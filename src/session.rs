@@ -6,7 +6,7 @@
 //! channel — in order, none dropped — so `RunEnd` arrives even when a slow
 //! frontend fell behind on streamed text.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,6 +26,11 @@ const COALESCE: Duration = Duration::from_millis(30);
 /// How long a plugin's question waits for an answer before the safe default.
 pub const UI_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How many of the latest runs' messages (`runStart`, `event`, `runEnd`,
+/// `notice`) the session keeps to replay to a frontend that connects later,
+/// so a page opened mid-run or after it shows what happened.
+pub const HISTORY: usize = 5000;
+
 /// How long a withdrawal for a question not asked yet is remembered: the
 /// asker's `withdraw` can overtake its own `request` on the way to the host.
 const EARLY_WITHDRAWAL: Duration = Duration::from_secs(60);
@@ -40,6 +45,9 @@ struct UiState {
     keys: HashMap<String, u64>,
     /// Keys withdrawn before their question was asked.
     early: HashMap<String, Instant>,
+    /// Questions asked with [`Session::ask_later`]: they belong to the
+    /// conversation, so a reset withdraws them.
+    held: HashSet<u64>,
 }
 
 struct Inner {
@@ -52,6 +60,10 @@ struct Inner {
     running: AtomicBool,
     /// The driver ended (or failed): nothing sent is heard any more.
     closed: AtomicBool,
+    /// The latest [`HISTORY`] run messages, oldest first. Written under the
+    /// `clients` lock (then this one), so a frontend connecting gets each
+    /// message once: in its replay, or live.
+    history: Mutex<VecDeque<ServerMessage>>,
 }
 
 /// The session handle.
@@ -92,6 +104,7 @@ impl Session {
                 plugin_versions: AtomicU64::new(0),
                 running: AtomicBool::new(false),
                 closed: AtomicBool::new(false),
+                history: Mutex::default(),
             }),
             commands: tx,
         };
@@ -106,8 +119,10 @@ impl Session {
         (session, driver)
     }
 
-    /// Attach a frontend. Its first message is [`ServerMessage::Hello`]
-    /// (then [`ServerMessage::Closed`] at once, if the session already ended).
+    /// Attach a frontend. Its first message is [`ServerMessage::Hello`], then
+    /// the session's recent runs as they were broadcast (up to [`HISTORY`]
+    /// messages, oldest first: a page opened late shows what happened), then
+    /// [`ServerMessage::Closed`] at once if the session already ended.
     pub fn connect(&self) -> Connection {
         let id = self.inner.next_client.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -131,6 +146,9 @@ impl Session {
             ui_plugins: self.ui_plugins(),
             ui_requests,
         });
+        for message in self.inner.history.lock().unwrap().iter() {
+            let _ = tx.send(message.clone());
+        }
         if self.inner.closed.load(Ordering::SeqCst) {
             let _ = tx.send(ServerMessage::Closed);
         }
@@ -219,8 +237,32 @@ impl Session {
         timeout: Duration,
         key: Option<String>,
     ) -> Json {
-        let request = request.normalized();
         let default = request.default_answer();
+        self.ask_inner(request, Some(timeout), key, false)
+            .await
+            .unwrap_or(default)
+    }
+
+    /// Ask, and keep the question open until it is answered — however long
+    /// that takes, and with no frontend attached: one that connects later
+    /// gets it in its `Hello`. For an agent working while its owner is away
+    /// (see the `handoff_agent` example). `Some(answer)` when a frontend
+    /// answered (`null` when the user dismissed it); `None` when nobody
+    /// will: the question was withdrawn — a reset withdraws these, since
+    /// they belong to the forgotten conversation — or the session ended. A
+    /// `notify` is shown and returns `Some(null)` at once.
+    pub async fn ask_later(&self, request: UiRequest) -> Option<Json> {
+        self.ask_inner(request, None, None, true).await
+    }
+
+    async fn ask_inner(
+        &self,
+        request: UiRequest,
+        timeout: Option<Duration>,
+        key: Option<String>,
+        hold: bool,
+    ) -> Option<Json> {
+        let request = request.normalized();
         let expects = request.expects_answer();
         let (tx, rx) = oneshot::channel();
         // Before the `ui` lock: `connect` takes `clients` then `ui`, so
@@ -232,22 +274,30 @@ impl Session {
             if let Some(key) = &key {
                 if ui.early.remove(key).is_some() {
                     tracing::debug!(%key, "a question withdrawn before it was asked");
-                    return default;
+                    return None;
                 }
             }
-            if !attached {
+            // Checked under `ui`: the session's end clears `pending` under it
+            // too, so a question is either refused here or cleared there.
+            if self.is_closed() {
+                return None;
+            }
+            if !attached && !hold {
                 drop(ui);
                 tracing::info!(
                     title = request.title(),
                     "no frontend to ask: the safe default"
                 );
-                return default;
+                return None;
             }
             ui.next_id += 1;
             let id = ui.next_id;
             let mut owned_key = None;
             if expects {
                 ui.pending.insert(id, (tx, request.clone()));
+                if hold {
+                    ui.held.insert(id);
+                }
                 if let Some(key) = key {
                     if ui.keys.contains_key(&key) {
                         tracing::warn!(%key, "a question key already in use: this one cannot be withdrawn by key");
@@ -262,7 +312,7 @@ impl Session {
         let title = request.title().to_owned();
         self.broadcast(ServerMessage::UiRequest { id, request });
         if !expects {
-            return Json::Null;
+            return Some(Json::Null);
         }
         /// Closes the question however `ask` ends — answered, timed out,
         /// withdrawn by key, or dropped — and tells the frontends why.
@@ -277,6 +327,7 @@ impl Session {
                 {
                     let mut ui = self.session.inner.ui.lock().unwrap();
                     ui.pending.remove(&self.id);
+                    ui.held.remove(&self.id);
                     if let Some(key) = &self.key {
                         if ui.keys.get(key) == Some(&self.id) {
                             ui.keys.remove(key);
@@ -295,16 +346,20 @@ impl Session {
             key,
             reason: ResolveReason::Withdrawn,
         };
-        match tokio::time::timeout(timeout, rx).await {
+        let answered = match timeout {
+            Some(limit) => tokio::time::timeout(limit, rx).await,
+            None => Ok(rx.await),
+        };
+        match answered {
             Ok(Ok(value)) => {
                 close.reason = ResolveReason::Answered;
-                value
+                Some(value)
             }
-            Ok(Err(_)) => default,
+            Ok(Err(_)) => None,
             Err(_) => {
                 close.reason = ResolveReason::TimedOut;
                 tracing::info!(%title, "no answer in time: the safe default");
-                default
+                None
             }
         }
     }
@@ -384,11 +439,35 @@ impl Session {
 }
 
 impl Inner {
+    /// Withdraw every question asked with [`Session::ask_later`] (a reset).
+    fn withdraw_held(&self) {
+        let mut ui = self.ui.lock().unwrap();
+        let held: Vec<u64> = ui.held.drain().collect();
+        for id in held {
+            // Dropping the waiter ends its `ask_later` with `None`; its guard
+            // tells the frontends.
+            ui.pending.remove(&id);
+        }
+    }
+
     fn broadcast(&self, message: ServerMessage) {
-        self.clients
-            .lock()
-            .unwrap()
-            .retain(|_, tx| tx.send(message.clone()).is_ok());
+        let mut clients = self.clients.lock().unwrap();
+        // Kept for later frontends: what a run showed. Questions are not
+        // (Hello carries the open ones), nor the session's own messages.
+        if matches!(
+            message,
+            ServerMessage::RunStart { .. }
+                | ServerMessage::Event { .. }
+                | ServerMessage::RunEnd { .. }
+                | ServerMessage::Notice { .. }
+        ) {
+            let mut history = self.history.lock().unwrap();
+            if history.len() == HISTORY {
+                history.pop_front();
+            }
+            history.push_back(message.clone());
+        }
+        clients.retain(|_, tx| tx.send(message.clone()).is_ok());
     }
 }
 
@@ -417,6 +496,9 @@ impl Drop for Ending {
         let mut clients = self.inner.clients.lock().unwrap();
         self.inner.closed.store(true, Ordering::SeqCst);
         clients.retain(|_, tx| tx.send(ServerMessage::Closed).is_ok());
+        // Open questions end with their default (a question held for an
+        // absent owner would otherwise wait forever). `clients` then `ui`.
+        self.inner.ui.lock().unwrap().pending.clear();
     }
 }
 
@@ -440,6 +522,7 @@ impl Driver {
                     ) => text,
                     Some(ClientMessage::Reset) => {
                         agent.clear_messages();
+                        inner.withdraw_held();
                         continue;
                     }
                     Some(ClientMessage::Quit) if self.accept_quit => break,
@@ -518,6 +601,22 @@ impl Driver {
             agent.finish().await;
             if reset {
                 agent.clear_messages();
+                inner.withdraw_held();
+                agent.clear_steering_queue();
+                agent.clear_follow_up_queue();
+            } else if !aborted {
+                // Steering or a follow-up that arrived after the loop's last
+                // look (while the answer streamed, or extensions finished):
+                // the next run's prompt, not left for some later run.
+                let late: Vec<String> = agent
+                    .take_steering_queue()
+                    .into_iter()
+                    .chain(agent.take_follow_up_queue())
+                    .filter_map(|m| text_of(&m))
+                    .collect();
+                if !late.is_empty() {
+                    queue.push_front(late.join("\n\n"));
+                }
             }
             let saw_end = end.is_some();
             let (stats, last) = end.unwrap_or_default();
@@ -560,6 +659,21 @@ impl Driver {
 
 fn user(text: String) -> AgentMessage {
     AgentMessage::Llm(Message::user(text))
+}
+
+/// A queued user message's text (the session only queues text).
+fn text_of(message: &AgentMessage) -> Option<String> {
+    let AgentMessage::Llm(Message::User { content, .. }) = message else {
+        return None;
+    };
+    let text: Vec<&str> = content
+        .iter()
+        .filter_map(|c| match c {
+            yoagent::Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
 }
 
 /// How the run ended, from its last assistant message only (an earlier

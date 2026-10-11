@@ -328,10 +328,68 @@ async fn a_driver_that_dies_mid_run_ends_the_run_and_the_session() {
     assert!(error.is_some());
     assert!(matches!(next(&mut ui).await, ServerMessage::Closed));
     assert!(!session.send(ClientMessage::Prompt { text: "x".into() }));
-    // A frontend connecting now learns at once that the session ended.
+    // A frontend connecting now gets the run that died (the replay), then
+    // learns that the session ended.
     let mut late = session.connect();
     assert!(matches!(next(&mut late).await, ServerMessage::Hello { .. }));
-    assert!(matches!(next(&mut late).await, ServerMessage::Closed));
+    let mut replay = Vec::new();
+    loop {
+        match next(&mut late).await {
+            ServerMessage::Closed => break,
+            other => replay.push(other),
+        }
+    }
+    assert!(matches!(
+        replay.first(),
+        Some(ServerMessage::RunStart { .. })
+    ));
+    assert!(matches!(
+        replay.last(),
+        Some(ServerMessage::RunEnd {
+            outcome: RunOutcome::Error,
+            ..
+        })
+    ));
+}
+
+/// A frontend that connects after runs gets them replayed after its Hello,
+/// in order, then live messages — each message once.
+#[tokio::test]
+async fn a_late_frontend_gets_the_runs_so_far() {
+    let (session, driver) = Session::new(true);
+    let mut early = session.connect();
+    next(&mut early).await;
+    let run = tokio::spawn(driver.run(agent(vec![
+        MockResponse::Text("first answer".into()),
+        MockResponse::Text("second answer".into()),
+    ])));
+    session.send(ClientMessage::Prompt { text: "one".into() });
+    let shown = until_run_end(&mut early).await;
+    session.notice(NoticeLevel::Info, "facts");
+    next(&mut early).await;
+
+    let mut late = session.connect();
+    assert!(matches!(
+        next(&mut late).await,
+        ServerMessage::Hello { running: false, .. }
+    ));
+    // The run as the early frontend saw it, and the notice.
+    for message in &shown {
+        assert_eq!(&next(&mut late).await, message);
+    }
+    assert!(
+        matches!(next(&mut late).await, ServerMessage::Notice { message, .. } if message == "facts")
+    );
+    // Then live: the next run reaches both, once.
+    session.send(ClientMessage::Prompt { text: "two".into() });
+    let live = until_run_end(&mut late).await;
+    assert!(
+        matches!(&live[0], ServerMessage::RunStart { run: 2, .. }),
+        "{live:?}"
+    );
+    assert_eq!(live, until_run_end(&mut early).await);
+    session.send(ClientMessage::Quit);
+    finished(run).await;
 }
 
 /// An abort mid-run is reported as such; a reset mid-run also drops the
@@ -638,4 +696,162 @@ async fn a_select_is_asked_with_each_option_once() {
         value: json!(["b", "a"]),
     });
     assert_eq!(asking.await.unwrap(), json!(["b", "a"]));
+}
+
+/// `ask_later`: with no frontend attached the question waits (no default);
+/// a frontend that connects later gets it in its Hello and answers it.
+#[tokio::test]
+async fn a_question_asked_later_waits_for_a_frontend() {
+    let (session, _driver) = Session::new(true);
+    let asking = {
+        let session = session.clone();
+        tokio::spawn(async move { session.ask_later(confirm("Keep the old loader?")).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!asking.is_finished(), "no frontend: it waits");
+    let mut phone = session.connect();
+    let ServerMessage::Hello { ui_requests, .. } = next(&mut phone).await else {
+        panic!("Hello")
+    };
+    assert_eq!(ui_requests.len(), 1);
+    let id = ui_requests[0].id;
+    assert!(session.send(ClientMessage::UiResponse {
+        id,
+        value: serde_json::json!(true),
+    }));
+    assert_eq!(asking.await.unwrap(), Some(serde_json::json!(true)));
+    assert_eq!(resolved(&mut phone).await, (id, ResolveReason::Answered));
+}
+
+/// A question asked later ends with its default when the session ends, and
+/// none is opened after.
+#[tokio::test]
+async fn a_question_asked_later_ends_with_the_session() {
+    let (session, driver) = Session::new(true);
+    let asking = {
+        let session = session.clone();
+        tokio::spawn(async move { session.ask_later(confirm("Keep the old loader?")).await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(driver);
+    let answer = tokio::time::timeout(Duration::from_secs(5), asking)
+        .await
+        .expect("the question ends with the session")
+        .unwrap();
+    // Nobody will answer: None, not a made-up default.
+    assert_eq!(answer, None);
+    let late = tokio::time::timeout(
+        Duration::from_secs(5),
+        session.ask_later(confirm("Another?")),
+    )
+    .await
+    .expect("refused at once on an ended session");
+    assert_eq!(late, None);
+}
+
+/// Holds the run's `finish` until released: a window after the loop's last
+/// look at the steering queue, before the run ends.
+struct HoldFinish {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<Semaphore>,
+}
+
+#[async_trait::async_trait]
+impl yoagent::extension::Extension for HoldFinish {
+    fn name(&self) -> &str {
+        "hold-finish"
+    }
+    async fn start_run(
+        &self,
+        _run: &yoagent::extension::RunContext<'_>,
+    ) -> Result<Box<dyn yoagent::extension::RunHooks>, yoagent::extension::ExtensionError> {
+        Ok(Box::new(HoldFinishRun {
+            entered: self.entered.clone(),
+            release: self.release.clone(),
+        }))
+    }
+}
+
+struct HoldFinishRun {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<Semaphore>,
+}
+
+#[async_trait::async_trait]
+impl yoagent::extension::RunHooks for HoldFinishRun {
+    async fn finish(&mut self, _outcome: &yoagent::extension::RunOutcome) {
+        self.entered.notify_one();
+        let _ = self.release.acquire().await.map(|p| p.forget());
+    }
+}
+
+/// A steer that arrives after the run's loop last looked (while extensions
+/// finish) starts the next run instead of waiting for some later one.
+#[tokio::test]
+async fn a_steer_arriving_as_a_run_ends_starts_the_next_run() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(Semaphore::new(0));
+    let agent = agent(vec![
+        MockResponse::Text("first".into()),
+        MockResponse::Text("second".into()),
+    ])
+    .with_extension(HoldFinish {
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    let run = tokio::spawn(driver.run(agent));
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("finish starts");
+    session.send(ClientMessage::Steer {
+        text: "late answer".into(),
+    });
+    // Let the driver hand the steer to the agent before the run ends.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    release.add_permits(2);
+    until_run_end(&mut ui).await;
+    let seen = until_run_end(&mut ui).await;
+    assert!(
+        matches!(&seen[0], ServerMessage::RunStart { run: 2, prompt } if prompt == "late answer"),
+        "{seen:?}"
+    );
+    session.send(ClientMessage::Quit);
+    finished(run).await;
+}
+
+/// A reset forgets the conversation, so the questions held for its owner
+/// are withdrawn: the asker gets `None` (no answer to act on) and frontends
+/// close them. A question asked with a timeout is not affected.
+#[tokio::test]
+async fn a_reset_withdraws_the_questions_held_for_the_owner() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    next(&mut ui).await;
+    let run = tokio::spawn(driver.run(agent(vec![])));
+    let held = {
+        let session = session.clone();
+        tokio::spawn(async move { session.ask_later(confirm("Keep the old loader?")).await })
+    };
+    let held_id = asked(&mut ui).await;
+    let timed = ask(
+        &session,
+        confirm("Delete build?"),
+        Duration::from_secs(60),
+        None,
+    );
+    let timed_id = asked(&mut ui).await;
+    session.send(ClientMessage::Reset);
+    assert_eq!(held.await.unwrap(), None, "withdrawn: nothing to act on");
+    assert_eq!(resolved(&mut ui).await, (held_id, ResolveReason::Withdrawn));
+    // The other question is still open, and answerable.
+    session.send(ClientMessage::UiResponse {
+        id: timed_id,
+        value: json!(true),
+    });
+    assert_eq!(timed.await.unwrap(), json!(true));
+    session.send(ClientMessage::Quit);
+    finished(run).await;
 }

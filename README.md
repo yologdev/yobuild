@@ -178,6 +178,65 @@ results rendered as links by the UI plugin, pi's question answered in the page.
 Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
 `$TMPDIR/yoagent-coding-agent.log`, since the terminal UI owns the screen.
 
+### `handoff_agent`: hand it a task and walk away
+
+A personal handoff agent for any task: research, writing, planning or code.
+It works in the directory you start it from, and puts what it makes there:
+
+```bash
+mkdir research && cd research && git init
+path/to/yoagent/scripts/try-handoff.sh --live "Research the best noise-cancelling headphones right now; write headphones.md with sources. Ask me my budget, but don't wait."
+path/to/yoagent/scripts/try-handoff.sh --phone --live "…"   # serve on the LAN, for a phone
+cargo run --example handoff_agent -- --demo                  # headless, scripted (CI): asks, gets an answer, writes notes.md
+```
+
+- **It plans** with a pi extension used unchanged, `@juicesharp/rpiv-todo`.
+  The `todo-plan` UI plugin draws the plan as a checklist in the page.
+- **It researches** with DSH's free web search, and works with yoagent's
+  file and shell tools.
+- **It asks without waiting.** `ask_owner` puts a question to every
+  frontend and returns at once, so the agent carries on with what does not
+  depend on it. The question stays open while nobody is connected
+  (`Session::ask_later`), and a phone that connects later gets it. The
+  answer comes back as a steer message: picked up mid-run, or starting a new
+  run if the agent had stopped. A dismissed question comes back as
+  "skipped", and the agent decides itself and says so. A reset withdraws
+  open questions: they belong to the conversation it forgot.
+- **Guardrails:**
+  - A pi extension (`confirm-dangerous.ts`) asks before anything that could
+    destroy or overwrite what you already have: `rm`, `git reset --hard`,
+    `git clean`, a forced push, a write or `>` over an existing file, and
+    more. Files the agent created this session, and its own scratch
+    folder, are exempt. These questions do wait, and with nobody
+    connected they are refused.
+  - Every run needs that policy (`require_policy`).
+  - Runs are capped in turns and minutes (`--max-minutes`), and in dollars
+    (`--budget-usd`) when the model has a price. DeepSeek has none in the
+    bundled table.
+- **Every run ends with a handoff report** (Done / Waiting on you /
+  Decisions / Next). The agent is sent back until it writes one. The host
+  then adds facts the model cannot make up: the change since the handoff
+  started (against your working tree as it was, so edits you had not
+  committed are not counted), commits, new files, tokens, tool calls,
+  time, and the questions still open.
+
+Tried live with DeepSeek and a phone-sized Chrome on a research task:
+"the best noise-cancelling headphones, ask my budget". It asked about
+budget and comfort vs sound, and kept searching while they waited. It
+folded in the answers as they came, and wrote a 164-line `headphones.md`
+with 33 sources and a pick matched to the answers. It also named the one
+review site it could not read.
+
+And on a small Python project ("move the config from JSON to TOML"). The agent started before any
+browser was attached.
+- **Run 1:** it planned, migrated, verified and committed. It asked two
+  questions along the way without stopping, and reported them open.
+- **The first answer** ("delete config.json") started run 2, which did that.
+- **The second question, dismissed,** started run 3: the agent decided
+  itself and wrote down why.
+- **While nobody was there,** `rm -rf __pycache__` was refused, and the
+  agent worked around it.
+
 ## Tests
 
 ```bash
