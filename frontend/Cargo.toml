@@ -2,21 +2,22 @@
 name = "yoagent-frontend"
 version = "0.0.1"
 edition = "2021"
-resolver = "3"
-description = "EXPERIMENTAL: one frontend protocol for yoagent agents — terminal and browser UIs, UI plugins, and plugin dialogs, over rutis"
+description = "One frontend protocol for yoagent agents — terminal and browser UIs, UI plugins, and plugin dialogs, over rutis"
 license = "MIT"
-repository = "https://github.com/yologdev/yoagent"
+repository = "https://github.com/yologdev/yobuild"
 rust-version = "1.88"
-# Experimental: not published, no API promise. yoagent's core and
-# yoagent-rutis's API do not depend on it.
+# Not published, no API promise (moved from yoagent; becomes
+# `yobuild::frontend`).
 publish = false
 exclude = ["plugins/node_modules"]
 
 [dependencies]
 # DshHome: a private, per-run home for DSH's own services.
 tempfile = "3"
-yoagent = { path = "../.." }
-yoagent-rutis = { path = "../yoagent-rutis", features = ["node"] }
+# Floors: 0.25.4 for `ToolGate` (the gate part), 0.3.1 for the DSH host
+# services behind `--dsh-services`.
+yoagent = "0.25.4"
+yoagent-rutis = { version = "0.3.1", features = ["node"] }
 rutis = "0.9"
 rutis-bridge = { version = "0.9", default-features = false, features = ["node"] }
 rutis-loader = { version = "0.9", features = ["node"] }

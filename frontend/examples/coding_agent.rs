@@ -27,10 +27,10 @@
 //! Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
 //! `$TMPDIR/yoagent-coding-agent.log` (the terminal UI owns the screen).
 //!
-//! Setup (once): `npm ci` in `integrations/yoagent-frontend/plugins/` and in
-//! `integrations/yoagent-rutis/plugins/pi/` (and `plugins/dsh/` for DSH's search and dialogs).
+//! Setup (once): `npm ci` in `frontend/plugins/` and in
+//! `vendor/yoagent-rutis/plugins/pi/` (and `plugins/dsh/` for DSH's search and dialogs).
 //!
-//! Run: `cargo run --manifest-path integrations/yoagent-frontend/Cargo.toml --example coding_agent [-- --web]`
+//! Run: `cargo run --example coding_agent [-- --web]`
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -52,7 +52,7 @@ fn here() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 fn rutis_plugins() -> PathBuf {
-    here().join("../yoagent-rutis/plugins")
+    here().join("../vendor/yoagent-rutis/plugins")
 }
 
 struct Options {

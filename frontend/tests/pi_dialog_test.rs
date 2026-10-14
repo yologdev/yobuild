@@ -2,7 +2,7 @@
 //! extension's `ctx.ui.select` reaches a frontend through `host-ui.ts` and
 //! the `ui` service, and the answer decides whether the command runs.
 //!
-//! Needs `npm ci` in `plugins/` and `../yoagent-rutis/plugins/pi/`; skipped
+//! Needs `npm ci` in `plugins/` and `../vendor/yoagent-rutis/plugins/pi/`; skipped
 //! (passing, with `SKIPPED:`) without them unless
 //! `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 
@@ -26,7 +26,7 @@ fn here() -> PathBuf {
 }
 
 fn pi_plugins() -> PathBuf {
-    here().join("../yoagent-rutis/plugins/pi")
+    here().join("../vendor/yoagent-rutis/plugins/pi")
 }
 
 fn runtimes_installed() -> bool {

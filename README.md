@@ -6,8 +6,15 @@ Harness plugins, MCP servers, rutis plugins in Rust, TypeScript, Python or
 Go — plus a few small parts of its own, on top of the
 [yoagent](https://github.com/yologdev/yoagent) loop.
 
-> Status: **design, not code yet.** These documents are for review. Nothing
-> here is built; numbers quoted are measured in the yoagent repository.
+> Status: **M0 (bootstrap).** The frontend moved here from yoagent
+> ([`frontend/`](frontend/README.md), with its examples); the manifest and
+> runner are not built yet. Numbers quoted are measured in the yoagent
+> repository.
+>
+> ```sh
+> scripts/try-coding-agent.sh                 # installs the plugin runtimes, runs the coding agent example
+> scripts/try-handoff.sh --demo               # the handoff agent, scripted (run it in a git repo)
+> ```
 
 ## The idea in one example
 

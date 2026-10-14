@@ -4,7 +4,7 @@ One frontend protocol for yoagent agents: a terminal UI and any number of
 browsers can drive the same agent session, plugins can ask the user things,
 and plugins can add their own UI to the browser.
 
-> **Experimental.** Not published (`publish = false`), no API promise.
+> Part of [yobuild](../README.md); moved from yoagent's `integrations/yoagent-frontend`. Not published (`publish = false`), no API promise.
 > yoagent's core and yoagent-rutis's API do not depend on it.
 
 ```
@@ -117,7 +117,7 @@ card (the bridge reports them by their text).
 
 pi extensions' `ctx.ui.select`, `confirm`, `input`, `editor` and `notify` reach the
 user when the host provides `ui` and loads
-[`yoagent-rutis/plugins/pi/host-ui.ts`](../yoagent-rutis/plugins/pi/host-ui.ts)
+[`yoagent-rutis/plugins/pi/host-ui.ts`](../vendor/yoagent-rutis/plugins/pi/host-ui.ts)
 in the pi runtime (rutis shows a host service only to plugins that inject it,
 and the adapter cannot require one). The adapter is then in pi's RPC mode
 (`hasUI` true). Without them it stays in print mode, as before. A question
@@ -129,7 +129,7 @@ yoagent-rutis's default is 60 s, so the example raises it
 
 An approval a DSH tool policy asks for, and DSH's `ask_user_question`, reach
 the user when
-[`yoagent-rutis/plugins/dsh/host-dialogs.ts`](../yoagent-rutis/plugins/dsh/host-dialogs.ts)
+[`yoagent-rutis/plugins/dsh/host-dialogs.ts`](../vendor/yoagent-rutis/plugins/dsh/host-dialogs.ts)
 is loaded in the DSH runtime with `ui` shared into it (`.share(services::UI)`;
 `@deepseek-ai/dsh-user-questions` and `@deepseek-ai/dsh-tool-ask-user` for
 the tool). An approval is a `confirm` showing the reason and the arguments:
@@ -188,9 +188,9 @@ It works in the directory you start it from, and puts what it makes there:
 
 ```bash
 mkdir research && cd research && git init
-path/to/yoagent/scripts/try-handoff.sh --live "Research the best noise-cancelling headphones right now; write headphones.md with sources. Ask me my budget, but don't wait."
-path/to/yoagent/scripts/try-handoff.sh --phone --live "…"   # serve on the LAN, for a phone
-path/to/yoagent/scripts/try-handoff.sh --demo               # headless, scripted (CI): asks, gets an answer, writes notes.md
+path/to/yobuild/scripts/try-handoff.sh --live "Research the best noise-cancelling headphones right now; write headphones.md with sources. Ask me my budget, but don't wait."
+path/to/yobuild/scripts/try-handoff.sh --phone --live "…"   # serve on the LAN, for a phone
+path/to/yobuild/scripts/try-handoff.sh --demo               # headless, scripted (CI): asks, gets an answer, writes notes.md
 ```
 
 - **It plans** with a pi extension used unchanged, `@juicesharp/rpiv-todo`.

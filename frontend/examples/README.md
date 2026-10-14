@@ -4,9 +4,9 @@
 
 ```bash
 mkdir research && cd research && git init
-DEEPSEEK_API_KEY=… path/to/yoagent/scripts/try-handoff.sh --live            # then open the printed URL
-DEEPSEEK_API_KEY=… path/to/yoagent/scripts/try-handoff.sh --live --phone    # open it on your phone too (same Wi-Fi)
-path/to/yoagent/scripts/try-handoff.sh --demo                               # scripted, no key, no browser (CI)
+DEEPSEEK_API_KEY=… path/to/yobuild/scripts/try-handoff.sh --live            # then open the printed URL
+DEEPSEEK_API_KEY=… path/to/yobuild/scripts/try-handoff.sh --live --phone    # open it on your phone too (same Wi-Fi)
+path/to/yobuild/scripts/try-handoff.sh --demo                               # scripted, no key, no browser (CI)
 ```
 
 The other two examples here are smaller. `minimal_browser.rs` is one agent and the browser page, with no plugins. `coding_agent.rs` is the interactive showcase, with a terminal or browser frontend.
@@ -74,7 +74,7 @@ Those from pi and DSH are installed from npm and loaded as published. The adapte
 - DSH's tool registry becomes yoagent tools;
 - pi's and DSH's dialogs reach the page.
 
-What does not map (pi's `/todos` command, a keyboard shortcut) is reported at info level and left out. A plugin hooking something yoagent cannot enforce is refused, not half-run. See [plugin compatibility](../../../docs/evals/plugin-compatibility.md) for how the 20 most-downloaded pi and DSH packages fare.
+What does not map (pi's `/todos` command, a keyboard shortcut) is reported at info level and left out. A plugin hooking something yoagent cannot enforce is refused, not half-run. See [plugin compatibility](https://github.com/yologdev/yoagent/blob/main/docs/evals/plugin-compatibility.md) for how the 20 most-downloaded pi and DSH packages fare.
 
 ## How a tool call travels
 

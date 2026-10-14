@@ -21,12 +21,12 @@
 //!
 //! ```bash
 //! cd my-project                                       # it works where it starts
-//! path/to/yoagent/scripts/try-handoff.sh --live "…"    # DeepSeek (DEEPSEEK_API_KEY)
-//! path/to/yoagent/scripts/try-handoff.sh --phone "…"   # serve on the LAN, for a phone
-//! path/to/yoagent/scripts/try-handoff.sh --demo        # headless, scripted (CI)
+//! path/to/yobuild/scripts/try-handoff.sh --live "…"    # DeepSeek (DEEPSEEK_API_KEY)
+//! path/to/yobuild/scripts/try-handoff.sh --phone "…"   # serve on the LAN, for a phone
+//! path/to/yobuild/scripts/try-handoff.sh --demo        # headless, scripted (CI)
 //! ```
 //!
-//! (`cargo run` needs `--manifest-path path/to/yoagent/integrations/yoagent-frontend/Cargo.toml`
+//! (`cargo run` needs `--manifest-path path/to/yobuild/Cargo.toml`
 //! when started from the project directory.)
 //!
 //! `--web ADDR` (default 127.0.0.1:8787), `--no-dsh`, `--dsh-services` (DSH's own host services, for DSH plugins that need them, in a DSH home of their own), `--max-minutes N`
@@ -99,7 +99,7 @@ fn here() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 fn rutis_plugins() -> PathBuf {
-    here().join("../yoagent-rutis/plugins")
+    here().join("../vendor/yoagent-rutis/plugins")
 }
 
 struct Options {
