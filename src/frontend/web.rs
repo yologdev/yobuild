@@ -1,7 +1,7 @@
 //! The browser frontend: a page, the UI plugins' modules, and the protocol
 //! over a WebSocket.
 //!
-//! - `GET /` — the page (`web/index.html`, `web/app.js`, `web/lib.js`, built in).
+//! - `GET /` — the page (`frontend/web/index.html`, `app.js`, `lib.js`, built in).
 //! - `GET /ws` — the WebSocket: each text frame is one JSON message,
 //!   [`ClientMessage`] in, [`ServerMessage`] out.
 //! - `GET /ui-plugins/{name}` — a UI plugin's ES module (`{name}` ends in `.js`).

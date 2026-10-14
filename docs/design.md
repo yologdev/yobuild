@@ -182,7 +182,7 @@ deployment's job.
 
 | From yoagent | To yobuild |
 |---|---|
-| `integrations/yoagent-frontend/` (crate, plugins, web, tests) | `yobuild::frontend` |
+| `integrations/yoagent-frontend/` (crate, plugins, web, tests) | `src/frontend/` (`yobuild::frontend`), `frontend/web/`, `frontend/plugins/`, `tests/` |
 | `examples/handoff_agent.rs`, `coding_agent.rs`, `minimal_browser.rs` | manifests `examples/handoff.toml`, `coding.toml`, `minimal.toml` (plus the parts they used) |
 | `plugins/pi-extensions/confirm-dangerous.ts` and its tests | `yobuild::parts::gate` |
 | `scripts/try-handoff.sh`, `try-coding-agent.sh` | `yobuild run` |

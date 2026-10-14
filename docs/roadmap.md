@@ -4,8 +4,9 @@ Draft for review. Each milestone ends with something that runs.
 
 ## M0 — Bootstrap (done 2026-10-15)
 
-- Repository, license, CI (fmt, clippy, tests; Node 22.19+, Bun 1.4, Go 1.24,
-  Python 3.10+ runtimes as yoagent-rutis's CI has them).
+- Repository, license, CI (fmt, clippy, tests; Node for the pi and DSH
+  runtimes). Bun, Go and Python runtimes join CI when an agent uses them
+  (M2a).
 - Move **yoagent-frontend** here with its history (`git subtree split`);
   depend on **yoagent ≥ 0.25.4** (`ToolGate`, for the gate part) and
   **yoagent-rutis ≥ 0.3.1** (the DSH host services behind

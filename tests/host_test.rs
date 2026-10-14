@@ -2,7 +2,7 @@
 //! file changed (new code), kept when its new code does not load, and
 //! unloaded (its tool gone).
 //!
-//! Needs `npm ci` in `plugins/`; skipped (passing, with `SKIPPED:`) without
+//! Needs `npm ci` in `frontend/plugins/`; skipped (passing, with `SKIPPED:`) without
 //! it unless `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 
 use std::path::{Path, PathBuf};
