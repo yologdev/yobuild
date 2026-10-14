@@ -64,7 +64,7 @@ install "$rutis_plugins/pi"
 install "$rutis_plugins/dsh"
 
 if $setup_only; then
-  echo "ready: run scripts/try-coding-agent.sh"
+  echo "ready: run $repo/scripts/try-coding-agent.sh"
   exit 0
 fi
 

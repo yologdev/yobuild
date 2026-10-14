@@ -12,7 +12,7 @@ publish = false
 
 
 [dependencies]
-# DshHome: a private, per-run home for DSH's own services.
+# DshHome: a private, per-process home for DSH's own services.
 tempfile = "3"
 # Floors: 0.25.4 for `ToolGate` (the gate part), 0.3.1 for the DSH host
 # services behind `--dsh-services`.

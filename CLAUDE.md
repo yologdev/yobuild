@@ -2,7 +2,7 @@
 
 Guidance for Claude Code in this repository. The vision, design and roadmap are in `docs/`; yoagent's own architecture and conventions are in the yoagent repository's root `CLAUDE.md`.
 
-Layout: one crate, `yobuild`. `src/frontend/` (moved from yoagent's `integrations/yoagent-frontend`, history kept) is `yobuild::frontend`; its browser page and TypeScript plugins stay in `frontend/web/` and `frontend/plugins/` (their own npm package); `examples/` and `tests/` are the crate's; the pi and DSH adapters the examples load are vendored in `vendor/yoagent-rutis/plugins/` (`scripts/check-vendor.sh`). Build and test: `cargo clippy --all-targets`, `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test` after `scripts/try-coding-agent.sh --setup-only`; CI sets `RUSTFLAGS=-Dwarnings`.
+Layout: one crate, `yobuild`. `src/frontend/` (moved from yoagent's `integrations/yoagent-frontend`, history kept) is `yobuild::frontend`; its browser page and TypeScript plugins stay in `frontend/web/` (embedded by `web.rs`; its `package.json` only marks it ESM) and `frontend/plugins/` (its own npm package); `examples/` and `tests/` are the crate's; the pi and DSH adapters the examples load are vendored in `vendor/yoagent-rutis/plugins/` (`scripts/check-vendor.sh`). Build and test: `cargo clippy --all-targets`, `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test` after `scripts/try-coding-agent.sh --setup-only`; CI sets `RUSTFLAGS=-Dwarnings`.
 
 ## Frontend (`src/frontend/`, `yobuild::frontend`)
 

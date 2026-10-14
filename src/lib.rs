@@ -6,6 +6,8 @@
 //! - [`frontend`]: one session for any number of frontends (browser, phone,
 //!   terminal), plugins' questions to the owner, and the plugin host.
 //!
-//! Not published yet and without an API promise.
+//! Today it has the frontend; the parts, the manifest and MCP servers are
+//! coming (see `docs/roadmap.md`). Not published yet and without an API
+//! promise.
 
 pub mod frontend;

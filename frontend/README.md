@@ -171,7 +171,7 @@ cargo run --example coding_agent -- --web --watch    # edit a plugin file: it re
 ```
 
 The agent: yoagent's tools, a pi extension asking before dangerous commands
-(`plugins/pi-extensions/confirm-dangerous.ts`), DSH's web search, and the
+([`plugins/pi-extensions/confirm-dangerous.ts`](plugins/pi-extensions/confirm-dangerous.ts)), DSH's web search, and the
 `search-links` UI plugin. DSH's `ask_user_question` is loaded too. Tried live with DeepSeek in Chrome: DSH search,
 results rendered as links by the UI plugin, pi's question answered in the page.
 
@@ -247,9 +247,9 @@ browser was attached.
 From the repository root:
 
 ```bash
-cargo test                                            # protocol, session, web, services
-YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test           # pi's and DSH's dialogs need their packages (CI)
-node --test frontend/web/lib.test.js                  # Markdown, question queue, run lines, tool views, diffs, links, typed answers
+cargo test                                            # protocol, session, web, services (tests needing a runtime skip without it)
+YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test           # also the plugin host and pi's and DSH's dialogs, which need their packages (CI)
+node --test frontend/web/lib.test.js frontend/plugins/pi-extensions/confirm-dangerous.test.mjs   # the page's logic; the approval gate
 ```
 
 ## Limits

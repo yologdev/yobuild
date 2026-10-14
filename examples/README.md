@@ -44,7 +44,7 @@ Rust process (21 MB)
 │    └─ extensions ──── Handoff (report check, facts), Budget (when the model is priced),
 │                       the rutis bridge (every plugin below, as one extension)
 ├─ yoagent-rutis ────── the bridge: plugins' tools, policies, prompt notes → yoagent hooks
-├─ yoagent-frontend ─── Session (one agent, many frontends), protocol, web server (axum + WebSocket)
+├─ yobuild::frontend ── Session (one agent, many frontends), protocol, web server (axum + WebSocket)
 └─ model ───────────── DeepSeek (deepseek-flash) over its OpenAI-compatible API
 
 Node runtime "ui"  ─── todo-plan             draws the plan in the page
@@ -140,7 +140,7 @@ The Node runtimes are the cost of running other ecosystems' plugins unchanged. A
   - A policy that fails denies the call.
   - The approval gate refuses when nobody is there. It is a guardrail for selected operations, not a sandbox.
   - The facts come from git and the event stream, not from the model.
-- **Walk-away first.** Questions that wait, a page that replays, answers that start the next run, a report on every run. These are what make "hand it off" work. Each is a small, tested piece of yoagent-frontend (`Session::ask_later`, history replay, late steering), not special code in the agent.
+- **Walk-away first.** Questions that wait, a page that replays, answers that start the next run, a report on every run. These are what make "hand it off" work. Each is a small, tested piece of `yobuild::frontend` (`Session::ask_later`, history replay, late steering), not special code in the agent.
 - **Not done yet.**
   - The session lives in memory, so a restart starts fresh; your files and git history are the durable record.
   - There are no push notifications.

@@ -95,7 +95,7 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// The sections every run's last message must have.
 const REPORT: [&str; 4] = ["Done", "Waiting on you", "Decisions", "Next"];
 
-/// The frontend's directory (its plugins and web page).
+/// `frontend/`, where the TypeScript plugins live.
 fn here() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend")
 }

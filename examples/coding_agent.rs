@@ -1,5 +1,5 @@
 //! EXPERIMENTAL. A coding agent with a terminal or a browser frontend, on
-//! the yoagent-frontend layer: yoagent's loop and tools, a pi extension that
+//! `yobuild::frontend`: yoagent's loop and tools, a pi extension that
 //! asks before dangerous commands (its `ctx.ui.select` reaches the frontend),
 //! DSH's web search and `ask_user_question` (its questions and approvals reach
 //! the frontend too), and a UI plugin that renders search results as links in
@@ -49,7 +49,7 @@ use yobuild::frontend::{services, session, web, NoticeLevel, Session};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// The frontend's directory (its plugins and web page).
+/// `frontend/`, where the TypeScript plugins live.
 fn here() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend")
 }

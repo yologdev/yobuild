@@ -2,8 +2,8 @@
 //! extension's `ctx.ui.select` reaches a frontend through `host-ui.ts` and
 //! the `ui` service, and the answer decides whether the command runs.
 //!
-//! Needs `npm ci` in `frontend/plugins/` and `vendor/yoagent-rutis/plugins/pi/`; skipped
-//! (passing, with `SKIPPED:`) without them unless
+//! Needs `npm ci` in `vendor/yoagent-rutis/plugins/pi/`; skipped
+//! (passing, with `SKIPPED:`) without it unless
 //! `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 
 use std::path::PathBuf;
@@ -21,7 +21,7 @@ use yobuild::frontend::{services, ClientMessage, ServerMessage, Session, UiReque
 
 const WAIT: Duration = Duration::from_secs(60);
 
-/// The frontend's directory (its plugins and web page).
+/// `frontend/`, where the TypeScript plugins live.
 fn here() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend")
 }

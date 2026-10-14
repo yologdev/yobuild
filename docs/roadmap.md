@@ -24,8 +24,8 @@ paths).
 
 ## M1 — Parts
 
-- One crate, `yobuild`: the frontend becomes `yobuild::frontend` (decided
-  2026-10-15), the parts `yobuild::parts`.
+- One crate, `yobuild` (decided 2026-10-15): the frontend is
+  `yobuild::frontend` (done, #2); the parts become `yobuild::parts`.
 
 - `yobuild::parts`: `ask_owner`, `report`, `facts`, `scratch`, `gate`,
   extracted from `handoff_agent` with their own tests.
@@ -52,8 +52,9 @@ paths).
 - `model = "provider/id"` → `ModelConfig` (design §2, Models); an unknown
   provider is an error listing the known ones.
 - `yobuild run` with plugins that are local paths or already installed —
-  the plugin folders with their `node_modules` that the yoagent examples
-  use today, installed by hand — so M2a does not need M2b's cache: start
+  the plugin folders with their `node_modules` that the examples here use
+  today (`frontend/plugins/`, `vendor/yoagent-rutis/plugins/`), installed by
+  hand — so M2a does not need M2b's cache: start
   runtimes, load rows, connect `[[mcp]]` servers (yoagent's MCP client,
   stdio and HTTP with headers), wire parts and frontend.
 - A scripted CI run of a manifest with an `[[mcp]]` entry, against a stdio

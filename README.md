@@ -13,8 +13,8 @@ Go — plus a few small parts of its own, on top of the
 > repository.
 >
 > ```sh
-> scripts/try-coding-agent.sh                         # installs the plugin runtimes, runs the coding agent example
-> mkdir research && cd research && git init
+> scripts/try-coding-agent.sh                         # in the checkout: installs the plugin runtimes, runs the coding agent example
+> cd ~ && mkdir research && cd research && git init   # anywhere outside the checkout
 > path/to/yobuild/scripts/try-handoff.sh --demo       # the handoff agent, scripted; works in the current directory
 > ```
 
