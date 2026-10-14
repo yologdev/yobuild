@@ -12,6 +12,8 @@ publish = false
 
 
 [dependencies]
+# The parts implement yoagent's `AgentTool` and `Extension` (async traits).
+async-trait = "0.1"
 # DshHome: a private, per-process home for DSH's own services.
 tempfile = "3"
 # Floors: 0.25.4 for `ToolGate` (the gate part), 0.3.1 for the DSH host
@@ -34,5 +36,4 @@ uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "signal"] }
 tokio-tungstenite = "0.28"
 tempfile = "3"
-async-trait = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

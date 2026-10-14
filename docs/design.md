@@ -124,13 +124,13 @@ Small, generic, and each tested on its own. They come from the handoff
 example and move into yobuild as a library (`yobuild::parts`), usable
 without the manifest.
 
-| Part | Plugs in as | Source today |
+| Part | Plugs in as | Where |
 |---|---|---|
-| `ask_owner` | a tool; returns at once, the answer comes back as steering (mid-run, or starting the next run) | `handoff_agent.rs` `AskOwner` + `Session::ask_later` |
-| `report` | an `Extension`: `on_stop` sends the agent back until the required sections are there | `handoff_agent.rs` `Handoff::on_stop` |
-| `facts` | the same extension: `on_event` counts tokens and tool calls, `finish` adds changes since the handoff (git snapshot), new files, open questions | `Handoff::on_event` / `finish` |
-| `gate` | a `before_tool` policy: ask before selected destructive commands and overwrites; refused with nobody there | `confirm-dangerous.ts` (a pi extension today; a Rust port is a candidate, see the roadmap) |
-| `scratch` | a private working folder named to the agent and the gate | `YOAGENT_SCRATCH` |
+| `ask_owner` | a tool; returns at once, the answer comes back as steering (mid-run, or starting the next run) | `yobuild::parts::AskOwner` (M1) |
+| `report` | an `Extension`: `on_stop` sends the agent back until the required sections are there | `yobuild::parts::Report` (M1) |
+| `facts` | an `Extension`: `on_event` counts tokens and tool calls, `finish` adds changes since the start (git snapshot), new files, open questions | `yobuild::parts::Facts` (M1) |
+| `gate` | a `before_tool` policy: ask before selected destructive commands and overwrites; refused with nobody there | `confirm-dangerous.ts` (a pi extension); a Rust port next in M1 |
+| `scratch` | a private working folder named to the agent and the gate | `yobuild::parts::Scratch` (M1) |
 | `limits` / `budget` | yoagent's `ExecutionLimits` and `Budget` | yoagent |
 
 What makes a part a part: more than one kind of agent wants it, it is

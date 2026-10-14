@@ -30,7 +30,7 @@ Most agents assume you are watching them. A handoff agent assumes you are not:
   For a guarantee, run it in a container or on a disposable copy.
 - **What it says is checked.**
   - Every run must end with a four-part report (Done, Waiting on you, Decisions, Next); the agent is sent back until it writes one.
-  - The host then adds facts the model cannot make up: what changed since the handoff (against your working tree as it was), commits, new files, tokens, tool calls, time, and open questions.
+  - The host then adds facts the model cannot make up: what changed since the start (against your working tree as it was), commits, new files, tokens, tool calls, time, and open questions.
 - **You can look whenever you like.** A page opened late replays the runs so far. Questions are docked, not modal, so the page stays readable.
 
 ## The stack
@@ -41,7 +41,7 @@ One Rust process holds the agent. Three Node processes host the plugins, each a 
 Rust process (21 MB)
 ├─ yoagent ──────────── the loop: model streaming, tool calls, limits, extensions
 │    ├─ tools ───────── yoagent's built-ins (bash, files, search) + ask_owner (this example)
-│    └─ extensions ──── Handoff (report check, facts), Budget (when the model is priced),
+│    └─ extensions ──── Report, Facts (yobuild::parts), Budget (when the model is priced),
 │                       the rutis bridge (every plugin below, as one extension)
 ├─ yoagent-rutis ────── the bridge: plugins' tools, policies, prompt notes → yoagent hooks
 ├─ yobuild::frontend ── Session (one agent, many frontends), protocol, web server (axum + WebSocket)
