@@ -128,13 +128,13 @@ Per tool call, the loop and the policy round trip take a few milliseconds (above
 | The Rust process (loop, bridge, session, web server) | 21 MB |
 | Each Node runtime | 137–244 MB |
 
-The Node runtimes are the cost of running other ecosystems' plugins unchanged. An agent with Rust tools only is the 21 MB process. yoagent's loop alone also runs in a Cloudflare Worker: about 4 ms to start, and a median of about 45 ms of CPU per agent run there (see the main README).
+The Node runtimes are the cost of running other ecosystems' plugins unchanged. An agent with Rust tools only is the 21 MB process. yoagent's loop alone also runs in a Cloudflare Worker: about 4 ms to start, and a median of about 45 ms of CPU per agent run there (see [yoagent's README](https://github.com/yologdev/yoagent#runs-where-agents-run)).
 
 **Cost.** DeepSeek's off-peak price is $0.15 per million input tokens on a cache miss and $0.003 on a hit. Peak hours cost double. A run like the one above (a few hundred thousand tokens in, mostly cache hits) costs cents. The example caps each run at 4M tokens (`--max-tokens`), 30 minutes and 80 turns. `--budget-usd` only applies to models in yoagent's price table, which DeepSeek is not yet.
 
 ## Perspective
 
-- **A small loop, big ecosystems.** The whole example is about 850 lines of Rust on top of yoagent's loop (a quarter of it is the scripted demo). The plan, the web search and the dialogs come from plugins that thousands of people already use. The adapters let them run unchanged instead of being rewritten.
+- **A small loop, big ecosystems.** The whole example is about 890 lines of Rust on top of yoagent's loop (a quarter of it is the scripted demo). The plan, the web search and the dialogs come from plugins that thousands of people already use. The adapters let them run unchanged instead of being rewritten.
 - **Safety by contract, not by trust.**
   - An adapter that cannot enforce a plugin's hook refuses it.
   - A policy that fails denies the call.

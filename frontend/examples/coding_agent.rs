@@ -28,7 +28,8 @@
 //! `$TMPDIR/yoagent-coding-agent.log` (the terminal UI owns the screen).
 //!
 //! Setup (once): `npm ci` in `frontend/plugins/` and in
-//! `vendor/yoagent-rutis/plugins/pi/` (and `plugins/dsh/` for DSH's search and dialogs).
+//! `vendor/yoagent-rutis/plugins/pi/` (and `vendor/yoagent-rutis/plugins/dsh/` for DSH's
+//! search and dialogs), or `scripts/try-coding-agent.sh --setup-only`.
 //!
 //! Run: `cargo run --example coding_agent [-- --web]`
 

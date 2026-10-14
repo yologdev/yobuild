@@ -6,20 +6,37 @@
 #
 #   scripts/check-vendor.sh           # check
 #   scripts/check-vendor.sh --update  # replace the copy with the crate's
+#                                     # (after `cargo update -p yoagent-rutis`)
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 vendor="$repo/vendor/yoagent-rutis/plugins"
 
+[ $# -le 1 ] || { echo "usage: $0 [--update]" >&2; exit 2; }
+case "${1:-}" in
+  "") update=false ;;
+  --update) update=true ;;
+  *) echo "usage: $0 [--update]" >&2; exit 2 ;;
+esac
+
+# Exactly one yoagent-rutis in the lock, else say so rather than pick one.
 crate=$(cargo metadata --format-version 1 --manifest-path "$repo/Cargo.toml" --locked |
   node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
-    const p=JSON.parse(s).packages.find(p=>p.name==="yoagent-rutis");
-    if(!p){process.exit(1)} console.log(p.version+" "+require("path").dirname(p.manifest_path))})')
+    if(!s.trim())process.exit(1) // cargo failed and said why
+    const ps=JSON.parse(s).packages.filter(p=>p.name==="yoagent-rutis");
+    if(ps.length!==1){console.error(`error: expected one yoagent-rutis in Cargo.lock, found ${ps.length}`);process.exit(1)}
+    console.log(ps[0].version+" "+require("path").dirname(ps[0].manifest_path))})')
 version=${crate%% *}
 dir=${crate#* }
 
-if [ "${1:-}" = --update ]; then
+sources=("$dir/plugins/pi" "$dir/plugins/dsh" "$dir/plugins/yoagent.d.ts")
+for s in "${sources[@]}"; do
+  [ -e "$s" ] || { echo "error: yoagent-rutis $version has no ${s#"$dir"/}" >&2; exit 1; }
+done
+
+if $update; then
   for d in pi dsh; do
+    mkdir -p "$vendor/$d"
     find "$vendor/$d" -mindepth 1 -maxdepth 1 ! -name node_modules -exec rm -rf {} +
     (cd "$dir/plugins/$d" && tar -cf - --exclude node_modules .) | (cd "$vendor/$d" && tar -xf -)
   done
