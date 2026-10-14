@@ -1,5 +1,5 @@
 //! EXPERIMENTAL. A coding agent with a terminal or a browser frontend, on
-//! the yoagent-frontend layer: yoagent's loop and tools, a pi extension that
+//! `yobuild::frontend`: yoagent's loop and tools, a pi extension that
 //! asks before dangerous commands (its `ctx.ui.select` reaches the frontend),
 //! DSH's web search and `ask_user_question` (its questions and approvals reach
 //! the frontend too), and a UI plugin that renders search results as links in
@@ -43,17 +43,18 @@ use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::{MockProvider, ModelConfig};
 use yoagent::tools::default_tools;
 use yoagent::Agent;
-use yoagent_frontend::host::{rows_from_file, DshHome, PluginHost, Row};
-use yoagent_frontend::{services, session, web, NoticeLevel, Session};
 use yoagent_rutis::RutisBridge;
+use yobuild::frontend::host::{rows_from_file, DshHome, PluginHost, Row};
+use yobuild::frontend::{services, session, web, NoticeLevel, Session};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// `frontend/`, where the TypeScript plugins live.
 fn here() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend")
 }
 fn rutis_plugins() -> PathBuf {
-    here().join("../vendor/yoagent-rutis/plugins")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/yoagent-rutis/plugins")
 }
 
 struct Options {
@@ -143,9 +144,7 @@ fn logging(stderr: bool) -> Result<Option<PathBuf>, BoxError> {
     let filter = EnvFilter::try_from_default_env()
         // The registry's "no API key" warning is about the scripted model's
         // `mock` provider; `--live` checks its key before starting.
-        .unwrap_or_else(|_| {
-            EnvFilter::new("warn,yoagent::provider::registry=error,yoagent_frontend=info")
-        });
+        .unwrap_or_else(|_| EnvFilter::new("warn,yoagent::provider::registry=error,yobuild=info"));
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
     if stderr {
         builder.with_writer(std::io::stderr).init();

@@ -2,7 +2,7 @@
 //! file changed (new code), kept when its new code does not load, and
 //! unloaded (its tool gone).
 //!
-//! Needs `npm ci` in `plugins/`; skipped (passing, with `SKIPPED:`) without
+//! Needs `npm ci` in `frontend/plugins/`; skipped (passing, with `SKIPPED:`) without
 //! it unless `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 
 use std::path::{Path, PathBuf};
@@ -13,13 +13,13 @@ use serde_json::json;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::{MockProvider, ModelConfig};
 use yoagent::{Agent, AgentMessage, Content, Message};
-use yoagent_frontend::host::{PluginHost, Row};
 use yoagent_rutis::RutisBridge;
+use yobuild::frontend::host::{PluginHost, Row};
 
 const WAIT: Duration = Duration::from_secs(60);
 
 fn plugins() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins")
 }
 
 fn runtime_installed() -> bool {

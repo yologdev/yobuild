@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 use yoagent::provider::mock::MockResponse;
 use yoagent::provider::{MockProvider, ModelConfig};
 use yoagent::Agent;
-use yoagent_frontend::{web, Session, UiPlugin, UiRequest};
+use yobuild::frontend::{web, Session, UiPlugin, UiRequest};
 
 async fn get(addr: std::net::SocketAddr, path: &str) -> String {
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();

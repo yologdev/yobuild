@@ -1,7 +1,7 @@
 // A pi extension in the style of pi's own permission gate: approval
 // guardrails for selected operations that delete, discard or overwrite what
 // the owner already has. In pi's print mode (no UI) it blocks them; with a
-// frontend attached through yoagent-frontend, the question reaches the
+// frontend attached through yobuild's frontend, the question reaches the
 // terminal or browser.
 //
 // Each shell command is tokenized (quotes, escapes, operators, redirections;

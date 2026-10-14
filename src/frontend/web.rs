@@ -1,7 +1,7 @@
 //! The browser frontend: a page, the UI plugins' modules, and the protocol
 //! over a WebSocket.
 //!
-//! - `GET /` — the page (`web/index.html`, `web/app.js`, `web/lib.js`, built in).
+//! - `GET /` — the page (`frontend/web/index.html`, `app.js`, `lib.js`, built in).
 //! - `GET /ws` — the WebSocket: each text frame is one JSON message,
 //!   [`ClientMessage`] in, [`ServerMessage`] out.
 //! - `GET /ui-plugins/{name}` — a UI plugin's ES module (`{name}` ends in `.js`).
@@ -24,12 +24,12 @@ use axum::routing::get;
 use axum::Router;
 use futures::{SinkExt, StreamExt};
 
-use crate::protocol::{ClientMessage, NoticeLevel, ServerMessage};
-use crate::session::Session;
+use crate::frontend::protocol::{ClientMessage, NoticeLevel, ServerMessage};
+use crate::frontend::session::Session;
 
-const INDEX: &str = include_str!("../web/index.html");
-const APP: &str = include_str!("../web/app.js");
-const LIB: &str = include_str!("../web/lib.js");
+const INDEX: &str = include_str!("../../frontend/web/index.html");
+const APP: &str = include_str!("../../frontend/web/app.js");
+const LIB: &str = include_str!("../../frontend/web/lib.js");
 
 /// A running browser frontend; serving stops with [`Served::stop`] or when
 /// this is dropped.

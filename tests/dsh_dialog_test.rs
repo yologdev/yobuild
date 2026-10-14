@@ -3,7 +3,7 @@
 //! `host-dialogs.ts` and the `ui` service; a DSH tool's presenters reach the
 //! frontend as `details.view`.
 //!
-//! Needs `npm ci` in `../vendor/yoagent-rutis/plugins/dsh/`; skipped (passing, with
+//! Needs `npm ci` in `vendor/yoagent-rutis/plugins/dsh/`; skipped (passing, with
 //! `SKIPPED:`) without it unless `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 
 use std::path::PathBuf;
@@ -14,16 +14,16 @@ use serde_json::{json, Value};
 use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::{MockProvider, ModelConfig};
 use yoagent::{Agent, AgentEvent};
-use yoagent_frontend::host::{PluginHost, Row};
-use yoagent_frontend::{
+use yoagent_rutis::RutisBridge;
+use yobuild::frontend::host::{PluginHost, Row};
+use yobuild::frontend::{
     services, ClientMessage, ResolveReason, RunOutcome, ServerMessage, Session, UiRequest,
 };
-use yoagent_rutis::RutisBridge;
 
 const WAIT: Duration = Duration::from_secs(60);
 
 fn dsh_plugins() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../vendor/yoagent-rutis/plugins/dsh")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/yoagent-rutis/plugins/dsh")
 }
 
 fn runtime_installed() -> bool {
@@ -53,7 +53,7 @@ fn call(name: &str, arguments: Value) -> MockResponse {
 async fn dsh_host() -> (
     Ctx,
     Session,
-    yoagent_frontend::Driver,
+    yobuild::frontend::Driver,
     RutisBridge,
     PluginHost,
 ) {

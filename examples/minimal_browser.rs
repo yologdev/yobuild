@@ -15,7 +15,7 @@ use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::{MockProvider, ModelConfig};
 use yoagent::tools::{ListFilesTool, ReadFileTool, SearchTool};
 use yoagent::Agent;
-use yoagent_frontend::{web, Session};
+use yobuild::frontend::{web, Session};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

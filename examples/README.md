@@ -44,7 +44,7 @@ Rust process (21 MB)
 │    └─ extensions ──── Handoff (report check, facts), Budget (when the model is priced),
 │                       the rutis bridge (every plugin below, as one extension)
 ├─ yoagent-rutis ────── the bridge: plugins' tools, policies, prompt notes → yoagent hooks
-├─ yoagent-frontend ─── Session (one agent, many frontends), protocol, web server (axum + WebSocket)
+├─ yobuild::frontend ── Session (one agent, many frontends), protocol, web server (axum + WebSocket)
 └─ model ───────────── DeepSeek (deepseek-flash) over its OpenAI-compatible API
 
 Node runtime "ui"  ─── todo-plan             draws the plan in the page
@@ -62,10 +62,10 @@ The browser page is plain HTML and JavaScript, served by the Rust process. Any n
 | Plugin | Ecosystem | Version | Changed? | What the agent gets |
 |---|---|---|---|---|
 | [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo) | pi (npm, ~207k downloads a month) | 2.12.0 | unchanged | the `todo` tool, its plan |
-| `plugins/pi-extensions/confirm-dangerous.ts` | pi (written here, in pi's extension format) | — | ours | the approval gate for destructive commands and overwrites |
+| `frontend/plugins/pi-extensions/confirm-dangerous.ts` | pi (written here, in pi's extension format) | — | ours | the approval gate for destructive commands and overwrites |
 | [`dsh-free-search`](https://www.npmjs.com/package/dsh-free-search) | DSH (npm) | 0.8.1 | unchanged | 9 search tools (`multi_search`, `research`, …) and prompt guidance |
 | `@deepseek-ai/dsh-web`, `dsh-system-prompt`, `dsh-tools` | DSH core | 0.2.0-rc.2 | unchanged | the services DSH plugins expect |
-| `plugins/todo-plan.ts` | rutis (yoagent-frontend UI plugin) | — | ours | the plan drawn as a checklist in the page |
+| `frontend/plugins/todo-plan.ts` | rutis (a UI plugin of the frontend) | — | ours | the plan drawn as a checklist in the page |
 | pi adapter, `host-ui.ts`, DSH adapter, `host-dialogs.ts` | rutis (yoagent-rutis) | — | ours | pi and DSH plugins as yoagent tools, policies and dialogs |
 | `ask_owner`, `Handoff` | yoagent (Rust, in the example) | — | ours | asking without waiting; the report check and the facts |
 
@@ -140,7 +140,7 @@ The Node runtimes are the cost of running other ecosystems' plugins unchanged. A
   - A policy that fails denies the call.
   - The approval gate refuses when nobody is there. It is a guardrail for selected operations, not a sandbox.
   - The facts come from git and the event stream, not from the model.
-- **Walk-away first.** Questions that wait, a page that replays, answers that start the next run, a report on every run. These are what make "hand it off" work. Each is a small, tested piece of yoagent-frontend (`Session::ask_later`, history replay, late steering), not special code in the agent.
+- **Walk-away first.** Questions that wait, a page that replays, answers that start the next run, a report on every run. These are what make "hand it off" work. Each is a small, tested piece of `yobuild::frontend` (`Session::ask_later`, history replay, late steering), not special code in the agent.
 - **Not done yet.**
   - The session lives in memory, so a restart starts fresh; your files and git history are the durable record.
   - There are no push notifications.

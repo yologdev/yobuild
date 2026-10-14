@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Hand a task to the handoff agent example
-# (frontend/examples/handoff_agent.rs) and walk away. It
+# (examples/handoff_agent.rs) and walk away. It
 # works in the directory you run this from — the project you hand off — and
 # prints a URL to follow it, answer its questions and read its reports.
 #
@@ -22,5 +22,5 @@ for arg in "$@"; do
 done
 # The plugin runtimes (installed once; checks Rust, Node and npm first).
 "$repo/scripts/try-coding-agent.sh" --setup-only >/dev/null
-exec cargo run --quiet --manifest-path "$repo/frontend/Cargo.toml" \
+exec cargo run --quiet --manifest-path "$repo/Cargo.toml" \
   --example handoff_agent -- "$@"

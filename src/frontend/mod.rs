@@ -12,8 +12,7 @@
 //! here). [`web`] serves a browser frontend; [`host`] cuts the rutis setup to
 //! a few lines.
 //!
-//! Not published and without an API promise: yoagent's core and
-//! yoagent-rutis's API do not depend on it.
+//! Moved from yoagent's `integrations/yoagent-frontend` (history kept).
 
 pub mod host;
 pub mod protocol;

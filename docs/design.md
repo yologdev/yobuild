@@ -152,7 +152,7 @@ small, and it has no opinion about the task.
 
 ## 5. The frontend
 
-yoagent-frontend moves here as `yobuild::frontend` (history kept via
+yoagent-frontend moved here as `yobuild::frontend` (M0, history kept via
 `git subtree split`): `Session` / `Driver`, the browser page and phone link,
 the pi-tui terminal UI, UI plugins, plugin dialogs (pi and DSH questions
 reach the owner), `PluginHost` (rows, routing, reload, `env`, `terminal`),
@@ -178,15 +178,18 @@ environment they inherit is visible to them; the gate checks selected
 operations, not everything a script does. A sandbox (container, VM) is the
 deployment's job.
 
-## 7. What moves, what stays
+## 7. What moved, what it becomes
 
-| From yoagent | To yobuild |
+Moved from yoagent in M0 (`integrations/yoagent-frontend/`, its examples,
+`scripts/try-*.sh`, the CI job). What each becomes:
+
+| In yobuild now | Becomes |
 |---|---|
-| `integrations/yoagent-frontend/` (crate, plugins, web, tests) | `yobuild::frontend` |
-| `examples/handoff_agent.rs`, `coding_agent.rs`, `minimal_browser.rs` | manifests `examples/handoff.toml`, `coding.toml`, `minimal.toml` (plus the parts they used) |
-| `plugins/pi-extensions/confirm-dangerous.ts` and its tests | `yobuild::parts::gate` |
-| `scripts/try-handoff.sh`, `try-coding-agent.sh` | `yobuild run` |
-| CI: frontend job, pty check, handoff demo | yobuild CI |
+| `src/frontend/` (`yobuild::frontend`), `frontend/web/`, `frontend/plugins/`, `tests/` | stays (M1: one crate) |
+| `examples/handoff_agent.rs`, `coding_agent.rs`, `minimal_browser.rs` | manifests `examples/handoff.toml`, `coding.toml`, `minimal.toml` (plus the parts they used; M2a) |
+| `frontend/plugins/pi-extensions/confirm-dangerous.ts` and its tests | `yobuild::parts::gate` (M1; the TypeScript version stays as an example) |
+| `scripts/try-handoff.sh`, `try-coding-agent.sh` | `yobuild run` (M2a) |
+| CI: `check` (pty check, handoff demo) | grows with the parts and manifests |
 
 Stays in yoagent: the loop, providers, tools, `Extension`; yoagent-rutis
 (bridge, pi and DSH adapters, the compatibility matrix and its probe);
@@ -211,7 +214,7 @@ plug into the same `Extension` contract, so a promotion swaps one manifest
 entry for a built-in part — the agent's behaviour, and its tests, stay.
 
 **Performance is rarely the reason.** Measured on the handoff agent
-(yoagent's `examples/README.md`, M2, release build): a live run of 30.5 s
+([`examples/README.md`](../examples/README.md), M2, release build): a live run of 30.5 s
 spent 15.7 s in the model and 2.7–6.7 s per web search; the loop plus a
 Node plugin policy costs about 3 ms per tool call (9–11 ms for the first).
 A Rust policy saves milliseconds next to seconds.

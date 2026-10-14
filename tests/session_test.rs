@@ -14,7 +14,7 @@ use yoagent::{
     Agent, AgentEvent, AgentTool, FilterResult, InputFilter, Message, ToolContext, ToolError,
     ToolResult, Usage,
 };
-use yoagent_frontend::{
+use yobuild::frontend::{
     ClientMessage, Connection, NoticeLevel, ResolveReason, RunOutcome, ServerMessage, Session,
     UiPlugin, UiRequest,
 };

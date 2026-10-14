@@ -1,5 +1,5 @@
 // EXPERIMENTAL. A terminal frontend built from pi's UI library (pi-tui), on
-// the yoagent-frontend protocol: it connects to the host's `frontend`
+// the `yobuild::frontend` protocol: it connects to the host's `frontend`
 // service, renders what arrives (`receive`), and sends what the user types.
 // Plugins' questions (`uiRequest`) are answered in the editor.
 //
