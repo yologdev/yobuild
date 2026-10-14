@@ -6,9 +6,10 @@ Harness plugins, MCP servers, rutis plugins in Rust, TypeScript, Python or
 Go — plus a few small parts of its own, on top of the
 [yoagent](https://github.com/yologdev/yoagent) loop.
 
-> Status: **M0 (bootstrap).** The frontend moved here from yoagent
-> ([`frontend/`](frontend/README.md), with its examples); the manifest and
-> runner are not built yet. Numbers quoted are measured in the yoagent
+> Status: **M1 (parts).** The frontend moved here from yoagent as
+> `yobuild::frontend` ([`frontend/`](frontend/README.md), with its
+> [examples](examples/README.md)); the manifest and runner are not built
+> yet. Numbers quoted are measured in the yoagent
 > repository.
 >
 > ```sh
@@ -19,7 +20,7 @@ Go — plus a few small parts of its own, on top of the
 
 ## The idea in one example
 
-The `handoff_agent` example ([`frontend/examples`](frontend/examples/README.md)) is a delegate you hand a task to
+The `handoff_agent` example ([`examples/`](examples/README.md)) is a delegate you hand a task to
 and walk away from. It plans, researches, asks you only what is yours to
 decide — without waiting for the answer — and ends every run with a report
 and facts the model cannot make up. Of what it does:
@@ -73,8 +74,9 @@ yobuild run handoff.toml
 yoagent stays a loop library: the loop, providers, tools, the `Extension`
 contract, and the plugin bridge (yoagent-rutis) with its pi and DSH
 adapters. yobuild is an *application* of it, depending on yoagent and
-yoagent-rutis from crates.io. The yoagent-frontend crate (sessions,
-browser/phone/terminal UIs, the plugin host) now lives here, in `frontend/`.
+yoagent-rutis from crates.io. The frontend that was yoagent-frontend
+(sessions, browser/phone/terminal UIs, the plugin host) lives here as
+`yobuild::frontend`.
 
 ## License
 

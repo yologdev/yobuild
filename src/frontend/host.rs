@@ -3,7 +3,7 @@
 //!
 //! ```no_run
 //! # async fn run(root: &rutis::Ctx) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-//! use yoagent_frontend::host::{PluginHost, Row};
+//! use yobuild::frontend::host::{PluginHost, Row};
 //! let mut host = PluginHost::builder()
 //!     .node("pi", "plugins/pi")        // package.json + node_modules here
 //!     .node("dsh", "plugins/dsh")
@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn the_shared_dsh_host_services_list_parses() {
         let file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../vendor/yoagent-rutis/plugins/dsh/host-services.json");
+            .join("vendor/yoagent-rutis/plugins/dsh/host-services.json");
         let rows = rows_from_file(&file, "dsh").unwrap();
         assert_eq!(rows.len(), 7);
         assert!(rows

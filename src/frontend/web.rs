@@ -24,12 +24,12 @@ use axum::routing::get;
 use axum::Router;
 use futures::{SinkExt, StreamExt};
 
-use crate::protocol::{ClientMessage, NoticeLevel, ServerMessage};
-use crate::session::Session;
+use crate::frontend::protocol::{ClientMessage, NoticeLevel, ServerMessage};
+use crate::frontend::session::Session;
 
-const INDEX: &str = include_str!("../web/index.html");
-const APP: &str = include_str!("../web/app.js");
-const LIB: &str = include_str!("../web/lib.js");
+const INDEX: &str = include_str!("../../frontend/web/index.html");
+const APP: &str = include_str!("../../frontend/web/app.js");
+const LIB: &str = include_str!("../../frontend/web/lib.js");
 
 /// A running browser frontend; serving stops with [`Served::stop`] or when
 /// this is dropped.

@@ -13,13 +13,13 @@ use serde_json::json;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::{MockProvider, ModelConfig};
 use yoagent::{Agent, AgentMessage, Content, Message};
-use yoagent_frontend::host::{PluginHost, Row};
 use yoagent_rutis::RutisBridge;
+use yobuild::frontend::host::{PluginHost, Row};
 
 const WAIT: Duration = Duration::from_secs(60);
 
 fn plugins() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins")
 }
 
 fn runtime_installed() -> bool {

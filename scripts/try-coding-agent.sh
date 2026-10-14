@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Try the coding agent example (frontend/examples/coding_agent.rs)
+# Try the coding agent example (examples/coding_agent.rs)
 # in one command: installs the plugin runtimes it needs, then runs it.
 #
 #   scripts/try-coding-agent.sh              # browser frontend, scripted model
@@ -73,4 +73,4 @@ if ! $terminal && ! $web_given; then
   args=(--web ${args[@]+"${args[@]}"})
 fi
 $live || echo "(scripted model; add --live for DeepSeek)"
-exec cargo run --quiet --manifest-path "$frontend/Cargo.toml" --example coding_agent -- ${args[@]+"${args[@]}"}
+exec cargo run --quiet --manifest-path "$repo/Cargo.toml" --example coding_agent -- ${args[@]+"${args[@]}"}

@@ -2,7 +2,7 @@
 
 Draft for review. Each milestone ends with something that runs.
 
-## M0 — Bootstrap
+## M0 — Bootstrap (done 2026-10-15)
 
 - Repository, license, CI (fmt, clippy, tests; Node 22.19+, Bun 1.4, Go 1.24,
   Python 3.10+ runtimes as yoagent-rutis's CI has them).
@@ -18,20 +18,27 @@ Draft for review. Each milestone ends with something that runs.
 **Done when** yobuild's CI is green on the moved code and yoagent's on
 the removal.
 
+Done: yobuild CI green, yoagent#314 merged (with pointers at the old
+paths).
+
 ## M1 — Parts
+
+- One crate, `yobuild`: the frontend becomes `yobuild::frontend` (decided
+  2026-10-15), the parts `yobuild::parts`.
 
 - `yobuild::parts`: `ask_owner`, `report`, `facts`, `scratch`, `gate`,
   extracted from `handoff_agent` with their own tests.
-- Decide the gate's form: keep the pi extension (TypeScript; shows pi
-  policies working) or port it to a Rust `before_tool` (no Node needed for
-  safety, microseconds instead of ~3 ms, tests beside the Rust). Recommended:
-  Rust, keep the pi version as an example.
+- The gate is a Rust `before_tool` on yoagent's `ToolGate` (decided
+  2026-10-15: no Node needed for safety, microseconds instead of ~3 ms,
+  tests beside the Rust); the pi extension stays as an example.
 - `handoff_agent` rebuilt on the parts: same behaviour, much less code.
 - **In parallel, in yoagent** (separate PRs, so M2 is not blocked waiting
   on a release):
-  - yoagent-rutis exposes the ecosystem probe as a public module
-    (open question 3); `yobuild check` needs it. An API addition, so it
-    ships in a yoagent-rutis release (0.3.2 or 0.4.0).
+  - yoagent-rutis exposes the ecosystem probe as a public module, and a
+    way to locate the pi and DSH adapter files (decided 2026-10-15);
+    `yobuild check` needs the first, and the second lets yobuild drop
+    `vendor/`. An API addition, so it ships in a yoagent-rutis release
+    (0.3.2 or 0.4.0).
   - DeepSeek pricing in yoagent's price table (in progress), so
     `budget_usd` and cost facts work for DeepSeek models too.
 
@@ -118,22 +125,19 @@ never loading, and a denied approval leaves the agent without the plugin.
 
 ## Open questions (for review)
 
-1. **Name and home.** `yobuild` in `yologdev/` (public) — or in the private
-   `yo` project, if this is yo's direction?
+1. **Name and home.** Decided: `yologdev/yobuild`, public.
 2. **Publish to crates.io?** As a binary crate (`cargo install yobuild`),
    and the library (`yobuild::parts`, `yobuild::frontend`) for people who
    would rather write Rust than a manifest?
-3. **The probe as a library.** `yobuild check` needs yoagent-rutis's
-   ecosystem probe, which is an example today. Expose it from
-   yoagent-rutis (a public module; proposed, so `check` and the
-   compatibility matrix cannot drift apart), or keep a copy here?
-   Decide before M1: the yoagent-rutis PR runs alongside it.
+3. **The probe as a library.** Decided: exposed from yoagent-rutis as a
+   public module (so `check` and the compatibility matrix cannot drift
+   apart), together with the adapter files' location.
 4. **Manifest format.** TOML (proposed) vs YAML vs a TypeScript config for
    people who live in npm.
 5. **Plugin installs.** One cache per ecosystem and lockfile hash (proposed),
    or per agent folder (simpler, bigger)?
-6. **The gate.** Port to Rust (recommended: it is on the safety path — design §9) or keep TypeScript?
-   And the rule itself: are the five reasons in design §9 (safety, hot
+6. **The gate.** Decided: Rust (it is on the safety path — design §9), the
+   TypeScript version kept as an example. Still open, the rule itself: are the five reasons in design §9 (safety, hot
    path, footprint, target, ownership) the right ones, and is "over 5 % of
    a turn" the right threshold?
 7. **Windows.** rutis 0.9 supports it; the frontend's terminal UI and the

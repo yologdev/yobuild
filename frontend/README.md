@@ -141,7 +141,7 @@ DSH answers as on its own (an `ask` is denied, the tool finds no answerer).
 ## Examples
 
 The smallest start: one agent and the browser page, no plugins and no Node
-([`examples/minimal_browser.rs`](examples/minimal_browser.rs), about 40
+([`examples/minimal_browser.rs`](../examples/minimal_browser.rs), about 40
 lines; read-only file tools sandboxed to the directory it runs in, since
 whoever has the page's URL drives the agent).
 
@@ -159,10 +159,10 @@ for the browser — open the URL it prints:
 scripts/try-coding-agent.sh            # scripted model; --live for DeepSeek, --terminal, --watch
 ```
 
-Or by hand, from this directory:
+Or by hand, from the repository root:
 
 ```bash
-(cd plugins && npm ci) && (cd ../vendor/yoagent-rutis/plugins/pi && npm ci) && (cd ../vendor/yoagent-rutis/plugins/dsh && npm ci)
+(cd frontend/plugins && npm ci) && (cd vendor/yoagent-rutis/plugins/pi && npm ci) && (cd vendor/yoagent-rutis/plugins/dsh && npm ci)
 cargo run --example coding_agent                     # terminal frontend, scripted model
 cargo run --example coding_agent -- --live           # DeepSeek (DEEPSEEK_API_KEY)
 cargo run --example coding_agent -- --web --live     # browser: open the printed http://127.0.0.1:8787/?t=… URL
@@ -181,7 +181,7 @@ Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
 ### `handoff_agent`: hand it a task and walk away
 
 The stack, the plugins by ecosystem, and measured performance are in
-[`examples/README.md`](examples/README.md).
+[`examples/README.md`](../examples/README.md).
 
 A personal handoff agent for any task: research, writing, planning or code.
 It works in the directory you start it from, and puts what it makes there:
@@ -244,12 +244,12 @@ browser was attached.
 
 ## Tests
 
-From this directory:
+From the repository root:
 
 ```bash
 cargo test                                            # protocol, session, web, services
 YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test           # pi's and DSH's dialogs need their packages (CI)
-node --test web/lib.test.js                           # Markdown, question queue, run lines, tool views, diffs, links, typed answers
+node --test frontend/web/lib.test.js                  # Markdown, question queue, run lines, tool views, diffs, links, typed answers
 ```
 
 ## Limits

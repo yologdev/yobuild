@@ -2,7 +2,7 @@
 //! extension's `ctx.ui.select` reaches a frontend through `host-ui.ts` and
 //! the `ui` service, and the answer decides whether the command runs.
 //!
-//! Needs `npm ci` in `plugins/` and `../vendor/yoagent-rutis/plugins/pi/`; skipped
+//! Needs `npm ci` in `frontend/plugins/` and `vendor/yoagent-rutis/plugins/pi/`; skipped
 //! (passing, with `SKIPPED:`) without them unless
 //! `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 
@@ -15,18 +15,19 @@ use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::{MockProvider, ModelConfig};
 use yoagent::tools::BashTool;
 use yoagent::{Agent, AgentEvent};
-use yoagent_frontend::host::{PluginHost, Row};
-use yoagent_frontend::{services, ClientMessage, ServerMessage, Session, UiRequest};
 use yoagent_rutis::RutisBridge;
+use yobuild::frontend::host::{PluginHost, Row};
+use yobuild::frontend::{services, ClientMessage, ServerMessage, Session, UiRequest};
 
 const WAIT: Duration = Duration::from_secs(60);
 
+/// The frontend's directory (its plugins and web page).
 fn here() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend")
 }
 
 fn pi_plugins() -> PathBuf {
-    here().join("../vendor/yoagent-rutis/plugins/pi")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/yoagent-rutis/plugins/pi")
 }
 
 fn runtimes_installed() -> bool {

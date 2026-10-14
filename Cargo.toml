@@ -1,3 +1,38 @@
-[workspace]
-members = ["frontend"]
+[package]
+name = "yobuild"
+version = "0.0.1"
+edition = "2021"
 resolver = "3"
+description = "Build an agent by choosing its parts: plugins from other ecosystems on the yoagent loop, a few parts of its own, and a frontend"
+license = "MIT"
+repository = "https://github.com/yologdev/yobuild"
+rust-version = "1.88"
+# Not published yet (open question 2 in docs/roadmap.md); no API promise.
+publish = false
+
+
+[dependencies]
+# DshHome: a private, per-run home for DSH's own services.
+tempfile = "3"
+# Floors: 0.25.4 for `ToolGate` (the gate part), 0.3.1 for the DSH host
+# services behind `--dsh-services`.
+yoagent = "0.25.4"
+yoagent-rutis = { version = "0.3.1", features = ["node"] }
+rutis = "0.9"
+rutis-bridge = { version = "0.9", default-features = false, features = ["node"] }
+rutis-loader = { version = "0.9", features = ["node"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net"] }
+tokio-util = "0.7"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "signal"] }
+tokio-tungstenite = "0.28"
+tempfile = "3"
+async-trait = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -2,7 +2,7 @@
 //! that asks the user something.
 //!
 //! - `frontend.connect(client)` — `client.receive(message)` is called with
-//!   every [`ServerMessage`](crate::ServerMessage), in order (the next waits for the previous
+//!   every [`ServerMessage`](crate::frontend::ServerMessage), in order (the next waits for the previous
 //!   call). Returns a disposer; the connection also ends when the plugin's
 //!   runtime does, or when a `receive` call fails (logged).
 //! - `frontend.send(message)` — a [`ClientMessage`] (`{type: "prompt", text}`, …);
@@ -30,8 +30,8 @@ use rutis_bridge::session::{self, host_key, Error, HostDispatch, Reply, Value};
 use serde_json::{json, Value as Json};
 use tokio_util::sync::CancellationToken;
 
-use crate::protocol::{ClientMessage, UiPlugin, UiRequest};
-use crate::session::{Session, UI_TIMEOUT};
+use crate::frontend::protocol::{ClientMessage, UiPlugin, UiRequest};
+use crate::frontend::session::{Session, UI_TIMEOUT};
 
 /// The service names, for the loader's catalog (`register_shared`).
 pub const FRONTEND: &str = "frontend";
@@ -260,7 +260,7 @@ impl HostDispatch for UiService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ServerMessage;
+    use crate::frontend::protocol::ServerMessage;
 
     fn list(values: Vec<Json>) -> Value {
         Value::List(values.into_iter().map(Value::Data).collect())

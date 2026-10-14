@@ -15,7 +15,7 @@ use serde_json::Value as Json;
 use tokio::sync::{mpsc, oneshot};
 use yoagent::{Agent, AgentEvent, AgentMessage, Message, SessionStats, StopReason, StreamDelta};
 
-use crate::protocol::{
+use crate::frontend::protocol::{
     ClientMessage, NoticeLevel, PendingUiRequest, ResolveReason, RunOutcome, ServerMessage,
     UiPlugin, UiRequest,
 };

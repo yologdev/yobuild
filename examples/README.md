@@ -62,10 +62,10 @@ The browser page is plain HTML and JavaScript, served by the Rust process. Any n
 | Plugin | Ecosystem | Version | Changed? | What the agent gets |
 |---|---|---|---|---|
 | [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo) | pi (npm, ~207k downloads a month) | 2.12.0 | unchanged | the `todo` tool, its plan |
-| `plugins/pi-extensions/confirm-dangerous.ts` | pi (written here, in pi's extension format) | — | ours | the approval gate for destructive commands and overwrites |
+| `frontend/plugins/pi-extensions/confirm-dangerous.ts` | pi (written here, in pi's extension format) | — | ours | the approval gate for destructive commands and overwrites |
 | [`dsh-free-search`](https://www.npmjs.com/package/dsh-free-search) | DSH (npm) | 0.8.1 | unchanged | 9 search tools (`multi_search`, `research`, …) and prompt guidance |
 | `@deepseek-ai/dsh-web`, `dsh-system-prompt`, `dsh-tools` | DSH core | 0.2.0-rc.2 | unchanged | the services DSH plugins expect |
-| `plugins/todo-plan.ts` | rutis (yoagent-frontend UI plugin) | — | ours | the plan drawn as a checklist in the page |
+| `frontend/plugins/todo-plan.ts` | rutis (a UI plugin of the frontend) | — | ours | the plan drawn as a checklist in the page |
 | pi adapter, `host-ui.ts`, DSH adapter, `host-dialogs.ts` | rutis (yoagent-rutis) | — | ours | pi and DSH plugins as yoagent tools, policies and dialogs |
 | `ask_owner`, `Handoff` | yoagent (Rust, in the example) | — | ours | asking without waiting; the report check and the facts |
 

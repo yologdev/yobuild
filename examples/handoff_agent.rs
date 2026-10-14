@@ -57,11 +57,11 @@ use yoagent::{
     Agent, AgentEvent, AgentMessage, AgentTool, Content, Message, ToolContext, ToolError,
     ToolResult,
 };
-use yoagent_frontend::host::{rows_from_file, DshHome, PluginHost, Row};
-use yoagent_frontend::{
+use yoagent_rutis::RutisBridge;
+use yobuild::frontend::host::{rows_from_file, DshHome, PluginHost, Row};
+use yobuild::frontend::{
     services, session, web, ClientMessage, NoticeLevel, ServerMessage, Session, UiRequest,
 };
-use yoagent_rutis::RutisBridge;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -95,11 +95,12 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// The sections every run's last message must have.
 const REPORT: [&str; 4] = ["Done", "Waiting on you", "Decisions", "Next"];
 
+/// The frontend's directory (its plugins and web page).
 fn here() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend")
 }
 fn rutis_plugins() -> PathBuf {
-    here().join("../vendor/yoagent-rutis/plugins")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/yoagent-rutis/plugins")
 }
 
 struct Options {
@@ -755,7 +756,7 @@ fn scripted() -> MockProvider {
 /// to stop, then answers the question, which starts the second run.
 async fn demo(
     session: Session,
-    driver: yoagent_frontend::Driver,
+    driver: yobuild::frontend::Driver,
     agent: Agent,
     task: Option<String>,
 ) -> Result<(), BoxError> {

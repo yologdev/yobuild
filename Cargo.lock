@@ -2416,7 +2416,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "yoagent-frontend"
+name = "yoagent-rutis"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2aba248f4e9211f05c9540d95a51710bd6c07354aafb6579b8833cbfe633b43c"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "futures",
+ "rutis",
+ "rutis-bridge",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "yoagent",
+]
+
+[[package]]
+name = "yobuild"
 version = "0.0.1"
 dependencies = [
  "async-trait",
@@ -2436,25 +2455,6 @@ dependencies = [
  "uuid",
  "yoagent",
  "yoagent-rutis",
-]
-
-[[package]]
-name = "yoagent-rutis"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2aba248f4e9211f05c9540d95a51710bd6c07354aafb6579b8833cbfe633b43c"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "futures",
- "rutis",
- "rutis-bridge",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
- "yoagent",
 ]
 
 [[package]]

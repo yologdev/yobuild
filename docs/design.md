@@ -211,7 +211,7 @@ plug into the same `Extension` contract, so a promotion swaps one manifest
 entry for a built-in part — the agent's behaviour, and its tests, stay.
 
 **Performance is rarely the reason.** Measured on the handoff agent
-(yoagent's `examples/README.md`, M2, release build): a live run of 30.5 s
+([`examples/README.md`](../examples/README.md), M2, release build): a live run of 30.5 s
 spent 15.7 s in the model and 2.7–6.7 s per web search; the loop plus a
 Node plugin policy costs about 3 ms per tool call (9–11 ms for the first).
 A Rust policy saves milliseconds next to seconds.

@@ -14,13 +14,12 @@ env:
   RUSTFLAGS: "-Dwarnings"
 
 jobs:
-  # The frontend (moved from yoagent's integrations/yoagent-frontend). The
-  # session and web tests need no Node; the pi and DSH dialog tests need the
-  # adapters' packages (required here). The examples run headless with three
-  # Node runtimes (the UI's, pi's and DSH's packages), on a pseudo-terminal,
-  # and as the scripted handoff demo.
-  frontend:
-    name: frontend
+  # The crate and its examples. The session and web tests need no Node; the
+  # pi and DSH dialog tests need the adapters' packages (required here). The
+  # examples run headless with three Node runtimes (the UI's, pi's and DSH's
+  # packages), on a pseudo-terminal, and as the scripted handoff demo.
+  check:
+    name: Check & test
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -49,7 +48,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets
       - name: Docs
-        run: RUSTDOCFLAGS="-Dwarnings" cargo doc --locked --no-deps -p yoagent-frontend
+        run: RUSTDOCFLAGS="-Dwarnings" cargo doc --locked --no-deps
       - name: Test (pi's and DSH's dialogs through the session need the runtimes)
         run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked
       - name: Page logic and the approval gate (node --test)
@@ -59,7 +58,7 @@ jobs:
         timeout-minutes: 5
         run: |
           mkdir -p "$RUNNER_TEMP/frontend-project" && cd "$RUNNER_TEMP/frontend-project"
-          cargo run --locked --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p yoagent-frontend --example coding_agent -- --demo "clean the build" \
+          cargo run --locked --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" --example coding_agent -- --demo "clean the build" \
             | sed 's/\x1b\[[0-9;]*m//g' | tee screen.txt
           grep -q "? Run \`rm -rf build\`?" screen.txt
           grep -q "bash ✗" screen.txt
@@ -71,8 +70,8 @@ jobs:
         timeout-minutes: 5
         run: |
           mkdir -p "$RUNNER_TEMP/pty-project" && cd "$RUNNER_TEMP/pty-project"
-          cargo build --locked --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p yoagent-frontend --example coding_agent
-          python3 "$GITHUB_WORKSPACE/frontend/tests/terminal_pty.py" \
+          cargo build --locked --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" --example coding_agent
+          python3 "$GITHUB_WORKSPACE/tests/terminal_pty.py" \
             "$GITHUB_WORKSPACE/target/debug/examples/coding_agent"
       - name: Handoff example (scripted; asks without waiting, the answer starts the next run)
         shell: bash
@@ -81,5 +80,5 @@ jobs:
           mkdir -p "$RUNNER_TEMP/handoff-project" && cd "$RUNNER_TEMP/handoff-project"
           git init -q && git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m start
           # The example checks its own outcome and exits non-zero on a regression.
-          cargo run --locked --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p yoagent-frontend --example handoff_agent -- --demo | tee out.txt
+          cargo run --locked --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" --example handoff_agent -- --demo | tee out.txt
           grep -q "ok: asked without waiting, answered later, wrote notes.md, two reports" out.txt
