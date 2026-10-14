@@ -12,6 +12,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 vendor="$repo/vendor/yoagent-rutis/plugins"
 
+[ $# -le 1 ] || { echo "usage: $0 [--update]" >&2; exit 2; }
 case "${1:-}" in
   "") update=false ;;
   --update) update=true ;;
@@ -21,6 +22,7 @@ esac
 # Exactly one yoagent-rutis in the lock, else say so rather than pick one.
 crate=$(cargo metadata --format-version 1 --manifest-path "$repo/Cargo.toml" --locked |
   node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    if(!s.trim())process.exit(1) // cargo failed and said why
     const ps=JSON.parse(s).packages.filter(p=>p.name==="yoagent-rutis");
     if(ps.length!==1){console.error(`error: expected one yoagent-rutis in Cargo.lock, found ${ps.length}`);process.exit(1)}
     console.log(ps[0].version+" "+require("path").dirname(ps[0].manifest_path))})')
@@ -34,6 +36,7 @@ done
 
 if $update; then
   for d in pi dsh; do
+    mkdir -p "$vendor/$d"
     find "$vendor/$d" -mindepth 1 -maxdepth 1 ! -name node_modules -exec rm -rf {} +
     (cd "$dir/plugins/$d" && tar -cf - --exclude node_modules .) | (cd "$vendor/$d" && tar -xf -)
   done

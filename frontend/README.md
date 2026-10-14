@@ -156,7 +156,7 @@ frontends, pi's and DSH's dialogs. One command from the repository root
 for the browser — open the URL it prints:
 
 ```bash
-../scripts/try-coding-agent.sh         # scripted model; --live for DeepSeek, --terminal, --watch
+scripts/try-coding-agent.sh            # scripted model; --live for DeepSeek, --terminal, --watch
 ```
 
 Or by hand, from this directory:

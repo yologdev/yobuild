@@ -11,6 +11,7 @@ Usage: terminal_pty.py <path to the built coding_agent example> (Unix).
 """
 import os
 import pty
+import re
 import select
 import signal
 import subprocess
@@ -23,13 +24,14 @@ if pid == 0:
     os.execv(exe, [exe, "--no-dsh"])
 
 screen = b""
+closed = False  # the pty hit EOF: the agent is gone
 
 
 def read_until(needle, seconds):
     """Read the terminal until `needle` shows (True) or time is up (False)."""
-    global screen
+    global screen, closed
     end = time.time() + seconds
-    while time.time() < end:
+    while time.time() < end and not closed:
         if needle in screen:
             return True
         ready, _, _ = select.select([fd], [], [], 0.2)
@@ -37,7 +39,7 @@ def read_until(needle, seconds):
             try:
                 screen += os.read(fd, 65536)
             except OSError:
-                break
+                closed = True
     return needle in screen
 
 
@@ -61,17 +63,23 @@ def stopped():
     return [f"{p} {cmd[:100]}" for p, stat, cmd in tree() if stat.startswith("T")]
 
 
-def watch_stopped(needle, seconds):
-    """Read until `needle` shows, checking for stopped processes all along."""
+def watch_stopped(needle, seconds, settle=1.5):
+    """Read until `needle` shows (and `settle` s more), checking for stopped
+    processes all along. Returns the stopped ones (empty when none)."""
     end = time.time() + seconds
-    while time.time() < end:
+    while time.time() < end and not closed:
         hit = stopped()
         if hit:
             return hit
         if read_until(needle, 0.5):
-            return stopped()
+            read_until(b"\0never\0", settle)
+            break
     return stopped()
 
+
+# The question pi's approval gate asks, as the terminal UI draws it (the tool
+# line alone, `bash {"command":"rm -rf build"}`, does not contain it).
+QUESTION = b"? Run `rm -rf build`?"
 
 failures = []
 if not read_until(b"terminal frontend", 90):
@@ -80,18 +88,31 @@ time.sleep(1)
 os.write(fd, b"list the files here\r")
 if not read_until(b"list_files", 60):
     failures.append("the typed prompt did not run a tool")
-# The same turn asks before `rm -rf build`: the dialog is what touches the
-# terminal, so keep watching until it is drawn, not only until `list_files`.
-hit = watch_stopped(b"rm -rf build", 15)
+# The same turn asks before `rm -rf build`: a question from the pi runtime,
+# through its host-ui service, to the terminal UI. Watch for stopped processes
+# while that happens, then answer it from the keyboard (2 = Block).
+hit = watch_stopped(QUESTION, 15)
 if hit:
     failures.append(f"stopped processes (SIGTTIN/SIGTTOU?): {hit}")
-if b"rm -rf build" not in screen:
+if QUESTION not in screen:
     failures.append("the approval question for `rm -rf build` was never drawn")
-if os.waitpid(pid, os.WNOHANG) != (0, 0):
-    failures.append("the agent exited before the end of the check")
+else:
+    os.write(fd, b"2\r")
+    # `bash ✗`, the mark coloured (an escape between them).
+    blocked = re.compile(rb"bash (?:\x1b\[[0-9;]*m)*\xe2\x9c\x97")
+    end = time.time() + 15
+    while not blocked.search(screen) and time.time() < end and not closed:
+        read_until(b"\0never\0", 0.5)
+    if not blocked.search(screen):
+        failures.append("answering Block from the keyboard did not stop `bash`")
 
 procs = tree()
-os.kill(pid, signal.SIGTERM)
+if os.waitpid(pid, os.WNOHANG) != (0, 0):
+    failures.append("the agent exited before the end of the check")
+try:
+    os.kill(pid, signal.SIGTERM)
+except ProcessLookupError:
+    pass
 time.sleep(1)
 for p, _, _ in procs:
     try:
@@ -103,4 +124,4 @@ if failures:
     print("FAILED:", "; ".join(failures))
     print("screen (last 2000 bytes):", screen[-2000:].decode("utf-8", "replace"))
     sys.exit(1)
-print("ok: the terminal UI drew, ran a typed prompt, asked before `rm -rf build`, and nothing was stopped")
+print("ok: the terminal UI drew, ran a typed prompt, asked before `rm -rf build`, took Block from the keyboard, and nothing was stopped")
