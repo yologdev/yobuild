@@ -12,13 +12,14 @@ Go — plus a few small parts of its own, on top of the
 > repository.
 >
 > ```sh
-> scripts/try-coding-agent.sh                 # installs the plugin runtimes, runs the coding agent example
-> scripts/try-handoff.sh --demo               # the handoff agent, scripted (run it in a git repo)
+> scripts/try-coding-agent.sh                         # installs the plugin runtimes, runs the coding agent example
+> mkdir research && cd research && git init
+> path/to/yobuild/scripts/try-handoff.sh --demo       # the handoff agent, scripted; works in the current directory
 > ```
 
 ## The idea in one example
 
-The `handoff_agent` example in yoagent is a delegate you hand a task to
+The `handoff_agent` example ([`frontend/examples`](frontend/examples/README.md)) is a delegate you hand a task to
 and walk away from. It plans, researches, asks you only what is yours to
 decide — without waiting for the answer — and ends every run with a report
 and facts the model cannot make up. Of what it does:
@@ -30,7 +31,7 @@ and facts the model cannot make up. Of what it does:
   without blocking, check the report, add the facts — and a frontend
   (browser, phone).
 
-The agent is mostly a *selection*. About 870 lines of Rust in that example
+The agent is mostly a *selection*. About 890 lines of Rust in that example
 are wiring. yobuild turns the wiring into a manifest:
 
 ```toml
@@ -72,8 +73,8 @@ yobuild run handoff.toml
 yoagent stays a loop library: the loop, providers, tools, the `Extension`
 contract, and the plugin bridge (yoagent-rutis) with its pi and DSH
 adapters. yobuild is an *application* of it, depending on yoagent and
-yoagent-rutis from crates.io. The experimental yoagent-frontend crate
-(sessions, browser/phone/terminal UIs, the plugin host) moves here.
+yoagent-rutis from crates.io. The yoagent-frontend crate (sessions,
+browser/phone/terminal UIs, the plugin host) now lives here, in `frontend/`.
 
 ## License
 

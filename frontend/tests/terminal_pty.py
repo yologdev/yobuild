@@ -61,6 +61,18 @@ def stopped():
     return [f"{p} {cmd[:100]}" for p, stat, cmd in tree() if stat.startswith("T")]
 
 
+def watch_stopped(needle, seconds):
+    """Read until `needle` shows, checking for stopped processes all along."""
+    end = time.time() + seconds
+    while time.time() < end:
+        hit = stopped()
+        if hit:
+            return hit
+        if read_until(needle, 0.5):
+            return stopped()
+    return stopped()
+
+
 failures = []
 if not read_until(b"terminal frontend", 90):
     failures.append("the terminal UI never drew its header")
@@ -68,8 +80,15 @@ time.sleep(1)
 os.write(fd, b"list the files here\r")
 if not read_until(b"list_files", 60):
     failures.append("the typed prompt did not run a tool")
-if stopped():
-    failures.append(f"stopped processes (SIGTTIN/SIGTTOU?): {stopped()}")
+# The same turn asks before `rm -rf build`: the dialog is what touches the
+# terminal, so keep watching until it is drawn, not only until `list_files`.
+hit = watch_stopped(b"rm -rf build", 15)
+if hit:
+    failures.append(f"stopped processes (SIGTTIN/SIGTTOU?): {hit}")
+if b"rm -rf build" not in screen:
+    failures.append("the approval question for `rm -rf build` was never drawn")
+if os.waitpid(pid, os.WNOHANG) != (0, 0):
+    failures.append("the agent exited before the end of the check")
 
 procs = tree()
 os.kill(pid, signal.SIGTERM)
@@ -84,4 +103,4 @@ if failures:
     print("FAILED:", "; ".join(failures))
     print("screen (last 2000 bytes):", screen[-2000:].decode("utf-8", "replace"))
     sys.exit(1)
-print("ok: the terminal UI drew, ran a typed prompt, and nothing was stopped")
+print("ok: the terminal UI drew, ran a typed prompt, asked before `rm -rf build`, and nothing was stopped")

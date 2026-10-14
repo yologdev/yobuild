@@ -156,13 +156,13 @@ frontends, pi's and DSH's dialogs. One command from the repository root
 for the browser — open the URL it prints:
 
 ```bash
-scripts/try-coding-agent.sh            # scripted model; --live for DeepSeek, --terminal, --watch
+../scripts/try-coding-agent.sh         # scripted model; --live for DeepSeek, --terminal, --watch
 ```
 
 Or by hand, from this directory:
 
 ```bash
-(cd plugins && npm ci) && (cd ../yoagent-rutis/plugins/pi && npm ci) && (cd ../yoagent-rutis/plugins/dsh && npm ci)
+(cd plugins && npm ci) && (cd ../vendor/yoagent-rutis/plugins/pi && npm ci) && (cd ../vendor/yoagent-rutis/plugins/dsh && npm ci)
 cargo run --example coding_agent                     # terminal frontend, scripted model
 cargo run --example coding_agent -- --live           # DeepSeek (DEEPSEEK_API_KEY)
 cargo run --example coding_agent -- --web --live     # browser: open the printed http://127.0.0.1:8787/?t=… URL
@@ -243,6 +243,8 @@ browser was attached.
   agent worked around it.
 
 ## Tests
+
+From this directory:
 
 ```bash
 cargo test                                            # protocol, session, web, services

@@ -7,7 +7,7 @@ ships them. The crate does not expose a path to them, and they need their own
 `npm ci`, so they are copied here.
 
 - `scripts/check-vendor.sh` checks the copy against the crate (CI runs it).
-- After upgrading yoagent-rutis: `scripts/check-vendor.sh --update`, then
-  `npm ci` in `pi/` and `dsh/`.
+- After upgrading yoagent-rutis (`cargo update -p yoagent-rutis`):
+  `scripts/check-vendor.sh --update`, then `npm ci` in `pi/` and `dsh/`.
 
 Do not edit these files here; change them in yoagent-rutis.
