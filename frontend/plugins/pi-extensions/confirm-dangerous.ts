@@ -30,7 +30,7 @@
 //   `cd` it cannot follow.
 // What does not: files the agent created in this session (by a write, a
 // redirection, `tee`, `cp` or `mv` it was allowed to run), anything in its
-// scratch folder when the host names one in `YOAGENT_SCRATCH`, and targeted
+// scratch folder when the host names one in `YOBUILD_SCRATCH`, and targeted
 // edits (`edit`) of existing files. Paths are compared with symlinks
 // resolved (on macOS /tmp is /private/tmp).
 //
@@ -58,7 +58,7 @@ function real(path: string): string {
   }
 }
 
-const SCRATCH = process.env.YOAGENT_SCRATCH ? real(resolve(process.env.YOAGENT_SCRATCH)) : undefined
+const SCRATCH = process.env.YOBUILD_SCRATCH ? real(resolve(process.env.YOBUILD_SCRATCH)) : undefined
 
 /** A word as the shell would see it; `known` is false when it holds an expansion. */
 type Word = { text: string; known: boolean }

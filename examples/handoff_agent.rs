@@ -75,8 +75,6 @@ struct Options {
     max_minutes: u64,
     max_tokens: usize,
     budget_usd: f64,
-    /// The agent's own scratch (downloads, helper scripts): not the owner's folder.
-    scratch: Scratch,
 }
 
 fn main() -> Result<(), BoxError> {
@@ -93,7 +91,6 @@ fn main() -> Result<(), BoxError> {
         // prompt counted each turn) stops a long one before it writes up.
         max_tokens: 4_000_000,
         budget_usd: 2.0,
-        scratch: Scratch::create("yoagent-handoff")?,
     };
     let mut live = false;
     let mut words = Vec::new();
@@ -168,7 +165,8 @@ fn main() -> Result<(), BoxError> {
 async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     let launched = Instant::now();
     let cwd = std::env::current_dir()?;
-    let scratch = options.scratch.clone();
+    // The agent's own scratch (downloads, helper scripts): not the owner's folder.
+    let scratch = Scratch::create("yobuild-handoff")?;
     // The demo ends itself with `Quit`: the agent's own tools hold session
     // handles, so the driver would not end when the demo drops its own.
     let (session, driver) = Session::new(options.demo);

@@ -8,25 +8,93 @@ use yoagent::{AgentTool, Content, ToolContext, ToolError, ToolResult};
 
 use crate::frontend::{ClientMessage, Session, UiRequest};
 
-/// A question for the owner.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// A question for the owner: the tool's arguments, and what a host service
+/// offering [`AskOwner::ask`] to plugins accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Question {
-    /// The question, on its own.
-    pub question: String,
-    /// What depends on it, briefly (may be empty).
-    pub why: String,
-    /// The choices; with fewer than two the owner answers in words.
-    pub options: Vec<String>,
+    question: String,
+    why: String,
+    options: Vec<String>,
 }
 
-/// How many questions are waiting on the owner. Clone it to share the count
-/// (with [`Facts`](super::Facts), say).
-#[derive(Debug, Clone, Default)]
+impl Question {
+    /// `question` trimmed and not empty; `why` may be empty. Options are
+    /// trimmed, blank ones dropped and repeats removed; with fewer than two
+    /// left, the owner answers in words.
+    pub fn new(
+        question: impl Into<String>,
+        why: impl Into<String>,
+        options: impl IntoIterator<Item = String>,
+    ) -> Result<Self, String> {
+        let question = question.into().trim().to_owned();
+        if question.is_empty() {
+            return Err("`question` is required".into());
+        }
+        let mut seen = Vec::new();
+        for option in options {
+            let option = option.trim().to_owned();
+            if !option.is_empty() && !seen.contains(&option) {
+                seen.push(option);
+            }
+        }
+        Ok(Self {
+            question,
+            why: why.into().trim().to_owned(),
+            options: seen,
+        })
+    }
+
+    /// From JSON `{question, why?, options?}`; any other shape is an error.
+    pub fn from_json(value: &Json) -> Result<Self, String> {
+        let question = value["question"]
+            .as_str()
+            .ok_or("`question` must be a string")?;
+        let why = match &value["why"] {
+            Json::Null => "",
+            Json::String(why) => why,
+            _ => return Err("`why` must be a string".into()),
+        };
+        let options = match &value["options"] {
+            Json::Null => Vec::new(),
+            Json::Array(options) => options
+                .iter()
+                .map(|o| o.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .ok_or("`options` must be strings")?,
+            _ => return Err("`options` must be a list of strings".into()),
+        };
+        Self::new(question, why, options)
+    }
+
+    pub fn question(&self) -> &str {
+        &self.question
+    }
+    pub fn why(&self) -> &str {
+        &self.why
+    }
+    pub fn options(&self) -> &[String] {
+        &self.options
+    }
+}
+
+/// How many questions are waiting on the owner; from
+/// [`AskOwner::open_questions`]. Clone it to share the count (with
+/// [`Facts`](super::Facts), say).
+#[derive(Debug, Clone)]
 pub struct OpenQuestions(Arc<AtomicUsize>);
 
 impl OpenQuestions {
     pub fn count(&self) -> usize {
         self.0.load(Ordering::Relaxed)
+    }
+}
+
+/// Counts a question open until dropped, however its task ends.
+struct Open(Arc<AtomicUsize>);
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -37,15 +105,18 @@ impl OpenQuestions {
 /// when the agent had stopped:
 ///
 /// - `[Owner's answer to #N] <question>\n<answer>`
-/// - `[Owner skipped #N] <question>` (an empty answer)
+/// - `[Owner skipped #N] <question>` (a blank answer)
 ///
 /// A question withdrawn by a reset, or still open when the session ends,
 /// sends nothing.
+///
+/// Make one per session and clone it: clones share the numbering and the
+/// count, so the tool and a host service do not both ask a "#1".
 #[derive(Clone)]
 pub struct AskOwner {
     session: Session,
     next: Arc<AtomicU64>,
-    open: OpenQuestions,
+    open: Arc<AtomicUsize>,
 }
 
 impl AskOwner {
@@ -53,51 +124,63 @@ impl AskOwner {
         Self {
             session,
             next: Arc::default(),
-            open: OpenQuestions::default(),
+            open: Arc::default(),
         }
     }
 
     /// The count of questions not answered yet.
     pub fn open_questions(&self) -> OpenQuestions {
-        self.open.clone()
+        OpenQuestions(self.open.clone())
     }
 
-    /// Asks without waiting; returns the question's number (1, 2, …).
+    /// Asks without waiting; returns the question's number (1, 2, …). Must
+    /// be called within a Tokio runtime (the answer is awaited on a task).
     pub fn ask(&self, question: Question) -> u64 {
         let n = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        let title = format!("#{n} {}", question.question);
-        let request = if question.options.len() >= 2 {
+        let Question {
+            question,
+            why,
+            options,
+        } = question;
+        let title = format!("#{n} {question}");
+        let request = if options.len() >= 2 {
             UiRequest::Select {
                 title,
-                message: question.why,
-                options: question.options,
+                message: why,
+                options,
                 multiple: false,
             }
         } else {
             UiRequest::Input {
                 title,
-                message: question.why,
+                message: why,
                 placeholder: "Your answer".into(),
                 value: String::new(),
             }
         };
-        let (session, open, text) = (self.session.clone(), self.open.clone(), question.question);
-        open.0.fetch_add(1, Ordering::Relaxed);
+        self.open.fetch_add(1, Ordering::Relaxed);
+        let open = Open(self.open.clone());
+        let session = self.session.clone();
         tokio::spawn(async move {
             let answer = session.ask_later(request).await;
-            open.0.fetch_sub(1, Ordering::Relaxed);
+            drop(open);
             // Withdrawn (a reset forgot the conversation it belongs to) or the
             // session ended: nothing to tell the agent.
             let Some(answer) = answer else { return };
             let text = match answer.as_str().map(str::trim) {
                 Some(answer) if !answer.is_empty() => {
-                    format!("[Owner's answer to #{n}] {text}\n{answer}")
+                    format!("[Owner's answer to #{n}] {question}\n{answer}")
                 }
-                _ => format!("[Owner skipped #{n}] {text}"),
+                _ => format!("[Owner skipped #{n}] {question}"),
             };
             // Mid-run it is picked up between tool batches; when the agent
             // had stopped, it starts a new run.
-            session.send(ClientMessage::Steer { text });
+            if !session.send(ClientMessage::Steer { text }) {
+                tracing::warn!(
+                    question = n,
+                    "the session closed before the owner's answer could reach the agent"
+                );
+            }
         });
         n
     }
@@ -114,7 +197,7 @@ impl AgentTool for AskOwner {
     fn description(&self) -> &str {
         "Ask the owner a question they decide, without waiting: this returns at once. Continue \
          with work that does not depend on the answer; it arrives later as a message. Give \
-         `options` when the answer is one of a few choices."
+         `options` (two or more) when the answer is one of a few choices."
     }
     fn parameters_schema(&self) -> Json {
         json!({
@@ -129,25 +212,8 @@ impl AgentTool for AskOwner {
     }
 
     async fn execute(&self, params: Json, _ctx: ToolContext) -> Result<ToolResult, ToolError> {
-        let question = params["question"]
-            .as_str()
-            .filter(|q| !q.trim().is_empty())
-            .ok_or_else(|| ToolError::InvalidArgs("`question` is required".into()))?
-            .to_owned();
-        let why = params["why"].as_str().unwrap_or_default().to_owned();
-        let options = params["options"]
-            .as_array()
-            .map(|o| {
-                o.iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let n = self.ask(Question {
-            question,
-            why,
-            options,
-        });
+        let question = Question::from_json(&params).map_err(ToolError::InvalidArgs)?;
+        let n = self.ask(question);
         Ok(ToolResult {
             content: vec![Content::Text {
                 text: format!(
@@ -157,5 +223,39 @@ impl AgentTool for AskOwner {
             }],
             details: json!({ "question": n }),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_question_is_trimmed_and_its_options_cleaned() {
+        let q = Question::new(
+            "  Which?  ",
+            " why ",
+            ["A".into(), " ".into(), " A ".into(), "B".into()],
+        )
+        .unwrap();
+        assert_eq!(q.question(), "Which?");
+        assert_eq!(q.why(), "why");
+        assert_eq!(q.options(), ["A", "B"]);
+        assert!(Question::new(" ", "", []).is_err());
+    }
+
+    #[test]
+    fn from_json_refuses_wrong_shapes() {
+        let ok = Question::from_json(&json!({ "question": "Q?" })).unwrap();
+        assert_eq!((ok.why(), ok.options().len()), ("", 0));
+        for bad in [
+            json!({}),
+            json!({ "question": 1 }),
+            json!({ "question": "Q?", "why": 2 }),
+            json!({ "question": "Q?", "options": "A" }),
+            json!({ "question": "Q?", "options": ["A", 3] }),
+        ] {
+            assert!(Question::from_json(&bad).is_err(), "{bad}");
+        }
     }
 }

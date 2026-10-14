@@ -1,7 +1,9 @@
 //! `report`: every run ends with the required sections.
 
+use std::sync::Arc;
+
 use yoagent::extension::{
-    Extension, ExtensionError, RunContext, RunHooks, StopContext, StopDecision,
+    Extension, ExtensionError, ExtensionMode, RunContext, RunHooks, StopContext, StopDecision,
 };
 use yoagent::{Content, Message};
 
@@ -10,23 +12,44 @@ use yoagent::{Content, Message};
 /// name appears anywhere in the message, ignoring case; the check is meant
 /// to get a report written, not to grade it.
 ///
+/// It is a required extension: when the agent still has not written the
+/// report after yoagent's limit of send-backs (`max_stop_continues`, 3 by
+/// default), the run fails, and the frontends see why — rather than ending
+/// quietly without one.
+///
 /// Put [`Report::instruction`] in the system prompt so the agent knows the
 /// sections before it is sent back.
 #[derive(Debug, Clone)]
 pub struct Report {
-    sections: Vec<String>,
+    sections: Arc<[String]>,
 }
 
 impl Report {
-    pub fn new<S: Into<String>>(sections: impl IntoIterator<Item = S>) -> Self {
-        Self {
-            sections: sections.into_iter().map(Into::into).collect(),
+    /// At least one section; names are trimmed, and a blank or repeated one
+    /// is an error.
+    pub fn new<S: Into<String>>(sections: impl IntoIterator<Item = S>) -> Result<Self, String> {
+        let mut names: Vec<String> = Vec::new();
+        for section in sections {
+            let section = section.into().trim().to_owned();
+            if section.is_empty() {
+                return Err("a report section needs a name".into());
+            }
+            if names.iter().any(|s| s.eq_ignore_ascii_case(&section)) {
+                return Err(format!("the report section {section:?} is given twice"));
+            }
+            names.push(section);
         }
+        if names.is_empty() {
+            return Err("a report needs at least one section".into());
+        }
+        Ok(Self {
+            sections: names.into(),
+        })
     }
 
     /// The handoff report: Done, Waiting on you, Decisions, Next.
     pub fn handoff() -> Self {
-        Self::new(["Done", "Waiting on you", "Decisions", "Next"])
+        Self::new(["Done", "Waiting on you", "Decisions", "Next"]).expect("valid sections")
     }
 
     pub fn sections(&self) -> &[String] {
@@ -37,7 +60,7 @@ impl Report {
     pub fn instruction(&self) -> String {
         format!(
             "End every run with a report in Markdown, with these sections: {}.",
-            self.headings()
+            headings(&self.sections)
         )
     }
 
@@ -50,14 +73,14 @@ impl Report {
             .map(String::as_str)
             .collect()
     }
+}
 
-    fn headings(&self) -> String {
-        self.sections
-            .iter()
-            .map(|s| format!("## {s}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
+fn headings(sections: &[String]) -> String {
+    sections
+        .iter()
+        .map(|s| format!("## {s}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[async_trait::async_trait]
@@ -65,14 +88,20 @@ impl Extension for Report {
     fn name(&self) -> &str {
         "report"
     }
+    fn mode(&self) -> ExtensionMode {
+        ExtensionMode::Required
+    }
     async fn start_run(&self, _run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
-        Ok(Box::new(self.clone()))
+        Ok(Box::new(ReportRun(self.clone())))
     }
 }
 
+struct ReportRun(Report);
+
 #[async_trait::async_trait]
-impl RunHooks for Report {
+impl RunHooks for ReportRun {
     async fn on_stop(&mut self, stop: &StopContext<'_>) -> StopDecision {
+        // yoagent asks only about a finished assistant message.
         let Message::Assistant { content, .. } = stop.answer else {
             return StopDecision::Accept;
         };
@@ -84,13 +113,13 @@ impl RunHooks for Report {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let missing = self.missing(&text);
+        let missing = self.0.missing(&text);
         if missing.is_empty() {
             StopDecision::Accept
         } else {
             StopDecision::Continue(format!(
                 "End with the report: sections {}. Missing: {}.",
-                self.headings(),
+                headings(&self.0.sections),
                 missing.join(", ")
             ))
         }
@@ -111,13 +140,26 @@ mod tests {
         assert!(report
             .missing("## Done\n## Waiting on you\n## Decisions\n## Next")
             .is_empty());
+        // Lenient on purpose: a name anywhere counts.
+        assert!(Report::new(["Done"])
+            .unwrap()
+            .missing("all done")
+            .is_empty());
     }
 
     #[test]
     fn the_instruction_lists_the_headings() {
         assert_eq!(
-            Report::new(["A", "B"]).instruction(),
+            Report::new(["A", "B"]).unwrap().instruction(),
             "End every run with a report in Markdown, with these sections: ## A, ## B."
         );
+    }
+
+    #[test]
+    fn sections_must_be_named_once() {
+        assert!(Report::new(Vec::<String>::new()).is_err());
+        assert!(Report::new([" "]).is_err());
+        assert!(Report::new(["Done", "done "]).is_err());
+        assert_eq!(Report::new([" Done "]).unwrap().sections(), ["Done"]);
     }
 }

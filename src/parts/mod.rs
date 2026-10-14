@@ -12,9 +12,10 @@
 //!   changes since the start, new files, tokens, tool calls, open questions.
 //! - [`Scratch`]: a private working folder, named to the agent and the gate.
 //!
-//! `AskOwner`'s question itself ([`AskOwner::ask`]) is separate from the
-//! tool, so a host service can offer it to plugins too. `Report` and `Facts`
-//! are the loop's checks on the agent, and stay out of plugins' reach.
+//! `AskOwner`'s question itself ([`AskOwner::ask`], with a validated
+//! [`Question`]) is separate from the tool, so a host service can offer it to
+//! plugins too. `Report` and `Facts` are the loop's checks on the agent, and
+//! stay out of plugins' reach.
 
 mod ask_owner;
 mod facts;
