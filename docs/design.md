@@ -129,7 +129,7 @@ without the manifest.
 | `ask_owner` | a tool; returns at once, the answer comes back as steering (mid-run, or starting the next run) | `yobuild::parts::AskOwner` (M1) |
 | `report` | an `Extension`: `on_stop` sends the agent back until the required sections are there | `yobuild::parts::Report` (M1) |
 | `facts` | an `Extension`: `on_event` counts tokens and tool calls, `finish` adds changes since the start (git snapshot), new files, open questions | `yobuild::parts::Facts` (M1) |
-| `gate` | a `before_tool` policy: ask before selected destructive commands and overwrites; refused with nobody there | `confirm-dangerous.ts` (a pi extension); a Rust port next in M1 |
+| `gate` | a `before_tool` policy: ask before selected destructive commands and overwrites; refused with nobody there | `yobuild::parts::Gate` (M1; `confirm-dangerous.ts` stays as the pi example) |
 | `scratch` | a private working folder named to the agent and the gate | `yobuild::parts::Scratch` (M1) |
 | `limits` / `budget` | yoagent's `ExecutionLimits` and `Budget` | yoagent |
 

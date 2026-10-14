@@ -206,8 +206,9 @@ path/to/yobuild/scripts/try-handoff.sh --demo               # headless, scripted
   "skipped", and the agent decides itself and says so. A reset withdraws
   open questions: they belong to the conversation it forgot.
 - **Guardrails:**
-  - A pi extension (`confirm-dangerous.ts`) asks before selected
-    operations that delete, discard or overwrite what you already have:
+  - The gate (`yobuild::parts::Gate`, in Rust; a port of the pi extension
+    `confirm-dangerous.ts`, which the coding agent still uses) asks before
+    selected operations that delete, discard or overwrite what you already have:
     `rm`, `git reset --hard`, `git clean`, `git restore`, a forced push, a
     write or `>` over an existing file, and more. Files the agent created
     this session, and its own scratch folder, are exempt. These questions

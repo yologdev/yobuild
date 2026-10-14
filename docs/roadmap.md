@@ -8,7 +8,7 @@ Draft for review. Each milestone ends with something that runs.
   runtimes). Bun, Go and Python runtimes join CI when an agent uses them
   (M2a).
 - Move **yoagent-frontend** here with its history (`git subtree split`);
-  depend on **yoagent ≥ 0.25.4** (`ToolGate`, for the gate part) and
+  depend on **yoagent ≥ 0.25.4** and
   **yoagent-rutis ≥ 0.3.1** (the DSH host services behind
   `[dsh] host_services`) from crates.io; both released 2026-10-14.
 - The three examples build and their CI checks pass here (the scripted
@@ -29,9 +29,12 @@ paths).
 
 - `yobuild::parts`: `ask_owner`, `report`, `facts`, `scratch`, `gate`,
   extracted from `handoff_agent` with their own tests.
-- The gate is a Rust `before_tool` on yoagent's `ToolGate` (decided
-  2026-10-15: no Node needed for safety, microseconds instead of ~3 ms,
-  tests beside the Rust); the pi extension stays as an example.
+- The gate is a Rust `before_tool` (decided 2026-10-15: no Node needed
+  for safety, microseconds instead of ~3 ms, tests beside the Rust): a port
+  of `confirm-dangerous.ts`'s rules, asking the owner through the session;
+  the pi extension stays as an example. (yoagent's `ToolGate` is a
+  different thing — a decision model judging each call — and could be
+  added on top later.)
 - `handoff_agent` rebuilt on the parts: same behaviour, much less code.
 - **In parallel, in yoagent** (separate PRs, so M2 is not blocked waiting
   on a release):

@@ -967,3 +967,147 @@ async fn facts_never_write_the_owners_index() {
     );
     assert!(!dir.path().join(".git/index.lock").exists());
 }
+
+// -- gate --------------------------------------------------------------------
+
+/// A stand-in for `bash` that only records what it was asked to run.
+struct FakeBash(Arc<std::sync::Mutex<Vec<String>>>);
+
+#[async_trait::async_trait]
+impl AgentTool for FakeBash {
+    fn name(&self) -> &str {
+        "bash"
+    }
+    fn label(&self) -> &str {
+        "bash"
+    }
+    fn description(&self) -> &str {
+        "records the command"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({ "type": "object", "properties": { "command": { "type": "string" } } })
+    }
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        self.0
+            .lock()
+            .unwrap()
+            .push(params["command"].as_str().unwrap_or_default().to_owned());
+        Ok(ToolResult {
+            content: vec![Content::Text { text: "ran".into() }],
+            details: json!({}),
+        })
+    }
+}
+
+/// An agent that runs `rm owner.txt` in a project where the owner has
+/// `owner.txt`, behind the gate; returns what the fake shell ran.
+fn gated(session: &Session, dir: &Path) -> (Agent, Arc<std::sync::Mutex<Vec<String>>>) {
+    std::fs::write(dir.join("owner.txt"), "theirs").unwrap();
+    let ran = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let agent = agent(vec![
+        MockResponse::ToolCalls(vec![call("bash", json!({ "command": "rm owner.txt" }))]),
+        MockResponse::Text("done".into()),
+    ])
+    .with_tools(vec![Box::new(FakeBash(ran.clone()))])
+    .with_extension(yobuild::parts::Gate::new(session.clone(), dir));
+    (agent, ran)
+}
+
+fn tool_errors(agent: &Agent) -> Vec<String> {
+    agent
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(Message::ToolResult {
+                is_error: true,
+                content,
+                ..
+            }) => Some(format!("{content:?}")),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn gate_answering(answer: &str) -> (Agent, Vec<String>, Vec<ServerMessage>) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ran = None;
+    let (session, mut owner, run) = drive(|session| {
+        let (agent, r) = gated(session, dir.path());
+        ran = Some(r);
+        agent
+    });
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    let mut seen = until_all(&mut owner, &[is_question]).await;
+    let (id, request) = questions(&seen)[0].clone();
+    assert_eq!(request.title(), "Run `rm owner.txt`?");
+    session.send(ClientMessage::UiResponse {
+        id,
+        value: json!(answer),
+    });
+    seen.extend(until_run_end(&mut owner).await);
+    let agent = quit(&session, run).await;
+    let ran = ran.unwrap().lock().unwrap().clone();
+    (agent, ran, seen)
+}
+
+#[tokio::test]
+async fn the_gate_asks_and_allow_lets_the_call_run() {
+    let (agent, ran, _) = gate_answering("Allow").await;
+    assert_eq!(ran, ["rm owner.txt"]);
+    assert!(tool_errors(&agent).is_empty());
+}
+
+#[tokio::test]
+async fn the_gate_asks_and_block_refuses_the_call() {
+    let (agent, ran, _) = gate_answering("Block").await;
+    assert!(ran.is_empty());
+    let errors = tool_errors(&agent);
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("the owner blocked it"), "{}", errors[0]);
+}
+
+/// Signals when each run ends, without being a frontend.
+struct Ended(Arc<Notify>);
+
+#[async_trait::async_trait]
+impl yoagent::extension::Extension for Ended {
+    fn name(&self) -> &str {
+        "ended"
+    }
+    async fn start_run(
+        &self,
+        _run: &yoagent::extension::RunContext<'_>,
+    ) -> Result<Box<dyn yoagent::extension::RunHooks>, yoagent::extension::ExtensionError> {
+        Ok(Box::new(EndedRun(self.0.clone())))
+    }
+}
+
+struct EndedRun(Arc<Notify>);
+
+#[async_trait::async_trait]
+impl yoagent::extension::RunHooks for EndedRun {
+    async fn finish(&mut self, _outcome: &yoagent::extension::RunOutcome) {
+        self.0.notify_one();
+    }
+}
+
+#[tokio::test]
+async fn with_nobody_there_the_gate_refuses_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (session, driver) = Session::new(true);
+    let (agent, ran) = gated(&session, dir.path());
+    let ended = Arc::new(Notify::new());
+    let run = tokio::spawn(driver.run(agent.with_extension(Ended(ended.clone()))));
+    // No frontend: the question gets the safe default (deny) at once.
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    tokio::time::timeout(WAIT, ended.notified()).await.unwrap();
+    let agent = quit(&session, run).await;
+    assert!(ran.lock().unwrap().is_empty());
+    let errors = tool_errors(&agent);
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("nobody answered"), "{}", errors[0]);
+}

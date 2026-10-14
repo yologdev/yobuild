@@ -41,7 +41,7 @@ One Rust process holds the agent. Three Node processes host the plugins, each a 
 Rust process (21 MB)
 ├─ yoagent ──────────── the loop: model streaming, tool calls, limits, extensions
 │    ├─ tools ───────── yoagent's built-ins (bash, files, search) + ask_owner (this example)
-│    └─ extensions ──── Report, Facts (yobuild::parts), Budget (when the model is priced),
+│    └─ extensions ──── Gate, Report, Facts (yobuild::parts), Budget (when the model is priced),
 │                       the rutis bridge (every plugin below, as one extension)
 ├─ yoagent-rutis ────── the bridge: plugins' tools, policies, prompt notes → yoagent hooks
 ├─ yobuild::frontend ── Session (one agent, many frontends), protocol, web server (axum + WebSocket)
@@ -49,8 +49,7 @@ Rust process (21 MB)
 
 Node runtime "ui"  ─── todo-plan             draws the plan in the page
 Node runtime "pi"  ─── pi adapter + host-ui  runs pi extensions unchanged
-                       ├─ @juicesharp/rpiv-todo   the plan (`todo` tool)
-                       └─ confirm-dangerous       the approval gate
+                       └─ @juicesharp/rpiv-todo   the plan (`todo` tool)
 Node runtime "dsh" ─── DSH adapter + host-dialogs, DSH's core packages
                        └─ dsh-free-search         web search (no API key)
 ```
@@ -62,12 +61,11 @@ The browser page is plain HTML and JavaScript, served by the Rust process. Any n
 | Plugin | Ecosystem | Version | Changed? | What the agent gets |
 |---|---|---|---|---|
 | [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo) | pi (npm, ~207k downloads a month) | 2.12.0 | unchanged | the `todo` tool, its plan |
-| `frontend/plugins/pi-extensions/confirm-dangerous.ts` | pi (written here, in pi's extension format) | — | ours | the approval gate for destructive commands and overwrites |
 | [`dsh-free-search`](https://www.npmjs.com/package/dsh-free-search) | DSH (npm) | 0.8.1 | unchanged | 9 search tools (`multi_search`, `research`, …) and prompt guidance |
 | `@deepseek-ai/dsh-web`, `dsh-system-prompt`, `dsh-tools` | DSH core | 0.2.0-rc.2 | unchanged | the services DSH plugins expect |
 | `frontend/plugins/todo-plan.ts` | rutis (a UI plugin of the frontend) | — | ours | the plan drawn as a checklist in the page |
 | pi adapter, `host-ui.ts`, DSH adapter, `host-dialogs.ts` | rutis (yoagent-rutis) | — | ours | pi and DSH plugins as yoagent tools, policies and dialogs |
-| `ask_owner`, `Handoff` | yoagent (Rust, in the example) | — | ours | asking without waiting; the report check and the facts |
+| `AskOwner`, `Gate`, `Report`, `Facts`, `Scratch` | `yobuild::parts` (Rust) | — | ours | asking without waiting; the approval gate; the report check; the facts; a scratch folder |
 
 Those from pi and DSH are installed from npm and loaded as published. The adapters translate:
 - pi's `tool_call` handlers become yoagent's `before_tool`;
@@ -79,8 +77,8 @@ What does not map (pi's `/todos` command, a keyboard shortcut) is reported at in
 ## How a tool call travels
 
 1. The model asks for `write_file` on `notes.md`.
-2. yoagent's loop calls `before_tool` on every extension. The rutis bridge forwards it to the pi adapter in its Node runtime.
-3. The adapter runs pi's `tool_call` handlers. `confirm-dangerous` sees a new file, which it allows; for an existing file it would ask you first. `ToolExecutionStart` is sent only after this step.
+2. yoagent's loop calls `before_tool` on every extension. The rutis bridge forwards it to the pi adapter in its Node runtime, which runs pi's `tool_call` handlers.
+3. The gate (`yobuild::parts::Gate`, in Rust) sees a new file, which it allows; for an existing file it would ask you first. `ToolExecutionStart` is sent only after this step.
 4. The loop runs the tool in Rust. The result goes back through `after_tool`, then to the page, then to the next model request.
 
 A pi tool such as `todo` makes the same trip, and then runs in the pi runtime.
@@ -97,7 +95,7 @@ Measured on 2026-10-11 on an Apple M2 (16 GB) with macOS 15.5, Node 24.7, a rele
 | 2 Node runtimes (`--no-dsh`) | 1.5–1.7 s |
 | First run after boot | ~9 s (macOS reading Node's modules from disk) |
 
-**A tool call** (scripted model; 5 runs). Two parts, measured apart:
+**A tool call** (scripted model; 5 runs; measured before the gate moved from the pi policy into Rust — since then a Rust tool's `before_tool` still crosses to Node for the pi adapter, but the gate itself runs in-process). Two parts, measured apart:
 - *Loop + policy:* from the model's message ending to the tool starting. This is the loop's own steps plus every `before_tool` policy, including the trip to the pi adapter in Node and back (`ToolExecutionStart` is sent after the policies).
 - *Tool:* the tool running, plus the `after_tool` hooks. The pi adapter always has one, so this includes one more trip to Node.
 
