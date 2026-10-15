@@ -278,9 +278,35 @@ fn appending_making_and_changing_inside_the_project() {
                 format!("echo hi | tee -a {o}/n.txt"),
             ),
             ("mkdir -p out/deep".to_string(), format!("mkdir {o}/x")),
-            ("touch owner.txt".to_string(), format!("touch {o}/y")),
-            ("chmod +x build.sh".to_string(), format!("chmod +x {o}")),
-            ("chmod 644 a.md".to_string(), "chmod -R 644 sub".to_string()),
+            ("touch new.txt".to_string(), format!("touch {o}/y")),
+        ],
+    );
+}
+
+#[test]
+fn touching_and_modes_only_on_the_agents_own() {
+    let p = Project::new();
+    p.agent_writes("run.sh");
+    let s = p.scratch.display().to_string();
+    pairs(
+        &p,
+        &[
+            ("touch new.txt".to_string(), "touch owner.txt".to_string()),
+            ("touch run.sh".to_string(), "touch -c a.md".to_string()),
+            (
+                "chmod +x run.sh".to_string(),
+                "chmod +x build.sh".to_string(),
+            ),
+            ("chmod 644 run.sh".to_string(), "chmod 644 a.md".to_string()),
+            (format!("chmod +x {s}"), "chmod 755 sub".to_string()),
+            (
+                "chmod u+x run.sh".to_string(),
+                "chown me run.sh owner.txt".to_string(),
+            ),
+            (
+                "chmod 644 run.sh".to_string(),
+                "chmod -R 644 run.sh".to_string(),
+            ),
         ],
     );
 }

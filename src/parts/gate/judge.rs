@@ -87,8 +87,8 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// Appending to `w`, or making it (a folder, an empty file) or touching
-    /// it: inside the project or the agent's own.
+    /// Appending to `w`, or making a folder: inside the project or the
+    /// agent's own.
     pub fn add_to(&mut self, w: &Word) -> Verdict {
         if DEVICES.contains(&w.text.as_str()) {
             return Ok(());
@@ -99,10 +99,20 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// Changing `w`'s mode or owner: inside the project or the agent's own.
+    /// Touching `w`: a new empty file inside the project, or one of the
+    /// agent's own (not the owner's file's time: builds and the facts read it).
+    pub fn touch(&mut self, w: &Word) -> Verdict {
+        let path = self.path(w)?;
+        match path.exists() {
+            true => ok_if(self.plain(&path) && self.rules.free(&path)),
+            false => self.add_to(w),
+        }
+    }
+
+    /// Changing `w`'s mode or owner: only the agent's own.
     pub fn change(&self, w: &Word) -> Verdict {
         let path = self.path(w)?;
-        ok_if(self.plain(&path) && self.in_reach(&path))
+        ok_if(self.plain(&path) && self.rules.free(&path))
     }
 
     /// Deleting `w` (or moving it away): only the agent's own.

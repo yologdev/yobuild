@@ -91,7 +91,7 @@ pub(super) fn entry(name: &str) -> Option<Entry> {
         }),
         // Files: making, changing, copying, deleting.
         "mkdir" => spec(MKDIR, |p, ctx| each(&p.operands, |w| ctx.add_to(w))),
-        "touch" => spec(TOUCH, |p, ctx| each(&p.operands, |w| ctx.add_to(w))),
+        "touch" => spec(TOUCH, |p, ctx| each(&p.operands, |w| ctx.touch(w))),
         "chmod" | "chown" | "chgrp" => spec(CHMOD, |p, ctx| {
             // The mode or owner, then the files.
             ok_if(p.operands.len() >= 2)?;

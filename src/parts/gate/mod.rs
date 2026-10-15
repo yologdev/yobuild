@@ -50,7 +50,8 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 /// everything it would write, append to, delete or run is allowed:
 /// - **writing** (replacing): a new file, one the agent made, or in its
 ///   [`Scratch`]; **deleting** or moving away: only those of the agent's;
-///   **appending**, making a folder or a file, changing a mode: inside the
+///   **touching** or **changing a mode** (`chmod`, `chown`): a new file or
+///   the agent's own; **appending**, making a folder or a file: inside the
 ///   project or the agent's own; never a name starting `.env`, nor `.git`
 ///   itself, in any case;
 /// - **running shell text** (`bash -c`, `eval`, `trap`, substitutions): read
