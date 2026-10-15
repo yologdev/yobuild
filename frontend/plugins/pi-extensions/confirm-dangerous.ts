@@ -306,6 +306,11 @@ function parse(s: string): Item[] | null {
           const runs = substitutions(body.join('\n'))
           if (!runs) return null
           feeds.runs.push(...runs)
+          // A heredoc with no command word (`<<EOF` alone) was never added:
+          // what its body runs still runs.
+          if (runs.length > 0 && !out.includes(feeds)) {
+            out.push({ words: [], truncates: [], appends: [], runs, after: 'end' })
+          }
         }
       }
       continue

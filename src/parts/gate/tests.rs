@@ -247,6 +247,8 @@ fn substitutions_run_commands_and_are_read_like_any_command() {
             "eval $CMD",
             "cd sub && echo $(rm -f only.txt)",
             "echo \"$(echo \"nested $(rm -f owner.txt)\")\"",
+            "<<EOF\n$(rm -f owner.txt)\nEOF",
+            "ls; <<EOF\n`rm -f owner.txt`\nEOF",
         ]),
         true,
     );

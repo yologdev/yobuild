@@ -125,6 +125,8 @@ test('substitutions run commands: they are read like any command', async () => {
     'eval $CMD',
     'cd sub && echo $(rm -f only.txt)', // run where the command runs: sub
     'echo "$(echo "nested $(rm -f owner.txt)")"',
+    '<<EOF\n$(rm -f owner.txt)\nEOF', // a heredoc with no command word still expands
+    'ls; <<EOF\n`rm -f owner.txt`\nEOF',
   ]) {
     assert.equal(await run(command), true, `should ask: ${JSON.stringify(command)}`)
   }
