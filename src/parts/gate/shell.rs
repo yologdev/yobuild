@@ -340,6 +340,13 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
             ' ' | '\t' => {
                 finish_word!();
             }
+            // A comment: to the end of the line (a backslash there does not
+            // join the next one).
+            '#' if word.is_none() => {
+                while i + 1 < s.len() && s[i + 1] != '\n' {
+                    i += 1;
+                }
+            }
             ';' => {
                 finish_command!(";");
             }
@@ -480,6 +487,22 @@ pub(super) fn basename(text: &str) -> String {
     trimmed.rsplit('/').next().unwrap_or(trimmed).to_owned()
 }
 
+/// A `GIT_*` assignment that can change what git runs or where (not one of
+/// the harmless settings agents use: `GIT_PAGER=cat`, `GIT_TERMINAL_PROMPT=0`,
+/// `GIT_EDITOR=true`, …).
+pub(super) fn git_variable(w: &Word) -> bool {
+    const HARMLESS: [&str; 7] = [
+        "GIT_PAGER=cat",
+        "GIT_PAGER=",
+        "GIT_TERMINAL_PROMPT=0",
+        "GIT_EDITOR=true",
+        "GIT_EDITOR=:",
+        "GIT_TRACE=0",
+        "GIT_TRACE=1",
+    ];
+    w.text.starts_with("GIT_") && !(w.known && HARMLESS.contains(&w.text.as_str()))
+}
+
 pub(super) fn unwrap(words: &[Word]) -> Program<'_> {
     let mut i = 0;
     let mut via_xargs = false;
@@ -487,22 +510,33 @@ pub(super) fn unwrap(words: &[Word]) -> Program<'_> {
     let text = |i: usize| words.get(i).map(|w| w.text.as_str()).unwrap_or("");
     loop {
         while i < words.len() && is_assignment(&words[i].text) {
-            git_env |= words[i].text.starts_with("GIT_");
+            git_env |= git_variable(&words[i]);
             i += 1;
         }
         let name = base(text(i));
         match name.as_str() {
             "nohup" | "builtin" => i += 1,
+            // `command -v x` only looks `x` up.
+            "command" if ["-v", "-V"].contains(&text(i + 1)) => {
+                return Program {
+                    known: true,
+                    name,
+                    args: words.get(i + 1..).unwrap_or(&[]),
+                    via_xargs,
+                    git_env,
+                }
+            }
             "command" => {
                 i += 1;
-                while ["-p", "-v", "-V", "--"].contains(&text(i)) {
+                while ["-p", "--"].contains(&text(i)) {
                     i += 1;
                 }
             }
             "exec" => {
                 i += 1;
                 while text(i).starts_with('-') {
-                    if text(i) == "-a" {
+                    // `-a NAME`, also in a cluster (`-la NAME`).
+                    if text(i).contains('a') && !text(i).starts_with("--") {
                         i += 1;
                     }
                     i += 1;
@@ -517,11 +551,11 @@ pub(super) fn unwrap(words: &[Word]) -> Program<'_> {
             "env" | "stdbuf" | "nice" | "ionice" => {
                 i += 1;
                 while i < words.len() && (text(i).starts_with('-') || is_assignment(text(i))) {
-                    git_env |= text(i).starts_with("GIT_") && is_assignment(text(i));
+                    git_env |= is_assignment(text(i)) && git_variable(&words[i]);
                     // The options that take a value, per wrapper.
                     let with_value: &[&str] = match name.as_str() {
                         "env" => &["-u", "-C", "-S"],
-                        "stdbuf" => &["-i", "-o", "-e"],
+                        "stdbuf" => &["-i", "-o", "-e", "--input", "--output", "--error"],
                         "nice" => &["-n"],
                         _ => &["-c", "-n"],
                     };

@@ -24,6 +24,33 @@ const DEVICES: [&str; 4] = ["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty
 const ALWAYS: [&str; 6] = ["sudo", "doas", "truncate", "shred", "mkfs", "wipefs"];
 const DELETERS: [&str; 4] = ["rm", "unlink", "rmdir", "shred"];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
+/// Programs `find -exec` may run without asking: they only read.
+const READS: [&str; 24] = [
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "wc",
+    "cat",
+    "head",
+    "tail",
+    "ls",
+    "stat",
+    "file",
+    "echo",
+    "printf",
+    "basename",
+    "dirname",
+    "md5sum",
+    "sha1sum",
+    "sha256sum",
+    "shasum",
+    "du",
+    "test",
+    "[",
+    "diff",
+    "cmp",
+];
 
 /// Tools that only read, free by default: yoagent's `read_file`,
 /// `list_files`, `search`, and `ask_owner`.
@@ -98,7 +125,7 @@ impl Gate {
         Self {
             session,
             rules: Arc::new(Rules {
-                cwd: real(&cwd),
+                start: Here::start(&cwd),
                 scratch: None,
                 free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
                 created: Mutex::default(),
@@ -121,7 +148,7 @@ impl Gate {
 
     fn change(self, edit: impl FnOnce(&mut Rules)) -> Self {
         let mut rules = Rules {
-            cwd: self.rules.cwd.clone(),
+            start: self.rules.start.clone(),
             scratch: self.rules.scratch.clone(),
             free_tools: self.rules.free_tools.clone(),
             created: Mutex::new(self.rules.created.lock().unwrap().clone()),
@@ -209,8 +236,38 @@ impl RunHooks for Gate {
     }
 }
 
+/// Where a shell is: its logical path (what `$PWD` says, what `cd ..`
+/// works on) and the real folder (where relative paths land).
+#[derive(Clone)]
+struct Here {
+    logical: PathBuf,
+    physical: PathBuf,
+}
+
+impl Here {
+    /// `cwd`; logically `$PWD` when that names the same folder (bash
+    /// inherits it), else `cwd` itself.
+    fn start(cwd: &Path) -> Self {
+        let physical = real(cwd);
+        let logical = std::env::var_os("PWD")
+            .map(PathBuf::from)
+            .filter(|pwd| pwd.is_absolute() && real(pwd) == physical)
+            .unwrap_or_else(|| cwd.to_owned());
+        Self { logical, physical }
+    }
+
+    /// Where `cd to` lands, as bash's (logical) `cd` does it.
+    fn cd(&self, to: &str) -> Self {
+        let logical = lexical(&self.logical, to);
+        Self {
+            physical: real(&logical),
+            logical,
+        }
+    }
+}
+
 struct Rules {
-    cwd: PathBuf,
+    start: Here,
     scratch: Option<PathBuf>,
     free_tools: HashSet<String>,
     /// Files the agent made this session: it may overwrite or delete them.
@@ -229,7 +286,7 @@ impl Rules {
                     check.ask = Some(format!("Run `bash` with {}?", short(args)));
                     return check;
                 };
-                let (ask, creates) = self.line(command, &self.cwd);
+                let (ask, creates) = self.line(command, &self.start);
                 check.creates = creates;
                 if ask {
                     check.ask = Some(format!("Run `{command}`?"));
@@ -245,7 +302,7 @@ impl Rules {
                         return check;
                     }
                 };
-                let path = locate(&self.cwd, file);
+                let path = locate(&self.start.physical, file);
                 if protected(Path::new(file)) || protected(&path) {
                     check.ask = Some(format!("Change the protected file {file}?"));
                 } else if writes && self.owners(&path) {
@@ -274,16 +331,16 @@ impl Rules {
     }
 
     /// Whether `line` needs the owner's yes, and the files it creates.
-    fn line(&self, line: &str, start: &Path) -> (bool, Vec<PathBuf>) {
+    fn line(&self, line: &str, start: &Here) -> (bool, Vec<PathBuf>) {
         const ASK: (bool, Vec<PathBuf>) = (true, Vec::new());
         let Some(items) = parse(line) else {
             return ASK;
         };
         let mut creates: Vec<PathBuf> = Vec::new();
         // `None` once a `cd` cannot be followed: every path is then unknown.
-        let mut cwd: Option<PathBuf> = Some(start.to_owned());
+        let mut cwd: Option<Here> = Some(start.clone());
         // Directories to return to when a `( … )` subshell ends.
-        let mut saved: Vec<Option<PathBuf>> = Vec::new();
+        let mut saved: Vec<Option<Here>> = Vec::new();
         let mut before = ";".to_owned();
 
         for item in items {
@@ -307,7 +364,11 @@ impl Rules {
                 if DEVICES.contains(&w.text.as_str()) {
                     return false;
                 }
-                let Some(dir) = cwd.as_deref().filter(|_| w.known) else {
+                let Some(dir) = cwd
+                    .as_ref()
+                    .map(|h| h.physical.as_path())
+                    .filter(|_| w.known)
+                else {
                     return true;
                 };
                 let path = locate(dir, &w.text);
@@ -321,7 +382,11 @@ impl Rules {
             };
             // A path this command would delete: asks unless it is the agent's own.
             let deletes = |w: &Word| -> bool {
-                match cwd.as_deref().filter(|_| w.known) {
+                match cwd
+                    .as_ref()
+                    .map(|h| h.physical.as_path())
+                    .filter(|_| w.known)
+                {
                     Some(dir) => !self.free(&locate(dir, &w.text)),
                     None => true,
                 }
@@ -329,10 +394,10 @@ impl Rules {
 
             // What its substitutions run, where it runs (a subshell of this directory).
             for inner in &command.runs {
-                let Some(dir) = cwd.as_deref() else {
+                let Some(here) = cwd.as_ref() else {
                     return ASK;
                 };
-                let (ask, made) = self.line(inner, dir);
+                let (ask, made) = self.line(inner, here);
                 if ask {
                     return ASK;
                 }
@@ -348,7 +413,11 @@ impl Rules {
                 if DEVICES.contains(&w.text.as_str()) {
                     continue;
                 }
-                match cwd.as_deref().filter(|_| w.known) {
+                match cwd
+                    .as_ref()
+                    .map(|h| h.physical.as_path())
+                    .filter(|_| w.known)
+                {
                     Some(dir) if !protected(&locate(dir, &w.text)) => {}
                     _ => return ASK,
                 }
@@ -377,18 +446,22 @@ impl Rules {
                 // Followed only when it surely applies to what comes next: a
                 // literal directory that exists, not in a pipeline or the
                 // background (a subshell), not before `||` (that runs if it failed).
-                // bash's `cd` is logical (`link/..` is where `link` sits), the
-                // kernel's paths are not: follow it only where they agree.
-                let dir = match (operands.first(), cwd.as_deref()) {
-                    (Some(to), Some(dir)) if to.known && name == "cd" => {
-                        let physical = locate(dir, &to.text);
-                        (lexical(dir, &to.text) == physical).then_some(physical)
-                    }
+                // As bash's (logical) `cd` does it: `..` on the logical path
+                // (`link/..` is where `link` sits), then the real folder.
+                let dir = match (operands.first(), cwd.as_ref()) {
+                    (Some(to), Some(here)) if to.known && name == "cd" => Some(here.cd(&to.text)),
                     _ => None,
                 };
                 let after = command.after.as_str();
-                cwd = dir.filter(|d| d.is_dir() && !piped && after != "&" && after != "||");
+                cwd =
+                    dir.filter(|d| d.physical.is_dir() && !piped && after != "&" && after != "||");
                 continue;
+            }
+            // Exporting a `GIT_*` variable sets it for every later git.
+            let exports = name == "export"
+                || (matches!(name, "declare" | "typeset") && flags.iter().any(|f| f.contains('x')));
+            if exports && operands.iter().any(|w| shell::git_variable(w)) {
+                return ASK;
             }
             if ALWAYS.contains(&name) || name.starts_with("mkfs.") {
                 return ASK;
@@ -398,14 +471,14 @@ impl Rules {
                 if args.is_empty() {
                     continue;
                 }
-                let Some(dir) = cwd.as_deref() else {
+                let Some(here) = cwd.as_ref() else {
                     return ASK;
                 };
                 if args.iter().any(|a| !a.known) {
                     return ASK;
                 }
                 let text: Vec<&str> = args.iter().map(|a| a.text.as_str()).collect();
-                let (ask, made) = self.line(&text.join(" "), dir);
+                let (ask, made) = self.line(&text.join(" "), here);
                 if ask {
                     return ASK;
                 }
@@ -425,30 +498,40 @@ impl Rules {
                 // Options as bash reads them: `-c` anywhere in a cluster
                 // (`-xc`, `-cx`), `-o`/`-O` take a value, `--` ends them; the
                 // first operand is the script (with `-c`) or its file.
-                let (mut i, mut command_string) = (0, false);
+                let (mut i, mut command_string, mut reads_stdin) = (0, false, false);
                 while let Some(a) = args.get(i) {
                     let t = a.text.as_str();
-                    if t == "--" {
+                    // `--` and a lone `-` end the options.
+                    if t == "--" || t == "-" {
                         i += 1;
                         break;
                     }
-                    if !(t.starts_with('-') || t.starts_with('+')) || t.len() < 2 {
+                    if !(t.starts_with('-') || t.starts_with('+')) {
                         break;
                     }
-                    if ["-o", "+o", "-O", "+O"].contains(&t) {
+                    if ["--rcfile", "--init-file"].contains(&t) {
                         i += 1;
-                    } else if t.starts_with('-') && !t.starts_with("--") && t.contains('c') {
-                        command_string = true;
+                    } else if !t.starts_with("--") {
+                        // A cluster: `-c` anywhere; `-s` reads stdin; one
+                        // ending in `o`/`O` takes a value (`-euxo pipefail`).
+                        command_string |= t.starts_with('-') && t.contains('c');
+                        reads_stdin |= t.starts_with('-') && t.contains('s');
+                        if t.ends_with('o') || t.ends_with('O') {
+                            i += 1;
+                        }
                     }
                     i += 1;
                 }
+                if reads_stdin && !command_string {
+                    return ASK;
+                }
                 match (command_string, args.get(i)) {
                     (true, body) => {
-                        let (Some(body), Some(dir)) = (body.filter(|b| b.known), cwd.as_deref())
+                        let (Some(body), Some(here)) = (body.filter(|b| b.known), cwd.as_ref())
                         else {
                             return ASK;
                         };
-                        let (ask, made) = self.line(&body.text, dir);
+                        let (ask, made) = self.line(&body.text, here);
                         if ask {
                             return ASK;
                         }
@@ -465,20 +548,24 @@ impl Rules {
                 if texts.contains(&"-delete") {
                     return ASK;
                 }
-                // Every `-exec`: a deleter, a shell or anything it cannot name asks.
                 for (at, t) in texts.iter().enumerate() {
-                    if !["-exec", "-execdir", "-ok", "-okdir"].contains(t) {
-                        continue;
+                    // What `-fprint FILE` and its kin write.
+                    if ["-fprint", "-fprint0", "-fprintf", "-fls"].contains(t) {
+                        match args.get(at + 1) {
+                            Some(file) if !target(file, &mut creates) => {}
+                            _ => return ASK,
+                        }
                     }
-                    let Some(program) = args.get(at + 1).filter(|w| w.known) else {
-                        return ASK;
-                    };
-                    let program = basename(&program.text);
-                    if DELETERS.contains(&program.as_str())
-                        || SHELLS.contains(&program.as_str())
-                        || ["eval", "xargs", "env", "sudo"].contains(&program.as_str())
-                    {
-                        return ASK;
+                    // What `-exec` runs: free only when it only reads.
+                    if ["-exec", "-execdir", "-ok", "-okdir"].contains(t) {
+                        let end = texts[at + 1..]
+                            .iter()
+                            .position(|w| *w == ";" || *w == "+")
+                            .map_or(args.len(), |n| at + 1 + n);
+                        let run = unwrap(&args[at + 1..end]);
+                        if !run.known || run.git_env || !READS.contains(&run.name.as_str()) {
+                            return ASK;
+                        }
                     }
                 }
                 continue;
@@ -512,7 +599,11 @@ impl Rules {
                 for w in &operands {
                     let asks = if appends {
                         // Appending is free, except to `.env*` or inside `.git/`.
-                        match cwd.as_deref().filter(|_| w.known) {
+                        match cwd
+                            .as_ref()
+                            .map(|h| h.physical.as_path())
+                            .filter(|_| w.known)
+                        {
                             Some(dir) => protected(&locate(dir, &w.text)),
                             None => true,
                         }
@@ -548,7 +639,11 @@ impl Rules {
                 if name == "mv" && sources.iter().any(|s| deletes(s)) {
                     return ASK;
                 }
-                let Some(here) = cwd.as_deref().filter(|_| dest.known) else {
+                let Some(here) = cwd
+                    .as_ref()
+                    .map(|h| h.physical.as_path())
+                    .filter(|_| dest.known)
+                else {
                     return ASK;
                 };
                 let dest_path = locate(here, &dest.text);
@@ -611,10 +706,48 @@ impl Rules {
                 // `--output[=]FILE` (wget: `-O`, `--output-document`; its log
                 // `-o`, `--output-file`). `curl -O` names the file from the URL.
                 let (short, long): (&[char], &[&str]) = if name == "curl" {
-                    (&['o'], &["--output"])
+                    (
+                        &['o', 'D', 'c'],
+                        &[
+                            "--output",
+                            "--dump-header",
+                            "--cookie-jar",
+                            "--trace",
+                            "--trace-ascii",
+                            "--stderr",
+                        ],
+                    )
                 } else {
                     (&['O', 'o'], &["--output-document", "--output-file"])
                 };
+                // Writing where it cannot see: another folder, files named
+                // from the server, overwriting by date.
+                let elsewhere: &[&str] = if name == "curl" {
+                    &["--output-dir", "--create-dirs"]
+                } else {
+                    &[
+                        "-N",
+                        "--timestamping",
+                        "-r",
+                        "--recursive",
+                        "-m",
+                        "--mirror",
+                        "-P",
+                        "--directory-prefix",
+                    ]
+                };
+                if args.iter().any(|a| {
+                    elsewhere.contains(&a.text.as_str())
+                        || elsewhere
+                            .iter()
+                            .any(|e| a.text.starts_with(&format!("{e}=")))
+                        || (name == "wget"
+                            && a.text.starts_with('-')
+                            && !a.text.starts_with("--")
+                            && a.text[1..].contains(['N', 'r', 'm', 'P']))
+                }) {
+                    return ASK;
+                }
                 if name == "curl"
                     && args.iter().any(|a| {
                         a.text == "--remote-name"
@@ -661,7 +794,7 @@ impl Rules {
                 }
                 continue;
             }
-            if name == "git" && self.git_risky(args, cwd.as_deref()) {
+            if name == "git" && self.git_risky(args, cwd.as_ref().map(|h| h.physical.as_path())) {
                 return ASK;
             }
         }
@@ -707,11 +840,39 @@ impl Rules {
                     "--get",
                     "--get-all",
                     "--get-regexp",
+                    "--get-urlmatch",
                     "--list",
                     "-l",
                     "--show-origin",
+                    "--show-scope",
+                    "--name-only",
                 ];
-                !(reads.iter().any(|r| has(r)) || (flags.is_empty() && paths.len() <= 1))
+                // Where it reads from does not make a read a write.
+                let scope = [
+                    "--global",
+                    "--local",
+                    "--system",
+                    "--worktree",
+                    "--includes",
+                    "--null",
+                    "-z",
+                ];
+                let other_flags = flags
+                    .iter()
+                    .filter(|f| {
+                        !scope.contains(f) && !f.starts_with("--type") && !f.starts_with("--file")
+                    })
+                    .count();
+                match paths.first().copied() {
+                    // git 2.46+: `git config get|list …` read, the rest write.
+                    Some("get") | Some("list") => false,
+                    Some("set")
+                    | Some("unset")
+                    | Some("rename-section")
+                    | Some("remove-section")
+                    | Some("edit") => true,
+                    _ => !(reads.iter().any(|r| has(r)) || (other_flags == 0 && paths.len() <= 1)),
+                }
             }
             "reset" => has("--hard") || has("--merge") || has("--keep"),
             "clean" => !has("-n") && !has("--dry-run"),

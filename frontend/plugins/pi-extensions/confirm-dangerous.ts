@@ -67,6 +67,11 @@ const DEVICES = new Set(['/dev/null', '/dev/stdout', '/dev/stderr', '/dev/tty'])
 const ALWAYS = new Set(['sudo', 'doas', 'truncate', 'shred', 'mkfs', 'wipefs'])
 const DELETERS = new Set(['rm', 'unlink', 'rmdir', 'shred'])
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh'])
+/** Programs `find -exec` may run without asking: they only read. */
+const READS = new Set([
+  'grep', 'egrep', 'fgrep', 'rg', 'wc', 'cat', 'head', 'tail', 'ls', 'stat', 'file', 'echo',
+  'printf', 'basename', 'dirname', 'md5sum', 'sha1sum', 'sha256sum', 'shasum', 'du', 'test', '[', 'diff', 'cmp',
+])
 
 /** `path` with symlinks resolved, also for a file not created yet. */
 function real(path: string, hops = 40): string {
@@ -331,6 +336,11 @@ function parse(s: string): Item[] | null {
       }
       continue
     }
+    // A comment: to the end of the line (a backslash there joins nothing).
+    if (c === '#' && !word) {
+      while (i + 1 < s.length && s[i + 1] !== '\n') i++
+      continue
+    }
     // bash splits words on spaces and tabs only (newlines are handled above).
     if (c === ' ' || c === '\t') {
       finishWord()
@@ -407,6 +417,15 @@ function parse(s: string): Item[] | null {
 }
 
 /** Past wrappers that run another program: their options, and the program. */
+/**
+ * A `GIT_*` assignment that can change what git runs or where (not one of
+ * the harmless settings agents use: `GIT_PAGER=cat`, `GIT_TERMINAL_PROMPT=0`, …).
+ */
+function gitVariable(w: Word): boolean {
+  const harmless = ['GIT_PAGER=cat', 'GIT_PAGER=', 'GIT_TERMINAL_PROMPT=0', 'GIT_EDITOR=true', 'GIT_EDITOR=:', 'GIT_TRACE=0', 'GIT_TRACE=1']
+  return w.text.startsWith('GIT_') && !(w.known && harmless.includes(w.text))
+}
+
 function unwrap(words: Word[]): { name: string; args: Word[]; viaXargs: boolean; known: boolean; gitEnv: boolean } {
   let i = 0
   let viaXargs = false
@@ -414,19 +433,23 @@ function unwrap(words: Word[]): { name: string; args: Word[]; viaXargs: boolean;
   let gitEnv = false
   for (;;) {
     while (i < words.length && /^\w+=/.test(words[i].text)) {
-      if (words[i].text.startsWith('GIT_')) gitEnv = true
+      if (gitVariable(words[i])) gitEnv = true
       i++
     }
     const w = words[i]?.text.replace(/^\\/, '') ?? ''
     const name = basename(w)
     if (['nohup', 'builtin'].includes(name)) i++
-    else if (name === 'command') {
+    else if (name === 'command' && ['-v', '-V'].includes(words[i + 1]?.text ?? '')) {
+      // `command -v x` only looks `x` up.
+      return { name, args: words.slice(i + 1), viaXargs, known: true, gitEnv }
+    } else if (name === 'command') {
       i++
-      while (['-p', '-v', '-V', '--'].includes(words[i]?.text ?? '')) i++
+      while (['-p', '--'].includes(words[i]?.text ?? '')) i++
     } else if (name === 'exec') {
       i++
       while (words[i]?.text.startsWith('-')) {
-        if (words[i].text === '-a') i++
+        // `-a NAME`, also in a cluster (`-la NAME`).
+        if (!words[i].text.startsWith('--') && words[i].text.includes('a')) i++
         i++
       }
     } else if (name === 'time') {
@@ -434,10 +457,10 @@ function unwrap(words: Word[]): { name: string; args: Word[]; viaXargs: boolean;
       while (words[i]?.text.startsWith('-')) i++
     } else if (name === 'env' || name === 'stdbuf' || name === 'nice' || name === 'ionice') {
       // The options that take a value, per wrapper.
-      const withValue = { env: ['-u', '-C', '-S'], stdbuf: ['-i', '-o', '-e'], nice: ['-n'], ionice: ['-c', '-n'] }[name]
+      const withValue = { env: ['-u', '-C', '-S'], stdbuf: ['-i', '-o', '-e', '--input', '--output', '--error'], nice: ['-n'], ionice: ['-c', '-n'] }[name]
       i++
       while (words[i] && (words[i].text.startsWith('-') || /^\w+=/.test(words[i].text))) {
-        if (words[i].text.startsWith('GIT_') && /^\w+=/.test(words[i].text)) gitEnv = true
+        if (/^\w+=/.test(words[i].text) && gitVariable(words[i])) gitEnv = true
         if (withValue.includes(words[i].text)) i++
         i++
       }
@@ -492,12 +515,14 @@ export default function (pi: any) {
    * `created` only if it runs). `cwd` is `null` once a `cd` cannot be
    * followed: every path is then unknown.
    */
-  function check(line: string, start: string): { ask: boolean; creates: string[] } {
+  function check(line: string, start: string, startLogical = start): { ask: boolean; creates: string[] } {
     const creates: string[] = []
     const ask = { ask: true, creates }
     const commands = parse(line)
     if (!commands) return ask
     let cwd: string | null = start
+    // The logical path (what `$PWD` says, what `cd ..` works on).
+    let logical: string | null = startLogical
     // A target this command would write: asks if it is the owner's, or unknown.
     const target = (w: Word): boolean => {
       if (DEVICES.has(w.text)) return false
@@ -511,16 +536,16 @@ export default function (pi: any) {
     const deletes = (w: Word): boolean => !w.known || cwd === null || !free(where(cwd, w.text))
 
     // Directories to return to when a `( … )` subshell ends.
-    const saved: (string | null)[] = []
+    const saved: [string | null, string | null][] = []
     let before = ';'
     for (const item of commands) {
       if (item === 'open') {
-        saved.push(cwd)
+        saved.push([cwd, logical])
         continue
       }
       if (item === 'close') {
         if (saved.length === 0) return ask
-        cwd = saved.pop()!
+        ;[cwd, logical] = saved.pop()!
         continue
       }
       const { words, truncates, appends, runs, after } = item
@@ -529,7 +554,7 @@ export default function (pi: any) {
       // What its substitutions run, where it runs (a subshell of this directory).
       for (const inner of runs) {
         if (cwd === null) return ask
-        const verdict = check(inner, cwd)
+        const verdict = check(inner, cwd, logical ?? cwd)
         if (verdict.ask) return ask
         creates.push(...verdict.creates)
       }
@@ -550,21 +575,25 @@ export default function (pi: any) {
         // Followed only when it surely applies to what comes next: a literal
         // directory that exists, not in a pipeline or the background (a
         // subshell), not before `||` (that runs if it failed).
-        // bash's `cd` is logical (`link/..` is where `link` sits), the
-        // kernel's paths are not: follow it only where they agree.
+        // As bash's (logical) `cd` does it: `..` on the logical path (`link/..`
+        // is where `link` sits), then the real folder.
         const to = operands[0]
-        const physical = to && to.known && cwd !== null && name === 'cd' ? where(cwd, to.text) : null
-        const dir = physical !== null && resolve(cwd!, to!.text) === physical ? physical : null
+        const toLogical = to && to.known && logical !== null && name === 'cd' ? resolve(logical, to.text) : null
+        const dir = toLogical !== null ? real(toLogical) : null
         const sure = dir !== null && isDir(dir) && !piped && after !== '&' && after !== '||'
         cwd = sure ? dir : null
+        logical = sure ? toLogical : null
         continue
       }
+      // Exporting a `GIT_*` variable sets it for every later git.
+      const exports = name === 'export' || (['declare', 'typeset'].includes(name) && flags.some((f) => f.includes('x')))
+      if (exports && operands.some(gitVariable)) return ask
       if (ALWAYS.has(name) || /^mkfs\./.test(name)) return ask
       if (name === 'eval') {
         // Read like any command line, when its text is known.
         if (args.length === 0) continue
         if (cwd === null || args.some((a) => !a.known)) return ask
-        const verdict = check(args.map((a) => a.text).join(' '), cwd)
+        const verdict = check(args.map((a) => a.text).join(' '), cwd, logical ?? cwd)
         if (verdict.ask) return ask
         creates.push(...verdict.creates)
         continue
@@ -580,20 +609,29 @@ export default function (pi: any) {
         // is the script (with `-c`) or its file.
         let k = 0
         let commandString = false
+        let readsStdin = false
         for (; k < args.length; k++) {
           const t = args[k].text
-          if (t === '--') {
+          // `--` and a lone `-` end the options.
+          if (t === '--' || t === '-') {
             k++
             break
           }
-          if (!(t.startsWith('-') || t.startsWith('+')) || t.length < 2) break
-          if (['-o', '+o', '-O', '+O'].includes(t)) k++
-          else if (t.startsWith('-') && !t.startsWith('--') && t.includes('c')) commandString = true
+          if (!(t.startsWith('-') || t.startsWith('+'))) break
+          if (['--rcfile', '--init-file'].includes(t)) k++
+          else if (!t.startsWith('--')) {
+            // A cluster: `-c` anywhere; `-s` reads stdin; one ending in
+            // `o`/`O` takes a value (`-euxo pipefail`).
+            if (t.startsWith('-') && t.includes('c')) commandString = true
+            if (t.startsWith('-') && t.includes('s')) readsStdin = true
+            if (t.endsWith('o') || t.endsWith('O')) k++
+          }
         }
+        if (readsStdin && !commandString) return ask
         const body = args[k]
         if (commandString) {
           if (!body || !body.known || cwd === null) return ask
-          const inner = check(body.text, cwd)
+          const inner = check(body.text, cwd, logical ?? cwd)
           if (inner.ask) return ask
           creates.push(...inner.creates)
         } else if (!body) return ask // it reads its script from stdin
@@ -602,13 +640,16 @@ export default function (pi: any) {
       if (name === 'find') {
         const texts = args.map((a) => a.text)
         if (texts.includes('-delete')) return ask
-        // Every `-exec`: a deleter, a shell or anything it cannot name asks.
         for (let k = 0; k < texts.length; k++) {
-          if (!['-exec', '-execdir', '-ok', '-okdir'].includes(texts[k])) continue
-          const program = args[k + 1]
-          if (!program?.known) return ask
-          const run = basename(program.text)
-          if (DELETERS.has(run) || SHELLS.has(run) || ['eval', 'xargs', 'env', 'sudo'].includes(run)) return ask
+          // What `-fprint FILE` and its kin write.
+          if (['-fprint', '-fprint0', '-fprintf', '-fls'].includes(texts[k]) && (!args[k + 1] || target(args[k + 1]))) return ask
+          // What `-exec` runs: free only when it only reads.
+          if (['-exec', '-execdir', '-ok', '-okdir'].includes(texts[k])) {
+            let end = texts.findIndex((w, n) => n > k && (w === ';' || w === '+'))
+            if (end < 0) end = args.length
+            const run = unwrap(args.slice(k + 1, end))
+            if (!run.known || run.gitEnv || !READS.has(run.name)) return ask
+          }
         }
         continue
       }
@@ -657,8 +698,26 @@ export default function (pi: any) {
         // Where it writes: `-o FILE`, `-oFILE`, `-sSLo FILE`, `--output[=]FILE`
         // (wget: `-O`, `--output-document`; its log `-o`, `--output-file`).
         // `curl -O` names the file from the URL.
-        const short = name === 'curl' ? ['o'] : ['O', 'o']
-        const long = name === 'curl' ? ['--output'] : ['--output-document', '--output-file']
+        const short = name === 'curl' ? ['o', 'D', 'c'] : ['O', 'o']
+        const long =
+          name === 'curl'
+            ? ['--output', '--dump-header', '--cookie-jar', '--trace', '--trace-ascii', '--stderr']
+            : ['--output-document', '--output-file']
+        // Writing where it cannot see: another folder, files named from the
+        // server, overwriting by date.
+        const elsewhere =
+          name === 'curl'
+            ? ['--output-dir', '--create-dirs']
+            : ['-N', '--timestamping', '-r', '--recursive', '-m', '--mirror', '-P', '--directory-prefix']
+        if (
+          args.some(
+            (a) =>
+              elsewhere.includes(a.text) ||
+              elsewhere.some((e) => a.text.startsWith(e + '=')) ||
+              (name === 'wget' && /^-[^-]/.test(a.text) && /[NrmP]/.test(a.text.slice(1))),
+          )
+        )
+          return ask
         if (
           name === 'curl' &&
           args.some((a) => a.text === '--remote-name' || a.text === '--remote-name-all' || (/^-[^-]/.test(a.text) && a.text.includes('O')))
@@ -701,9 +760,14 @@ export default function (pi: any) {
     const paths = rest.filter((a) => !a.startsWith('-'))
     switch (sub) {
       case 'config': {
-        // Writing configuration: an alias or a hook path can run a shell.
-        const reads = ['--get', '--get-all', '--get-regexp', '--list', '-l', '--show-origin']
-        return !(reads.some((r) => flags.has(r)) || (flags.size === 0 && paths.length <= 1))
+        const reads = ['--get', '--get-all', '--get-regexp', '--get-urlmatch', '--list', '-l', '--show-origin', '--show-scope', '--name-only']
+        // Where it reads from does not make a read a write.
+        const scope = ['--global', '--local', '--system', '--worktree', '--includes', '--null', '-z']
+        const otherFlags = [...flags].filter((f) => !scope.includes(f) && !f.startsWith('--type') && !f.startsWith('--file')).length
+        // git 2.46+: `git config get|list …` read, the rest write.
+        if (paths[0] === 'get' || paths[0] === 'list') return false
+        if (['set', 'unset', 'rename-section', 'remove-section', 'edit'].includes(paths[0])) return true
+        return !(reads.some((r) => flags.has(r)) || (otherFlags === 0 && paths.length <= 1))
       }
       case 'reset':
         return flags.has('--hard') || flags.has('--merge') || flags.has('--keep')
@@ -740,14 +804,17 @@ export default function (pi: any) {
   }
 
   pi.on('tool_call', async (event: any, ctx: any) => {
-    const cwd = ctx.cwd ?? process.cwd()
+    const cwd = real(ctx.cwd ?? process.cwd())
+    // bash inherits `$PWD` when it names the same folder.
+    const pwd = process.env.PWD
+    const logicalStart = pwd && isAbsolute(pwd) && real(pwd) === cwd ? pwd : ctx.cwd ?? cwd
     let subject: string | false = false
     let creates: string[] = []
     if (event.toolName === 'bash') {
       const command = event.input?.command
       if (typeof command !== 'string') subject = `Run \`bash\` with ${JSON.stringify(event.input)}?`
       else {
-        const verdict = check(command, cwd)
+        const verdict = check(command, cwd, logicalStart)
         creates = verdict.creates
         if (verdict.ask) subject = `Run \`${command}\`?`
       }
