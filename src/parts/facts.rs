@@ -16,6 +16,9 @@ use crate::frontend::{NoticeLevel, Session};
 /// (yoagent gives an extension's `finish` 5 s in all).
 const GIT_TIME: Duration = Duration::from_secs(4);
 
+/// How far a file's time may lag the snapshot's and still be after it.
+const TIME_MARGIN: Duration = Duration::from_secs(2);
+
 /// How many names a list shows before it only counts.
 const NAMES: usize = 3;
 
@@ -194,6 +197,10 @@ impl Snapshot {
     }
 
     async fn take_now(cwd: &Path) -> Result<Option<Start>, GitError> {
+        // Before anything is listed, with a margin: file times come from a
+        // coarse clock (Linux lags the precise one by a tick), so a file
+        // made just after the snapshot could look older than it.
+        let taken = SystemTime::now() - TIME_MARGIN;
         let root = match Git::at(cwd).run(&["rev-parse", "--show-toplevel"]).await {
             Ok(root) => PathBuf::from(root.trim()),
             Err(GitError::NotRepo) => return Ok(None),
@@ -234,7 +241,7 @@ impl Snapshot {
             edits_known,
             tips,
             untracked,
-            taken: SystemTime::now(),
+            taken,
         }))
     }
 
