@@ -37,7 +37,8 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 ///
 /// Shell commands (`bash`) are read command by command — quotes, escapes,
 /// operators, redirections, heredocs, substitutions, `bash -c` / `eval` of
-/// literal text — following `cd` only where it surely applies. What asks:
+/// literal text, backslash-newlines joined — following `cd` only where it
+/// surely applies (not through a symlink: bash's `cd` is logical). What asks:
 /// - `rm`, `unlink`, `rmdir`, `git rm` (not `--cached`), `xargs` running
 ///   one of them, `find … -delete` or `-exec rm …`, `mv` of a file that is
 ///   not the agent's (moving it away is deleting it here);
@@ -45,14 +46,18 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 ///   `checkout` / `restore` of paths (not `restore --staged`),
 ///   `checkout -f`, `switch -f` / `--discard-changes`, `branch -D`, a forced
 ///   push (`-f`, `--force*`, `+ref`, `:ref`, `--mirror`, `--delete`),
-///   `stash drop` / `clear`, and any `git -c` (an alias can run a shell);
+///   `stash drop` / `clear`, any `git -c` and `git config` write, and any
+///   `GIT_*` variable set for a command (an alias can run a shell);
 /// - `mv`, `cp`, `tee` (without `-a`), `dd of=`, `ln -f`, `install`,
-///   `curl -o` / `wget -O` and truncating redirections (`>`, `>|`, `2>`,
+///   `curl -o` / `wget -O` (also in a cluster, `-sSLo`), `curl -O` and
+///   truncating redirections (`>`, `>|`, `2>`,
 ///   `&>`, `>&file`; not `>>`, not to `/dev/null`) onto a file that exists;
 ///   `rsync --delete` / `--remove-source-files`;
 /// - `sudo`, `truncate`, `shred`, `mkfs`, recursive `chmod` / `chown`, a
-///   shell reading its script from stdin (`| sh`, `bash <<EOF`);
-/// - anything written or appended to `.env*` or inside `.git/` (any case);
+///   shell reading its script from stdin (`| sh`, `bash <<EOF`), a shell or
+///   deleter run by any `find -exec`;
+/// - anything written or appended to `.env*`, `.git` or inside `.git/` (any
+///   case), also through a dangling symlink;
 /// - anything it cannot know: a path with `$VAR`, `~`, globs or after a `cd`
 ///   it cannot follow; a program named by an expansion (`$(echo rm)`).
 ///
@@ -356,6 +361,10 @@ impl Rules {
             if !program.known {
                 return ASK;
             }
+            // `GIT_CONFIG_*`, `GIT_DIR`, …: configuration or a repository not judged.
+            if program.git_env {
+                return ASK;
+            }
             let (name, args) = (program.name.as_str(), program.args);
             let flags: Vec<&str> = args
                 .iter()
@@ -368,9 +377,12 @@ impl Rules {
                 // Followed only when it surely applies to what comes next: a
                 // literal directory that exists, not in a pipeline or the
                 // background (a subshell), not before `||` (that runs if it failed).
+                // bash's `cd` is logical (`link/..` is where `link` sits), the
+                // kernel's paths are not: follow it only where they agree.
                 let dir = match (operands.first(), cwd.as_deref()) {
                     (Some(to), Some(dir)) if to.known && name == "cd" => {
-                        Some(locate(dir, &to.text))
+                        let physical = locate(dir, &to.text);
+                        (lexical(dir, &to.text) == physical).then_some(physical)
                     }
                     _ => None,
                 };
@@ -410,17 +422,28 @@ impl Rules {
                 return ASK;
             }
             if SHELLS.contains(&name) {
-                let script = args.iter().position(|a| {
-                    a.text == "-c"
-                        || (a.text.starts_with('-')
-                            && a.text.ends_with('c')
-                            && a.text[1..]
-                                .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '_'))
-                });
-                match script {
-                    Some(at) => {
-                        let body = args.get(at + 1);
+                // Options as bash reads them: `-c` anywhere in a cluster
+                // (`-xc`, `-cx`), `-o`/`-O` take a value, `--` ends them; the
+                // first operand is the script (with `-c`) or its file.
+                let (mut i, mut command_string) = (0, false);
+                while let Some(a) = args.get(i) {
+                    let t = a.text.as_str();
+                    if t == "--" {
+                        i += 1;
+                        break;
+                    }
+                    if !(t.starts_with('-') || t.starts_with('+')) || t.len() < 2 {
+                        break;
+                    }
+                    if ["-o", "+o", "-O", "+O"].contains(&t) {
+                        i += 1;
+                    } else if t.starts_with('-') && !t.starts_with("--") && t.contains('c') {
+                        command_string = true;
+                    }
+                    i += 1;
+                }
+                match (command_string, args.get(i)) {
+                    (true, body) => {
                         let (Some(body), Some(dir)) = (body.filter(|b| b.known), cwd.as_deref())
                         else {
                             return ASK;
@@ -432,8 +455,8 @@ impl Rules {
                         creates.extend(made);
                     }
                     // No script named: it reads one from stdin (`| sh`, `bash <<EOF`).
-                    None if operands.is_empty() => return ASK,
-                    None => {}
+                    (false, None) => return ASK,
+                    (false, Some(_)) => {}
                 }
                 continue;
             }
@@ -442,14 +465,19 @@ impl Rules {
                 if texts.contains(&"-delete") {
                     return ASK;
                 }
-                if let Some(exec) = texts
-                    .iter()
-                    .position(|t| ["-exec", "-execdir", "-ok", "-okdir"].contains(t))
-                {
-                    let Some(program) = args.get(exec + 1).filter(|w| w.known) else {
+                // Every `-exec`: a deleter, a shell or anything it cannot name asks.
+                for (at, t) in texts.iter().enumerate() {
+                    if !["-exec", "-execdir", "-ok", "-okdir"].contains(t) {
+                        continue;
+                    }
+                    let Some(program) = args.get(at + 1).filter(|w| w.known) else {
                         return ASK;
                     };
-                    if DELETERS.contains(&basename(&program.text).as_str()) {
+                    let program = basename(&program.text);
+                    if DELETERS.contains(&program.as_str())
+                        || SHELLS.contains(&program.as_str())
+                        || ["eval", "xargs", "env", "sudo"].contains(&program.as_str())
+                    {
                         return ASK;
                     }
                 }
@@ -579,28 +607,57 @@ impl Rules {
                 return ASK;
             }
             if matches!(name, "curl" | "wget") {
-                let option: &[&str] = if name == "curl" {
-                    &["-o", "--output"]
+                // Where it writes: `-o FILE`, `-oFILE`, `-sSLo FILE`,
+                // `--output[=]FILE` (wget: `-O`, `--output-document`; its log
+                // `-o`, `--output-file`). `curl -O` names the file from the URL.
+                let (short, long): (&[char], &[&str]) = if name == "curl" {
+                    (&['o'], &["--output"])
                 } else {
-                    &["-O", "--output-document"]
+                    (&['O', 'o'], &["--output-document", "--output-file"])
                 };
-                for (at, a) in args.iter().enumerate() {
-                    let value = if option.contains(&a.text.as_str()) {
-                        args.get(at + 1).cloned()
-                    } else {
-                        option.iter().find_map(|o| {
-                            let joined = a.text.strip_prefix(&format!("{o}="))?;
-                            Some(Word {
-                                text: joined.to_owned(),
-                                known: a.known,
-                            })
-                        })
-                    };
+                if name == "curl"
+                    && args.iter().any(|a| {
+                        a.text == "--remote-name"
+                            || a.text == "--remote-name-all"
+                            || (a.text.starts_with('-')
+                                && !a.text.starts_with("--")
+                                && a.text.contains('O'))
+                    })
+                {
+                    return ASK;
+                }
+                let mut at = 0;
+                while let Some(a) = args.get(at) {
+                    let t = a.text.as_str();
+                    let mut value: Option<Word> = None;
+                    if long.contains(&t) {
+                        value = args.get(at + 1).cloned();
+                    } else if let Some(joined) =
+                        long.iter().find_map(|o| t.strip_prefix(&format!("{o}=")))
+                    {
+                        value = Some(Word {
+                            text: joined.to_owned(),
+                            known: a.known,
+                        });
+                    } else if t.starts_with('-') && !t.starts_with("--") {
+                        if let Some(pos) = t[1..].find(|c| short.contains(&c)) {
+                            let rest = &t[2 + pos..];
+                            value = if rest.is_empty() {
+                                args.get(at + 1).cloned()
+                            } else {
+                                Some(Word {
+                                    text: rest.to_owned(),
+                                    known: a.known,
+                                })
+                            };
+                        }
+                    }
                     if let Some(value) = value {
                         if value.text != "-" && target(&value, &mut creates) {
                             return ASK;
                         }
                     }
+                    at += 1;
                 }
                 continue;
             }
@@ -644,6 +701,18 @@ impl Rules {
             .collect();
         let has = |f: &str| flags.contains(f);
         match sub {
+            // Writing configuration: an alias or a hook path can run a shell.
+            "config" => {
+                let reads = [
+                    "--get",
+                    "--get-all",
+                    "--get-regexp",
+                    "--list",
+                    "-l",
+                    "--show-origin",
+                ];
+                !(reads.iter().any(|r| has(r)) || (flags.is_empty() && paths.len() <= 1))
+            }
             "reset" => has("--hard") || has("--merge") || has("--keep"),
             "clean" => !has("-n") && !has("--dry-run"),
             "rm" => !has("--cached"),
@@ -686,11 +755,7 @@ fn protected(path: &Path) -> bool {
             _ => None,
         })
         .collect();
-    parts.iter().any(|p| p.starts_with(".env"))
-        || parts
-            .iter()
-            .take(parts.len().saturating_sub(1))
-            .any(|p| p == ".git")
+    parts.iter().any(|p| p.starts_with(".env") || p == ".git")
 }
 
 /// A call's arguments, briefly, for a question.
@@ -721,15 +786,47 @@ fn locate(dir: &Path, file: &str) -> PathBuf {
     real(&out)
 }
 
-/// `path` with symlinks resolved, also for a file not created yet.
+/// `path` with symlinks resolved, also for a file not created yet — and a
+/// dangling symlink resolved to where it points (a write through it lands
+/// there).
 fn real(path: &Path) -> PathBuf {
+    real_within(path, 40)
+}
+
+fn real_within(path: &Path, hops: usize) -> PathBuf {
     if let Ok(real) = path.canonicalize() {
         return real;
     }
-    match (path.parent(), path.file_name()) {
-        (Some(parent), Some(name)) if parent != path => real(parent).join(name),
-        _ => path.to_owned(),
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return path.to_owned();
+    };
+    if parent == path {
+        return path.to_owned();
     }
+    let here = real_within(parent, hops).join(name);
+    match std::fs::read_link(&here) {
+        Ok(target) if hops > 0 => {
+            real_within(&here.parent().unwrap_or(&here).join(target), hops - 1)
+        }
+        _ => here,
+    }
+}
+
+/// `file` against `dir` as text: `..` drops the component before it,
+/// whatever it is (bash's logical `cd`).
+fn lexical(dir: &Path, file: &str) -> PathBuf {
+    let mut out = dir.to_owned();
+    for part in Path::new(file).components() {
+        match part {
+            Component::Prefix(_) | Component::RootDir => out = PathBuf::from(part.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(name) => out.push(name),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

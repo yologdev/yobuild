@@ -11,8 +11,9 @@
 // Each shell command is tokenized (words split on spaces, tabs and newlines
 // only, as bash does; quotes, escapes, operators, redirections; the bodies
 // of `<<WORD` heredocs skipped, delimiters with their quotes removed) and
-// read command by command, keeping track of the directory `cd` moves to:
-// only where the cd surely applies (a literal directory that exists;
+// read command by command (backslash-newlines joined), keeping track of
+// the directory `cd` moves to: only where the cd surely applies (a literal
+// directory that exists, not through a symlink — bash's `cd` is logical;
 // `( … )` restores the directory after; a cd in a pipeline, in the
 // background or before `||`, or to a missing directory, makes it unknown).
 // What asks:
@@ -22,20 +23,24 @@
 // - git: `reset --hard`, `clean` (not `-n`), `checkout` / `restore` of
 //   paths (not `restore --staged`), `checkout -f`, `switch -f` /
 //   `--discard-changes`, `branch -D`, a forced push (`-f`, `--force*`,
-//   `+ref`, `:ref`, `--mirror`, `--delete`), `stash drop` / `clear`, and any
-//   `git -c` (an alias can run a shell);
+//   `+ref`, `:ref`, `--mirror`, `--delete`), `stash drop` / `clear`, any
+//   `git -c` and `git config` write, any `GIT_*` variable set for a command
+//   (an alias can run a shell);
 // - `mv`, `cp` (also into a directory), `tee` (without `-a`), `dd of=`,
-//   `ln -f`, `install`, `curl -o` / `wget -O` and every truncating
+//   `ln -f`, `install`, `curl -o` / `wget -O` (also `-sSLo`), `curl -O`, and
+//   every truncating
 //   redirection (`>`, `>|`, `1>`, `2>`, `&>`, `>&file`; not `>>` or to
 //   `/dev/null`) onto a file that exists; `rsync --delete`;
 // - `sudo`, `truncate`, `shred`, `mkfs`, recursive `chmod` / `chown`, a
-//   shell reading its script from stdin (`| sh`, `bash <<EOF`);
+//   shell reading its script from stdin (`| sh`, `bash <<EOF`), a shell or
+//   deleter run by any `find -exec`;
 // - `bash -c` / `sh -c` scripts and `eval` of literal text, read the same
 //   way, and what command substitutions run (`$( … )`, backquotes, `<( … )`,
 //   `>( … )`; also inside double quotes and unquoted heredoc bodies, which
 //   the shell expands), each where its command runs; `eval` of unknown text;
 // - a whole-file write over a file that exists, and any change (appends
-//   too) to `.env*` or inside `.git/`, in any case;
+//   too) to `.env*`, `.git` or inside `.git/`, in any case, also through a
+//   dangling symlink;
 // - anything it cannot know: a path with `$VAR`, `~`, backquotes, globs, or
 //   after a `cd` it cannot follow; a program named by an expansion
 //   (`$(echo rm)`); tool arguments that are not strings, a `~` or `@` path.
@@ -49,13 +54,13 @@
 // command line does not show (`sed -i`, `python3 -c …`, a Makefile). For a
 // guarantee, run the agent in a container or a disposable copy.
 
-import { existsSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readlinkSync, realpathSync, statSync } from 'node:fs'
 import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
 
 /** A path with a component starting `.env`, or inside `.git/`, in any case. */
 function isProtected(path: string): boolean {
   const parts = path.split('/').filter((p) => p !== '').map((p) => p.toLowerCase())
-  return parts.some((p) => p.startsWith('.env')) || parts.slice(0, -1).includes('.git')
+  return parts.some((p) => p.startsWith('.env') || p === '.git')
 }
 /** Where a redirection is harmless. */
 const DEVICES = new Set(['/dev/null', '/dev/stdout', '/dev/stderr', '/dev/tty'])
@@ -64,12 +69,18 @@ const DELETERS = new Set(['rm', 'unlink', 'rmdir', 'shred'])
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh'])
 
 /** `path` with symlinks resolved, also for a file not created yet. */
-function real(path: string): string {
+function real(path: string, hops = 40): string {
   try {
     return realpathSync(path)
   } catch {
     const parent = dirname(path)
-    return parent === path ? path : resolve(real(parent), basename(path))
+    if (parent === path) return path
+    const here = resolve(real(parent, hops), basename(path))
+    // A dangling symlink: a write through it lands where it points.
+    try {
+      if (hops > 0 && lstatSync(here).isSymbolicLink()) return real(resolve(dirname(here), readlinkSync(here)), hops - 1)
+    } catch {}
+    return here
   }
 }
 
@@ -249,12 +260,17 @@ function parse(s: string): Item[] | null {
       if (!runs) return null
       cur.runs.push(...runs)
       word ??= { text: '', known: true }
-      word.text += body
+      word.text += body.replace(/\\\n/g, '')
       if (/[$`]/.test(body)) word.known = false
       i = end
       continue
     }
     if (c === '\\') {
+      // A backslash before a newline joins the lines (`r\⏎m` is `rm`).
+      if (s[i + 1] === '\n') {
+        i++
+        continue
+      }
       word ??= { text: '', known: true }
       word.text += s[i + 1] ?? ''
       i++
@@ -391,21 +407,38 @@ function parse(s: string): Item[] | null {
 }
 
 /** Past wrappers that run another program: their options, and the program. */
-function unwrap(words: Word[]): { name: string; args: Word[]; viaXargs: boolean; known: boolean } {
+function unwrap(words: Word[]): { name: string; args: Word[]; viaXargs: boolean; known: boolean; gitEnv: boolean } {
   let i = 0
   let viaXargs = false
+  // A `GIT_*` variable set for it (`GIT_CONFIG_*`, `GIT_DIR`, …).
+  let gitEnv = false
   for (;;) {
-    while (i < words.length && /^\w+=/.test(words[i].text)) i++
+    while (i < words.length && /^\w+=/.test(words[i].text)) {
+      if (words[i].text.startsWith('GIT_')) gitEnv = true
+      i++
+    }
     const w = words[i]?.text.replace(/^\\/, '') ?? ''
     const name = basename(w)
-    if (['command', 'nohup', 'exec', 'builtin'].includes(name)) i++
-    else if (name === 'time') {
+    if (['nohup', 'builtin'].includes(name)) i++
+    else if (name === 'command') {
+      i++
+      while (['-p', '-v', '-V', '--'].includes(words[i]?.text ?? '')) i++
+    } else if (name === 'exec') {
+      i++
+      while (words[i]?.text.startsWith('-')) {
+        if (words[i].text === '-a') i++
+        i++
+      }
+    } else if (name === 'time') {
       i++
       while (words[i]?.text.startsWith('-')) i++
     } else if (name === 'env' || name === 'stdbuf' || name === 'nice' || name === 'ionice') {
+      // The options that take a value, per wrapper.
+      const withValue = { env: ['-u', '-C', '-S'], stdbuf: ['-i', '-o', '-e'], nice: ['-n'], ionice: ['-c', '-n'] }[name]
       i++
       while (words[i] && (words[i].text.startsWith('-') || /^\w+=/.test(words[i].text))) {
-        if (['-u', '-n', '-c', '-C', '-S'].includes(words[i].text)) i++
+        if (words[i].text.startsWith('GIT_') && /^\w+=/.test(words[i].text)) gitEnv = true
+        if (withValue.includes(words[i].text)) i++
         i++
       }
     } else if (name === 'timeout') {
@@ -418,12 +451,13 @@ function unwrap(words: Word[]): { name: string; args: Word[]; viaXargs: boolean;
     } else if (name === 'xargs') {
       viaXargs = true
       i++
+      const longWithValue = ['--max-args', '--max-lines', '--max-procs', '--delimiter', '--eof', '--arg-file', '--process-slot-var']
       while (words[i]?.text.startsWith('-')) {
-        if (/^-[IdEsnLPa]$/.test(words[i].text)) i++
+        if (/^-[IdEsnLPa]$/.test(words[i].text) || longWithValue.includes(words[i].text)) i++
         i++
       }
     } else {
-      return { name, args: words.slice(i + 1), viaXargs, known: (words[i]?.known ?? false) && name !== '' }
+      return { name, args: words.slice(i + 1), viaXargs, known: (words[i]?.known ?? false) && name !== '', gitEnv }
     }
   }
 }
@@ -505,17 +539,22 @@ export default function (pi: any) {
         !DEVICES.has(w.text) && (!w.known || cwd === null || isProtected(where(cwd, w.text)))
       if (appends.some(appendAsks)) return ask
       if (words.length === 0) continue
-      const { name, args, viaXargs, known } = unwrap(words)
+      const { name, args, viaXargs, known, gitEnv } = unwrap(words)
       // A program named by an expansion (`$(echo rm)`, `$X`): unknown.
       if (!known) return ask
+      // `GIT_CONFIG_*`, `GIT_DIR`, …: configuration or a repository not judged.
+      if (gitEnv) return ask
       const flags = args.filter((a) => a.text.startsWith('-')).map((a) => a.text)
       const operands = args.filter((a) => !a.text.startsWith('-'))
       if (name === 'cd' || name === 'pushd' || name === 'popd') {
         // Followed only when it surely applies to what comes next: a literal
         // directory that exists, not in a pipeline or the background (a
         // subshell), not before `||` (that runs if it failed).
+        // bash's `cd` is logical (`link/..` is where `link` sits), the
+        // kernel's paths are not: follow it only where they agree.
         const to = operands[0]
-        const dir = to && to.known && cwd !== null && name === 'cd' ? where(cwd, to.text) : null
+        const physical = to && to.known && cwd !== null && name === 'cd' ? where(cwd, to.text) : null
+        const dir = physical !== null && resolve(cwd!, to!.text) === physical ? physical : null
         const sure = dir !== null && isDir(dir) && !piped && after !== '&' && after !== '||'
         cwd = sure ? dir : null
         continue
@@ -536,21 +575,41 @@ export default function (pi: any) {
       }
       if (viaXargs && ['mv', 'cp', 'dd', 'tee', 'git'].includes(name)) return ask
       if (SHELLS.has(name)) {
-        const script = args.findIndex((a) => a.text === '-c' || /^-\w*c$/.test(a.text))
-        if (script >= 0) {
-          const body = args[script + 1]
+        // Options as bash reads them: `-c` anywhere in a cluster (`-xc`,
+        // `-cx`), `-o`/`-O` take a value, `--` ends them; the first operand
+        // is the script (with `-c`) or its file.
+        let k = 0
+        let commandString = false
+        for (; k < args.length; k++) {
+          const t = args[k].text
+          if (t === '--') {
+            k++
+            break
+          }
+          if (!(t.startsWith('-') || t.startsWith('+')) || t.length < 2) break
+          if (['-o', '+o', '-O', '+O'].includes(t)) k++
+          else if (t.startsWith('-') && !t.startsWith('--') && t.includes('c')) commandString = true
+        }
+        const body = args[k]
+        if (commandString) {
           if (!body || !body.known || cwd === null) return ask
           const inner = check(body.text, cwd)
           if (inner.ask) return ask
           creates.push(...inner.creates)
-        } else if (operands.length === 0) return ask // it reads its script from stdin
+        } else if (!body) return ask // it reads its script from stdin
         continue
       }
       if (name === 'find') {
         const texts = args.map((a) => a.text)
         if (texts.includes('-delete')) return ask
-        const exec = texts.findIndex((t) => ['-exec', '-execdir', '-ok', '-okdir'].includes(t))
-        if (exec >= 0 && (!args[exec + 1]?.known || DELETERS.has(basename(texts[exec + 1] ?? '')))) return ask
+        // Every `-exec`: a deleter, a shell or anything it cannot name asks.
+        for (let k = 0; k < texts.length; k++) {
+          if (!['-exec', '-execdir', '-ok', '-okdir'].includes(texts[k])) continue
+          const program = args[k + 1]
+          if (!program?.known) return ask
+          const run = basename(program.text)
+          if (DELETERS.has(run) || SHELLS.has(run) || ['eval', 'xargs', 'env', 'sudo'].includes(run)) return ask
+        }
         continue
       }
       if ((name === 'chmod' || name === 'chown') && flags.some((f) => /^-\w*R/.test(f) || f === '--recursive')) return ask
@@ -595,14 +654,28 @@ export default function (pi: any) {
       }
       if (name === 'rsync' && flags.some((f) => f.startsWith('--delete') || f === '--remove-source-files')) return ask
       if (name === 'curl' || name === 'wget') {
-        const options = name === 'curl' ? ['-o', '--output'] : ['-O', '--output-document']
+        // Where it writes: `-o FILE`, `-oFILE`, `-sSLo FILE`, `--output[=]FILE`
+        // (wget: `-O`, `--output-document`; its log `-o`, `--output-file`).
+        // `curl -O` names the file from the URL.
+        const short = name === 'curl' ? ['o'] : ['O', 'o']
+        const long = name === 'curl' ? ['--output'] : ['--output-document', '--output-file']
+        if (
+          name === 'curl' &&
+          args.some((a) => a.text === '--remote-name' || a.text === '--remote-name-all' || (/^-[^-]/.test(a.text) && a.text.includes('O')))
+        )
+          return ask
         for (let k = 0; k < args.length; k++) {
           const a = args[k]
           let value: Word | undefined
-          if (options.includes(a.text)) value = args[k + 1]
-          else {
-            const joined = options.find((o) => a.text.startsWith(o + '='))
-            if (joined) value = { text: a.text.slice(joined.length + 1), known: a.known }
+          const joined = long.find((o) => a.text.startsWith(o + '='))
+          if (long.includes(a.text)) value = args[k + 1]
+          else if (joined) value = { text: a.text.slice(joined.length + 1), known: a.known }
+          else if (/^-[^-]/.test(a.text)) {
+            const pos = [...a.text.slice(1)].findIndex((c) => short.includes(c))
+            if (pos >= 0) {
+              const rest = a.text.slice(2 + pos)
+              value = rest === '' ? args[k + 1] : { text: rest, known: a.known }
+            }
           }
           if (value && value.text !== '-' && target(value)) return ask
         }
@@ -627,6 +700,11 @@ export default function (pi: any) {
     const flags = new Set(rest.filter((a) => a.startsWith('-')))
     const paths = rest.filter((a) => !a.startsWith('-'))
     switch (sub) {
+      case 'config': {
+        // Writing configuration: an alias or a hook path can run a shell.
+        const reads = ['--get', '--get-all', '--get-regexp', '--list', '-l', '--show-origin']
+        return !(reads.some((r) => flags.has(r)) || (flags.size === 0 && paths.length <= 1))
+      }
       case 'reset':
         return flags.has('--hard') || flags.has('--merge') || flags.has('--keep')
       case 'clean':

@@ -434,5 +434,114 @@ fn trailing_slashes_do_not_hide_a_program_or_a_landing() {
     let p = Project::new();
     assert!(p.run("/bin/rm/ owner.txt"));
     assert_eq!(super::shell::basename("dir/"), "dir");
-    assert_eq!(super::shell::basename("/"), "/");
+    assert_eq!(super::shell::basename("/"), "");
+}
+
+// -- the parity review of #5: holes both gates had --------------------------
+
+#[test]
+fn a_cd_through_a_symlink_is_not_followed() {
+    let p = Project::new();
+    let link = p.dir.path().join("toscr");
+    std::fs::create_dir(p.scratch.join("d")).unwrap();
+    std::os::unix::fs::symlink(p.scratch.join("d"), &link).unwrap();
+    // bash's `cd toscr/..` lands back in the project; the kernel's path
+    // would be the scratch folder.
+    for command in [
+        "cd toscr/.. && rm owner.txt",
+        "cd toscr && cd .. && rm owner.txt",
+    ] {
+        assert!(p.run(command), "should ask: {command}");
+    }
+}
+
+#[test]
+fn a_dangling_symlink_is_where_it_points() {
+    let p = Project::new();
+    let root = p.dir.path();
+    std::fs::create_dir_all(root.join(".git/hooks")).unwrap();
+    std::os::unix::fs::symlink(root.join(".git/hooks/pre-commit"), root.join("hooklink")).unwrap();
+    std::os::unix::fs::symlink(root.join(".env.local"), root.join("envlink")).unwrap();
+    for command in [
+        "echo 'rm -rf ~' > hooklink",
+        "echo x >> hooklink",
+        "echo X=1 > envlink",
+    ] {
+        assert!(p.run(command), "should ask: {command}");
+    }
+    assert!(p.write("write_file", "hooklink"));
+}
+
+#[test]
+fn a_backslash_newline_joins_the_lines() {
+    let p = Project::new();
+    for command in [
+        "r\\\nm owner.txt",
+        "rm \\\nowner.txt",
+        "echo \"a\\\nb\" > owner.txt",
+    ] {
+        assert!(p.run(command), "should ask: {command:?}");
+    }
+}
+
+#[test]
+fn wrappers_and_shell_options_are_read_as_their_programs_do() {
+    let p = Project::new();
+    for command in [
+        "command -p rm owner.txt",
+        "exec -a x rm owner.txt",
+        "stdbuf -o L rm owner.txt",
+        "echo owner.txt | xargs --max-args 1 rm",
+        "bash -c -- 'rm owner.txt'",
+        "bash -c -x 'rm owner.txt'",
+        "bash -xc 'rm owner.txt'",
+        "echo rm owner.txt | bash -o pipefail",
+        r"find . -exec echo {} \; -exec rm {} \;",
+        r"find . -name x -exec sh -c 'rm owner.txt' \;",
+    ] {
+        assert!(p.run(command), "should ask: {command}");
+    }
+    assert!(
+        !p.run("bash -o pipefail build.sh"),
+        "a script file is not read"
+    );
+}
+
+#[test]
+fn combined_output_flags_are_seen() {
+    let p = Project::new();
+    for command in [
+        "curl -sSLo owner.txt https://example.com",
+        "curl -oowner.txt https://example.com",
+        "wget -qO owner.txt https://example.com",
+        "wget -o owner.txt https://example.com",
+        "curl -O https://example.com/owner.txt",
+    ] {
+        assert!(p.run(command), "should ask: {command}");
+    }
+    assert!(!p.run("curl -sSLo fresh.html https://example.com"));
+}
+
+#[test]
+fn git_configuration_however_it_is_given_asks() {
+    let p = Project::new();
+    for command in [
+        "git config alias.x '!rm owner.txt'",
+        "git config --global core.hooksPath /tmp/h",
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='!rm a' git x",
+        "env GIT_DIR=/elsewhere git status",
+    ] {
+        assert!(p.run(command), "should ask: {command}");
+    }
+    for command in [
+        "git config --get user.name",
+        "git config user.name",
+        "git config --list",
+    ] {
+        assert!(!p.run(command), "should be free: {command}");
+    }
+    assert!(
+        p.write("edit_file", ".git"),
+        "a .git file (a worktree's gitdir)"
+    );
 }

@@ -185,3 +185,43 @@ test('hardened: the ways through the rules the reviews found', async () => {
   assert.equal(await block({ toolName: 'write', input: { path: '~/.zshrc' } }), true)
   assert.equal(await block({ toolName: 'edit', input: { path: '@notes.md' } }), true)
 })
+
+test('the parity review of #5: holes both gates had', async () => {
+  const { run, write, project } = setup()
+  const S = scratch
+  mkdirSync(join(S, 'd'), { recursive: true })
+  symlinkSync(join(S, 'd'), join(project, 'toscr'))
+  mkdirSync(join(project, '.git/hooks'), { recursive: true })
+  symlinkSync(join(project, '.git/hooks/pre-commit'), join(project, 'hooklink'))
+  symlinkSync(join(project, '.env.local'), join(project, 'envlink'))
+  for (const command of [
+    // bash's `cd` is logical; the kernel's paths are not.
+    'cd toscr/.. && rm owner.txt', 'cd toscr && cd .. && rm owner.txt',
+    // A dangling symlink is where it points.
+    "echo 'rm -rf ~' > hooklink", 'echo x >> hooklink', 'echo X=1 > envlink',
+    // A backslash-newline joins the lines.
+    'r\\\nm owner.txt', 'rm \\\nowner.txt', 'echo "a\\\nb" > owner.txt',
+    // Wrappers and shell options.
+    'command -p rm owner.txt', 'exec -a x rm owner.txt', 'stdbuf -o L rm owner.txt',
+    'echo owner.txt | xargs --max-args 1 rm', "bash -c -- 'rm owner.txt'", "bash -c -x 'rm owner.txt'",
+    "bash -xc 'rm owner.txt'", 'echo rm owner.txt | bash -o pipefail',
+    'find . -exec echo {} \\; -exec rm {} \\;', "find . -name x -exec sh -c 'rm owner.txt' \\;",
+    // Combined output flags.
+    'curl -sSLo owner.txt https://example.com', 'curl -oowner.txt https://example.com',
+    'wget -qO owner.txt https://example.com', 'wget -o owner.txt https://example.com', 'curl -O https://example.com/owner.txt',
+    // git configuration, however it is given.
+    "git config alias.x '!rm owner.txt'", 'git config --global core.hooksPath /tmp/h',
+    "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0='!rm a' git x", 'env GIT_DIR=/elsewhere git status',
+    'env -i rm existing.txt',
+  ]) {
+    assert.equal(await run(command), true, `should ask: ${JSON.stringify(command)}`)
+  }
+  for (const command of [
+    'bash -o pipefail build.sh', 'curl -sSLo fresh.html https://example.com',
+    'git config --get user.name', 'git config user.name', 'git config --list',
+  ]) {
+    assert.equal(await run(command), false, `should be free: ${JSON.stringify(command)}`)
+  }
+  assert.equal(await write('write', 'hooklink'), true)
+  assert.equal(await write('edit', '.git'), true, 'a .git file (a worktree gitdir)')
+})

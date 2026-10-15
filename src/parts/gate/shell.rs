@@ -273,12 +273,16 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                 let body = &s[i + 1..end];
                 cur.runs.extend(substitutions(body)?);
                 let w = word.get_or_insert_with(Word::empty);
-                w.text.extend(body.iter());
+                // Inside double quotes a backslash-newline joins lines too.
+                w.text
+                    .push_str(&body.iter().collect::<String>().replace("\\\n", ""));
                 if body.iter().any(|c| *c == '$' || *c == '`') {
                     w.known = false;
                 }
                 i = end;
             }
+            // A backslash before a newline joins the lines (`r\⏎m` is `rm`).
+            '\\' if s.get(i + 1) == Some(&'\n') => i += 1,
             '\\' => {
                 let w = word.get_or_insert_with(Word::empty);
                 if let Some(next) = s.get(i + 1) {
@@ -462,6 +466,8 @@ pub(super) struct Program<'a> {
     pub via_xargs: bool,
     /// The program's word is literal text (not `$X`, `$(…)`, a glob).
     pub known: bool,
+    /// A `GIT_*` variable is set for it (`GIT_CONFIG_*`, `GIT_DIR`, …).
+    pub git_env: bool,
 }
 
 fn base(text: &str) -> String {
@@ -471,23 +477,37 @@ fn base(text: &str) -> String {
 /// The last path component, trailing slashes ignored (as Node's `basename`).
 pub(super) fn basename(text: &str) -> String {
     let trimmed = text.trim_end_matches('/');
-    if trimmed.is_empty() && !text.is_empty() {
-        return "/".into();
-    }
     trimmed.rsplit('/').next().unwrap_or(trimmed).to_owned()
 }
 
 pub(super) fn unwrap(words: &[Word]) -> Program<'_> {
     let mut i = 0;
     let mut via_xargs = false;
+    let mut git_env = false;
     let text = |i: usize| words.get(i).map(|w| w.text.as_str()).unwrap_or("");
     loop {
         while i < words.len() && is_assignment(&words[i].text) {
+            git_env |= words[i].text.starts_with("GIT_");
             i += 1;
         }
         let name = base(text(i));
         match name.as_str() {
-            "command" | "nohup" | "exec" | "builtin" => i += 1,
+            "nohup" | "builtin" => i += 1,
+            "command" => {
+                i += 1;
+                while ["-p", "-v", "-V", "--"].contains(&text(i)) {
+                    i += 1;
+                }
+            }
+            "exec" => {
+                i += 1;
+                while text(i).starts_with('-') {
+                    if text(i) == "-a" {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
             "time" => {
                 i += 1;
                 while text(i).starts_with('-') {
@@ -497,7 +517,15 @@ pub(super) fn unwrap(words: &[Word]) -> Program<'_> {
             "env" | "stdbuf" | "nice" | "ionice" => {
                 i += 1;
                 while i < words.len() && (text(i).starts_with('-') || is_assignment(text(i))) {
-                    if ["-u", "-n", "-c", "-C", "-S"].contains(&text(i)) {
+                    git_env |= text(i).starts_with("GIT_") && is_assignment(text(i));
+                    // The options that take a value, per wrapper.
+                    let with_value: &[&str] = match name.as_str() {
+                        "env" => &["-u", "-C", "-S"],
+                        "stdbuf" => &["-i", "-o", "-e"],
+                        "nice" => &["-n"],
+                        _ => &["-c", "-n"],
+                    };
+                    if with_value.contains(&text(i)) {
                         i += 1;
                     }
                     i += 1;
@@ -518,7 +546,17 @@ pub(super) fn unwrap(words: &[Word]) -> Program<'_> {
                 i += 1;
                 while text(i).starts_with('-') {
                     let t = text(i);
-                    if t.len() == 2 && "IdEsnLPa".contains(&t[1..]) {
+                    let long_with_value = [
+                        "--max-args",
+                        "--max-lines",
+                        "--max-procs",
+                        "--delimiter",
+                        "--eof",
+                        "--arg-file",
+                        "--process-slot-var",
+                    ]
+                    .contains(&t);
+                    if (t.len() == 2 && "IdEsnLPa".contains(&t[1..])) || long_with_value {
                         i += 1;
                     }
                     i += 1;
@@ -530,6 +568,7 @@ pub(super) fn unwrap(words: &[Word]) -> Program<'_> {
                     name,
                     args: words.get(i + 1..).unwrap_or(&[]),
                     via_xargs,
+                    git_env,
                 }
             }
         }
