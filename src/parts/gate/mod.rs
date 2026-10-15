@@ -542,7 +542,8 @@ impl Rules {
                 }
                 continue;
             }
-            if program.via_xargs && ["mv", "cp", "dd", "tee", "git"].contains(&name) {
+            // What `xargs` runs gets arguments it does not show: readers only.
+            if program.via_xargs && !READS.contains(&name) {
                 return ASK;
             }
             if SHELLS.contains(&name) {
@@ -905,7 +906,7 @@ impl Rules {
                 continue;
             }
             if name == "git" {
-                if !git_free(args) {
+                if !git_free(args, cwd.as_ref().map(|h| h.physical.as_path())) {
                     return ASK;
                 }
                 continue;
@@ -941,6 +942,13 @@ impl Rules {
             // `uniq IN OUT` writes OUT; `tar -cf FILE` writes FILE.
             if name == "uniq" && operands.len() >= 2 && target(operands[1], &mut creates) {
                 return ASK;
+            }
+            if name == "zip" {
+                if let Some(archive) = operands.first() {
+                    if target(archive, &mut creates) {
+                        return ASK;
+                    }
+                }
             }
             if name == "tar" {
                 if let Some(file) = tar_file(args) {
@@ -1013,8 +1021,8 @@ fn allowed(name: &str, args: &[Word], operands: &[&Word], flags: &[&str]) -> boo
         | "readlink" | "date" | "printenv" | "whoami" | "id" | "uname" | "hostname" | "cut"
         | "tr" | "comm" | "diff" | "cmp" | "tree" | "md5sum" | "sha1sum" | "sha256sum"
         | "shasum" | "xxd" | "od" | "hexdump" | "nl" | "column" | "fold" | "expand"
-        | "unexpand" | "seq" | "sleep" | "jq" | "yq" | "bat" | "less" | "more" | "wait"
-        | "jobs" | "history" | "env" | "uniq" | "mktemp" | "command" => true,
+        | "unexpand" | "seq" | "sleep" | "jq" | "yq" | "wait" | "jobs" | "uniq" | "mktemp"
+        | "command" => true,
         // Shell state.
         "export" | "unset" | "set" | "local" | "readonly" | "declare" | "typeset" | "read"
         | "shift" | "break" | "continue" | "return" | "exit" => true,
@@ -1022,37 +1030,67 @@ fn allowed(name: &str, args: &[Word], operands: &[&Word], flags: &[&str]) -> boo
         "mkdir" | "touch" => true,
         // Permissions of one file at a time (recursive ones ask).
         "chmod" | "chown" => !(has("--recursive") || cluster('R')),
-        "sort" => !(has("--output") || cluster('o')),
-        "sed" => {
-            let in_place = has("--in-place") || cluster('i');
-            // A `w file` command in the script writes a file.
-            let writes = operands.iter().any(|w| {
-                w.text.contains("/w ") || w.text.starts_with("w ") || w.text.contains(";w ")
-            });
-            !in_place && !writes
-        }
+        // Output to a file, or a program to compress with.
+        "sort" => !(has("--output") || cluster('o') || has("--compress-program")),
+        "sed" => sed_free(args),
         "awk" | "gawk" | "mawk" => {
+            // Options other than a separator and variables can bring in a
+            // program not read here (`-f`, `--source`, …).
+            let mut i = 0;
+            let mut readable = true;
+            while let Some(a) = args.get(i) {
+                match a.text.as_str() {
+                    "-F" | "-v" => i += 2,
+                    t if t.starts_with("-F") || t.starts_with("-v") => i += 1,
+                    "--" => {
+                        i += 1;
+                        break;
+                    }
+                    t if t.starts_with('-') => {
+                        readable = false;
+                        break;
+                    }
+                    _ => break,
+                }
+            }
             // Its program can write files and run commands.
-            let program = args
-                .iter()
-                .find(|w| !w.text.starts_with('-'))
-                .map(|w| w.text.as_str())
-                .unwrap_or("");
-            !has("-f")
-                && !["system", ">", "|", "getline"]
-                    .iter()
-                    .any(|t| program.contains(t))
+            let program = args.get(i).filter(|w| w.known).map(|w| w.text.as_str());
+            readable
+                && program.is_some_and(|p| {
+                    !["system", ">", "|", "getline", "fflush", "close"]
+                        .iter()
+                        .any(|t| p.contains(t))
+                })
         }
-        // Listing or creating an archive (its file judged by the caller).
+        // Listing or creating an archive (its file judged by the caller);
+        // never removing files or running a program.
         "tar" => {
             let mode = args
                 .first()
                 .map(|w| w.text.trim_start_matches('-'))
                 .unwrap_or("");
-            (mode.contains('t') || has("--list") || creates_archive(args)) && !mode.contains('x')
+            let runs = [
+                "--remove-files",
+                "--to-command",
+                "--use-compress-program",
+                "--checkpoint-action",
+                "--info-script",
+                "--new-volume-script",
+                "--rmt-command",
+                "--rsh-command",
+            ]
+            .iter()
+            .any(|o| has(o))
+                || flags.contains(&"-I")
+                || flags.contains(&"-F");
+            (mode.contains('t') || has("--list") || creates_archive(args))
+                && !mode.contains('x')
+                && !runs
         }
         "unzip" => cluster('l') || cluster('t') || cluster('v'),
-        "zip" => !cluster('m') && !has("--move"),
+        // Its archive is judged by the caller; never moving files in or
+        // running a test command.
+        "zip" => !cluster('m') && !has("--move") && !has("-TT") && !has("--unzip-command"),
         // Building and testing: they run the owner's code.
         "cargo" => {
             let builds = matches!(
@@ -1079,6 +1117,13 @@ fn allowed(name: &str, args: &[Word], operands: &[&Word], flags: &[&str]) -> boo
                     | "verify-project"
             );
             let lints = first == "clippy" && !has("--fix");
+            // Pointed at code elsewhere: not the owner's build.
+            if has("--manifest-path")
+                || has("--config")
+                || flags.iter().any(|f| f.starts_with("-Z"))
+            {
+                return false;
+            }
             let version = operands.is_empty()
                 && flags
                     .iter()
@@ -1086,35 +1131,94 @@ fn allowed(name: &str, args: &[Word], operands: &[&Word], flags: &[&str]) -> boo
             builds || lints || version
         }
         "go" => {
-            matches!(
-                first,
-                "build" | "test" | "vet" | "fmt" | "run" | "list" | "env" | "version"
-            ) || (first == "mod"
+            // `go run file.go` runs that file; `-C` builds elsewhere.
+            let elsewhere = has("-C") || operands.iter().any(|w| w.text.ends_with(".go"));
+            !elsewhere
                 && matches!(
-                    operands.get(1).map(|w| w.text.as_str()),
-                    Some("graph" | "why" | "verify" | "download")
-                ))
+                    first,
+                    "build" | "test" | "vet" | "fmt" | "run" | "list" | "env" | "version"
+                )
+                || (first == "mod"
+                    && matches!(
+                        operands.get(1).map(|w| w.text.as_str()),
+                        Some("graph" | "why" | "verify" | "download")
+                    ))
         }
         "npm" | "pnpm" | "yarn" => {
+            !(has("--prefix") || has("-C") || has("--dir"))
+                && matches!(
+                    first,
+                    "test"
+                        | "t"
+                        | "run"
+                        | "run-script"
+                        | "ls"
+                        | "list"
+                        | "view"
+                        | "info"
+                        | "outdated"
+                        | "why"
+                )
+                || (first == "audit" && !operands.iter().any(|w| w.text == "fix"))
+        }
+        // The owner's Makefile, here (not `-f`/`-C` elsewhere).
+        "make" | "gmake" => {
+            ![
+                "-f",
+                "--file",
+                "--makefile",
+                "-C",
+                "--directory",
+                "-I",
+                "--include-dir",
+            ]
+            .iter()
+            .any(|o| has(o) || flags.iter().any(|f| f.starts_with(o) && o.len() == 2))
+                && !operands.iter().any(|w| {
+                    ["install", "uninstall", "clean", "distclean"].contains(&w.text.as_str())
+                })
+        }
+        "pytest" | "ctest" | "tsc" | "eslint" | "prettier" | "vitest" | "jest" | "mypy" => {
+            // Not rewriting files, nor loading plugins or configuration from
+            // elsewhere.
+            ![
+                "--write",
+                "--fix",
+                "-p",
+                "-c",
+                "--rootdir",
+                "--config",
+                "--config-file",
+                "--confcutdir",
+            ]
+            .iter()
+            .any(|o| has(o))
+        }
+        // `npx tsc` and the like: the checkers above.
+        "npx" => {
+            let tool = operands.first().map(|w| w.text.as_str()).unwrap_or("");
+            ["tsc", "eslint", "prettier", "vitest", "jest"].contains(&tool)
+                && !["--write", "--fix", "-c", "--config"]
+                    .iter()
+                    .any(|o| has(o))
+        }
+        "uv" | "poetry" => {
+            first == "run"
+                && matches!(
+                    operands.get(1).map(|w| w.text.as_str()),
+                    Some("pytest" | "mypy")
+                )
+                && !["-p", "-c", "--rootdir"].iter().any(|o| has(o))
+        }
+        "rustfmt" => has("--check"),
+        // GitHub's CLI, reading.
+        "gh" => {
+            let what = operands.get(1).map(|w| w.text.as_str()).unwrap_or("");
             matches!(
                 first,
-                "test"
-                    | "t"
-                    | "run"
-                    | "run-script"
-                    | "ls"
-                    | "list"
-                    | "view"
-                    | "info"
-                    | "outdated"
-                    | "why"
-            ) || (first == "audit" && !operands.iter().any(|w| w.text == "fix"))
-        }
-        "make" | "gmake" => !operands
-            .iter()
-            .any(|w| ["install", "uninstall", "clean", "distclean"].contains(&w.text.as_str())),
-        "pytest" | "ctest" | "tsc" | "eslint" | "prettier" if !has("--write") && !has("--fix") => {
-            true
+                "pr" | "issue" | "run" | "release" | "repo" | "workflow"
+            ) && matches!(what, "view" | "list" | "diff" | "checks" | "status")
+                && !has("--web")
         }
         "rustc" | "rustup" | "gcc" | "clang" | "cc" => {
             flags.iter().any(|f| ["--version", "-V", "-v"].contains(f)) && operands.is_empty()
@@ -1123,6 +1227,100 @@ fn allowed(name: &str, args: &[Word], operands: &[&Word], flags: &[&str]) -> boo
         }
         _ => false,
     }
+}
+
+/// Whether a `sed` call only reads: no `-i`, no script file, and every
+/// command of its script one that prints, deletes, quits or substitutes
+/// (`s///` without the `w` or `e` flags).
+fn sed_free(args: &[Word]) -> bool {
+    let mut scripts: Vec<&str> = Vec::new();
+    let mut i = 0;
+    let mut explicit = false;
+    while let Some(a) = args.get(i) {
+        let t = a.text.as_str();
+        match t {
+            "-n" | "--quiet" | "--silent" | "-E" | "-r" | "--regexp-extended" | "-s" | "-u"
+            | "-z" | "--posix" => {}
+            "-e" | "--expression" => {
+                match args.get(i + 1).filter(|w| w.known) {
+                    Some(w) => scripts.push(&w.text),
+                    None => return false,
+                }
+                explicit = true;
+                i += 1;
+            }
+            t if t.starts_with('-') => return false,
+            _ if !explicit && scripts.is_empty() => {
+                if !a.known {
+                    return false;
+                }
+                scripts.push(t);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    !scripts.is_empty() && scripts.iter().all(|s| sed_script_reads(s))
+}
+
+fn sed_script_reads(script: &str) -> bool {
+    let chars: Vec<char> = script.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        // Separators and an address (line numbers, `$`, `/re/`, ranges).
+        while i < chars.len() && (chars[i].is_whitespace() || chars[i] == ';') {
+            i += 1;
+        }
+        loop {
+            match chars.get(i) {
+                Some(c) if c.is_ascii_digit() || matches!(c, '$' | ',' | '!' | '~' | '+') => i += 1,
+                Some('/') => {
+                    i += 1;
+                    while i < chars.len() && chars[i] != '/' {
+                        if chars[i] == '\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                _ => break,
+            }
+        }
+        match chars.get(i) {
+            None => break,
+            Some(
+                'p' | 'P' | 'd' | 'D' | 'q' | 'Q' | '=' | 'n' | 'N' | 'g' | 'G' | 'h' | 'H' | 'x'
+                | 'l',
+            ) => i += 1,
+            Some('{' | '}') => i += 1,
+            Some('s') => {
+                let Some(&delim) = chars.get(i + 1) else {
+                    return false;
+                };
+                i += 2;
+                for _ in 0..2 {
+                    while i < chars.len() && chars[i] != delim {
+                        if chars[i] == '\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                while let Some(c) = chars.get(i) {
+                    if matches!(c, 'g' | 'i' | 'I' | 'p' | 'm' | 'M') || c.is_ascii_digit() {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            // `w`, `W`, `e`, `r`, `R`, `a`/`i`/`c` text, `y`, labels: not read here.
+            Some(_) => return false,
+        }
+    }
+    true
 }
 
 /// `tar`'s archive file (`-f FILE`, `-cf FILE`, `cf FILE`, `--file=FILE`).
@@ -1156,7 +1354,7 @@ fn creates_archive(args: &[Word]) -> bool {
 /// that keep them so. Anything else — a subcommand or option not listed, an
 /// abbreviation (`--har`), a cluster (`-qf`), `-c`, a `--git-dir` elsewhere,
 /// an option that runs a command (`-x`, `--upload-pack`, `-O`) — asks.
-fn git_free(args: &[Word]) -> bool {
+fn git_free(args: &[Word], cwd: Option<&Path>) -> bool {
     let mut i = 0;
     while let Some(a) = args.get(i) {
         match a.text.as_str() {
@@ -1349,7 +1547,8 @@ fn git_free(args: &[Word]) -> bool {
             "--date",
         ]),
         "init" => only(&["-q", "--quiet", "-b", "--initial-branch", "--bare"]),
-        "clone" => only(&[
+        "clone" => {
+            only(&[
             "--depth",
             "--branch",
             "-b",
@@ -1363,8 +1562,13 @@ fn git_free(args: &[Word]) -> bool {
             "--origin",
             "-o",
             "--shallow-since",
-        ]),
-        "fetch" => only(&[
+        ])
+                // Into a folder that is not there yet (its last operand, when it names one).
+                && (operands.len() < 2
+                    || cwd.is_some_and(|c| !locate(c, operands[operands.len() - 1]).exists()))
+        }
+        "fetch" => {
+            only(&[
             "--all",
             "--prune",
             "-p",
@@ -1378,8 +1582,12 @@ fn git_free(args: &[Word]) -> bool {
             "--unshallow",
             "--no-tags",
             "--dry-run",
-        ]),
-        "pull" => only(&[
+        ])
+                // A refspec naming a local ref (`src:dst`, `+…`) can overwrite a branch.
+                && !operands.iter().skip(1).any(|r| r.contains(':') || r.starts_with('+'))
+        }
+        "pull" => {
+            only(&[
             "--ff-only",
             "--no-rebase",
             "--rebase",
@@ -1390,7 +1598,10 @@ fn git_free(args: &[Word]) -> bool {
             "--verbose",
             "--no-edit",
             "--tags",
-        ]),
+        ])
+                // A refspec naming a local ref (`src:dst`, `+…`) can overwrite a branch.
+                && !operands.iter().skip(1).any(|r| r.contains(':') || r.starts_with('+'))
+        }
         "push" => {
             only(&[
                 "-u",

@@ -879,3 +879,59 @@ fn a_command_that_writes_nothing_frees_nothing() {
     std::fs::write(p.dir.path().join("report2.md"), "the owner's").unwrap();
     assert!(p.run("rm report2.md"));
 }
+
+// -- the review of #7: tightening and fewer over-asks ------------------------
+
+#[test]
+fn programs_that_could_write_or_run_code_ask() {
+    let p = Project::new();
+    for command in [
+        "less a.md",
+        "sed 's/a/b/w owner.txt' a.md",
+        "sed 's/a/date/e' a.md",
+        "sed -f script.sed a.md",
+        "sed '1r owner.txt' a.md",
+        "awk --source 'BEGIN { system(\"rm owner.txt\") }'",
+        "awk -f prog.awk a.md",
+        "awk '{ printf \"x\" > \"owner.txt\" }' a.md",
+        "sort --compress-program=sh a.md",
+        "tar -czf new.tgz --remove-files sub",
+        "tar -cf new.tar --to-command='rm owner.txt' sub",
+        "zip owner.txt a.md",
+        "zip -TT 'rm owner.txt' new.zip a.md",
+        "cargo run --manifest-path /tmp/x/Cargo.toml",
+        "go run /tmp/agent.go",
+        "make -f /tmp/Makefile",
+        "make -C /tmp/elsewhere",
+        "npm --prefix /tmp/x run build",
+        "pytest -p plugin",
+        "echo owner.txt | xargs ln -sf a.md",
+        "git fetch origin +main:main",
+        "git clone https://example.com/r.git sub",
+    ] {
+        assert!(p.run(command), "should ask: {command}");
+    }
+}
+
+#[test]
+fn harmless_checks_that_used_to_ask_are_free() {
+    let p = Project::new();
+    for command in [
+        "npx tsc --noEmit",
+        "rustfmt --check src/lib.rs",
+        "gh pr view 7",
+        "gh pr list",
+        "gh run list",
+        "uv run pytest",
+        "poetry run pytest -q",
+        "sed -n '1,5p' a.md",
+        "sed -e 's/a/b/g' -e '/^#/d' a.md",
+        "awk -F, '{ print $1 }' a.md",
+        "find . -type f | xargs wc -l",
+        "git clone https://example.com/r.git fresh",
+        "git fetch origin",
+        "tar -czf new.tgz sub",
+    ] {
+        assert!(!p.run(command), "should be free: {command}");
+    }
+}
