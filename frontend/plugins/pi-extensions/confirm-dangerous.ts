@@ -4,35 +4,46 @@
 // frontend attached through yobuild's frontend, the question reaches the
 // terminal or browser.
 //
-// Each shell command is tokenized (quotes, escapes, operators, redirections;
-// the bodies of unquoted `<<WORD` heredocs skipped) and read command by
-// command, keeping track of the directory `cd` moves to: only where the cd
-// surely applies (a literal directory that exists; `( … )` restores the
-// directory after; a cd in a pipeline, in the background or before `||`, or
-// to a missing directory, makes it unknown). What asks:
+// The Rust gate (`yobuild::parts::Gate`) is a port of this one; the two keep
+// the same rules and test cases. (The Rust gate also asks before tools it
+// has no rule for; this one judges `bash`, `write` and `edit` only.)
+//
+// Each shell command is tokenized (words split on spaces, tabs and newlines
+// only, as bash does; quotes, escapes, operators, redirections; the bodies
+// of `<<WORD` heredocs skipped, delimiters with their quotes removed) and
+// read command by command, keeping track of the directory `cd` moves to:
+// only where the cd surely applies (a literal directory that exists;
+// `( … )` restores the directory after; a cd in a pipeline, in the
+// background or before `||`, or to a missing directory, makes it unknown).
+// What asks:
 // - `rm`, `unlink`, `rmdir`, `git rm` (not `--cached`), `xargs` running one
-//   of them, `find … -delete` or `-exec rm …`;
+//   of them, `find … -delete` or `-exec rm …`, `mv` of a file that is not
+//   the agent's (moving it away deletes it where it was);
 // - git: `reset --hard`, `clean` (not `-n`), `checkout` / `restore` of
 //   paths (not `restore --staged`), `checkout -f`, `switch -f` /
 //   `--discard-changes`, `branch -D`, a forced push (`-f`, `--force*`,
-//   `+ref`, `:ref`, `--mirror`, `--delete`), `stash drop` / `clear`;
-// - `mv`, `cp` (also into a directory), `tee` (without `-a`), `dd of=` and
-//   every truncating redirection (`>`, `>|`, `1>`, `2>`, `&>`; not `>>` or
-//   to `/dev/null`) onto a file that exists;
-// - `sudo`, `truncate`, `shred`, `mkfs`, recursive `chmod` / `chown`;
+//   `+ref`, `:ref`, `--mirror`, `--delete`), `stash drop` / `clear`, and any
+//   `git -c` (an alias can run a shell);
+// - `mv`, `cp` (also into a directory), `tee` (without `-a`), `dd of=`,
+//   `ln -f`, `install`, `curl -o` / `wget -O` and every truncating
+//   redirection (`>`, `>|`, `1>`, `2>`, `&>`, `>&file`; not `>>` or to
+//   `/dev/null`) onto a file that exists; `rsync --delete`;
+// - `sudo`, `truncate`, `shred`, `mkfs`, recursive `chmod` / `chown`, a
+//   shell reading its script from stdin (`| sh`, `bash <<EOF`);
 // - `bash -c` / `sh -c` scripts and `eval` of literal text, read the same
 //   way, and what command substitutions run (`$( … )`, backquotes, `<( … )`,
 //   `>( … )`; also inside double quotes and unquoted heredoc bodies, which
 //   the shell expands), each where its command runs; `eval` of unknown text;
-// - a whole-file write over a file that exists, and any change to `.env`
-//   or `.git/`;
-// - any path it cannot know: `$VAR`, `~`, backquotes, globs, or after a
-//   `cd` it cannot follow.
+// - a whole-file write over a file that exists, and any change (appends
+//   too) to `.env*` or inside `.git/`, in any case;
+// - anything it cannot know: a path with `$VAR`, `~`, backquotes, globs, or
+//   after a `cd` it cannot follow; a program named by an expansion
+//   (`$(echo rm)`); tool arguments that are not strings, a `~` or `@` path.
 // What does not: files the agent created in this session (by a write, a
 // redirection, `tee`, `cp` or `mv` it was allowed to run), anything in its
 // scratch folder when the host names one in `YOBUILD_SCRATCH`, and targeted
-// edits (`edit`) of existing files. Paths are compared with symlinks
-// resolved (on macOS /tmp is /private/tmp).
+// edits (`edit`) of existing files. Paths are resolved as the kernel does:
+// symlinks followed before `..` (on macOS /tmp is /private/tmp).
 //
 // Not a sandbox: a script or program can still change files in ways a
 // command line does not show (`sed -i`, `python3 -c …`, a Makefile). For a
@@ -41,7 +52,11 @@
 import { existsSync, realpathSync, statSync } from 'node:fs'
 import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
 
-const PROTECTED = /(^|\/)(\.env|\.git\/)/
+/** A path with a component starting `.env`, or inside `.git/`, in any case. */
+function isProtected(path: string): boolean {
+  const parts = path.split('/').filter((p) => p !== '').map((p) => p.toLowerCase())
+  return parts.some((p) => p.startsWith('.env')) || parts.slice(0, -1).includes('.git')
+}
 /** Where a redirection is harmless. */
 const DEVICES = new Set(['/dev/null', '/dev/stdout', '/dev/stderr', '/dev/tty'])
 const ALWAYS = new Set(['sudo', 'doas', 'truncate', 'shred', 'mkfs', 'wipefs'])
@@ -68,7 +83,7 @@ type Word = { text: string; known: boolean }
  * also inside double quotes and unquoted heredoc bodies), and the operator
  * after it (`;`, `\n`, `&&`, `||`, `|`, `&`, or `end`).
  */
-type Simple = { words: Word[]; truncates: Word[]; runs: string[]; after: string }
+type Simple = { words: Word[]; truncates: Word[]; appends: Word[]; runs: string[]; after: string }
 /** A command, or the start / end of a `( … )` subshell. */
 type Item = Simple | 'open' | 'close'
 
@@ -138,7 +153,8 @@ function substitutions(text: string): string[] | null {
       const end = closing(text, i + 1)
       if (end < 0) return null
       const inner = text.slice(i + 2, end)
-      if (text[i + 2] === '(') {
+      // Arithmetic only when `$((` is closed by `))` as one pair.
+      if (text[i + 2] === '(' && closing(text, i + 2) === end - 1) {
         // Arithmetic `$(( … ))`: only what it substitutes runs.
         const nested = substitutions(inner.slice(1, -1))
         if (!nested) return null
@@ -151,6 +167,33 @@ function substitutions(text: string): string[] | null {
 }
 
 /**
+ * A heredoc's delimiter starting at `at`: one shell word with its quotes
+ * removed (`E'O'F` is `EOF`); quoted anywhere, the body is not expanded.
+ */
+function delimiterAt(s: string, at: number): { delimiter: string; quoted: boolean; length: number } | null {
+  let delimiter = ''
+  let quoted = false
+  let i = at
+  while (i < s.length && !' \t\n;&|<>()'.includes(s[i])) {
+    const c = s[i]
+    if (c === "'" || c === '"') {
+      const end = s.indexOf(c, i + 1)
+      if (end < 0) return null
+      delimiter += s.slice(i + 1, end)
+      quoted = true
+      i = end
+    } else if (c === '\\') {
+      if (i + 1 >= s.length) return null
+      delimiter += s[i + 1]
+      quoted = true
+      i++
+    } else delimiter += c
+    i++
+  }
+  return i > at ? { delimiter, quoted, length: i - at } : null
+}
+
+/**
  * Split a command line into simple commands and subshell markers. Quotes,
  * escapes, substitutions and redirections are read as the shell reads
  * them; a heredoc (an unquoted `<<WORD`) has its body skipped, from the
@@ -160,25 +203,29 @@ function substitutions(text: string): string[] | null {
  */
 function parse(s: string): Item[] | null {
   const out: Item[] = []
-  let cur: Simple = { words: [], truncates: [], runs: [], after: 'end' }
+  let cur: Simple = { words: [], truncates: [], appends: [], runs: [], after: 'end' }
   let word: Word | null = null
-  let redirect: 'truncate' | 'skip' | null = null
+  let redirect: 'truncate' | 'append' | 'dup' | 'skip' | null = null
   // Heredocs waiting for the end of the current line, with the command they feed.
   const heredocs: { delimiter: string; strip: boolean; expands: boolean; feeds: Simple }[] = []
   const finishWord = () => {
     if (!word) return
     if (redirect === 'truncate') cur.truncates.push(word)
-    else if (redirect !== 'skip') cur.words.push(word)
+    else if (redirect === 'append') cur.appends.push(word)
+    else if (redirect === 'dup') {
+      // `>&2`, `>&-` duplicate a descriptor; `>&file` truncates the file.
+      if (!(word.known && (word.text === '-' || /^\d+$/.test(word.text)))) cur.truncates.push(word)
+    } else if (redirect !== 'skip') cur.words.push(word)
     redirect = null
     word = null
   }
   const finishCommand = (after: string) => {
     finishWord()
-    if (cur.words.length > 0 || cur.truncates.length > 0 || cur.runs.length > 0) {
+    if (cur.words.length > 0 || cur.truncates.length > 0 || cur.appends.length > 0 || cur.runs.length > 0) {
       cur.after = after
       out.push(cur)
     }
-    cur = { words: [], truncates: [], runs: [], after: 'end' }
+    cur = { words: [], truncates: [], appends: [], runs: [], after: 'end' }
   }
   const unknown = () => {
     word ??= { text: '', known: true }
@@ -263,7 +310,8 @@ function parse(s: string): Item[] | null {
       }
       continue
     }
-    if (/\s/.test(c)) {
+    // bash splits words on spaces and tabs only (newlines are handled above).
+    if (c === ' ' || c === '\t') {
       finishWord()
       continue
     }
@@ -280,7 +328,7 @@ function parse(s: string): Item[] | null {
       if (c === '&' && s[i + 1] === '>') {
         // `&>file`, `&>>file`
         finishWord()
-        redirect = s[i + 2] === '>' ? 'skip' : 'truncate'
+        redirect = s[i + 2] === '>' ? 'append' : 'truncate'
         i += s[i + 2] === '>' ? 2 : 1
         continue
       }
@@ -303,16 +351,10 @@ function parse(s: string): Item[] | null {
         const strip = s[i + 1] === '-'
         if (strip) i++
         while (s[i + 1] === ' ' || s[i + 1] === '\t') i++
-        const m = s.slice(i + 1).match(/^(?:'([^']*)'|"([^"]*)"|([^\s;&|<>()]+))/)
-        if (!m) return null
-        const quoted = m[1] !== undefined || m[2] !== undefined || m[3].includes('\\')
-        heredocs.push({
-          delimiter: m[1] ?? m[2] ?? m[3].replace(/\\/g, ''),
-          strip,
-          expands: !quoted,
-          feeds: cur,
-        })
-        i += m[0].length
+        const read = delimiterAt(s, i + 1)
+        if (!read) return null
+        heredocs.push({ delimiter: read.delimiter, strip, expands: !read.quoted, feeds: cur })
+        i += read.length
         continue
       }
       redirect = 'skip'
@@ -323,10 +365,10 @@ function parse(s: string): Item[] | null {
       if (word && /^\d+$/.test(word.text) && word.known) word = null
       else finishWord()
       if (s[i + 1] === '>') {
-        redirect = 'skip'
+        redirect = 'append'
         i++
       } else if (s[i + 1] === '&') {
-        redirect = 'skip'
+        redirect = 'dup'
         i++
       } else {
         redirect = 'truncate'
@@ -344,7 +386,7 @@ function parse(s: string): Item[] | null {
 }
 
 /** Past wrappers that run another program: their options, and the program. */
-function unwrap(words: Word[]): { name: string; args: Word[]; viaXargs: boolean } {
+function unwrap(words: Word[]): { name: string; args: Word[]; viaXargs: boolean; known: boolean } {
   let i = 0
   let viaXargs = false
   for (;;) {
@@ -376,7 +418,7 @@ function unwrap(words: Word[]): { name: string; args: Word[]; viaXargs: boolean 
         i++
       }
     } else {
-      return { name, args: words.slice(i + 1), viaXargs }
+      return { name, args: words.slice(i + 1), viaXargs, known: (words[i]?.known ?? false) && name !== '' }
     }
   }
 }
@@ -384,7 +426,16 @@ function unwrap(words: Word[]): { name: string; args: Word[]; viaXargs: boolean 
 export default function (pi: any) {
   // Files the agent made this session: it may overwrite or delete them.
   const created = new Set<string>()
-  const where = (cwd: string, file: string) => real(isAbsolute(file) ? resolve(file) : resolve(cwd, file))
+  // As the kernel resolves it: a `..` applies to the path so far with its
+  // symlinks followed (`link/..` is the parent of where `link` points).
+  const where = (cwd: string, file: string) => {
+    let out = isAbsolute(file) ? sep : cwd
+    for (const part of file.split('/')) {
+      if (part === '' || part === '.') continue
+      out = part === '..' ? dirname(real(out)) : resolve(out, part)
+    }
+    return real(out)
+  }
   const free = (path: string) =>
     created.has(path) || (SCRATCH !== undefined && (path === SCRATCH || path.startsWith(SCRATCH + sep)))
   // A path the agent may not touch without asking: one that exists and is not its own.
@@ -413,7 +464,7 @@ export default function (pi: any) {
       if (DEVICES.has(w.text)) return false
       if (!w.known || cwd === null) return true
       const path = where(cwd, w.text)
-      if (owners(path)) return true
+      if (isProtected(path) || owners(path)) return true
       if (!existsSync(path)) creates.push(path)
       return false
     }
@@ -433,7 +484,7 @@ export default function (pi: any) {
         cwd = saved.pop()!
         continue
       }
-      const { words, truncates, runs, after } = item
+      const { words, truncates, appends, runs, after } = item
       const piped = before === '|' || after === '|'
       before = after
       // What its substitutions run, where it runs (a subshell of this directory).
@@ -444,8 +495,14 @@ export default function (pi: any) {
         creates.push(...verdict.creates)
       }
       if (truncates.some(target)) return ask
+      // Appending is free, except to `.env*` or inside `.git/` (a hook).
+      const appendAsks = (w: Word) =>
+        !DEVICES.has(w.text) && (!w.known || cwd === null || isProtected(where(cwd, w.text)))
+      if (appends.some(appendAsks)) return ask
       if (words.length === 0) continue
-      const { name, args, viaXargs } = unwrap(words)
+      const { name, args, viaXargs, known } = unwrap(words)
+      // A program named by an expansion (`$(echo rm)`, `$X`): unknown.
+      if (!known) return ask
       const flags = args.filter((a) => a.text.startsWith('-')).map((a) => a.text)
       const operands = args.filter((a) => !a.text.startsWith('-'))
       if (name === 'cd' || name === 'pushd' || name === 'popd') {
@@ -481,14 +538,14 @@ export default function (pi: any) {
           const inner = check(body.text, cwd)
           if (inner.ask) return ask
           creates.push(...inner.creates)
-        }
+        } else if (operands.length === 0) return ask // it reads its script from stdin
         continue
       }
       if (name === 'find') {
         const texts = args.map((a) => a.text)
         if (texts.includes('-delete')) return ask
         const exec = texts.findIndex((t) => ['-exec', '-execdir', '-ok', '-okdir'].includes(t))
-        if (exec >= 0 && DELETERS.has(basename(texts[exec + 1] ?? ''))) return ask
+        if (exec >= 0 && (!args[exec + 1]?.known || DELETERS.has(basename(texts[exec + 1] ?? '')))) return ask
         continue
       }
       if ((name === 'chmod' || name === 'chown') && flags.some((f) => /^-\w*R/.test(f) || f === '--recursive')) return ask
@@ -498,7 +555,8 @@ export default function (pi: any) {
         continue
       }
       if (name === 'tee') {
-        if (!flags.some((f) => f === '-a' || f === '--append') && operands.some(target)) return ask
+        if (flags.some((f) => f === '-a' || f === '--append') ? operands.some(appendAsks) : operands.some(target))
+          return ask
         continue
       }
       if (name === 'mv' || name === 'cp') {
@@ -507,6 +565,8 @@ export default function (pi: any) {
         const sources = dir ? operands.filter((a) => a !== dir) : operands.slice(0, -1)
         const dest = dir ?? operands.at(-1)
         if (!dest || sources.length === 0) continue
+        // Moving a file away deletes it where it was.
+        if (name === 'mv' && sources.some(deletes)) return ask
         if (!dest.known || cwd === null) return ask
         const destPath = where(cwd, dest.text)
         const landings =
@@ -514,6 +574,33 @@ export default function (pi: any) {
             ? sources.map((s) => ({ text: resolve(destPath, basename(s.text)), known: s.known }))
             : [{ text: destPath, known: true }]
         if (landings.some(target)) return ask
+        continue
+      }
+      if (name === 'ln') {
+        // Forced: it replaces what is at the link's name.
+        if (flags.some((f) => f === '--force' || (!f.startsWith('--') && f.slice(1).includes('f')))) {
+          const dest = operands.at(-1)
+          if (!dest || target(dest)) return ask
+        }
+        continue
+      }
+      if (name === 'install') {
+        if (operands.length >= 2 && target(operands.at(-1)!)) return ask
+        continue
+      }
+      if (name === 'rsync' && flags.some((f) => f.startsWith('--delete') || f === '--remove-source-files')) return ask
+      if (name === 'curl' || name === 'wget') {
+        const options = name === 'curl' ? ['-o', '--output'] : ['-O', '--output-document']
+        for (let k = 0; k < args.length; k++) {
+          const a = args[k]
+          let value: Word | undefined
+          if (options.includes(a.text)) value = args[k + 1]
+          else {
+            const joined = options.find((o) => a.text.startsWith(o + '='))
+            if (joined) value = { text: a.text.slice(joined.length + 1), known: a.known }
+          }
+          if (value && value.text !== '-' && target(value)) return ask
+        }
         continue
       }
       if (name === 'git' && gitRisky(args, cwd)) return ask
@@ -524,7 +611,10 @@ export default function (pi: any) {
   function gitRisky(args: Word[], cwd: string | null): boolean {
     let i = 0
     while (i < args.length && args[i].text.startsWith('-')) {
-      if (['-C', '-c', '--git-dir', '--work-tree', '--namespace'].includes(args[i].text)) i++
+      // Configuration on the command line can define an alias that runs a
+      // shell (`alias.x=!rm …`) or a command git runs: not judged.
+      if (args[i].text === '-c' || args[i].text.startsWith('--config-env')) return true
+      if (['-C', '--git-dir', '--work-tree', '--namespace'].includes(args[i].text)) i++
       i++
     }
     const sub = args[i]?.text ?? ''
@@ -571,16 +661,24 @@ export default function (pi: any) {
     let subject: string | false = false
     let creates: string[] = []
     if (event.toolName === 'bash') {
-      const command = String(event.input?.command ?? '')
-      const verdict = check(command, cwd)
-      creates = verdict.creates
-      if (verdict.ask) subject = `Run \`${command}\`?`
+      const command = event.input?.command
+      if (typeof command !== 'string') subject = `Run \`bash\` with ${JSON.stringify(event.input)}?`
+      else {
+        const verdict = check(command, cwd)
+        creates = verdict.creates
+        if (verdict.ask) subject = `Run \`${command}\`?`
+      }
     } else if (['write', 'edit'].includes(event.toolName)) {
-      const file = String(event.input?.path ?? '')
-      const path = where(cwd, file)
-      if (PROTECTED.test(file)) subject = `Change the protected file ${file}?`
-      else if (event.toolName === 'write' && owners(path)) subject = `Overwrite the existing file ${file}?`
-      else if (event.toolName === 'write' && !existsSync(path)) creates = [path]
+      const file = event.input?.path
+      // `~` and `@` mean something else to pi's file tools.
+      if (typeof file !== 'string' || file === '' || file.startsWith('~') || file.startsWith('@')) {
+        subject = `Run \`${event.toolName}\` with ${JSON.stringify(event.input)}?`
+      } else {
+        const path = where(cwd, file)
+        if (isProtected(file) || isProtected(path)) subject = `Change the protected file ${file}?`
+        else if (event.toolName === 'write' && owners(path)) subject = `Overwrite the existing file ${file}?`
+        else if (event.toolName === 'write' && !existsSync(path)) creates = [path]
+      }
     }
     if (subject) {
       if (!ctx.hasUI) return { block: true, reason: 'needs confirmation, and no one is there to ask' }

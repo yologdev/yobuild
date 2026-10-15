@@ -3,7 +3,7 @@
 // temporary project: owner files exist, a scratch folder is named.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -25,6 +25,7 @@ function setup() {
     project,
     run: async (command) => !!(await handler({ toolName: 'bash', input: { command } }, ctx))?.block,
     write: async (toolName, file) => !!(await handler({ toolName, input: { path: join(project, file) } }, ctx))?.block,
+    block: async (event) => !!(await handler(event, ctx))?.block,
   }
 }
 
@@ -42,13 +43,15 @@ const ASKS = [
   'dd of=existing.txt if=/dev/zero', 'git push origin +main', 'git push origin :main', 'git checkout -f main',
   'git switch --discard-changes main', 'cd $DIR && rm x.txt', 'echo x >existing.txt', '>existing.txt',
   'echo "unclosed > existing.txt', 'cp a.md sub/only.txt',
+  // Moving the owner's file away deletes it where it was.
+  'mkdir -p out && mv a.md out/',
 ]
 const FREE = [
   'ls -la && cat owner.txt', 'echo hi >> owner.txt', 'python3 -m unittest 2>/dev/null', 'make 2>&1 | tail',
   'git status', 'git checkout -b feature', 'git restore --staged owner.txt', 'git push origin main', 'git diff',
   `rm -rf ${scratch}/pages`, `cd ${scratch} && rm -rf pages`, 'echo a > new.md', 'echo hi | tee -a owner.txt',
   'cargo test truncate', 'grep -r truncate src', 'git commit -m "Use sudo-less install"', 'git clean -n',
-  'cat > INSTALL.md <<EOF\nrun: sudo apt install x\nrm -rf /\nEOF', 'mkdir -p out && mv a.md out/',
+  'cat > INSTALL.md <<EOF\nrun: sudo apt install x\nrm -rf /\nEOF',
   'echo "a > b" > fresh.txt', 'cp sub/only.txt .',
 ]
 
@@ -146,4 +149,37 @@ test('writes and edits', async () => {
   assert.equal(await write('write', 'fresh.md'), false, 'its own file again')
   assert.equal(await write('edit', 'owner.txt'), false, 'a targeted edit')
   assert.equal(await write('edit', '.env'), true, 'a protected file')
+})
+
+test('hardened: the ways through the rules the reviews found', async () => {
+  const { run, write, project, block } = setup()
+  const S = scratch
+  for (const command of [
+    'mv owner.txt moved.txt', `mv report.md ${S}/`, `mv sub ${S}/`,
+    '$(echo rm) -f existing.txt', '`echo rm` -f existing.txt', 'X=rm; $X -f existing.txt', 'find . -exec $RM {} \\;',
+    "git -c alias.nuke='!rm -f a.md' nuke", 'git -c user.name=x status', 'git --config-env=core.pager=X log',
+    'echo x >> .env', 'echo x >> .git/hooks/post-checkout', 'tee -a .env.local < x', 'echo x > .env.new',
+    'echo x >&owner.txt', 'echo $((rm owner.txt); ls)', "cat <<E'O'F\nhi\nEOF\nrm owner.txt",
+    'cat <<EOF""\nhi\nEOF\nrm owner.txt', "bash <<'EOF'\nrm owner.txt\nEOF", 'echo rm owner.txt | sh',
+    'ln -sf /dev/null main', 'rsync -a --delete sub/ out/', 'curl -o owner.txt https://example.com',
+    'wget -O owner.txt https://example.com', 'install a.md owner.txt',
+    'cd sub\u0085; echo x > owner.txt', 'cd sub\u000b; echo x > owner.txt', 'cd sub\u00a0; echo x > owner.txt',
+  ]) {
+    assert.equal(await run(command), true, `should ask: ${JSON.stringify(command)}`)
+  }
+  for (const command of ['echo x 2>&1', 'echo x >&2 | cat', 'curl -o fresh.html https://example.com', 'bash build.sh', 'echo x >> notes.log']) {
+    assert.equal(await run(command), false, `should be free: ${JSON.stringify(command)}`)
+  }
+  // The agent's own file may move.
+  assert.equal(await run('echo x > mine.txt'), false)
+  assert.equal(await run('mv mine.txt also-mine.txt'), false)
+  // `..` follows symlinks as the kernel does.
+  symlinkSync(join(project, 'sub'), join(S, 'l'))
+  assert.equal(await run(`rm ${S}/l/../main`), true, 'l/.. is the project')
+  // Protected in any case; arguments it cannot read.
+  assert.equal(await write('edit', '.ENV'), true)
+  assert.equal(await write('edit', '.GIT/config'), true)
+  assert.equal(await block({ toolName: 'bash', input: { command: 123 } }), true)
+  assert.equal(await block({ toolName: 'write', input: { path: '~/.zshrc' } }), true)
+  assert.equal(await block({ toolName: 'edit', input: { path: '@notes.md' } }), true)
 })
