@@ -1176,34 +1176,12 @@ async fn the_gate_judges_a_call_another_extension_rewrote() {
     assert!(errors[0].contains("not allowed"), "{}", errors[0]);
 }
 
-/// A `bash` that fails without running anything.
-struct FailingBash;
-
-#[async_trait::async_trait]
-impl AgentTool for FailingBash {
-    fn name(&self) -> &str {
-        "bash"
-    }
-    fn label(&self) -> &str {
-        "bash"
-    }
-    fn description(&self) -> &str {
-        "fails"
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        json!({ "type": "object" })
-    }
-    async fn execute(
-        &self,
-        _params: serde_json::Value,
-        _ctx: ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        Err(ToolError::Failed("no".into()))
-    }
+/// A `bash` that runs the command with `sh` in its folder; with `fails`, it
+/// then reports an error anyway (the files it made are there).
+struct Shell {
+    dir: PathBuf,
+    fails: bool,
 }
-
-/// A `bash` that runs the command with `sh` in its folder.
-struct Shell(PathBuf);
 
 #[async_trait::async_trait]
 impl AgentTool for Shell {
@@ -1227,9 +1205,12 @@ impl AgentTool for Shell {
         let command = params["command"].as_str().unwrap_or_default();
         let status = std::process::Command::new("sh")
             .args(["-c", command])
-            .current_dir(&self.0)
+            .current_dir(&self.dir)
             .status()
             .map_err(|e| ToolError::Failed(e.to_string()))?;
+        if self.fails {
+            return Err(ToolError::Failed("failed after running".into()));
+        }
         Ok(ToolResult {
             content: vec![Content::Text {
                 text: status.to_string(),
@@ -1264,7 +1245,10 @@ async fn gate_after(dir: &Path, bash: Box<dyn AgentTool>, command: &str) -> yobu
 #[tokio::test]
 async fn a_call_that_ran_makes_its_new_files_the_agents() {
     let dir = tempfile::tempdir().unwrap();
-    let shell = Box::new(Shell(dir.path().to_owned()));
+    let shell = Box::new(Shell {
+        dir: dir.path().to_owned(),
+        fails: false,
+    });
     let gate = gate_after(dir.path(), shell, "echo x > new.txt").await;
     assert!(dir.path().join("new.txt").exists(), "the call ran");
     // The clone made before the run shares what its hooks recorded.
@@ -1281,9 +1265,13 @@ async fn a_call_that_ran_makes_its_new_files_the_agents() {
 #[tokio::test]
 async fn a_failed_call_does_not_make_its_files_the_agents() {
     let dir = tempfile::tempdir().unwrap();
-    let gate = gate_after(dir.path(), Box::new(FailingBash), "echo x > new.txt").await;
-    // The owner makes new.txt afterwards: it is theirs.
-    std::fs::write(dir.path().join("new.txt"), "the owner's").unwrap();
+    let shell = Box::new(Shell {
+        dir: dir.path().to_owned(),
+        fails: true,
+    });
+    let gate = gate_after(dir.path(), shell, "echo x > new.txt").await;
+    // The file is there, but the call ended in an error: not the agent's.
+    assert!(dir.path().join("new.txt").exists(), "the call ran");
     let check = gate.check("bash", &json!({ "command": "rm new.txt" }));
     assert!(check.ask.is_some(), "{check:?}");
 }

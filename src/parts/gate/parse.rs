@@ -452,7 +452,10 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
             }
             _ => {
                 let w = word.get_or_insert_with(Word::empty);
-                if matches!(c, '$' | '*' | '?' | '{' | '[') || (c == '~' && w.text.is_empty()) {
+                // bash expands `~` at a word's start, and after `=` or `:`
+                // (`of=~/x`, `PATH=a:~/b`).
+                let tilde = c == '~' && (w.text.is_empty() || w.text.ends_with(['=', ':']));
+                if matches!(c, '$' | '*' | '?' | '{' | '[') || tilde {
                     w.expands();
                 }
                 w.text.push(c);

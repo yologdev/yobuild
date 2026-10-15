@@ -120,8 +120,27 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// A file of the owner's to run (a script, a test file): inside the
-    /// project, there, and not made by the agent.
+    /// Where the line is, inside the project: a build or a test runs the
+    /// project's code, not code elsewhere (`cd /tmp/x && make`).
+    pub fn in_project(&self) -> Verdict {
+        let here = self.cwd.as_ref().ok_or(Ask)?;
+        ok_if(here.physical.starts_with(&self.rules.start.physical))
+    }
+
+    /// A path inside the project (a test file or folder to run).
+    pub fn inside(&self, w: &Word) -> Verdict {
+        let path = self.path(w)?;
+        ok_if(path.starts_with(&self.rules.start.physical))
+    }
+
+    /// A file a program sends away (`curl -d @FILE`): not a protected one.
+    pub fn send(&self, w: &Word) -> Verdict {
+        let path = self.path(w)?;
+        ok_if(!self.rules.protected(&path))
+    }
+
+    /// A script of the owner's to run: inside the project, there, and not
+    /// made by the agent.
     pub fn owners_file(&self, w: &Word) -> Verdict {
         let path = self.path(w)?;
         ok_if(
@@ -154,13 +173,16 @@ impl Ctx<'_> {
     }
 
     /// A command, as its words: what runs, by its catalogue entry. With
-    /// `readers_only`, only a program none of whose options can write or
-    /// run (`find -exec`).
+    /// `readers_only` (`find -exec`; also forced under `xargs`), only a
+    /// program none of whose options can write or run.
     pub fn command(&mut self, words: &[Word], readers_only: bool) -> Verdict {
         let Some(run) = invocation(words)? else {
             return Ok(());
         };
         let entry = catalogue::entry(&run.name).ok_or(Ask)?;
+        if catalogue::BUILDS.contains(&run.name.as_str()) {
+            self.in_project()?;
+        }
         // What `xargs` runs gets arguments the line does not show.
         let readers_only = readers_only || run.via_xargs;
         match entry {

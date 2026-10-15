@@ -5,14 +5,16 @@
 //! - [`invocation`]: what each command runs, past keywords, assignments
 //!   and wrappers;
 //! - [`args`]: one option grammar, by each program's [`Spec`](args::Spec);
-//! - [`catalogue`] and [`git`]: the programs it lets run and what they do
-//!   with their arguments; [`specs`]: the options each may be given;
+//! - [`catalogue`]: the programs it lets run and what they do with their
+//!   arguments; [`specs`]: the options each may be given; [`grammars`] and
+//!   [`git`]: programs read by a grammar of their own;
 //! - [`judge`]: each effect (a write, an append, a delete, shell text run)
 //!   judged by one rule, against [`paths`].
 
 mod args;
 mod catalogue;
 mod git;
+mod grammars;
 mod invocation;
 mod judge;
 mod parse;
@@ -34,7 +36,7 @@ use super::Scratch;
 use crate::frontend::{session::UI_TIMEOUT, Session, UiRequest};
 
 /// Tools that only read, free by default: yoagent's `read_file`,
-/// `list_files`, `search`, and `ask_owner`.
+/// `list_files` and `search`, and this crate's `ask_owner`.
 pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "ask_owner"];
 
 /// An extension that asks the owner before a tool call does anything it
@@ -49,15 +51,17 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 /// - **writing** (replacing): a new file, one the agent made, or in its
 ///   [`Scratch`]; **deleting** or moving away: only those of the agent's;
 ///   **appending**, making a folder or a file, changing a mode: inside the
-///   project or the agent's own; never a name starting `.env` or `.git`, in
-///   any case;
+///   project or the agent's own; never a name starting `.env`, nor `.git`
+///   itself, in any case;
 /// - **running shell text** (`bash -c`, `eval`, `trap`, substitutions): read
-///   as a command line too; **a script or test file** given to an
-///   interpreter: one of the owner's, inside the project;
+///   as a command line too; **a script** given to an interpreter: one of
+///   the owner's, inside the project; **a test file**: inside the project;
 /// - **programs**: readers, and writers whose targets are judged as above
-///   (`cp`, `mv`, `tee`, `tar -c`, `curl -o`, …); builds and tests of the
-///   project (`cargo test`, `go test ./...`, `npm test`, `make`, `pytest`);
-///   git that reads, or adds, commits and shares without discarding. Each
+///   (`cp`, `mv`, `tee`, `tar -c`, `curl -o`, …); builds and tests, with the
+///   line inside the project (`cargo test`, `go test ./...`, `npm test`,
+///   `make`, `pytest`); git that reads, or adds, commits and shares without
+///   discarding the working tree (`reset --soft`, `commit --amend` move
+///   history; the reflog keeps it). Each
 ///   with its own list of options: an option not on it asks, as does an
 ///   abbreviation, or a cluster with a letter not on it;
 /// - **the program itself**: named plainly (`cat`), or by its path in a
@@ -67,8 +71,9 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 /// The line is read as bash reads it — quotes, escapes, operators,
 /// redirections, heredocs, keywords, comments, line continuations — and
 /// `cd` is followed as bash's logical `cd` does it. Everything it cannot
-/// read asks: an expansion where an option or a path could be, a `cd` it
-/// cannot follow, a name linked earlier in the same line.
+/// read asks: an expansion where an option or a path could be, anything
+/// naming a path after a `cd` it cannot follow, a name linked earlier in
+/// the same line.
 ///
 /// File tools: `write_file` (or pi's `write`) over a file that exists,
 /// `edit_file` (`edit`) of a file outside the project that is not the
@@ -77,8 +82,9 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 /// [`with_free_tools`](Self::with_free_tools) (by default
 /// [`READ_ONLY_TOOLS`]), else they ask.
 ///
-/// The agent's own files are those created by calls that ran: recorded
-/// after the call, only if they exist, as that very file (device and inode;
+/// The agent's own files are those created by calls the gate let through
+/// without asking (a call the owner allowed makes nothing the agent's):
+/// recorded after the call, only if they exist, as that very file (device and inode;
 /// a hard link to the owner's file under that name is the owner's). Where
 /// file identity is not known (not Unix), nothing is the agent's own.
 ///
@@ -130,7 +136,8 @@ impl Gate {
 
     /// Also lets these tools run without asking: tools that only read or
     /// look things up (a plan, a web search). Never one that writes, deletes
-    /// or runs code.
+    /// or runs code. It cannot free `bash` or the file tools: those are
+    /// always judged.
     pub fn with_free_tools<S: Into<String>>(self, tools: impl IntoIterator<Item = S>) -> Self {
         self.change(|rules| rules.free_tools.extend(tools.into_iter().map(Into::into)))
     }
@@ -323,7 +330,7 @@ impl Rules {
             .is_some_and(|scratch| path.starts_with(scratch))
     }
 
-    /// A name starting `.env` or `.git`: below the project's folder for a
+    /// A name starting `.env`, or `.git` itself: below the project's folder for a
     /// path inside it (the project may sit in `~/.envs/`), anywhere for
     /// one outside.
     fn protected(&self, path: &Path) -> bool {

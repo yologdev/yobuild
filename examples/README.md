@@ -132,7 +132,7 @@ The Node runtimes are the cost of running other ecosystems' plugins unchanged. A
 
 ## Perspective
 
-- **A small loop, big ecosystems.** The whole example is about 600 lines of Rust on top of yoagent's loop (a quarter of it is the scripted demo). The plan, the web search and the dialogs come from plugins that thousands of people already use. The adapters let them run unchanged instead of being rewritten.
+- **A small loop, big ecosystems.** The whole example is about 600 lines of Rust on top of yoagent's loop (a third of it is the scripted demo). The plan, the web search and the dialogs come from plugins that thousands of people already use. The adapters let them run unchanged instead of being rewritten.
 - **Safety by contract, not by trust.**
   - An adapter that cannot enforce a plugin's hook refuses it.
   - A policy that fails denies the call.

@@ -1,5 +1,7 @@
 //! `git`: the subcommands that read, or add, commit and share without
-//! discarding anything, each with the options that keep it so. Anything
+//! discarding the working tree or a ref (`reset --soft` and `commit
+//! --amend` move history; the reflog keeps it), each with the options that
+//! keep it so. Anything
 //! else — a subcommand or option not listed, `-c`, `--git-dir`, an alias —
 //! asks.
 
@@ -115,7 +117,12 @@ fn subcommand(name: &str, rest: &[Word]) -> Option<(Spec, Judge)> {
         // Adding and committing: nothing is discarded.
         "add" => pair(ADD, free),
         "commit" => pair(COMMIT, free),
-        "init" => pair(INIT, free),
+        "init" => pair(INIT, |p, ctx| match p.operands.as_slice() {
+            [] => Ok(()),
+            // A new repository in a folder not there yet.
+            [dir] => ctx.new_or_own(dir),
+            _ => Err(Ask),
+        }),
         "clone" => pair(CLONE, |p, ctx| match p.operands.as_slice() {
             [_] => Ok(()),
             // Into a folder not there yet.
@@ -128,7 +135,7 @@ fn subcommand(name: &str, rest: &[Word]) -> Option<(Spec, Judge)> {
             // Not forced (`+…`), not deleting (`:branch`).
             refspecs(p, |r| !r.starts_with(['+', ':']))
         }),
-        // Making and moving to a new branch; unstaging; a dry run.
+        // A new branch; unstaging; moving HEAD back (`--soft`, `--mixed`); a dry run.
         "checkout" => pair(CHECKOUT, |p, _| {
             ok_if((p.has("-b") || p.has("--orphan")) && p.operands.len() <= 1)
         }),

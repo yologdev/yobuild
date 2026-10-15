@@ -24,7 +24,8 @@ pub(super) struct Spec {
     pub numbers: bool,
     /// Options end at the first operand (`bash script -x`, `awk PROGRAM`).
     pub posix: bool,
-    /// Long options take one dash (`-tags`, as Go's flags do).
+    /// Long options with one dash or two (`-tags`, `--tags`, as Go's flags
+    /// do); no clusters (`-vo` is not `-v -o`).
     pub single_dash: bool,
 }
 
