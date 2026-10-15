@@ -1202,26 +1202,88 @@ impl AgentTool for FailingBash {
     }
 }
 
-#[tokio::test]
-async fn a_failed_call_does_not_make_its_files_the_agents() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().to_owned();
+/// A `bash` that runs the command with `sh` in its folder.
+struct Shell(PathBuf);
+
+#[async_trait::async_trait]
+impl AgentTool for Shell {
+    fn name(&self) -> &str {
+        "bash"
+    }
+    fn label(&self) -> &str {
+        "bash"
+    }
+    fn description(&self) -> &str {
+        "runs the command"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({ "type": "object", "properties": { "command": { "type": "string" } } })
+    }
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let command = params["command"].as_str().unwrap_or_default();
+        let status = std::process::Command::new("sh")
+            .args(["-c", command])
+            .current_dir(&self.0)
+            .status()
+            .map_err(|e| ToolError::Failed(e.to_string()))?;
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: status.to_string(),
+            }],
+            details: json!({}),
+        })
+    }
+}
+
+/// Runs `command` through `bash` behind a gate in `dir`, with nobody to
+/// ask; returns a clone of the gate made before the run.
+async fn gate_after(dir: &Path, bash: Box<dyn AgentTool>, command: &str) -> yobuild::parts::Gate {
+    let path = dir.to_owned();
+    let command = command.to_owned();
     let gate = Arc::new(std::sync::Mutex::new(None));
     let g = gate.clone();
     run_alone(move |session| {
         let built = yobuild::parts::Gate::new(session.clone(), &path);
         *g.lock().unwrap() = Some(built.clone());
         agent(vec![
-            MockResponse::ToolCalls(vec![call("bash", json!({ "command": "echo x > new.txt" }))]),
+            MockResponse::ToolCalls(vec![call("bash", json!({ "command": command }))]),
             MockResponse::Text("done".into()),
         ])
-        .with_tools(vec![Box::new(FailingBash)])
+        .with_tools(vec![bash])
         .with_extension(built)
     })
     .await;
+    let gate = gate.lock().unwrap().clone().unwrap();
+    gate
+}
+
+#[tokio::test]
+async fn a_call_that_ran_makes_its_new_files_the_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let shell = Box::new(Shell(dir.path().to_owned()));
+    let gate = gate_after(dir.path(), shell, "echo x > new.txt").await;
+    assert!(dir.path().join("new.txt").exists(), "the call ran");
+    // The clone made before the run shares what its hooks recorded.
+    let check = gate.check("bash", &json!({ "command": "rm new.txt" }));
+    assert!(check.ask.is_none(), "{check:?}");
+    // The owner replaces it: no longer the file the agent made.
+    std::fs::remove_file(dir.path().join("new.txt")).unwrap();
+    std::fs::write(dir.path().join("other"), "the owner's").unwrap();
+    std::fs::write(dir.path().join("new.txt"), "the owner's").unwrap();
+    let check = gate.check("bash", &json!({ "command": "rm new.txt" }));
+    assert!(check.ask.is_some(), "{check:?}");
+}
+
+#[tokio::test]
+async fn a_failed_call_does_not_make_its_files_the_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let gate = gate_after(dir.path(), Box::new(FailingBash), "echo x > new.txt").await;
     // The owner makes new.txt afterwards: it is theirs.
     std::fs::write(dir.path().join("new.txt"), "the owner's").unwrap();
-    let gate = gate.lock().unwrap().clone().unwrap();
     let check = gate.check("bash", &json!({ "command": "rm new.txt" }));
     assert!(check.ask.is_some(), "{check:?}");
 }
@@ -1230,21 +1292,27 @@ async fn a_failed_call_does_not_make_its_files_the_agents() {
 async fn free_tools_run_and_others_ask_through_a_real_agent() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_owned();
+    let worked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let w = worked.clone();
     let agent = run_alone(move |session| {
         agent(vec![
             MockResponse::ToolCalls(vec![call("work", json!({})), call("noop", json!({}))]),
             MockResponse::Text("done".into()),
         ])
         .with_tools(vec![
-            Box::new(Work(Box::new(|| {}))),
+            Box::new(Work(Box::new(move || {
+                w.store(true, std::sync::atomic::Ordering::SeqCst)
+            }))),
             Box::new(Named("noop")),
         ])
         .with_extension(yobuild::parts::Gate::new(session.clone(), &path).with_free_tools(["work"]))
     })
     .await;
+    // `work` is free and ran; `noop` has no rule and nobody answered.
+    assert!(worked.load(std::sync::atomic::Ordering::SeqCst));
     let errors = tool_errors(&agent);
-    // `work` is free; `noop` has no rule and nobody answered.
     assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("not allowed"), "{}", errors[0]);
 }
 
 #[test]

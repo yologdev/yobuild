@@ -129,7 +129,7 @@ without the manifest.
 | `ask_owner` | a tool; returns at once, the answer comes back as steering (mid-run, or starting the next run) | `yobuild::parts::AskOwner` (M1) |
 | `report` | an `Extension`: `on_stop` sends the agent back until the required sections are there | `yobuild::parts::Report` (M1) |
 | `facts` | an `Extension`: `on_event` counts tokens and tool calls, `finish` adds changes since the start (git snapshot), new files, open questions | `yobuild::parts::Facts` (M1) |
-| `gate` | a `before_tool` policy: ask before selected destructive commands and overwrites; refused with nobody there | `yobuild::parts::Gate` (M1; `confirm-dangerous.ts` stays as the pi example) |
+| `gate` | a `before_tool` policy: an allow-list of programs and their options; everything else (deleting, overwriting above all) asks; refused with nobody there | `yobuild::parts::Gate` (M1; `confirm-dangerous.ts` stays as the pi example) |
 | `scratch` | a private working folder named to the agent and the gate | `yobuild::parts::Scratch` (M1) |
 | `limits` / `budget` | yoagent's `ExecutionLimits` and `Budget` | yoagent |
 
@@ -166,8 +166,9 @@ Inherited from yoagent and the handoff work, and kept on by default:
   times out, crashes or is unloaded denies; a redaction that fails
   withholds; a plugin hooking what the loop cannot enforce is refused.
 - **The gate holds without a plugin runtime**: `yobuild::parts::Gate` is a
-  required extension in the Rust process, an allow-list (anything it does
-  not know to be harmless asks). A gate written as a plugin (the pi
+  required extension in the Rust process, an allow-list: each program it
+  lets run has a list of options, and what it writes, deletes or runs is
+  judged; anything it does not know asks. A gate written as a plugin (the pi
   example) needs `require_policy`, so a run starting while that plugin is
   down denies every tool call.
 - **Questions are never answered for the owner**; with no frontend, the
@@ -177,8 +178,9 @@ Inherited from yoagent and the handoff work, and kept on by default:
 - **Message size**: calls to plugins stay under rutis's 16 MiB limit.
 
 Not covered, and said so: plugins run with the process's rights; the
-environment they inherit is visible to them; the gate checks selected
-operations, not everything a script does. A sandbox (container, VM) is the
+environment they inherit is visible to them; the gate judges command
+lines and file tools, not what code does once it runs (a build or a test
+runs the project's code, including what the agent edited). A sandbox (container, VM) is the
 deployment's job.
 
 ## 7. What moved, what it becomes

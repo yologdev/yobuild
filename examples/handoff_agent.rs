@@ -11,8 +11,10 @@
 //!   answer, whenever it comes, is sent in as a steer message: picked up by
 //!   the run in progress, or starting a new run when the agent had stopped.
 //! - Guardrails, not a sandbox: the gate (`yobuild::parts::Gate`, in Rust)
-//!   asks before selected commands that delete, discard or overwrite
-//!   existing files (those do wait), and refuses them with nobody there;
+//!   is an allow-list — reading, building, testing, committing and writing
+//!   new files run; anything else, above all deleting, discarding or
+//!   overwriting what the owner has, waits for their yes, and is refused
+//!   with nobody there;
 //!   runs are capped in turns, tokens and minutes, and in dollars when the
 //!   model has a price.
 //! - Every run ends with a handoff report (Done / Waiting on you /
@@ -60,20 +62,9 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// dsh-free-search's searches (not its `npm` or test tools). yoagent's
 /// read-only tools and `ask_owner` are free by default.
 const FREE_TOOLS: [&str; 14] = [
-    "todo",
-    "multi_search",
-    "research",
-    "web_search",
-    "search_web_pages",
-    "advanced_search",
-    "global_search",
-    "domain_search",
-    "platform_search",
-    "video_search",
-    "zhihu_search",
-    "cache_search",
-    "search_pro",
-    "web_search_exa",
+    "todo", "multi_search", "research", "web_search", "search_web_pages", "advanced_search",
+    "global_search", "domain_search", "platform_search", "video_search", "zhihu_search",
+    "cache_search", "search_pro", "web_search_exa",
 ];
 
 /// `frontend/`, where the TypeScript plugins live.
@@ -325,8 +316,9 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
             .with_max_duration(Duration::from_secs(options.max_minutes * 60)),
     )
     .with_extension(bridge.extension())
-    // The approval gate: the agent deletes and overwrites freely in its
-    // scratch and in what it created, and asks for the rest.
+    // The approval gate: what it knows to be harmless runs; the agent
+    // deletes and overwrites freely in its scratch and in what it created;
+    // everything else asks.
     .with_extension(
         Gate::new(session.clone(), &cwd)
             .with_scratch(&scratch)

@@ -30,12 +30,15 @@ paths).
 - `yobuild::parts`: `ask_owner`, `report`, `facts`, `scratch`, `gate`,
   extracted from `handoff_agent` with their own tests.
 - The gate is a Rust `before_tool` (decided 2026-10-15: no Node needed
-  for safety, microseconds instead of ~3 ms, tests beside the Rust): a port
-  of `confirm-dangerous.ts`'s rules, asking the owner through the session;
-  the pi extension stays as an example. (yoagent's `ToolGate` is a
+  for safety, microseconds instead of ~3 ms, tests beside the Rust),
+  asking the owner through the session. It started as a port of
+  `confirm-dangerous.ts`'s deny-list; after four review rounds kept finding
+  ways around it, it became an allow-list (programs, each with its
+  options). The pi extension stays as an example. (yoagent's `ToolGate` is a
   different thing — a decision model judging each call — and could be
   added on top later.)
-- `handoff_agent` rebuilt on the parts: same behaviour, much less code.
+- `handoff_agent` rebuilt on the parts: the same behaviour, except the
+  gate is now an allow-list (it asks about more), in much less code.
 - **In parallel, in yoagent** (separate PRs, so M2 is not blocked waiting
   on a release):
   - yoagent-rutis exposes the ecosystem probe as a public module, and a
@@ -141,8 +144,9 @@ never loading, and a denied approval leaves the agent without the plugin.
    people who live in npm.
 5. **Plugin installs.** One cache per ecosystem and lockfile hash (proposed),
    or per agent folder (simpler, bigger)?
-6. **The gate.** Decided: Rust (it is on the safety path — design §9), the
-   TypeScript version kept as an example. Still open, the rule itself: are the five reasons in design §9 (safety, hot
+6. **The gate.** Decided: Rust (it is on the safety path — design §9), an
+   allow-list, the TypeScript deny-list kept as an example. Still open, the
+   rule for what belongs in Rust: are the five reasons in design §9 (safety, hot
    path, footprint, target, ownership) the right ones, and is "over 5 % of
    a turn" the right threshold?
 7. **Windows.** rutis 0.9 supports it; the frontend's terminal UI and the

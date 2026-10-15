@@ -1,5 +1,6 @@
-//! Reading a command line as the shell does, enough to see what it runs and
-//! what it writes. A port of `confirm-dangerous.ts`'s reader.
+//! Reading a command line as the shell does: commands, their words (and
+//! whether each is literal), redirections, what substitutions run, and
+//! subshells. Only reading; what a command may do is judged elsewhere.
 
 /// A word as the shell would see it; `known` is false when it holds an
 /// expansion (`$VAR`, `~`, a glob, a substitution).
@@ -7,14 +8,29 @@
 pub(super) struct Word {
     pub text: String,
     pub known: bool,
+    /// It begins with an expansion, so it could begin with anything (`-o…`);
+    /// otherwise its first character is the literal one in `text`.
+    pub opens_unknown: bool,
 }
 
 impl Word {
-    fn empty() -> Self {
+    /// A literal word.
+    pub fn literal(text: impl Into<String>) -> Self {
         Self {
-            text: String::new(),
+            text: text.into(),
             known: true,
+            opens_unknown: false,
         }
+    }
+
+    fn empty() -> Self {
+        Self::literal("")
+    }
+
+    /// Marks it unknown from here on.
+    fn expands(&mut self) {
+        self.known = false;
+        self.opens_unknown |= self.text.is_empty();
     }
 }
 
@@ -273,11 +289,13 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                 let body = &s[i + 1..end];
                 cur.runs.extend(substitutions(body)?);
                 let w = word.get_or_insert_with(Word::empty);
+                let opens = w.text.is_empty() && matches!(body.first(), Some('$' | '`'));
                 // Inside double quotes a backslash-newline joins lines too.
                 w.text
                     .push_str(&body.iter().collect::<String>().replace("\\\n", ""));
                 if body.iter().any(|c| *c == '$' || *c == '`') {
                     w.known = false;
+                    w.opens_unknown |= opens;
                 }
                 i = end;
             }
@@ -293,20 +311,20 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
             '`' => {
                 let end = end_of_backquote(&s, i)?;
                 cur.runs.push(text(&s, i + 1, end).replace("\\`", "`"));
-                word.get_or_insert_with(Word::empty).known = false;
+                word.get_or_insert_with(Word::empty).expands();
                 i = end;
             }
             '$' if s.get(i + 1) == Some(&'(') => {
                 let end = closing(&s, i + 1)?;
                 cur.runs.extend(substitutions(&s[i..=end])?);
-                word.get_or_insert_with(Word::empty).known = false;
+                word.get_or_insert_with(Word::empty).expands();
                 i = end;
             }
             '<' | '>' if s.get(i + 1) == Some(&'(') => {
                 // Process substitution: the command runs; the word is a path to its pipe.
                 let end = closing(&s, i + 1)?;
                 cur.runs.push(text(&s, i + 2, end));
-                word.get_or_insert_with(Word::empty).known = false;
+                word.get_or_insert_with(Word::empty).expands();
                 i = end;
             }
             '\n' => {
@@ -435,7 +453,7 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
             _ => {
                 let w = word.get_or_insert_with(Word::empty);
                 if matches!(c, '$' | '*' | '?' | '{' | '[') || (c == '~' && w.text.is_empty()) {
-                    w.known = false;
+                    w.expands();
                 }
                 w.text.push(c);
             }
@@ -463,156 +481,6 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
         }
     }
     Some(out.into_iter().map(|(_, item)| item).collect())
-}
-
-/// The program a command runs, past wrappers that run another program
-/// (`env`, `nohup`, `timeout`, `xargs`, …), and its arguments.
-pub(super) struct Program<'a> {
-    pub name: String,
-    pub args: &'a [Word],
-    pub via_xargs: bool,
-    /// The program's word is literal text (not `$X`, `$(…)`, a glob).
-    pub known: bool,
-    /// A `GIT_*` variable is set for it (`GIT_CONFIG_*`, `GIT_DIR`, …).
-    pub git_env: bool,
-}
-
-fn base(text: &str) -> String {
-    basename(text.strip_prefix('\\').unwrap_or(text))
-}
-
-/// The last path component, trailing slashes ignored (as Node's `basename`).
-pub(super) fn basename(text: &str) -> String {
-    let trimmed = text.trim_end_matches('/');
-    trimmed.rsplit('/').next().unwrap_or(trimmed).to_owned()
-}
-
-/// A `GIT_*` assignment that can change what git runs or where (not one of
-/// the harmless settings agents use: `GIT_PAGER=cat`, `GIT_TERMINAL_PROMPT=0`,
-/// `GIT_EDITOR=true`, …).
-pub(super) fn git_variable(w: &Word) -> bool {
-    const HARMLESS: [&str; 7] = [
-        "GIT_PAGER=cat",
-        "GIT_PAGER=",
-        "GIT_TERMINAL_PROMPT=0",
-        "GIT_EDITOR=true",
-        "GIT_EDITOR=:",
-        "GIT_TRACE=0",
-        "GIT_TRACE=1",
-    ];
-    w.text.starts_with("GIT_") && !(w.known && HARMLESS.contains(&w.text.as_str()))
-}
-
-pub(super) fn unwrap(words: &[Word]) -> Program<'_> {
-    let mut i = 0;
-    let mut via_xargs = false;
-    let mut git_env = false;
-    let text = |i: usize| words.get(i).map(|w| w.text.as_str()).unwrap_or("");
-    loop {
-        while i < words.len() && is_assignment(&words[i].text) {
-            git_env |= git_variable(&words[i]);
-            i += 1;
-        }
-        let name = base(text(i));
-        match name.as_str() {
-            // Shell keywords before a command: the command after them runs.
-            "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "!" | "{" => i += 1,
-            "nohup" | "builtin" => i += 1,
-            // `command -v x` only looks `x` up.
-            "command" if ["-v", "-V"].contains(&text(i + 1)) => {
-                return Program {
-                    known: true,
-                    name,
-                    args: words.get(i + 1..).unwrap_or(&[]),
-                    via_xargs,
-                    git_env,
-                }
-            }
-            "command" => {
-                i += 1;
-                while ["-p", "--"].contains(&text(i)) {
-                    i += 1;
-                }
-            }
-            "exec" => {
-                i += 1;
-                while text(i).starts_with('-') {
-                    // `-a NAME`, also in a cluster (`-la NAME`).
-                    if text(i).contains('a') && !text(i).starts_with("--") {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-            }
-            "time" => {
-                i += 1;
-                while text(i).starts_with('-') {
-                    i += 1;
-                }
-            }
-            "env" | "stdbuf" | "nice" | "ionice" => {
-                i += 1;
-                while i < words.len() && (text(i).starts_with('-') || is_assignment(text(i))) {
-                    git_env |= is_assignment(text(i)) && git_variable(&words[i]);
-                    // The options that take a value, per wrapper.
-                    let with_value: &[&str] = match name.as_str() {
-                        "env" => &["-u", "-C", "-S"],
-                        "stdbuf" => &["-i", "-o", "-e", "--input", "--output", "--error"],
-                        "nice" => &["-n"],
-                        _ => &["-c", "-n"],
-                    };
-                    if with_value.contains(&text(i)) {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-            }
-            "timeout" => {
-                i += 1;
-                while text(i).starts_with('-') {
-                    if ["-s", "-k", "--signal", "--kill-after"].contains(&text(i)) {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-                i += 1; // the duration
-            }
-            "xargs" => {
-                via_xargs = true;
-                i += 1;
-                while text(i).starts_with('-') {
-                    let t = text(i);
-                    let long_with_value = [
-                        "--max-args",
-                        "--max-lines",
-                        "--max-procs",
-                        "--delimiter",
-                        "--eof",
-                        "--arg-file",
-                        "--process-slot-var",
-                    ]
-                    .contains(&t);
-                    if (t.len() == 2 && "IdEsnLPa".contains(&t[1..])) || long_with_value {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-            }
-            _ => {
-                return Program {
-                    // `[` and `[[` are tests, not globs.
-                    known: words
-                        .get(i)
-                        .is_some_and(|w| w.known || ["[", "[["].contains(&w.text.as_str()))
-                        && !name.is_empty(),
-                    name,
-                    args: words.get(i + 1..).unwrap_or(&[]),
-                    via_xargs,
-                    git_env,
-                };
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -668,23 +536,5 @@ mod tests {
         assert!(parse("echo \"open").is_none());
         assert!(parse("echo $(open").is_none());
         assert!(parse("echo 'open").is_none());
-    }
-
-    #[test]
-    fn wrappers_are_seen_through() {
-        let w = |line: &str| commands(line).remove(0).words;
-        for (line, name) in [
-            ("env -i FOO=1 rm x", "rm"),
-            ("timeout -s KILL 5 rm x", "rm"),
-            ("nice nohup /bin/rm x", "rm"),
-            ("\\rm x", "rm"),
-        ] {
-            let words = w(line);
-            assert_eq!(unwrap(&words).name, name, "{line}");
-        }
-        let words = w("xargs -I {} rm {}");
-        let p = unwrap(&words);
-        assert!(p.via_xargs);
-        assert_eq!(p.name, "rm");
     }
 }

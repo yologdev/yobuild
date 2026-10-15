@@ -32,7 +32,7 @@ and facts the model cannot make up. Of what it does:
   without blocking, check the report, add the facts — and a frontend
   (browser, phone).
 
-The agent is mostly a *selection*. About 890 lines of Rust in that example
+The agent is mostly a *selection*. About 600 lines of Rust in that example
 are wiring. yobuild turns the wiring into a manifest:
 
 ```toml

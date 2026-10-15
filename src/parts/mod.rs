@@ -10,8 +10,9 @@
 //!   required sections.
 //! - [`Facts`]: after each run, tells the frontends what the host counted —
 //!   changes since the start, new files, tokens, tool calls, open questions.
-//! - [`Gate`]: asks the owner before a call deletes, discards or
-//!   overwrites what they already have; refuses it when nobody answers.
+//! - [`Gate`]: an allow-list — asks the owner before a call does anything
+//!   it does not know to be harmless (deleting, discarding or overwriting
+//!   what they have above all); refuses it when nobody answers.
 //! - [`Scratch`]: a private working folder, named to the agent and the gate.
 //!
 //! `AskOwner`'s question itself ([`AskOwner::ask`], with a validated

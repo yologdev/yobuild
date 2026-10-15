@@ -21,11 +21,11 @@ Most agents assume you are watching them. A handoff agent assumes you are not:
   - Dismissing a question means "decide yourself"; the agent does, and says so.
 - **Approval guardrails: an allow-list.** The gate (`yobuild::parts::Gate`) lets through what it knows to be harmless — reading, building and testing, `git status`/`add`/`commit`/`push`, writing new files — and asks first about everything else; with nobody there it is refused:
   - anything that deletes, discards or overwrites what you already have (`rm`, `git reset --hard`, `mv` or `cp` over a file, `>` onto one, …);
-  - any program, git subcommand or option it does not know, an interpreter running code it was given, a plugin tool not declared free (the plan and search tools are).
+  - any program, git subcommand or option it does not know (each program it knows has its own list of options), a program run from a path that is not a system folder (`./cat`), an environment variable that changes what runs (`PATH=…`), an interpreter running code that is not your script, a plugin tool not declared free (the plan and search tools are).
 
   Files it created itself, and its own scratch folder, stay free, so it can keep its deliverable up to date. These are guardrails, not a sandbox:
   - targeted edits of your existing files (the edit tool) go through;
-  - your own scripts and builds run as they are, and a program can change files in ways its command line does not show.
+  - builds and tests run your project's code as it is, including what the agent edited or added (a test, a `build.rs`, a `Makefile` rule); the gate does not judge what code does.
 
   For a guarantee, run it in a container or on a disposable copy.
 - **What it says is checked.**
@@ -61,7 +61,7 @@ The browser page is plain HTML and JavaScript, served by the Rust process. Any n
 | Plugin | Ecosystem | Version | Changed? | What the agent gets |
 |---|---|---|---|---|
 | [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo) | pi (npm, ~207k downloads a month) | 2.12.0 | unchanged | the `todo` tool, its plan |
-| [`dsh-free-search`](https://www.npmjs.com/package/dsh-free-search) | DSH (npm) | 0.8.1 | unchanged | 9 search tools (`multi_search`, `research`, …) and prompt guidance |
+| [`dsh-free-search`](https://www.npmjs.com/package/dsh-free-search) | DSH (npm) | 0.8.1 | unchanged | 13 search tools (`multi_search`, `research`, …) and prompt guidance |
 | `@deepseek-ai/dsh-web`, `dsh-system-prompt`, `dsh-tools` | DSH core | 0.2.0-rc.2 | unchanged | the services DSH plugins expect |
 | `frontend/plugins/todo-plan.ts` | rutis (a UI plugin of the frontend) | — | ours | the plan drawn as a checklist in the page |
 | pi adapter, `host-ui.ts`, DSH adapter, `host-dialogs.ts` | rutis (yoagent-rutis) | — | ours | pi and DSH plugins as yoagent tools, policies and dialogs |
@@ -132,11 +132,11 @@ The Node runtimes are the cost of running other ecosystems' plugins unchanged. A
 
 ## Perspective
 
-- **A small loop, big ecosystems.** The whole example is about 890 lines of Rust on top of yoagent's loop (a quarter of it is the scripted demo). The plan, the web search and the dialogs come from plugins that thousands of people already use. The adapters let them run unchanged instead of being rewritten.
+- **A small loop, big ecosystems.** The whole example is about 600 lines of Rust on top of yoagent's loop (a quarter of it is the scripted demo). The plan, the web search and the dialogs come from plugins that thousands of people already use. The adapters let them run unchanged instead of being rewritten.
 - **Safety by contract, not by trust.**
   - An adapter that cannot enforce a plugin's hook refuses it.
   - A policy that fails denies the call.
-  - The approval gate refuses when nobody is there. It is a guardrail for selected operations, not a sandbox.
+  - The approval gate refuses when nobody is there. It is an allow-list for commands and file tools, not a sandbox: code that builds and tests run is not judged.
   - The facts come from git and the event stream, not from the model.
 - **Walk-away first.** Questions that wait, a page that replays, answers that start the next run, a report on every run. These are what make "hand it off" work. Each is a small, tested piece of `yobuild::frontend` (`Session::ask_later`, history replay, late steering), not special code in the agent.
 - **Not done yet.**
