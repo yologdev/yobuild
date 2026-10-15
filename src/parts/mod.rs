@@ -27,6 +27,6 @@ mod scratch;
 
 pub use ask_owner::{AskOwner, OpenQuestions, Question};
 pub use facts::Facts;
-pub use gate::{Check, Gate};
+pub use gate::{Check, Gate, READ_ONLY_TOOLS};
 pub use report::Report;
 pub use scratch::Scratch;

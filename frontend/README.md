@@ -215,7 +215,9 @@ path/to/yobuild/scripts/try-handoff.sh --demo               # headless, scripted
     do wait, and with nobody connected they are refused. It is a guardrail,
     not a sandbox: edits of existing files, `sed -i`, and what a script
     does inside are not checked.
-  - Every run needs that policy (`require_policy`).
+  - The gate is a required extension in the Rust process: no plugin
+    runtime has to be up for it to hold. It also asks before any plugin
+    tool it has no rule for (the plan and search tools are declared free).
   - Runs are capped in turns and minutes (`--max-minutes`), and in dollars
     (`--budget-usd`) when the model has a price. DeepSeek has none in the
     bundled table.

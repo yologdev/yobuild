@@ -5,12 +5,14 @@
 
 mod shell;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value as Json;
-use yoagent::extension::{Extension, ExtensionError, ExtensionMode, RunContext, RunHooks};
+use yoagent::extension::{
+    Extension, ExtensionError, ExtensionMode, RunContext, RunHooks, ToolOutput,
+};
 use yoagent::{ToolCallRequest, ToolDecision};
 
 use self::shell::{basename, parse, unwrap, Item, Word};
@@ -23,68 +25,105 @@ const ALWAYS: [&str; 6] = ["sudo", "doas", "truncate", "shred", "mkfs", "wipefs"
 const DELETERS: [&str; 4] = ["rm", "unlink", "rmdir", "shred"];
 const SHELLS: [&str; 5] = ["sh", "bash", "zsh", "dash", "ksh"];
 
+/// Tools that only read, free by default: yoagent's `read_file`,
+/// `list_files`, `search`, and `ask_owner`.
+pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "ask_owner"];
+
 /// An extension that asks the owner before a tool call deletes, discards
-/// or overwrites what they already have, and refuses it when nobody answers
-/// "Allow" (no frontend, a timeout, or "Block"). The refusal reaches the
-/// model as an error tool result with the reason.
+/// or overwrites what they already have — and before any tool it has no rule
+/// for — and refuses it when nobody answers "Allow" (no frontend, a timeout,
+/// or "Block"). The refusal reaches the model as an error tool result with
+/// the reason.
 ///
 /// Shell commands (`bash`) are read command by command — quotes, escapes,
 /// operators, redirections, heredocs, substitutions, `bash -c` / `eval` of
 /// literal text — following `cd` only where it surely applies. What asks:
 /// - `rm`, `unlink`, `rmdir`, `git rm` (not `--cached`), `xargs` running
-///   one of them, `find … -delete` or `-exec rm …`;
+///   one of them, `find … -delete` or `-exec rm …`, `mv` of a file that is
+///   not the agent's (moving it away is deleting it here);
 /// - git: `reset --hard`/`--merge`/`--keep`, `clean` (not `-n`),
 ///   `checkout` / `restore` of paths (not `restore --staged`),
 ///   `checkout -f`, `switch -f` / `--discard-changes`, `branch -D`, a forced
 ///   push (`-f`, `--force*`, `+ref`, `:ref`, `--mirror`, `--delete`),
-///   `stash drop` / `clear`;
-/// - `mv`, `cp`, `tee` (without `-a`), `dd of=` and truncating redirections
-///   (`>`, `>|`, `2>`, `&>`; not `>>`, not to `/dev/null`) onto a file that
-///   exists;
-/// - `sudo`, `truncate`, `shred`, `mkfs`, recursive `chmod` / `chown`;
-/// - any path it cannot know (`$VAR`, `~`, globs, a `cd` it cannot follow).
+///   `stash drop` / `clear`, and any `git -c` (an alias can run a shell);
+/// - `mv`, `cp`, `tee` (without `-a`), `dd of=`, `ln -f`, `install`,
+///   `curl -o` / `wget -O` and truncating redirections (`>`, `>|`, `2>`,
+///   `&>`, `>&file`; not `>>`, not to `/dev/null`) onto a file that exists;
+///   `rsync --delete` / `--remove-source-files`;
+/// - `sudo`, `truncate`, `shred`, `mkfs`, recursive `chmod` / `chown`, a
+///   shell reading its script from stdin (`| sh`, `bash <<EOF`);
+/// - anything written or appended to `.env*` or inside `.git/` (any case);
+/// - anything it cannot know: a path with `$VAR`, `~`, globs or after a `cd`
+///   it cannot follow; a program named by an expansion (`$(echo rm)`).
 ///
 /// File tools: `write_file` (or pi's `write`) over a file that exists, and
-/// `write_file` / `edit_file` (`edit`) of `.env` or anything in `.git/`.
+/// `write_file` / `edit_file` (`edit`) of `.env*` or inside `.git/`, or of a
+/// path it cannot read (not a string, `~`, `@`).
 ///
-/// Free: files the agent created in this session (by a call that was let
-/// through), anything in its [`Scratch`], and targeted edits of other files.
-/// Paths are compared with symlinks resolved.
+/// Other tools: free when named in [`with_free_tools`](Self::with_free_tools)
+/// (by default [`READ_ONLY_TOOLS`]); any other tool asks — a plugin's tool
+/// may run code or delete files, and the gate cannot see inside it.
+///
+/// Free: files the agent created in this session (by a call that ran),
+/// anything in its [`Scratch`], and targeted edits of other files. Paths are
+/// resolved as the kernel does: symlinks followed before `..`.
 ///
 /// **Not a sandbox:** a script or program can still change files in ways a
-/// command line does not show (`sed -i`, `python3 -c …`, a Makefile), and a
-/// plugin's own tools are judged only by these names. For a guarantee, run
-/// the agent in a container or a disposable copy.
+/// command line does not show (`sed -i`, `python3 -c …`, `bash script.sh`, a
+/// Makefile). For a guarantee, run the agent in a container or a disposable
+/// copy.
 ///
-/// It is a required extension, and its state (the files the agent created)
-/// lasts across runs.
+/// It is a required extension; it judges a call again when a later
+/// extension rewrote it; its state (the files the agent created) lasts
+/// across runs and is shared by clones.
 #[derive(Clone)]
 pub struct Gate {
     session: Session,
     rules: Arc<Rules>,
+    /// Files each allowed call would create, until it has run.
+    pending: Arc<Mutex<HashMap<String, Vec<PathBuf>>>>,
 }
 
 impl Gate {
-    /// Asks through `session`; relative paths are against `cwd`.
+    /// Asks through `session`; relative paths are against `cwd` (made
+    /// absolute). [`READ_ONLY_TOOLS`] are free.
     pub fn new(session: Session, cwd: impl Into<PathBuf>) -> Self {
+        let cwd = cwd.into();
+        let cwd = std::path::absolute(&cwd).unwrap_or(cwd);
         Self {
             session,
             rules: Arc::new(Rules {
-                cwd: cwd.into(),
+                cwd: real(&cwd),
                 scratch: None,
+                free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
                 created: Mutex::default(),
             }),
+            pending: Arc::default(),
         }
     }
 
     /// Lets the agent delete and overwrite freely in its scratch folder.
     pub fn with_scratch(self, scratch: &Scratch) -> Self {
+        self.change(|rules| rules.scratch = Some(real(scratch.path())))
+    }
+
+    /// Also lets these tools run without asking: tools that only read or
+    /// look things up (a plan, a web search). Never one that writes, deletes
+    /// or runs code.
+    pub fn with_free_tools<S: Into<String>>(self, tools: impl IntoIterator<Item = S>) -> Self {
+        self.change(|rules| rules.free_tools.extend(tools.into_iter().map(Into::into)))
+    }
+
+    fn change(self, edit: impl FnOnce(&mut Rules)) -> Self {
+        let mut rules = Rules {
+            cwd: self.rules.cwd.clone(),
+            scratch: self.rules.scratch.clone(),
+            free_tools: self.rules.free_tools.clone(),
+            created: Mutex::new(self.rules.created.lock().unwrap().clone()),
+        };
+        edit(&mut rules);
         Self {
-            rules: Arc::new(Rules {
-                cwd: self.rules.cwd.clone(),
-                scratch: Some(real(scratch.path())),
-                created: Mutex::default(),
-            }),
+            rules: Arc::new(rules),
             ..self
         }
     }
@@ -101,7 +140,7 @@ impl Gate {
 pub struct Check {
     /// The question for the owner, when it needs their yes.
     pub ask: Option<String>,
-    /// Files it creates: the agent's own once the call is let through.
+    /// Files it creates: the agent's own once the call has run.
     pub creates: Vec<PathBuf>,
 }
 
@@ -112,6 +151,9 @@ impl Extension for Gate {
     }
     fn mode(&self) -> ExtensionMode {
         ExtensionMode::Required
+    }
+    fn rechecks_modified_calls(&self) -> bool {
+        true
     }
     async fn start_run(&self, _run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
         Ok(Box::new(self.clone()))
@@ -140,15 +182,32 @@ impl RunHooks for Gate {
                 }
             }
         }
-        // Only once it may run: the files it makes are then the agent's own.
-        self.rules.created.lock().unwrap().extend(check.creates);
+        // The files it makes become the agent's own once it has run (a
+        // recheck replaces what the first look found).
+        self.pending
+            .lock()
+            .unwrap()
+            .insert(call.tool_call_id.to_owned(), check.creates);
         ToolDecision::Allow
+    }
+
+    async fn after_tool(
+        &self,
+        call: &ToolCallRequest<'_>,
+        output: &mut ToolOutput,
+    ) -> Result<(), ExtensionError> {
+        let creates = self.pending.lock().unwrap().remove(call.tool_call_id);
+        if let (Some(creates), false) = (creates, output.is_error) {
+            self.rules.created.lock().unwrap().extend(creates);
+        }
+        Ok(())
     }
 }
 
 struct Rules {
     cwd: PathBuf,
     scratch: Option<PathBuf>,
+    free_tools: HashSet<String>,
     /// Files the agent made this session: it may overwrite or delete them.
     created: Mutex<HashSet<PathBuf>>,
 }
@@ -161,7 +220,10 @@ impl Rules {
         };
         match tool {
             "bash" => {
-                let command = args["command"].as_str().unwrap_or_default();
+                let Some(command) = args["command"].as_str() else {
+                    check.ask = Some(format!("Run `bash` with {}?", short(args)));
+                    return check;
+                };
                 let (ask, creates) = self.line(command, &self.cwd);
                 check.creates = creates;
                 if ask {
@@ -169,10 +231,17 @@ impl Rules {
                 }
             }
             "write_file" | "write" | "edit_file" | "edit" => {
-                let file = args["path"].as_str().unwrap_or_default();
-                let path = locate(&self.cwd, file);
                 let writes = matches!(tool, "write_file" | "write");
-                if protected(file) {
+                let file = match args["path"].as_str() {
+                    // `~` and `@` mean something else to some tools (pi's).
+                    Some(file) if !file.is_empty() && !file.starts_with(['~', '@']) => file,
+                    _ => {
+                        check.ask = Some(format!("Run `{tool}` with {}?", short(args)));
+                        return check;
+                    }
+                };
+                let path = locate(&self.cwd, file);
+                if protected(Path::new(file)) || protected(&path) {
                     check.ask = Some(format!("Change the protected file {file}?"));
                 } else if writes && self.owners(&path) {
                     check.ask = Some(format!("Overwrite the existing file {file}?"));
@@ -180,7 +249,8 @@ impl Rules {
                     check.creates.push(path);
                 }
             }
-            _ => {}
+            tool if self.free_tools.contains(tool) => {}
+            tool => check.ask = Some(format!("Run `{tool}` with {}?", short(args))),
         }
         check
     }
@@ -236,7 +306,7 @@ impl Rules {
                     return true;
                 };
                 let path = locate(dir, &w.text);
-                if self.owners(&path) {
+                if protected(&path) || self.owners(&path) {
                     return true;
                 }
                 if !path.exists() {
@@ -268,10 +338,24 @@ impl Rules {
                     return ASK;
                 }
             }
+            // Appending is free, except to `.env*` or inside `.git/` (a hook).
+            for w in &command.appends {
+                if DEVICES.contains(&w.text.as_str()) {
+                    continue;
+                }
+                match cwd.as_deref().filter(|_| w.known) {
+                    Some(dir) if !protected(&locate(dir, &w.text)) => {}
+                    _ => return ASK,
+                }
+            }
             if command.words.is_empty() {
                 continue;
             }
             let program = unwrap(&command.words);
+            // A program named by an expansion (`$(echo rm)`, `$X`): unknown.
+            if !program.known {
+                return ASK;
+            }
             let (name, args) = (program.name.as_str(), program.args);
             let flags: Vec<&str> = args
                 .iter()
@@ -334,16 +418,22 @@ impl Rules {
                                 .chars()
                                 .all(|c| c.is_ascii_alphanumeric() || c == '_'))
                 });
-                if let Some(at) = script {
-                    let body = args.get(at + 1);
-                    let (Some(body), Some(dir)) = (body.filter(|b| b.known), cwd.as_deref()) else {
-                        return ASK;
-                    };
-                    let (ask, made) = self.line(&body.text, dir);
-                    if ask {
-                        return ASK;
+                match script {
+                    Some(at) => {
+                        let body = args.get(at + 1);
+                        let (Some(body), Some(dir)) = (body.filter(|b| b.known), cwd.as_deref())
+                        else {
+                            return ASK;
+                        };
+                        let (ask, made) = self.line(&body.text, dir);
+                        if ask {
+                            return ASK;
+                        }
+                        creates.extend(made);
                     }
-                    creates.extend(made);
+                    // No script named: it reads one from stdin (`| sh`, `bash <<EOF`).
+                    None if operands.is_empty() => return ASK,
+                    None => {}
                 }
                 continue;
             }
@@ -356,8 +446,10 @@ impl Rules {
                     .iter()
                     .position(|t| ["-exec", "-execdir", "-ok", "-okdir"].contains(t))
                 {
-                    let runs = basename(texts.get(exec + 1).copied().unwrap_or(""));
-                    if DELETERS.contains(&runs.as_str()) {
+                    let Some(program) = args.get(exec + 1).filter(|w| w.known) else {
+                        return ASK;
+                    };
+                    if DELETERS.contains(&basename(&program.text).as_str()) {
                         return ASK;
                     }
                 }
@@ -369,8 +461,8 @@ impl Rules {
                         || (!f.starts_with("--")
                             && f[1..]
                                 .chars()
-                                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                            && f.contains('R'))
+                                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                                .any(|c| c == 'R'))
                 })
             {
                 return ASK;
@@ -389,11 +481,18 @@ impl Rules {
             }
             if name == "tee" {
                 let appends = flags.iter().any(|f| *f == "-a" || *f == "--append");
-                if !appends {
-                    for w in &operands {
-                        if target(w, &mut creates) {
-                            return ASK;
+                for w in &operands {
+                    let asks = if appends {
+                        // Appending is free, except to `.env*` or inside `.git/`.
+                        match cwd.as_deref().filter(|_| w.known) {
+                            Some(dir) => protected(&locate(dir, &w.text)),
+                            None => true,
                         }
+                    } else {
+                        target(w, &mut creates)
+                    };
+                    if asks {
+                        return ASK;
                     }
                 }
                 continue;
@@ -404,7 +503,11 @@ impl Rules {
                     .position(|a| a.text == "-t" || a.text == "--target-directory");
                 let dir = into.and_then(|at| args.get(at + 1));
                 let sources: Vec<&Word> = match dir {
-                    Some(dir) => operands.iter().copied().filter(|a| *a != dir).collect(),
+                    Some(dir) => operands
+                        .iter()
+                        .copied()
+                        .filter(|a| !std::ptr::eq(*a, dir))
+                        .collect(),
                     None => operands[..operands.len().saturating_sub(1)].to_vec(),
                 };
                 let Some(dest) = dir.or(operands.last().copied()) else {
@@ -412,6 +515,10 @@ impl Rules {
                 };
                 if sources.is_empty() {
                     continue;
+                }
+                // Moving a file away deletes it where it was.
+                if name == "mv" && sources.iter().any(|s| deletes(s)) {
+                    return ASK;
                 }
                 let Some(here) = cwd.as_deref().filter(|_| dest.known) else {
                     return ASK;
@@ -441,6 +548,62 @@ impl Rules {
                 }
                 continue;
             }
+            if name == "ln" {
+                // Forced: it replaces what is at the link's name.
+                let forced = flags
+                    .iter()
+                    .any(|f| *f == "--force" || (!f.starts_with("--") && f[1..].contains('f')));
+                if forced {
+                    let Some(dest) = operands.last() else {
+                        return ASK;
+                    };
+                    if target(dest, &mut creates) {
+                        return ASK;
+                    }
+                }
+                continue;
+            }
+            if name == "install" {
+                if let Some(dest) = operands.last() {
+                    if operands.len() >= 2 && target(dest, &mut creates) {
+                        return ASK;
+                    }
+                }
+                continue;
+            }
+            if name == "rsync"
+                && flags
+                    .iter()
+                    .any(|f| f.starts_with("--delete") || *f == "--remove-source-files")
+            {
+                return ASK;
+            }
+            if matches!(name, "curl" | "wget") {
+                let option: &[&str] = if name == "curl" {
+                    &["-o", "--output"]
+                } else {
+                    &["-O", "--output-document"]
+                };
+                for (at, a) in args.iter().enumerate() {
+                    let value = if option.contains(&a.text.as_str()) {
+                        args.get(at + 1).cloned()
+                    } else {
+                        option.iter().find_map(|o| {
+                            let joined = a.text.strip_prefix(&format!("{o}="))?;
+                            Some(Word {
+                                text: joined.to_owned(),
+                                known: a.known,
+                            })
+                        })
+                    };
+                    if let Some(value) = value {
+                        if value.text != "-" && target(&value, &mut creates) {
+                            return ASK;
+                        }
+                    }
+                }
+                continue;
+            }
             if name == "git" && self.git_risky(args, cwd.as_deref()) {
                 return ASK;
             }
@@ -451,9 +614,13 @@ impl Rules {
     fn git_risky(&self, args: &[Word], cwd: Option<&Path>) -> bool {
         let mut i = 0;
         while i < args.len() && args[i].text.starts_with('-') {
-            if ["-C", "-c", "--git-dir", "--work-tree", "--namespace"]
-                .contains(&args[i].text.as_str())
-            {
+            let option = args[i].text.as_str();
+            // Configuration on the command line can define an alias that runs
+            // a shell (`alias.x=!rm …`) or a command git runs: not judged.
+            if option == "-c" || option.starts_with("--config-env") {
+                return true;
+            }
+            if ["-C", "--git-dir", "--work-tree", "--namespace"].contains(&option) {
                 i += 1;
             }
             i += 1;
@@ -510,38 +677,48 @@ impl Rules {
 }
 
 /// A path with a component starting `.env` (`.env`, `.env.local`, …) or
-/// inside `.git/`.
-fn protected(file: &str) -> bool {
-    let starts = |s: &str| s.starts_with(".env") || s.starts_with(".git/");
-    starts(file)
-        || file
-            .match_indices('/')
-            .any(|(at, _)| starts(&file[at + 1..]))
+/// inside `.git/`, in any case (macOS and Windows file systems ignore it).
+fn protected(path: &Path) -> bool {
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(name) => Some(name.to_string_lossy().to_lowercase()),
+            _ => None,
+        })
+        .collect();
+    parts.iter().any(|p| p.starts_with(".env"))
+        || parts
+            .iter()
+            .take(parts.len().saturating_sub(1))
+            .any(|p| p == ".git")
+}
+
+/// A call's arguments, briefly, for a question.
+fn short(args: &Json) -> String {
+    let text = args.to_string();
+    match text.char_indices().nth(200) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text,
+    }
 }
 
 /// `file` against `dir`, with `.` and `..` applied and symlinks resolved.
+/// As the kernel resolves it: a `..` applies to the path so far with its
+/// symlinks followed (`link/..` is the parent of where `link` points).
 fn locate(dir: &Path, file: &str) -> PathBuf {
-    let path = Path::new(file);
-    let joined = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        dir.join(path)
-    };
-    real(&normalize(&joined))
-}
-
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for part in path.components() {
+    let mut out = dir.to_owned();
+    for part in Path::new(file).components() {
         match part {
+            Component::Prefix(_) | Component::RootDir => out = PathBuf::from(part.as_os_str()),
             Component::CurDir => {}
             Component::ParentDir => {
+                out = real(&out);
                 out.pop();
             }
-            other => out.push(other),
+            Component::Normal(name) => out.push(name),
         }
     }
-    out
+    real(&out)
 }
 
 /// `path` with symlinks resolved, also for a file not created yet.

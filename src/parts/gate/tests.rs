@@ -34,6 +34,7 @@ impl Project {
         let rules = Rules {
             cwd: real(root),
             scratch: Some(scratch.clone()),
+            free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
             created: Mutex::default(),
         };
         Self {
@@ -158,7 +159,6 @@ fn everyday_commands_do_not() {
         "git commit -m \"Use sudo-less install\"",
         "git clean -n",
         "cat > INSTALL.md <<EOF\nrun: sudo apt install x\nrm -rf /\nEOF",
-        "mkdir -p out && mv a.md out/",
         "echo \"a > b\" > fresh.txt",
         "cp sub/only.txt .",
     ]);
@@ -292,4 +292,145 @@ fn the_question_names_what_it_asks_about() {
         check.ask.as_deref(),
         Some("Overwrite the existing file owner.txt?")
     );
+}
+
+// -- hardening beyond the TypeScript gate (the reviews of #4) ---------------
+
+#[test]
+fn moving_a_file_away_is_deleting_it() {
+    let p = Project::new();
+    let s = p.scratch.display();
+    for command in [
+        "mv owner.txt moved.txt".to_string(),
+        format!("mv report.md {s}/"),
+        format!("mv sub {s}/"),
+    ] {
+        assert!(p.run(&command), "should ask: {command}");
+    }
+    // The agent's own file may move.
+    assert!(!p.run("echo x > mine.txt"));
+    assert!(!p.run("mv mine.txt also-mine.txt"));
+}
+
+#[test]
+fn a_program_named_by_an_expansion_is_unknown() {
+    let p = Project::new();
+    for command in [
+        "$(echo rm) -f existing.txt",
+        "`echo rm` -f existing.txt",
+        "X=rm; $X -f existing.txt",
+        "find . -exec $RM {} \\;",
+    ] {
+        assert!(p.run(command), "should ask: {command}");
+    }
+}
+
+#[test]
+fn dot_dot_follows_symlinks_as_the_kernel_does() {
+    let p = Project::new();
+    let link = p.scratch.join("l");
+    std::os::unix::fs::symlink(p.dir.path().join("sub"), &link).unwrap();
+    // `l/..` is the project (where `sub` is), not the scratch folder.
+    let command = format!("rm {}/../main", link.display());
+    assert!(p.run(&command), "should ask: {command}");
+}
+
+#[test]
+fn git_configuration_on_the_command_line_asks() {
+    let p = Project::new();
+    for command in [
+        "git -c alias.nuke='!rm -f a.md' nuke",
+        "git -c user.name=x status",
+        "git --config-env=core.pager=X log",
+    ] {
+        assert!(p.run(command), "should ask: {command}");
+    }
+}
+
+#[test]
+fn protected_files_in_any_case_and_by_any_write() {
+    let p = Project::new();
+    assert!(p.write("edit_file", ".ENV"), ".ENV");
+    assert!(p.write("edit_file", ".GIT/config"), ".GIT/config");
+    for command in [
+        "echo x >> .env",
+        "echo x >> .git/hooks/post-checkout",
+        "tee -a .env.local < x",
+        "echo x > .env.new",
+    ] {
+        assert!(p.run(command), "should ask: {command}");
+    }
+    assert!(!p.run("echo x >> notes.log"), "appending elsewhere is free");
+}
+
+#[test]
+fn more_ways_to_overwrite_or_delete() {
+    let p = Project::new();
+    for command in [
+        "echo x >&owner.txt",
+        "echo $((rm owner.txt); ls)",
+        "cat <<E'O'F\nhi\nEOF\nrm owner.txt",
+        "cat <<EOF\"\"\nhi\nEOF\nrm owner.txt",
+        "bash <<'EOF'\nrm owner.txt\nEOF",
+        "echo rm owner.txt | sh",
+        "ln -sf /dev/null main",
+        "rsync -a --delete sub/ out/",
+        "curl -o owner.txt https://example.com",
+        "wget -O owner.txt https://example.com",
+        "install a.md owner.txt",
+        "chmod -Rw,o-r .",
+        // Stricter than the TypeScript gate: moving the owner's file away.
+        "mkdir -p out && mv a.md out/",
+    ] {
+        assert!(p.run(command), "should ask: {command:?}");
+    }
+    for command in [
+        "echo x 2>&1",
+        "echo x >&2 | cat",
+        "curl -o fresh.html https://example.com",
+        "bash build.sh",
+    ] {
+        assert!(!p.run(command), "should be free: {command:?}");
+    }
+}
+
+#[test]
+fn only_spaces_tabs_and_newlines_split_words() {
+    let p = Project::new();
+    // bash does not split on NEL or vertical tab: the cd fails, the write
+    // lands on ./owner.txt.
+    for space in ['\u{85}', '\u{0b}', '\u{a0}'] {
+        let command = format!("cd sub{space}; echo x > owner.txt");
+        assert!(p.run(&command), "should ask: {command:?}");
+    }
+}
+
+#[test]
+fn a_tool_without_a_rule_asks_unless_named_free() {
+    let p = Project::new();
+    assert!(p.call("run_code", json!({ "code": "rm -rf ~" })));
+    assert!(!p.call("list_files", json!({ "path": "." })));
+    let check = p.rules.check("multi_search", &json!({ "q": "x" }));
+    assert_eq!(
+        check.ask.as_deref(),
+        Some("Run `multi_search` with {\"q\":\"x\"}?")
+    );
+}
+
+#[test]
+fn arguments_it_cannot_read_ask() {
+    let p = Project::new();
+    assert!(p.call("bash", json!({ "command": 123 })));
+    assert!(p.call("bash", json!({})));
+    assert!(p.call("write_file", json!({ "path": ["a"] })));
+    assert!(p.call("write", json!({ "path": "~/.zshrc" })));
+    assert!(p.call("edit", json!({ "path": "@notes.md" })));
+}
+
+#[test]
+fn trailing_slashes_do_not_hide_a_program_or_a_landing() {
+    let p = Project::new();
+    assert!(p.run("/bin/rm/ owner.txt"));
+    assert_eq!(super::shell::basename("dir/"), "dir");
+    assert_eq!(super::shell::basename("/"), "/");
 }

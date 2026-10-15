@@ -26,6 +26,8 @@ impl Word {
 pub(super) struct Simple {
     pub words: Vec<Word>,
     pub truncates: Vec<Word>,
+    /// Files appended to (`>>`, `&>>`).
+    pub appends: Vec<Word>,
     pub runs: Vec<String>,
     pub after: String,
 }
@@ -128,10 +130,13 @@ fn substitutions(body: &[char]) -> Option<Vec<String>> {
             }
             '$' if body.get(i + 1) == Some(&'(') => {
                 let end = closing(body, i + 1)?;
-                if body.get(i + 2) == Some(&'(') {
+                // Arithmetic only when `$((` is closed by `))` as one pair
+                // (`$((rm x); ls)` is a command substitution).
+                let arithmetic =
+                    body.get(i + 2) == Some(&'(') && closing(body, i + 2) == Some(end - 1);
+                if arithmetic {
                     // Arithmetic `$(( … ))`: only what it substitutes runs.
-                    let inner = &body[(i + 3).min(end)..end.saturating_sub(1).max(i + 3)];
-                    runs.extend(substitutions(inner)?);
+                    runs.extend(substitutions(&body[i + 3..end - 1])?);
                 } else {
                     runs.push(text(body, i + 2, end));
                 }
@@ -153,34 +158,45 @@ struct Heredoc {
     feeds: usize,
 }
 
-/// A heredoc's delimiter right after `<<` / `<<-`: `'x'`, `"x"` or a word.
-/// Returns (delimiter, quoted, length read).
+/// Where a word ends: bash splits words on spaces, tabs and newlines only
+/// (other Unicode spaces are part of the word), and at its operators.
+fn ends_word(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n') || ";&|<>()".contains(c)
+}
+
+/// A heredoc's delimiter right after `<<` / `<<-`: one shell word with its
+/// quotes removed (`E'O'F` is `EOF`). Quoted anywhere, the body is not
+/// expanded. Returns (delimiter, quoted, length read).
 fn delimiter(rest: &[char]) -> Option<(String, bool, usize)> {
-    match rest.first()? {
-        '\'' | '"' => {
-            let quote = rest[0];
-            let end = find(rest, quote, 1)?;
-            Some((text(rest, 1, end), true, end + 1))
-        }
-        _ => {
-            let len = rest
-                .iter()
-                .take_while(|c| !c.is_whitespace() && !";&|<>()".contains(**c))
-                .count();
-            if len == 0 {
-                return None;
+    let (mut out, mut quoted, mut i) = (String::new(), false, 0);
+    while i < rest.len() && !ends_word(rest[i]) {
+        match rest[i] {
+            '\'' | '"' => {
+                let end = find(rest, rest[i], i + 1)?;
+                out.push_str(&text(rest, i + 1, end));
+                quoted = true;
+                i = end;
             }
-            let raw = text(rest, 0, len);
-            let quoted = raw.contains('\\');
-            Some((raw.replace('\\', ""), quoted, len))
+            '\\' => {
+                out.push(*rest.get(i + 1)?);
+                quoted = true;
+                i += 1;
+            }
+            c => out.push(c),
         }
+        i += 1;
     }
+    (i > 0).then_some((out, quoted, i))
 }
 
 #[derive(PartialEq)]
 enum Redirect {
     None,
     Truncate,
+    Append,
+    /// `>&word`: a duplicated descriptor when `word` is a number or `-`,
+    /// else a file it truncates.
+    Duplicate,
     Skip,
 }
 
@@ -209,6 +225,13 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
             if let Some(w) = word.take() {
                 match redirect {
                     Redirect::Truncate => cur.truncates.push(w),
+                    Redirect::Append => cur.appends.push(w),
+                    Redirect::Duplicate
+                        if w.known
+                            && (w.text == "-"
+                                || (!w.text.is_empty()
+                                    && w.text.chars().all(|c| c.is_ascii_digit()))) => {}
+                    Redirect::Duplicate => cur.truncates.push(w),
                     Redirect::Skip => {}
                     Redirect::None => cur.words.push(w),
                 }
@@ -219,7 +242,11 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
     macro_rules! finish_command {
         ($after:expr) => {
             finish_word!();
-            if !cur.words.is_empty() || !cur.truncates.is_empty() || !cur.runs.is_empty() {
+            if !cur.words.is_empty()
+                || !cur.truncates.is_empty()
+                || !cur.appends.is_empty()
+                || !cur.runs.is_empty()
+            {
                 cur.after = $after.to_string();
                 out.push((Some(cur_id), Item::Command(std::mem::take(&mut cur))));
             } else {
@@ -306,7 +333,7 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                     }
                 }
             }
-            c if c.is_whitespace() => {
+            ' ' | '\t' => {
                 finish_word!();
             }
             ';' => {
@@ -322,7 +349,7 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                     finish_word!();
                     let append = s.get(i + 2) == Some(&'>');
                     redirect = if append {
-                        Redirect::Skip
+                        Redirect::Append
                     } else {
                         Redirect::Truncate
                     };
@@ -379,8 +406,12 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                     finish_word!();
                 }
                 match s.get(i + 1) {
-                    Some('>') | Some('&') => {
-                        redirect = Redirect::Skip;
+                    Some('>') => {
+                        redirect = Redirect::Append;
+                        i += 1;
+                    }
+                    Some('&') => {
+                        redirect = Redirect::Duplicate;
                         i += 1;
                     }
                     Some('|') => {
@@ -429,15 +460,21 @@ pub(super) struct Program<'a> {
     pub name: String,
     pub args: &'a [Word],
     pub via_xargs: bool,
+    /// The program's word is literal text (not `$X`, `$(…)`, a glob).
+    pub known: bool,
 }
 
 fn base(text: &str) -> String {
-    let trimmed = text.strip_prefix('\\').unwrap_or(text);
-    trimmed.rsplit('/').next().unwrap_or(trimmed).to_owned()
+    basename(text.strip_prefix('\\').unwrap_or(text))
 }
 
+/// The last path component, trailing slashes ignored (as Node's `basename`).
 pub(super) fn basename(text: &str) -> String {
-    text.rsplit('/').next().unwrap_or(text).to_owned()
+    let trimmed = text.trim_end_matches('/');
+    if trimmed.is_empty() && !text.is_empty() {
+        return "/".into();
+    }
+    trimmed.rsplit('/').next().unwrap_or(trimmed).to_owned()
 }
 
 pub(super) fn unwrap(words: &[Word]) -> Program<'_> {
@@ -489,6 +526,7 @@ pub(super) fn unwrap(words: &[Word]) -> Program<'_> {
             }
             _ => {
                 return Program {
+                    known: words.get(i).is_some_and(|w| w.known) && !name.is_empty(),
                     name,
                     args: words.get(i + 1..).unwrap_or(&[]),
                     via_xargs,

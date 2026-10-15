@@ -6,8 +6,9 @@ use std::path::{Component, Path, PathBuf};
 /// A folder for what the agent makes for itself (downloads, helper scripts,
 /// notes to itself), kept out of the owner's. Name it in the system prompt,
 /// and to the approval gate, which lets the agent delete and overwrite there
-/// freely: [`Scratch::ENV`] in the environment of the plugin runtime the gate
-/// runs in (`PluginHostBuilder::env`).
+/// freely: [`Gate::with_scratch`](super::Gate::with_scratch), or for the pi
+/// example gate `confirm-dangerous.ts`, [`Scratch::ENV`] in its runtime's
+/// environment (`PluginHostBuilder::env`).
 ///
 /// The folder is left in place when the agent ends, so what it gathered can
 /// still be looked at.
@@ -17,7 +18,8 @@ pub struct Scratch {
 }
 
 impl Scratch {
-    /// The environment variable the approval gate reads.
+    /// The environment variable the pi example gate (`confirm-dangerous.ts`)
+    /// reads.
     pub const ENV: &'static str = "YOBUILD_SCRATCH";
 
     /// A new, empty folder in the temp dir, named `<name>-<random>`. `name`

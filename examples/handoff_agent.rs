@@ -56,6 +56,26 @@ use yobuild::parts::{AskOwner, Facts, Gate, Report, Scratch};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// The plugin tools that only plan or search: rpiv-todo's plan and
+/// dsh-free-search's searches (not its `npm` or test tools). yoagent's
+/// read-only tools and `ask_owner` are free by default.
+const FREE_TOOLS: [&str; 14] = [
+    "todo",
+    "multi_search",
+    "research",
+    "web_search",
+    "search_web_pages",
+    "advanced_search",
+    "global_search",
+    "domain_search",
+    "platform_search",
+    "video_search",
+    "zhihu_search",
+    "cache_search",
+    "search_pro",
+    "web_search_exa",
+];
+
 /// `frontend/`, where the TypeScript plugins live.
 fn here() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend")
@@ -196,7 +216,7 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         .start(root)
         .await?;
     let mut rows = vec![
-        // pi extensions, unchanged: the plan, and approval of dangerous commands.
+        // pi extensions, unchanged: the plan.
         Row::new(
             "pi",
             rutis_plugins()
@@ -307,7 +327,12 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     .with_extension(bridge.extension())
     // The approval gate: the agent deletes and overwrites freely in its
     // scratch and in what it created, and asks for the rest.
-    .with_extension(Gate::new(session.clone(), &cwd).with_scratch(&scratch))
+    .with_extension(
+        Gate::new(session.clone(), &cwd)
+            .with_scratch(&scratch)
+            // Tools that only plan or look things up; any other plugin tool asks.
+            .with_free_tools(FREE_TOOLS),
+    )
     .with_extension(report)
     .with_extension(facts);
     let priced = budget.is_some();
