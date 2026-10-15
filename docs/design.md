@@ -165,8 +165,11 @@ Inherited from yoagent and the handoff work, and kept on by default:
 - **Fail closed** at every plugin boundary (yoagent-rutis): a policy that
   times out, crashes or is unloaded denies; a redaction that fails
   withholds; a plugin hooking what the loop cannot enforce is refused.
-- **A policy is required** when a gate is configured (`require_policy`): a
-  run starting while the policy plugin is down denies every tool call.
+- **The gate holds without a plugin runtime**: `yobuild::parts::Gate` is a
+  required extension in the Rust process, an allow-list (anything it does
+  not know to be harmless asks). A gate written as a plugin (the pi
+  example) needs `require_policy`, so a run starting while that plugin is
+  down denies every tool call.
 - **Questions are never answered for the owner**; with no frontend, the
   safe default (deny, skip).
 - **Private homes**: DSH's services get a home of their own (`DshHome`);

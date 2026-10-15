@@ -10,6 +10,7 @@ struct Project {
     dir: tempfile::TempDir,
     scratch: PathBuf,
     rules: Rules,
+    pending: std::cell::RefCell<Vec<PathBuf>>,
 }
 
 impl Project {
@@ -26,6 +27,8 @@ impl Project {
             "my file.txt",
             ".env",
             "a.md",
+            // The owner's script: running it is the owner's code.
+            "build.sh",
         ] {
             std::fs::write(root.join(f), "the owner's\n").unwrap();
         }
@@ -35,12 +38,13 @@ impl Project {
             start: Here::start(root),
             scratch: Some(scratch.clone()),
             free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
-            created: Mutex::default(),
+            created: Arc::default(),
         };
         Self {
             dir,
             scratch,
             rules,
+            pending: Default::default(),
         }
     }
 
@@ -56,9 +60,16 @@ impl Project {
     }
 
     fn call(&self, tool: &str, args: Json) -> bool {
+        // The previous call's files are recorded as `after_tool` would once
+        // it ran: those that exist by now (the test writes them).
+        for path in self.pending.borrow_mut().drain(..) {
+            if let Some(id) = identity(&path) {
+                self.rules.created.lock().unwrap().insert(path, id);
+            }
+        }
         let check = self.rules.check(tool, &args);
         if check.ask.is_none() {
-            self.rules.created.lock().unwrap().extend(check.creates);
+            *self.pending.borrow_mut() = check.creates;
         }
         check.ask.is_some()
     }
@@ -311,6 +322,7 @@ fn moving_a_file_away_is_deleting_it() {
     }
     // The agent's own file may move.
     assert!(!p.run("echo x > mine.txt"));
+    std::fs::write(p.dir.path().join("mine.txt"), "x").unwrap();
     assert!(!p.run("mv mine.txt also-mine.txt"));
 }
 
@@ -413,10 +425,8 @@ fn a_tool_without_a_rule_asks_unless_named_free() {
     assert!(p.call("run_code", json!({ "code": "rm -rf ~" })));
     assert!(!p.call("list_files", json!({ "path": "." })));
     let check = p.rules.check("multi_search", &json!({ "q": "x" }));
-    assert_eq!(
-        check.ask.as_deref(),
-        Some("Run `multi_search` with {\"q\":\"x\"}?")
-    );
+    assert_eq!(check.ask.as_deref(), Some("Run `multi_search`?"));
+    assert_eq!(check.details, "{\n  \"q\": \"x\"\n}");
 }
 
 #[test]
@@ -583,7 +593,7 @@ fn cd_follows_the_logical_path_as_bash_does() {
         },
         scratch: None,
         free_tools: HashSet::new(),
-        created: Mutex::default(),
+        created: Arc::default(),
     };
     let asks = |c: &str| rules.check("bash", &json!({ "command": c })).ask.is_some();
     assert!(asks("cd .. && echo x > notes.txt"), "the link's parent");
@@ -674,4 +684,198 @@ fn reads_that_used_to_ask_are_free() {
         assert!(!p.run(command), "should be free: {command}");
     }
     assert!(p.run("git config set alias.x '!rm a'"));
+}
+
+// -- the allow-list (the review of #4) ---------------------------------------
+
+#[test]
+fn keywords_do_not_hide_the_command_after_them() {
+    let p = Project::new();
+    for command in [
+        "if true; then rm owner.txt; fi",
+        "for f in a; do rm owner.txt; done",
+        "while false; do rm owner.txt; done",
+        "! rm owner.txt",
+        "if [ -f x ]; then rm -rf build; fi",
+        "function f { rm owner.txt; }; f",
+        "coproc rm owner.txt",
+        "case x in x) rm owner.txt ;; esac",
+    ] {
+        assert!(p.run(command), "should ask: {command}");
+    }
+    for command in [
+        "if [ -f a.md ]; then cat a.md; fi",
+        "for f in *.md; do echo \"$f\"; done",
+        "while read -r l; do echo \"$l\"; done < a.md",
+    ] {
+        assert!(!p.run(command), "should be free: {command}");
+    }
+}
+
+#[test]
+fn git_is_free_only_for_what_it_knows() {
+    let p = Project::new();
+    for command in [
+        "git rebase -x 'rm owner.txt' HEAD~1",
+        "git grep -O'rm owner.txt' x",
+        "git difftool -y -x 'rm owner.txt' HEAD",
+        "git fetch --upload-pack='rm owner.txt;' .",
+        "git reset --har",
+        "git checkout --fo dev",
+        "git checkout -qf dev",
+        "git switch -qf dev",
+        "git push -uf",
+        "git push --del origin x",
+        "git branch -d -f x",
+        "git checkout HEAD '*.txt'",
+        "git -C sub checkout HEAD only.txt",
+        "git mv -f a.md owner.txt",
+        "git stash -u",
+        "git merge other",
+        "git submodule foreach 'rm owner.txt'",
+    ] {
+        assert!(p.run(command), "should ask: {command}");
+    }
+    for command in [
+        "git status",
+        "git diff --stat",
+        "git log --oneline -5",
+        "git show HEAD",
+        "git add -A",
+        "git commit -m 'msg'",
+        "git push origin main",
+        "git push -u origin feature",
+        "git fetch --all",
+        "git checkout -b feature",
+        "git switch -c feature",
+        "git restore --staged owner.txt",
+        "git rm --cached owner.txt",
+        "git reset",
+        "git reset --soft HEAD~1",
+        "git clean -n",
+        "git branch -a",
+        "git stash",
+        "git stash list",
+        "git -C sub status",
+    ] {
+        assert!(!p.run(command), "should be free: {command}");
+    }
+}
+
+#[test]
+fn programs_off_the_list_ask() {
+    let p = Project::new();
+    for command in [
+        "csh -c 'rm owner.txt'",
+        "tcsh -c 'rm owner.txt'",
+        "caffeinate -i rm owner.txt",
+        "arch -arm64 rm owner.txt",
+        "echo owner.txt | xargs -J % rm %",
+        "sort -o owner.txt a.md",
+        "uniq a.md owner.txt",
+        "tar -xf archive.tar",
+        "unzip archive.zip",
+        "trap 'rm owner.txt' EXIT",
+        "python3 -c 'import os; os.remove(\"owner.txt\")'",
+        "python3 tool.py",
+        "sed -i 's/a/b/' owner.txt",
+        "awk '{ print > \"owner.txt\" }' a.md",
+        "npm install",
+        "cargo install ripgrep",
+        "make clean",
+        "shopt -s expand_aliases",
+        "source env.sh",
+        "kill -9 1",
+    ] {
+        assert!(p.run(command), "should ask: {command}");
+    }
+}
+
+#[test]
+fn everyday_commands_stay_free() {
+    let p = Project::new();
+    for command in [
+        "ls -la",
+        "cat a.md | grep x | wc -l",
+        "rg --files",
+        "head -n 5 a.md",
+        "find . -name '*.rs'",
+        "mkdir -p out && touch out/x",
+        "cargo build --release",
+        "cargo test -- --nocapture",
+        "cargo clippy --all-targets",
+        "cargo fmt",
+        "go test ./...",
+        "npm test",
+        "npm run build",
+        "make",
+        "pytest -q",
+        "python3 -m pytest",
+        "bash build.sh",
+        "jq . a.md",
+        "sed 's/a/b/' a.md",
+        "awk '{ print $1 }' a.md",
+        "sort a.md | uniq -c",
+        "tar -tf archive.tar",
+        "tar -czf new.tgz sub",
+        "diff a.md owner.txt",
+        "date && uname -a",
+        "export PATH=/usr/bin:$PATH",
+        "which cargo",
+        "echo x > new.txt",
+        "chmod +x build.sh",
+    ] {
+        assert!(!p.run(command), "should be free: {command}");
+    }
+}
+
+#[test]
+fn copies_and_links_that_would_land_on_the_owners_files() {
+    let p = Project::new();
+    std::fs::create_dir_all(p.scratch.join("x")).unwrap();
+    std::fs::write(p.scratch.join("x/owner.txt"), "new").unwrap();
+    let s = p.scratch.display();
+    for command in [
+        format!("cp -R {s}/x/ ."),
+        format!("cp -R {s}/x/ sub"),
+        format!("rsync -a {s}/x/ ."),
+        format!("cp --target-directory=sub {s}/x/owner.txt"),
+        format!("cp -tsub {s}/x/owner.txt"),
+        "ln -s owner.txt new && echo x > new".to_string(),
+        "ln owner.txt h && : > h".to_string(),
+        "ln -s .git/hooks h && echo x > h/pre-commit".to_string(),
+        "cp -l owner.txt bar".to_string(),
+    ] {
+        assert!(p.run(&command), "should ask: {command}");
+    }
+    assert!(
+        !p.run(&format!("rsync -a {s}/x/ fresh/")),
+        "into a new folder"
+    );
+}
+
+#[test]
+fn a_hard_link_to_the_owners_file_is_not_the_agents() {
+    let p = Project::new();
+    let root = p.dir.path();
+    // The agent makes foo, deletes it, and links the owner's file there.
+    assert!(!p.run("echo a > foo"));
+    std::fs::write(root.join("foo"), "a").unwrap();
+    assert!(!p.run("rm foo"));
+    std::fs::remove_file(root.join("foo")).unwrap();
+    std::fs::hard_link(root.join("owner.txt"), root.join("foo")).unwrap();
+    // foo is now the owner's file under another name.
+    assert!(p.run(": > foo"));
+}
+
+#[test]
+fn a_command_that_writes_nothing_frees_nothing() {
+    let p = Project::new();
+    // Allowed, but it never ran far enough to make report2.md.
+    assert!(!p.run("false && echo x > report2.md"));
+    // The call ran (`after_tool`): report2.md was not there.
+    assert!(!p.run("ls"));
+    // The owner's file appears there later: it is theirs.
+    std::fs::write(p.dir.path().join("report2.md"), "the owner's").unwrap();
+    assert!(p.run("rm report2.md"));
 }

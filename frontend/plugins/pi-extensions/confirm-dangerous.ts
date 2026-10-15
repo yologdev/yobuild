@@ -4,9 +4,11 @@
 // frontend attached through yobuild's frontend, the question reaches the
 // terminal or browser.
 //
-// The Rust gate (`yobuild::parts::Gate`) is a port of this one; the two keep
-// the same rules and test cases. (The Rust gate also asks before tools it
-// has no rule for; this one judges `bash`, `write` and `edit` only.)
+// The pi example of an approval gate. The Rust gate (`yobuild::parts::Gate`)
+// started as a port of it and is now an allow-list: it asks before anything
+// it does not know to be harmless. This one is a deny-list — it asks before
+// what its rules name — kept as the example of a pi policy, not as the
+// handoff agent's guardrail.
 //
 // Each shell command is tokenized (words split on spaces, tabs and newlines
 // only, as bash does; quotes, escapes, operators, redirections; the bodies

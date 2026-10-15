@@ -56,54 +56,60 @@ const READS: [&str; 24] = [
 /// `list_files`, `search`, and `ask_owner`.
 pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "ask_owner"];
 
-/// An extension that asks the owner before a tool call deletes, discards
-/// or overwrites what they already have — and before any tool it has no rule
-/// for — and refuses it when nobody answers "Allow" (no frontend, a timeout,
-/// or "Block"). The refusal reaches the model as an error tool result with
-/// the reason.
+/// An extension that asks the owner before a tool call does anything it
+/// does not know to be harmless, and refuses it when nobody answers "Allow"
+/// (no frontend, a timeout, "Block" or a dismissed question). The refusal
+/// reaches the model as an error tool result with the reason. The question
+/// has a short title, and the command or arguments in full, as written.
 ///
-/// Shell commands (`bash`) are read command by command — quotes, escapes,
-/// operators, redirections, heredocs, substitutions, `bash -c` / `eval` of
-/// literal text, backslash-newlines joined — following `cd` only where it
-/// surely applies (not through a symlink: bash's `cd` is logical). What asks:
-/// - `rm`, `unlink`, `rmdir`, `git rm` (not `--cached`), `xargs` running
-///   one of them, `find … -delete` or `-exec rm …`, `mv` of a file that is
-///   not the agent's (moving it away is deleting it here);
-/// - git: `reset --hard`/`--merge`/`--keep`, `clean` (not `-n`),
-///   `checkout` / `restore` of paths (not `restore --staged`),
-///   `checkout -f`, `switch -f` / `--discard-changes`, `branch -D`, a forced
-///   push (`-f`, `--force*`, `+ref`, `:ref`, `--mirror`, `--delete`),
-///   `stash drop` / `clear`, any `git -c` and `git config` write, and any
-///   `GIT_*` variable set for a command (an alias can run a shell);
-/// - `mv`, `cp`, `tee` (without `-a`), `dd of=`, `ln -f`, `install`,
-///   `curl -o` / `wget -O` (also in a cluster, `-sSLo`), `curl -O` and
-///   truncating redirections (`>`, `>|`, `2>`,
-///   `&>`, `>&file`; not `>>`, not to `/dev/null`) onto a file that exists;
-///   `rsync --delete` / `--remove-source-files`;
-/// - `sudo`, `truncate`, `shred`, `mkfs`, recursive `chmod` / `chown`, a
-///   shell reading its script from stdin (`| sh`, `bash <<EOF`), a shell or
-///   deleter run by any `find -exec`;
-/// - anything written or appended to `.env*`, `.git` or inside `.git/` (any
-///   case), also through a dangling symlink;
-/// - anything it cannot know: a path with `$VAR`, `~`, globs or after a `cd`
-///   it cannot follow; a program named by an expansion (`$(echo rm)`).
+/// **An allow-list.** A shell command (`bash`) is free only when every
+/// command in it is known to do no harm here, and everything it writes is
+/// new, the agent's own, or in its [`Scratch`]. The line is read as bash
+/// reads it — quotes, escapes, operators, redirections, heredocs,
+/// substitutions (each read as a command line too), `bash -c` / `eval` /
+/// `trap` text, keywords (`if … then`, `for … do`: the command after them is
+/// judged), comments, line continuations — and `cd` is followed as bash's
+/// logical `cd` does it. Free:
+/// - readers and shell builtins (`ls`, `cat`, `grep`, `rg`, `jq`, `diff`,
+///   `sed` without `-i`, `awk` without output or `system`, `[`, `read`, …);
+///   making folders and empty files; non-recursive `chmod` / `chown`;
+/// - building and testing (the owner's code): `cargo build|test|check|…`,
+///   `go build|test|…`, `npm test` / `npm run`, `make` (not `install` or
+///   `clean`), `pytest`, `python -m pytest`; the owner's own scripts (`bash
+///   build.sh`, `python3 tool.py` when the file is theirs);
+/// - git that reads or adds, commits and shares without discarding:
+///   `status`, `diff`, `log`, `show`, `add`, `commit`, `push` (not forced),
+///   `fetch`, `checkout -b`, `restore --staged`, `reset --soft`, `clean -n`, …,
+///   each with the options that keep it so;
+/// - writers whose targets are judged: redirections, `cp`, `mv` (the source
+///   too: moving away is deleting), `tee`, `dd of=`, `ln`, `install`,
+///   `curl -o` / `wget -O`, `rsync` into a new folder, `rm` of the agent's
+///   own files, `tar -c`, `uniq IN OUT`.
+///
+/// Everything else asks: a program not on the list (an interpreter running
+/// code it was given, `sudo`, `kill`, `source`, an unknown wrapper), a git
+/// subcommand or option not listed (abbreviated, clustered, one that runs a
+/// command), a path it cannot know (`$VAR`, `~`, globs, a `cd` it cannot
+/// follow), a write onto the owner's file, anything written or appended to
+/// `.env*` or `.git` in any case, a name linked earlier in the same line.
 ///
 /// File tools: `write_file` (or pi's `write`) over a file that exists, and
-/// `write_file` / `edit_file` (`edit`) of `.env*` or inside `.git/`, or of a
-/// path it cannot read (not a string, `~`, `@`).
-///
+/// `write_file` / `edit_file` (`edit`) of `.env*` or `.git`, or of a path it
+/// cannot read (not a string, `~`, `@`), ask; targeted edits are free.
 /// Other tools: free when named in [`with_free_tools`](Self::with_free_tools)
-/// (by default [`READ_ONLY_TOOLS`]); any other tool asks — a plugin's tool
-/// may run code or delete files, and the gate cannot see inside it.
+/// (by default [`READ_ONLY_TOOLS`]), else they ask.
 ///
-/// Free: files the agent created in this session (by a call that ran),
-/// anything in its [`Scratch`], and targeted edits of other files. Paths are
-/// resolved as the kernel does: symlinks followed before `..`.
+/// The agent's own files are those created by calls that ran: recorded
+/// after the call, only if they exist, as that very file (device and inode;
+/// a hard link to the owner's file under that name is the owner's).
 ///
-/// **Not a sandbox:** a script or program can still change files in ways a
-/// command line does not show (`sed -i`, `python3 -c …`, `bash script.sh`, a
-/// Makefile). For a guarantee, run the agent in a container or a disposable
-/// copy.
+/// **Its folder must be the shell's:** relative paths are judged against
+/// the `cwd` given to [`Gate::new`], so the agent's `bash` tool and file
+/// tools must work there too.
+///
+/// **Not a sandbox:** the owner's own scripts and builds run as they are,
+/// and a program can change files in ways its command line does not show.
+/// For a guarantee, run the agent in a container or a disposable copy.
 ///
 /// It is a required extension; it judges a call again when a later
 /// extension rewrote it; its state (the files the agent created) lasts
@@ -128,7 +134,7 @@ impl Gate {
                 start: Here::start(&cwd),
                 scratch: None,
                 free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
-                created: Mutex::default(),
+                created: Arc::default(),
             }),
             pending: Arc::default(),
         }
@@ -151,7 +157,7 @@ impl Gate {
             start: self.rules.start.clone(),
             scratch: self.rules.scratch.clone(),
             free_tools: self.rules.free_tools.clone(),
-            created: Mutex::new(self.rules.created.lock().unwrap().clone()),
+            created: self.rules.created.clone(),
         };
         edit(&mut rules);
         Self {
@@ -169,10 +175,15 @@ impl Gate {
 
 /// The gate's reading of one call.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Check {
-    /// The question for the owner, when it needs their yes.
+    /// The question for the owner (a short title), when it needs their yes.
     pub ask: Option<String>,
-    /// Files it creates: the agent's own once the call has run.
+    /// What the question is about, in full (the command as written, the
+    /// arguments), shown under the title.
+    pub details: String,
+    /// Files it creates (only when it needs no yes): the agent's own once
+    /// the call has run and they exist.
     pub creates: Vec<PathBuf>,
 }
 
@@ -195,11 +206,15 @@ impl Extension for Gate {
 #[async_trait::async_trait]
 impl RunHooks for Gate {
     async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
+        // Each look replaces what an earlier one found (a recheck), and a
+        // denied call leaves nothing behind.
+        self.pending.lock().unwrap().remove(call.tool_call_id);
         let check = self.rules.check(call.tool_name, call.args);
         if let Some(question) = check.ask {
             let request = UiRequest::Select {
                 title: question,
-                message: String::new(),
+                // The command as written (several lines stay several lines).
+                message: check.details,
                 options: vec!["Allow".into(), "Block".into()],
                 multiple: false,
             };
@@ -209,17 +224,18 @@ impl RunHooks for Gate {
                 Some(_) => return ToolDecision::Deny("the owner blocked it".into()),
                 None => {
                     return ToolDecision::Deny(
-                        "needs the owner's approval, and nobody answered".into(),
+                        "not allowed: the owner declined, or nobody answered".into(),
                     )
                 }
             }
         }
-        // The files it makes become the agent's own once it has run (a
-        // recheck replaces what the first look found).
-        self.pending
-            .lock()
-            .unwrap()
-            .insert(call.tool_call_id.to_owned(), check.creates);
+        // The files it makes become the agent's own once it has run.
+        if !check.creates.is_empty() {
+            self.pending
+                .lock()
+                .unwrap()
+                .insert(call.tool_call_id.to_owned(), check.creates);
+        }
         ToolDecision::Allow
     }
 
@@ -230,7 +246,14 @@ impl RunHooks for Gate {
     ) -> Result<(), ExtensionError> {
         let creates = self.pending.lock().unwrap().remove(call.tool_call_id);
         if let (Some(creates), false) = (creates, output.is_error) {
-            self.rules.created.lock().unwrap().extend(creates);
+            // Only what is there now (a command can fail with no error from
+            // the tool), as that very file.
+            let mut created = self.rules.created.lock().unwrap();
+            for path in creates {
+                if let Some(id) = identity(&path) {
+                    created.insert(path, id);
+                }
+            }
         }
         Ok(())
     }
@@ -249,10 +272,11 @@ impl Here {
     /// inherits it), else `cwd` itself.
     fn start(cwd: &Path) -> Self {
         let physical = real(cwd);
+        // Otherwise bash starts from the real folder (`getcwd`).
         let logical = std::env::var_os("PWD")
             .map(PathBuf::from)
             .filter(|pwd| pwd.is_absolute() && real(pwd) == physical)
-            .unwrap_or_else(|| cwd.to_owned());
+            .unwrap_or_else(|| physical.clone());
         Self { logical, physical }
     }
 
@@ -270,26 +294,35 @@ struct Rules {
     start: Here,
     scratch: Option<PathBuf>,
     free_tools: HashSet<String>,
-    /// Files the agent made this session: it may overwrite or delete them.
-    created: Mutex<HashSet<PathBuf>>,
+    /// Files the agent made this session, as the files they were (device
+    /// and inode): it may overwrite or delete them while they still are.
+    /// Shared by every clone of the gate.
+    created: Arc<Mutex<HashMap<PathBuf, (u64, u64)>>>,
 }
 
 impl Rules {
     fn check(&self, tool: &str, args: &Json) -> Check {
         let mut check = Check {
             ask: None,
+            details: String::new(),
             creates: Vec::new(),
         };
         match tool {
             "bash" => {
                 let Some(command) = args["command"].as_str() else {
-                    check.ask = Some(format!("Run `bash` with {}?", short(args)));
+                    check.ask = Some("Run `bash` with these arguments?".into());
+                    check.details = pretty(args);
                     return check;
                 };
                 let (ask, creates) = self.line(command, &self.start);
-                check.creates = creates;
                 if ask {
-                    check.ask = Some(format!("Run `{command}`?"));
+                    check.ask = Some(match command.lines().count() {
+                        1 if command.chars().count() <= 80 => format!("Run `{command}`?"),
+                        _ => "Run this command?".into(),
+                    });
+                    check.details = command.to_owned();
+                } else {
+                    check.creates = creates;
                 }
             }
             "write_file" | "write" | "edit_file" | "edit" => {
@@ -298,7 +331,8 @@ impl Rules {
                     // `~` and `@` mean something else to some tools (pi's).
                     Some(file) if !file.is_empty() && !file.starts_with(['~', '@']) => file,
                     _ => {
-                        check.ask = Some(format!("Run `{tool}` with {}?", short(args)));
+                        check.ask = Some(format!("Run `{tool}` with these arguments?"));
+                        check.details = pretty(args);
                         return check;
                     }
                 };
@@ -312,17 +346,27 @@ impl Rules {
                 }
             }
             tool if self.free_tools.contains(tool) => {}
-            tool => check.ask = Some(format!("Run `{tool}` with {}?", short(args))),
+            tool => {
+                check.ask = Some(format!("Run `{tool}`?"));
+                check.details = pretty(args);
+            }
         }
         check
     }
 
     fn free(&self, path: &Path) -> bool {
-        self.created.lock().unwrap().contains(path)
-            || self
-                .scratch
-                .as_ref()
-                .is_some_and(|scratch| path.starts_with(scratch))
+        // Its own file only while it is the same file, and not linked to
+        // another name (a hard link to the owner's file is the owner's).
+        let own = self
+            .created
+            .lock()
+            .unwrap()
+            .get(path)
+            .is_some_and(|id| identity(path) == Some(*id) && single(path));
+        own || self
+            .scratch
+            .as_ref()
+            .is_some_and(|scratch| path.starts_with(scratch))
     }
 
     /// A path the agent may not touch without asking: one that exists and is not its own.
@@ -342,6 +386,10 @@ impl Rules {
         // Directories to return to when a `( … )` subshell ends.
         let mut saved: Vec<Option<Here>> = Vec::new();
         let mut before = ";".to_owned();
+        // Names linked earlier in this line (`ln`): a write through one lands
+        // elsewhere, so they are unknown for the rest of it.
+        let linked: std::cell::RefCell<Vec<PathBuf>> = Default::default();
+        let through_link = |path: &Path| linked.borrow().iter().any(|l| path.starts_with(l));
 
         for item in items {
             let command = match item {
@@ -372,7 +420,7 @@ impl Rules {
                     return true;
                 };
                 let path = locate(dir, &w.text);
-                if protected(&path) || self.owners(&path) {
+                if protected(&path) || self.owners(&path) || through_link(&path) {
                     return true;
                 }
                 if !path.exists() {
@@ -387,7 +435,10 @@ impl Rules {
                     .map(|h| h.physical.as_path())
                     .filter(|_| w.known)
                 {
-                    Some(dir) => !self.free(&locate(dir, &w.text)),
+                    Some(dir) => {
+                        let path = locate(dir, &w.text);
+                        !self.free(&path) || through_link(&path)
+                    }
                     None => true,
                 }
             };
@@ -539,7 +590,11 @@ impl Rules {
                     }
                     // No script named: it reads one from stdin (`| sh`, `bash <<EOF`).
                     (false, None) => return ASK,
-                    (false, Some(_)) => {}
+                    (false, Some(script)) => {
+                        if !self.owners_script(script, cwd.as_ref()) {
+                            return ASK;
+                        }
+                    }
                 }
                 continue;
             }
@@ -617,6 +672,33 @@ impl Rules {
                 continue;
             }
             if matches!(name, "mv" | "cp") {
+                // Forms it does not follow: a joined target folder, `-T`,
+                // copies that make links.
+                let unread = args.iter().any(|a| {
+                    let t = a.text.as_str();
+                    t.starts_with("--target-directory=")
+                        || (t.starts_with("-t") && t.len() > 2 && !t.starts_with("--"))
+                        || t == "-T"
+                        || t == "--no-target-directory"
+                        || t == "--link"
+                        || t == "--symbolic-link"
+                        || (name == "cp"
+                            && t.starts_with('-')
+                            && !t.starts_with("--")
+                            && t[1..].contains(['l', 's']))
+                });
+                if unread {
+                    return ASK;
+                }
+                let recursive = name == "cp"
+                    && args.iter().any(|a| {
+                        let t = a.text.as_str();
+                        t == "--recursive"
+                            || t == "--archive"
+                            || (t.starts_with('-')
+                                && !t.starts_with("--")
+                                && t[1..].contains(['r', 'R', 'a']))
+                    });
                 let into = args
                     .iter()
                     .position(|a| a.text == "-t" || a.text == "--target-directory");
@@ -647,6 +729,12 @@ impl Rules {
                     return ASK;
                 };
                 let dest_path = locate(here, &dest.text);
+                // A whole tree into a folder that is there: what lands where
+                // is not read from the command (`cp -R dir/ .` copies dir's
+                // contents), so only into a folder of the agent's own.
+                if recursive && dest_path.is_dir() && !self.free(&dest_path) {
+                    return ASK;
+                }
                 let landings: Vec<Word> = if dir.is_some() || dest_path.is_dir() {
                     sources
                         .iter()
@@ -676,14 +764,23 @@ impl Rules {
                 let forced = flags
                     .iter()
                     .any(|f| *f == "--force" || (!f.starts_with("--") && f[1..].contains('f')));
-                if forced {
-                    let Some(dest) = operands.last() else {
-                        return ASK;
-                    };
-                    if target(dest, &mut creates) {
-                        return ASK;
-                    }
+                let Some(dest) = operands.last().filter(|d| d.known) else {
+                    return ASK;
+                };
+                let Some(dir) = cwd.as_ref().map(|h| h.physical.as_path()) else {
+                    return ASK;
+                };
+                if forced && target(dest, &mut creates) {
+                    return ASK;
                 }
+                let link = locate(dir, &dest.text);
+                let link = if operands.len() > 1 && link.is_dir() {
+                    // `ln -s a b dir/`: links inside the folder, named as given.
+                    return ASK;
+                } else {
+                    link
+                };
+                linked.borrow_mut().push(link);
                 continue;
             }
             if name == "install" {
@@ -694,12 +791,25 @@ impl Rules {
                 }
                 continue;
             }
-            if name == "rsync"
-                && flags
+            if name == "rsync" {
+                if flags
                     .iter()
                     .any(|f| f.starts_with("--delete") || *f == "--remove-source-files")
-            {
-                return ASK;
+                {
+                    return ASK;
+                }
+                // Into a folder that is not there yet, or the agent's own.
+                let Some(dest) = operands.last().filter(|d| d.known && operands.len() >= 2) else {
+                    return ASK;
+                };
+                let Some(dir) = cwd.as_ref().map(|h| h.physical.as_path()) else {
+                    return ASK;
+                };
+                let path = locate(dir, &dest.text);
+                if path.exists() && !self.free(&path) {
+                    return ASK;
+                }
+                continue;
             }
             if matches!(name, "curl" | "wget") {
                 // Where it writes: `-o FILE`, `-oFILE`, `-sSLo FILE`,
@@ -794,115 +904,556 @@ impl Rules {
                 }
                 continue;
             }
-            if name == "git" && self.git_risky(args, cwd.as_ref().map(|h| h.physical.as_path())) {
+            if name == "git" {
+                if !git_free(args) {
+                    return ASK;
+                }
+                continue;
+            }
+            if name == "trap" {
+                // Its first argument is shell text run later: read it now.
+                let Some(here) = cwd.as_ref() else {
+                    return ASK;
+                };
+                match args.first() {
+                    Some(code) if code.known => {
+                        let (ask, made) = self.line(&code.text, here);
+                        if ask {
+                            return ASK;
+                        }
+                        creates.extend(made);
+                    }
+                    Some(_) => return ASK,
+                    None => {}
+                }
+                continue;
+            }
+            if INTERPRETERS.contains(&name) {
+                if !self.interpreter_free(name, args, cwd.as_ref()) {
+                    return ASK;
+                }
+                continue;
+            }
+            // Everything else: free only when it is known to do no harm here.
+            if !allowed(name, args, &operands, &flags) {
                 return ASK;
+            }
+            // `uniq IN OUT` writes OUT; `tar -cf FILE` writes FILE.
+            if name == "uniq" && operands.len() >= 2 && target(operands[1], &mut creates) {
+                return ASK;
+            }
+            if name == "tar" {
+                if let Some(file) = tar_file(args) {
+                    if creates_archive(args) && target(&file, &mut creates) {
+                        return ASK;
+                    }
+                }
             }
         }
         (false, creates)
     }
 
-    fn git_risky(&self, args: &[Word], cwd: Option<&Path>) -> bool {
-        let mut i = 0;
-        while i < args.len() && args[i].text.starts_with('-') {
-            let option = args[i].text.as_str();
-            // Configuration on the command line can define an alias that runs
-            // a shell (`alias.x=!rm …`) or a command git runs: not judged.
-            if option == "-c" || option.starts_with("--config-env") {
-                return true;
-            }
-            if ["-C", "--git-dir", "--work-tree", "--namespace"].contains(&option) {
-                i += 1;
-            }
-            i += 1;
+    /// A script the owner has (it exists, the agent did not make it, it is
+    /// not in scratch): running it is the owner's code.
+    fn owners_script(&self, script: &Word, cwd: Option<&Here>) -> bool {
+        let Some(here) = cwd.filter(|_| script.known) else {
+            return false;
+        };
+        let path = locate(&here.physical, &script.text);
+        path.is_file() && !self.free(&path)
+    }
+
+    /// An interpreter running the owner's script, or a known module or flag
+    /// that runs no code of the agent's.
+    fn interpreter_free(&self, name: &str, args: &[Word], cwd: Option<&Here>) -> bool {
+        let text = |i: usize| args.get(i).map(|w| w.text.as_str()).unwrap_or("");
+        if ["--version", "-V", "-v", "--help"].contains(&text(0)) && args.len() == 1 {
+            return true;
         }
-        let sub = args.get(i).map(|a| a.text.as_str()).unwrap_or("");
-        let rest: Vec<&str> = args
-            .get(i + 1..)
-            .unwrap_or(&[])
-            .iter()
-            .map(|a| a.text.as_str())
-            .collect();
-        let flags: HashSet<&str> = rest
-            .iter()
-            .copied()
-            .filter(|a| a.starts_with('-'))
-            .collect();
-        let paths: Vec<&str> = rest
-            .iter()
-            .copied()
-            .filter(|a| !a.starts_with('-'))
-            .collect();
-        let has = |f: &str| flags.contains(f);
-        match sub {
-            // Writing configuration: an alias or a hook path can run a shell.
-            "config" => {
-                let reads = [
-                    "--get",
-                    "--get-all",
-                    "--get-regexp",
-                    "--get-urlmatch",
-                    "--list",
-                    "-l",
-                    "--show-origin",
-                    "--show-scope",
-                    "--name-only",
-                ];
-                // Where it reads from does not make a read a write.
-                let scope = [
-                    "--global",
-                    "--local",
-                    "--system",
-                    "--worktree",
-                    "--includes",
-                    "--null",
-                    "-z",
-                ];
-                let other_flags = flags
-                    .iter()
-                    .filter(|f| {
-                        !scope.contains(f) && !f.starts_with("--type") && !f.starts_with("--file")
-                    })
-                    .count();
-                match paths.first().copied() {
-                    // git 2.46+: `git config get|list …` read, the rest write.
-                    Some("get") | Some("list") => false,
-                    Some("set")
-                    | Some("unset")
-                    | Some("rename-section")
-                    | Some("remove-section")
-                    | Some("edit") => true,
-                    _ => !(reads.iter().any(|r| has(r)) || (other_flags == 0 && paths.len() <= 1)),
-                }
-            }
-            "reset" => has("--hard") || has("--merge") || has("--keep"),
-            "clean" => !has("-n") && !has("--dry-run"),
-            "rm" => !has("--cached"),
-            // Unstaging only touches the index; anything else rewrites files.
-            "restore" => !(has("--staged") && !has("--worktree") && !has("-W")),
-            // A branch switch is fine; checking out paths discards their changes.
-            "checkout" => {
-                has("-f")
-                    || has("--force")
-                    || rest.contains(&"--")
-                    || paths.contains(&".")
-                    || cwd.is_some_and(|dir| paths.iter().any(|p| self.owners(&locate(dir, p))))
-            }
-            "switch" => has("-f") || has("--force") || has("--discard-changes"),
-            "branch" => has("-D") || (has("-d") && has("--force")),
-            "push" => {
-                flags.iter().any(|f| {
-                    *f == "-f"
-                        || f.starts_with("--force")
-                        || *f == "--mirror"
-                        || *f == "--delete"
-                        || *f == "-d"
-                }) || paths
-                    .iter()
-                    .any(|p| p.starts_with('+') || p.starts_with(':'))
-            }
-            "stash" => matches!(paths.first(), Some(&"drop") | Some(&"clear")),
+        if name.starts_with("python") && text(0) == "-m" {
+            return match text(1) {
+                "pytest" | "unittest" | "mypy" | "pyflakes" | "pylint" | "compileall" => true,
+                "pip" => matches!(text(2), "list" | "show" | "freeze" | "check"),
+                _ => false,
+            };
+        }
+        if name == "node" && text(0) == "--test" {
+            return true;
+        }
+        match args.first() {
+            Some(script) if !script.text.starts_with('-') => self.owners_script(script, cwd),
             _ => false,
         }
+    }
+}
+
+/// Interpreters: they run whatever code they are given.
+const INTERPRETERS: [&str; 10] = [
+    "python", "python3", "node", "deno", "bun", "ruby", "perl", "php", "lua", "Rscript",
+];
+
+/// Whether a program with no rule of its own is known to do no harm with
+/// these arguments: it reads, builds, tests, or writes only what the
+/// redirections and rules above already judged.
+fn allowed(name: &str, args: &[Word], operands: &[&Word], flags: &[&str]) -> bool {
+    let first = operands.first().map(|w| w.text.as_str()).unwrap_or("");
+    let cluster = |c: char| {
+        flags
+            .iter()
+            .any(|f| !f.starts_with("--") && f[1..].contains(c))
+    };
+    let has = |f: &str| flags.contains(&f) || flags.iter().any(|g| g.starts_with(&format!("{f}=")));
+    match name {
+        // Shell keywords that end or open a block, and loop headers (data).
+        "fi" | "done" | "esac" | "}" | "]]" | "for" | "select" => true,
+        // Readers.
+        "ls" | "cat" | "head" | "tail" | "wc" | "grep" | "egrep" | "fgrep" | "rg" | "fd"
+        | "file" | "stat" | "du" | "df" | "pwd" | "echo" | "printf" | "true" | "false" | "test"
+        | "[" | "[[" | ":" | "which" | "type" | "whereis" | "basename" | "dirname" | "realpath"
+        | "readlink" | "date" | "printenv" | "whoami" | "id" | "uname" | "hostname" | "cut"
+        | "tr" | "comm" | "diff" | "cmp" | "tree" | "md5sum" | "sha1sum" | "sha256sum"
+        | "shasum" | "xxd" | "od" | "hexdump" | "nl" | "column" | "fold" | "expand"
+        | "unexpand" | "seq" | "sleep" | "jq" | "yq" | "bat" | "less" | "more" | "wait"
+        | "jobs" | "history" | "env" | "uniq" | "mktemp" | "command" => true,
+        // Shell state.
+        "export" | "unset" | "set" | "local" | "readonly" | "declare" | "typeset" | "read"
+        | "shift" | "break" | "continue" | "return" | "exit" => true,
+        // Making a folder or a new empty file, or a time stamp.
+        "mkdir" | "touch" => true,
+        // Permissions of one file at a time (recursive ones ask).
+        "chmod" | "chown" => !(has("--recursive") || cluster('R')),
+        "sort" => !(has("--output") || cluster('o')),
+        "sed" => {
+            let in_place = has("--in-place") || cluster('i');
+            // A `w file` command in the script writes a file.
+            let writes = operands.iter().any(|w| {
+                w.text.contains("/w ") || w.text.starts_with("w ") || w.text.contains(";w ")
+            });
+            !in_place && !writes
+        }
+        "awk" | "gawk" | "mawk" => {
+            // Its program can write files and run commands.
+            let program = args
+                .iter()
+                .find(|w| !w.text.starts_with('-'))
+                .map(|w| w.text.as_str())
+                .unwrap_or("");
+            !has("-f")
+                && !["system", ">", "|", "getline"]
+                    .iter()
+                    .any(|t| program.contains(t))
+        }
+        // Listing or creating an archive (its file judged by the caller).
+        "tar" => {
+            let mode = args
+                .first()
+                .map(|w| w.text.trim_start_matches('-'))
+                .unwrap_or("");
+            (mode.contains('t') || has("--list") || creates_archive(args)) && !mode.contains('x')
+        }
+        "unzip" => cluster('l') || cluster('t') || cluster('v'),
+        "zip" => !cluster('m') && !has("--move"),
+        // Building and testing: they run the owner's code.
+        "cargo" => {
+            let builds = matches!(
+                first,
+                "build"
+                    | "b"
+                    | "check"
+                    | "c"
+                    | "test"
+                    | "t"
+                    | "fmt"
+                    | "doc"
+                    | "d"
+                    | "tree"
+                    | "metadata"
+                    | "run"
+                    | "r"
+                    | "bench"
+                    | "version"
+                    | "search"
+                    | "nextest"
+                    | "locate-project"
+                    | "pkgid"
+                    | "verify-project"
+            );
+            let lints = first == "clippy" && !has("--fix");
+            let version = operands.is_empty()
+                && flags
+                    .iter()
+                    .all(|f| ["--version", "-V", "--help"].contains(f));
+            builds || lints || version
+        }
+        "go" => {
+            matches!(
+                first,
+                "build" | "test" | "vet" | "fmt" | "run" | "list" | "env" | "version"
+            ) || (first == "mod"
+                && matches!(
+                    operands.get(1).map(|w| w.text.as_str()),
+                    Some("graph" | "why" | "verify" | "download")
+                ))
+        }
+        "npm" | "pnpm" | "yarn" => {
+            matches!(
+                first,
+                "test"
+                    | "t"
+                    | "run"
+                    | "run-script"
+                    | "ls"
+                    | "list"
+                    | "view"
+                    | "info"
+                    | "outdated"
+                    | "why"
+            ) || (first == "audit" && !operands.iter().any(|w| w.text == "fix"))
+        }
+        "make" | "gmake" => !operands
+            .iter()
+            .any(|w| ["install", "uninstall", "clean", "distclean"].contains(&w.text.as_str())),
+        "pytest" | "ctest" | "tsc" | "eslint" | "prettier" if !has("--write") && !has("--fix") => {
+            true
+        }
+        "rustc" | "rustup" | "gcc" | "clang" | "cc" => {
+            flags.iter().any(|f| ["--version", "-V", "-v"].contains(f)) && operands.is_empty()
+                || (name == "rustup"
+                    && matches!(first, "show" | "toolchain" if operands.get(1).map(|w| w.text.as_str()) != Some("install")))
+        }
+        _ => false,
+    }
+}
+
+/// `tar`'s archive file (`-f FILE`, `-cf FILE`, `cf FILE`, `--file=FILE`).
+fn tar_file(args: &[Word]) -> Option<Word> {
+    for (at, a) in args.iter().enumerate() {
+        let t = a.text.as_str();
+        if let Some(file) = t.strip_prefix("--file=") {
+            return Some(Word {
+                text: file.to_owned(),
+                known: a.known,
+            });
+        }
+        let cluster = t.trim_start_matches('-');
+        if (at == 0 || t.starts_with('-')) && !t.starts_with("--") && cluster.ends_with('f') {
+            return args.get(at + 1).cloned();
+        }
+    }
+    None
+}
+
+/// `tar -c…` (or `--create`).
+fn creates_archive(args: &[Word]) -> bool {
+    args.iter().any(|a| a.text == "--create")
+        || args.first().is_some_and(|a| {
+            !a.text.starts_with("--") && a.text.trim_start_matches('-').contains('c')
+        })
+}
+
+/// Whether a git command is known to do no harm: the subcommands that read,
+/// or add, commit and share without discarding anything, with the options
+/// that keep them so. Anything else — a subcommand or option not listed, an
+/// abbreviation (`--har`), a cluster (`-qf`), `-c`, a `--git-dir` elsewhere,
+/// an option that runs a command (`-x`, `--upload-pack`, `-O`) — asks.
+fn git_free(args: &[Word]) -> bool {
+    let mut i = 0;
+    while let Some(a) = args.get(i) {
+        match a.text.as_str() {
+            "--no-pager" | "-P" | "--no-optional-locks" | "--literal-pathspecs" => i += 1,
+            // A folder for git to work in: the paths after it are not read here.
+            "-C" => i += 2,
+            t if t.starts_with('-') => return false,
+            _ => break,
+        }
+    }
+    if args.iter().any(|a| !a.known) {
+        return false;
+    }
+    let sub = args.get(i).map(|w| w.text.as_str()).unwrap_or("");
+    let rest: Vec<&str> = args[(i + 1).min(args.len())..]
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect();
+    let flags: Vec<&str> = rest
+        .iter()
+        .copied()
+        .filter(|t| t.starts_with('-') && *t != "--")
+        .collect();
+    let operands: Vec<&str> = rest
+        .iter()
+        .copied()
+        .filter(|t| !t.starts_with('-'))
+        .collect();
+    // Every option is one of these (exactly, or `--opt=value` for a long one).
+    let only = |safe: &[&str]| {
+        flags.iter().all(|f| {
+            safe.contains(f)
+                || f.split_once('=')
+                    .is_some_and(|(name, _)| name.starts_with("--") && safe.contains(&name))
+        })
+    };
+    // Options no reading subcommand may have: they write a file or run one.
+    let runs_or_writes = flags.iter().any(|f| {
+        f.starts_with("--output")
+            || f.starts_with("-O")
+            || f.starts_with("--open-files-in-pager")
+            || f.starts_with("--ext-diff")
+            || f.starts_with("--exec")
+            || f.starts_with("--upload-pack")
+            || f.starts_with("--receive-pack")
+            || f.starts_with("--config")
+            || *f == "-x"
+    });
+    match sub {
+        "" | "--version" | "version" | "help" => true,
+        // Reading.
+        "status" | "diff" | "log" | "show" | "blame" | "ls-files" | "ls-tree" | "rev-parse"
+        | "rev-list" | "describe" | "shortlog" | "cat-file" | "merge-base" | "name-rev"
+        | "for-each-ref" | "show-ref" | "grep" | "whatchanged" | "count-objects" | "var"
+        | "check-ignore" | "check-attr" | "show-branch" | "cherry" | "range-diff" => {
+            !runs_or_writes
+        }
+        "reflog" => {
+            matches!(operands.first(), None | Some(&"show") | Some(&"list")) && !runs_or_writes
+        }
+        "remote" => {
+            matches!(operands.first(), None | Some(&"show") | Some(&"get-url"))
+                && only(&["-v", "--verbose"])
+        }
+        "worktree" => operands.first() == Some(&"list"),
+        "stash" => match operands.first() {
+            Some(&"list") | Some(&"show") => !runs_or_writes,
+            // Putting changes aside keeps them (untracked files too would
+            // leave the tree: `-u`, `--all` ask).
+            None | Some(&"push") | Some(&"save") => only(&[
+                "-m",
+                "--message",
+                "-q",
+                "--quiet",
+                "--staged",
+                "-S",
+                "--keep-index",
+                "-k",
+                "-p",
+                "--patch",
+            ]),
+            _ => false,
+        },
+        "branch" => only(&[
+            "-a",
+            "--all",
+            "-r",
+            "--remotes",
+            "-v",
+            "-vv",
+            "--verbose",
+            "--list",
+            "-l",
+            "--show-current",
+            "--contains",
+            "--merged",
+            "--no-merged",
+            "--sort",
+            "--format",
+            "--no-color",
+            "--color",
+        ]),
+        "tag" => only(&[
+            "-l",
+            "--list",
+            "-n",
+            "--sort",
+            "--contains",
+            "--points-at",
+            "--format",
+            "-a",
+            "--annotate",
+            "-m",
+            "--message",
+            "-s",
+            "--sign",
+        ]),
+        "config" => {
+            let reads = [
+                "--get",
+                "--get-all",
+                "--get-regexp",
+                "--get-urlmatch",
+                "--list",
+                "-l",
+                "--show-origin",
+                "--show-scope",
+                "--name-only",
+                "--global",
+                "--local",
+                "--system",
+                "--worktree",
+                "--includes",
+                "--null",
+                "-z",
+                "--type",
+                "--file",
+                "-f",
+            ];
+            match operands.first() {
+                Some(&"get") | Some(&"list") => only(&reads),
+                _ => {
+                    only(&reads)
+                        && (flags
+                            .iter()
+                            .any(|f| f.starts_with("--get") || *f == "--list" || *f == "-l")
+                            || operands.len() <= 1)
+                }
+            }
+        }
+        // Adding and committing: nothing is discarded.
+        "add" => only(&[
+            "-A",
+            "--all",
+            "-u",
+            "--update",
+            "-N",
+            "--intent-to-add",
+            "-p",
+            "--patch",
+            "-v",
+            "--verbose",
+            "-n",
+            "--dry-run",
+            "-f",
+            "--force",
+            "--",
+        ]),
+        "commit" => only(&[
+            "-m",
+            "--message",
+            "-a",
+            "--all",
+            "-q",
+            "--quiet",
+            "-v",
+            "--verbose",
+            "-s",
+            "--signoff",
+            "--amend",
+            "--no-edit",
+            "--allow-empty",
+            "-S",
+            "--gpg-sign",
+            "--no-verify",
+            "-n",
+            "-F",
+            "--file",
+            "--author",
+            "--date",
+        ]),
+        "init" => only(&["-q", "--quiet", "-b", "--initial-branch", "--bare"]),
+        "clone" => only(&[
+            "--depth",
+            "--branch",
+            "-b",
+            "-q",
+            "--quiet",
+            "--single-branch",
+            "--no-tags",
+            "--filter",
+            "--no-checkout",
+            "--bare",
+            "--origin",
+            "-o",
+            "--shallow-since",
+        ]),
+        "fetch" => only(&[
+            "--all",
+            "--prune",
+            "-p",
+            "--tags",
+            "-t",
+            "-q",
+            "--quiet",
+            "-v",
+            "--verbose",
+            "--depth",
+            "--unshallow",
+            "--no-tags",
+            "--dry-run",
+        ]),
+        "pull" => only(&[
+            "--ff-only",
+            "--no-rebase",
+            "--rebase",
+            "-r",
+            "-q",
+            "--quiet",
+            "-v",
+            "--verbose",
+            "--no-edit",
+            "--tags",
+        ]),
+        "push" => {
+            only(&[
+                "-u",
+                "--set-upstream",
+                "-q",
+                "--quiet",
+                "-v",
+                "--verbose",
+                "--tags",
+                "--follow-tags",
+                "--dry-run",
+                "-n",
+                "--no-verify",
+            ]) && !operands
+                .iter()
+                .any(|r| r.starts_with('+') || r.starts_with(':'))
+        }
+        // Making and moving to a new branch; unstaging; a dry run.
+        "checkout" => {
+            flags.iter().any(|f| ["-b", "--orphan"].contains(f))
+                && only(&[
+                    "-b",
+                    "--orphan",
+                    "-q",
+                    "--quiet",
+                    "--no-track",
+                    "--track",
+                    "-t",
+                ])
+                && operands.len() <= 2
+        }
+        "switch" => {
+            flags
+                .iter()
+                .any(|f| ["-c", "--create", "--orphan"].contains(f))
+                && only(&[
+                    "-c",
+                    "--create",
+                    "--orphan",
+                    "-q",
+                    "--quiet",
+                    "--no-track",
+                    "--track",
+                    "-t",
+                ])
+                && operands.len() <= 2
+        }
+        "restore" => {
+            flags.iter().any(|f| ["--staged", "-S"].contains(f))
+                && only(&["--staged", "-S", "-q", "--quiet", "-p", "--patch"])
+        }
+        "rm" => {
+            flags.contains(&"--cached")
+                && only(&["--cached", "-r", "-q", "--quiet", "-n", "--dry-run", "--"])
+        }
+        "reset" => only(&["--soft", "--mixed", "-q", "--quiet", "--"]) && operands.len() <= 1,
+        "clean" => {
+            flags
+                .iter()
+                .all(|f| ["-n", "--dry-run", "-d", "-x", "-X"].contains(f))
+                && flags.iter().any(|f| ["-n", "--dry-run"].contains(f))
+        }
+        _ => false,
     }
 }
 
@@ -919,13 +1470,23 @@ fn protected(path: &Path) -> bool {
     parts.iter().any(|p| p.starts_with(".env") || p == ".git")
 }
 
-/// A call's arguments, briefly, for a question.
-fn short(args: &Json) -> String {
-    let text = args.to_string();
-    match text.char_indices().nth(200) {
-        Some((at, _)) => format!("{}…", &text[..at]),
-        None => text,
-    }
+/// A call's arguments in full, for a question.
+fn pretty(args: &Json) -> String {
+    serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string())
+}
+
+/// A file's device and inode (not following a symlink at the end).
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|m| (m.dev(), m.ino()))
+}
+
+/// A folder, or a file with one name only.
+fn single(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() || m.nlink() == 1)
 }
 
 /// `file` against `dir`, with `.` and `..` applied and symlinks resolved.

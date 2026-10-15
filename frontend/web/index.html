@@ -70,6 +70,8 @@
   dialog .count:empty { display: none; }
   body.asking #log { padding-bottom: 45vh; }
   dialog h3 { margin: 0 0 6px; font-size: 16px; }
+  /* A question's details as written: a command's lines stay lines. */
+  dialog p.message { white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
   dialog .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; flex-wrap: wrap; }
   dialog input { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); font: inherit; }
 </style>

@@ -515,6 +515,8 @@ pub(super) fn unwrap(words: &[Word]) -> Program<'_> {
         }
         let name = base(text(i));
         match name.as_str() {
+            // Shell keywords before a command: the command after them runs.
+            "if" | "then" | "else" | "elif" | "while" | "until" | "do" | "!" | "{" => i += 1,
             "nohup" | "builtin" => i += 1,
             // `command -v x` only looks `x` up.
             "command" if ["-v", "-V"].contains(&text(i + 1)) => {
@@ -598,12 +600,16 @@ pub(super) fn unwrap(words: &[Word]) -> Program<'_> {
             }
             _ => {
                 return Program {
-                    known: words.get(i).is_some_and(|w| w.known) && !name.is_empty(),
+                    // `[` and `[[` are tests, not globs.
+                    known: words
+                        .get(i)
+                        .is_some_and(|w| w.known || ["[", "[["].contains(&w.text.as_str()))
+                        && !name.is_empty(),
                     name,
                     args: words.get(i + 1..).unwrap_or(&[]),
                     via_xargs,
                     git_env,
-                }
+                };
             }
         }
     }
