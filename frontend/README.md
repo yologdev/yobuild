@@ -220,7 +220,7 @@ path/to/yobuild/scripts/try-handoff.sh --demo               # headless, scripted
     bundled table.
 - **Every run ends with a handoff report** (Done / Waiting on you /
   Decisions / Next). The agent is sent back until it writes one. The host
-  then adds facts the model cannot make up: the change since the handoff
+  then adds facts the model cannot make up: the change since the agent
   started (against your working tree as it was, so edits you had not
   committed are not counted), commits, new files, tokens, tool calls,
   time, and the questions still open.

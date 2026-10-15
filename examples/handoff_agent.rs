@@ -37,63 +37,23 @@
 //!
 //! Setup: `scripts/try-coding-agent.sh --setup-only` (Node 22.19+, npm).
 
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rutis::Ctx;
 use serde_json::{json, Value as Json};
 use yoagent::context::ExecutionLimits;
-use yoagent::extension::{
-    Extension, ExtensionError, RunContext, RunHooks, RunOutcome, StopContext, StopDecision,
-};
 use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::{prices, MockProvider, ModelConfig};
 use yoagent::tools::default_tools;
-use yoagent::{
-    Agent, AgentEvent, AgentMessage, AgentTool, Content, Message, ToolContext, ToolError,
-    ToolResult,
-};
+use yoagent::{Agent, AgentEvent, AgentMessage, Content, Message};
 use yoagent_rutis::RutisBridge;
 use yobuild::frontend::host::{rows_from_file, DshHome, PluginHost, Row};
-use yobuild::frontend::{
-    services, session, web, ClientMessage, NoticeLevel, ServerMessage, Session, UiRequest,
-};
+use yobuild::frontend::{services, session, web, ClientMessage, ServerMessage, Session};
+use yobuild::parts::{AskOwner, Facts, Report, Scratch};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
-
-/// Where a handoff started, in git.
-#[derive(Clone)]
-struct Start {
-    /// The commit (git's empty tree when the repository has none yet):
-    /// commits after it are the agent's.
-    head: String,
-    /// The working tree, uncommitted edits included (`git stash create`
-    /// stores them as a commit without touching the files, the index or
-    /// the stash list), else `head`: changes since it are the agent's.
-    tree: String,
-}
-
-impl Start {
-    /// `None` outside a git repository.
-    fn of(cwd: &std::path::Path) -> Option<Self> {
-        git(cwd, &["rev-parse", "--git-dir"])?;
-        let head = git(cwd, &["rev-parse", "HEAD"]).unwrap_or_else(|| EMPTY_TREE.to_owned());
-        let tree = git(cwd, &["stash", "create"])
-            .filter(|snapshot| !snapshot.is_empty())
-            .unwrap_or_else(|| head.clone());
-        Some(Start { head, tree })
-    }
-}
-
-/// Git's empty tree: the base of a repository with no commit yet.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
-/// The sections every run's last message must have.
-const REPORT: [&str; 4] = ["Done", "Waiting on you", "Decisions", "Next"];
 
 /// `frontend/`, where the TypeScript plugins live.
 fn here() -> PathBuf {
@@ -115,8 +75,6 @@ struct Options {
     max_minutes: u64,
     max_tokens: usize,
     budget_usd: f64,
-    /// The agent's own scratch (downloads, helper scripts): not the owner's folder.
-    scratch: PathBuf,
 }
 
 fn main() -> Result<(), BoxError> {
@@ -133,7 +91,6 @@ fn main() -> Result<(), BoxError> {
         // prompt counted each turn) stops a long one before it writes up.
         max_tokens: 4_000_000,
         budget_usd: 2.0,
-        scratch: std::env::temp_dir().join(format!("yoagent-handoff-{}", std::process::id())),
     };
     let mut live = false;
     let mut words = Vec::new();
@@ -178,11 +135,6 @@ fn main() -> Result<(), BoxError> {
             _ => return Err("--live needs DEEPSEEK_API_KEY".into()),
         }
     }
-    std::fs::create_dir_all(&options.scratch)?;
-    // Before any thread starts: the plugin runtimes inherit it. The approval
-    // gate (confirm-dangerous.ts) lets the agent delete and overwrite freely
-    // there, and nowhere else it did not create.
-    std::env::set_var("YOAGENT_SCRATCH", &options.scratch);
     if std::env::var_os("NODE_OPTIONS").is_none() {
         std::env::set_var("NODE_OPTIONS", "--no-warnings");
     }
@@ -213,16 +165,21 @@ fn main() -> Result<(), BoxError> {
 async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     let launched = Instant::now();
     let cwd = std::env::current_dir()?;
-    let scratch = options.scratch.clone();
+    // The agent's own scratch (downloads, helper scripts): not the owner's folder.
+    let scratch = Scratch::create("yobuild-handoff")?;
     // The demo ends itself with `Quit`: the agent's own tools hold session
     // handles, so the driver would not end when the demo drops its own.
     let (session, driver) = Session::new(options.demo);
     let bridge = RutisBridge::install(root)?;
     services::provide(root, &session)?;
 
+    // The approval gate (confirm-dangerous.ts, in the pi runtime) lets the
+    // agent delete and overwrite freely in its scratch, and nowhere else it
+    // did not create.
     let mut builder = PluginHost::builder()
         .node("ui", here().join("plugins"))
-        .node("pi", rutis_plugins().join("pi"));
+        .node("pi", rutis_plugins().join("pi"))
+        .env("pi", Scratch::ENV, scratch.path());
     // DSH's own host services, on request: in a home of their own, never
     // the user's `~/.dsh` (see `DshHome` for what that does not cover).
     let dsh_home = match options.dsh && options.dsh_services {
@@ -330,20 +287,19 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     };
     let budget = yoagent::extension::Budget::for_model(options.budget_usd, &config)
         .map(|budget| budget.across_runs());
-    let open = Arc::new(AtomicUsize::new(0));
+    let report = Report::handoff();
+    let ask_owner = AskOwner::new(session.clone());
+    // Snapshot the folder before the agent touches it.
+    let facts = Facts::new(session.clone(), &cwd).with_open_questions(ask_owner.open_questions());
     let mut agent = match &options.key {
         Some(key) => Agent::from_config(config).with_api_key(key.clone()),
         None => Agent::from_provider(scripted(), config),
     }
-    .with_system_prompt(system_prompt(&cwd, &scratch))
+    .with_system_prompt(system_prompt(&cwd, scratch.path(), &report))
     .with_tools({
         // `with_tools` sets the whole list: yoagent's tools and `ask_owner`.
         let mut tools = default_tools();
-        tools.push(Box::new(AskOwner {
-            session: session.clone(),
-            next: Arc::default(),
-            open: open.clone(),
-        }));
+        tools.push(Box::new(ask_owner));
         tools
     })
     .with_execution_limits(
@@ -359,14 +315,8 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
             .require_policy()
             .with_policy_timeout(Some(session::UI_TIMEOUT + Duration::from_secs(30))),
     )
-    .with_extension(Handoff {
-        session: session.clone(),
-        start: Start::of(&cwd),
-        // Untracked files already there are not the agent's.
-        untracked: untracked(&cwd),
-        cwd: cwd.clone(),
-        open,
-    });
+    .with_extension(report)
+    .with_extension(facts);
     let priced = budget.is_some();
     if let Some(budget) = budget {
         agent = agent.with_extension(budget);
@@ -405,7 +355,7 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     Ok(())
 }
 
-fn system_prompt(cwd: &std::path::Path, scratch: &std::path::Path) -> String {
+fn system_prompt(cwd: &std::path::Path, scratch: &std::path::Path, report: &Report) -> String {
     format!(
         "You are the owner's handoff agent. The owner handed you a task — research, writing, \
          planning, code, whatever it is — and went away; you finish it on your own. You can \
@@ -427,269 +377,11 @@ fn system_prompt(cwd: &std::path::Path, scratch: &std::path::Path) -> String {
          - Do nothing that cannot be undone or that acts for the owner (deleting their files, \
          spending money, sending messages, signing up for things) without their answer first. \
          Some commands ask the owner for approval and may be refused.\n\
-         - End every run with a handoff report in Markdown, with these sections: {sections}. \
-         Under Waiting on you, list the open questions by number.",
+         - {report} Under Waiting on you, list the open questions by number.",
         cwd = cwd.display(),
         scratch = scratch.display(),
-        sections = REPORT.map(|s| format!("## {s}")).join(", "),
+        report = report.instruction(),
     )
-}
-
-/// Puts a question to the owner and returns at once; the answer comes back
-/// as a steer message.
-struct AskOwner {
-    session: Session,
-    next: Arc<AtomicU64>,
-    /// Questions not answered yet (shared with the report).
-    open: Arc<AtomicUsize>,
-}
-
-#[async_trait::async_trait]
-impl AgentTool for AskOwner {
-    fn name(&self) -> &str {
-        "ask_owner"
-    }
-    fn label(&self) -> &str {
-        "Ask the owner"
-    }
-    fn description(&self) -> &str {
-        "Ask the owner a question they decide, without waiting: this returns at once. Continue \
-         with work that does not depend on the answer; it arrives later as a message. Give \
-         `options` when the answer is one of a few choices."
-    }
-    fn parameters_schema(&self) -> Json {
-        json!({
-            "type": "object",
-            "properties": {
-                "question": { "type": "string", "description": "The question, on its own." },
-                "why": { "type": "string", "description": "What depends on it, briefly." },
-                "options": { "type": "array", "items": { "type": "string" } }
-            },
-            "required": ["question"]
-        })
-    }
-
-    async fn execute(&self, params: Json, _ctx: ToolContext) -> Result<ToolResult, ToolError> {
-        let question = params["question"]
-            .as_str()
-            .filter(|q| !q.trim().is_empty())
-            .ok_or_else(|| ToolError::InvalidArgs("`question` is required".into()))?
-            .to_owned();
-        let why = params["why"].as_str().unwrap_or_default().to_owned();
-        let options: Vec<String> = params["options"]
-            .as_array()
-            .map(|o| {
-                o.iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let n = self.next.fetch_add(1, Ordering::Relaxed) + 1;
-        let title = format!("#{n} {question}");
-        let request = if options.len() >= 2 {
-            UiRequest::Select {
-                title,
-                message: why,
-                options,
-                multiple: false,
-            }
-        } else {
-            UiRequest::Input {
-                title,
-                message: why,
-                placeholder: "Your answer".into(),
-                value: String::new(),
-            }
-        };
-        let (session, open) = (self.session.clone(), self.open.clone());
-        open.fetch_add(1, Ordering::Relaxed);
-        tokio::spawn(async move {
-            let answer = session.ask_later(request).await;
-            open.fetch_sub(1, Ordering::Relaxed);
-            // Withdrawn (a reset forgot the conversation it belongs to) or the
-            // session ended: nothing to tell the agent.
-            let Some(answer) = answer else { return };
-            let text = match answer.as_str().map(str::trim) {
-                Some(answer) if !answer.is_empty() => {
-                    format!("[Owner's answer to #{n}] {question}\n{answer}")
-                }
-                _ => format!("[Owner skipped #{n}] {question}"),
-            };
-            // Mid-run it is picked up between tool batches; when the agent
-            // had stopped, it starts a new run.
-            session.send(ClientMessage::Steer { text });
-        });
-        Ok(ToolResult {
-            content: vec![Content::Text {
-                text: format!(
-                    "Asked the owner as #{n}. Do not wait: continue with what does not depend on \
-                     it. The answer will arrive as a message starting with [Owner's answer to #{n}]."
-                ),
-            }],
-            details: json!({ "question": n }),
-        })
-    }
-}
-
-/// Every run ends with the handoff report, and the facts the model cannot
-/// make up, told to the frontends.
-struct Handoff {
-    session: Session,
-    cwd: PathBuf,
-    /// Where the handoff started (`None`: not a git repository).
-    start: Option<Start>,
-    /// The untracked files when the handoff started.
-    untracked: Arc<HashSet<String>>,
-    open: Arc<AtomicUsize>,
-}
-
-#[async_trait::async_trait]
-impl Extension for Handoff {
-    fn name(&self) -> &str {
-        "handoff"
-    }
-    async fn start_run(&self, _run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
-        Ok(Box::new(HandoffRun {
-            session: self.session.clone(),
-            cwd: self.cwd.clone(),
-            start: self.start.clone(),
-            untracked: self.untracked.clone(),
-            open: self.open.clone(),
-            started: Instant::now(),
-            counts: Mutex::default(),
-        }))
-    }
-}
-
-struct HandoffRun {
-    session: Session,
-    cwd: PathBuf,
-    start: Option<Start>,
-    untracked: Arc<HashSet<String>>,
-    open: Arc<AtomicUsize>,
-    started: Instant,
-    /// Tokens in and out, tool calls.
-    counts: Mutex<(u64, u64, usize)>,
-}
-
-#[async_trait::async_trait]
-impl RunHooks for HandoffRun {
-    fn on_event(&self, event: &AgentEvent) {
-        let mut counts = self.counts.lock().unwrap();
-        match event {
-            AgentEvent::MessageEnd {
-                message: AgentMessage::Llm(Message::Assistant { usage, .. }),
-            } => {
-                counts.0 += usage.input + usage.cache_read;
-                counts.1 += usage.output;
-            }
-            AgentEvent::ToolExecutionEnd { .. } => counts.2 += 1,
-            _ => {}
-        }
-    }
-
-    async fn on_stop(&mut self, stop: &StopContext<'_>) -> StopDecision {
-        let Message::Assistant { content, .. } = stop.answer else {
-            return StopDecision::Accept;
-        };
-        let text: String = content
-            .iter()
-            .filter_map(|c| match c {
-                Content::Text { text } => Some(text.to_lowercase()),
-                _ => None,
-            })
-            .collect();
-        let missing: Vec<&str> = REPORT
-            .into_iter()
-            .filter(|s| !text.contains(&s.to_lowercase()))
-            .collect();
-        if missing.is_empty() {
-            StopDecision::Accept
-        } else {
-            StopDecision::Continue(format!(
-                "End with the handoff report: sections {}. Missing: {}.",
-                REPORT.map(|s| format!("## {s}")).join(", "),
-                missing.join(", ")
-            ))
-        }
-    }
-
-    async fn finish(&mut self, outcome: &RunOutcome) {
-        // A run a limit stopped has no report: say so, and how to go on.
-        if let yoagent::extension::RunEnd::Stopped { reason } = outcome.end() {
-            self.session.notice(
-                NoticeLevel::Warning,
-                format!("Stopped early: {reason}. Send \"continue\" to pick up where it left off."),
-            );
-        }
-        let (tokens_in, tokens_out, tools) = *self.counts.lock().unwrap();
-        // Since the handoff started: committed and uncommitted changes alike.
-        let changed = match &self.start {
-            Some(start) => {
-                // Against the working tree as it was: edits the owner had not
-                // committed are not the agent's.
-                let diff =
-                    git(&self.cwd, &["diff", "--shortstat", &start.tree]).unwrap_or_default();
-                let range = if start.head == EMPTY_TREE {
-                    "HEAD".to_owned()
-                } else {
-                    format!("{}..HEAD", start.head)
-                };
-                let commits = git(&self.cwd, &["rev-list", "--count", &range])
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .unwrap_or(0);
-                let diff = if diff.is_empty() {
-                    "no changes".into()
-                } else {
-                    diff
-                };
-                format!("since the handoff: {diff}, {commits} commit(s)")
-            }
-            None => "not a git repository".into(),
-        };
-        // New since the handoff started, named (a test run's bytecode shows as what it is).
-        let mut new: Vec<String> = untracked(&self.cwd)
-            .iter()
-            .filter(|f| !self.untracked.contains(*f))
-            .cloned()
-            .collect();
-        new.sort();
-        let new = match new.len() {
-            0 => String::new(),
-            n if n <= 3 => format!(", new: {}", new.join(", ")),
-            n => format!(", {n} new files: {}, …", new[..3].join(", ")),
-        };
-        let open = self.open.load(Ordering::Relaxed);
-        self.session.notice(
-            NoticeLevel::Info,
-            format!(
-                "Handoff facts: {changed}{}; {tokens_in} tokens in, {tokens_out} out; {tools} tool \
-                 call(s); {:.0}s; {open} question(s) waiting on you.",
-                new,
-                self.started.elapsed().as_secs_f64(),
-            ),
-        );
-    }
-}
-
-/// The untracked files (git's ignore rules apply); empty outside a repository.
-fn untracked(cwd: &std::path::Path) -> Arc<HashSet<String>> {
-    Arc::new(
-        git(cwd, &["ls-files", "--others", "--exclude-standard"])
-            .map(|s| s.lines().map(str::to_owned).collect())
-            .unwrap_or_default(),
-    )
-}
-
-fn git(cwd: &std::path::Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
 /// This machine's address on the local network (no packet is sent).
@@ -874,12 +566,7 @@ async fn demo(
     if !answered {
         return Err("the owner's answer never reached the agent".into());
     }
-    if facts
-        .iter()
-        .filter(|f| f.starts_with("Handoff facts"))
-        .count()
-        != 2
-    {
+    if facts.iter().filter(|f| f.starts_with("Facts:")).count() != 2 {
         return Err(format!("expected the facts after each run: {facts:?}").into());
     }
     // What the reports claim was done.

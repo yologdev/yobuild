@@ -5,9 +5,12 @@
 //!
 //! - [`frontend`]: one session for any number of frontends (browser, phone,
 //!   terminal), plugins' questions to the owner, and the plugin host.
+//! - [`parts`]: what more than one kind of agent wants — asking the owner
+//!   without waiting, a required report, host-counted facts, a scratch
+//!   folder.
 //!
-//! Today it has the frontend; the parts, the manifest and MCP servers are
-//! coming (see `docs/roadmap.md`). Not published yet and without an API
-//! promise.
+//! The approval gate, the manifest and MCP servers are coming (see
+//! `docs/roadmap.md`). Not published yet and without an API promise.
 
 pub mod frontend;
+pub mod parts;

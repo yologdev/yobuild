@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'gate-scratch-')))
-process.env.YOAGENT_SCRATCH = scratch
+process.env.YOBUILD_SCRATCH = scratch
 const { default: gate } = await import('./confirm-dangerous.ts')
 
 /** A fresh gate in a fresh project; `run(command)` → whether it was refused (nobody to ask). */
