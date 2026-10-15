@@ -41,11 +41,26 @@ impl Scratch {
     }
 
     /// `path`, created if it is not there yet (an existing folder is used as
-    /// it is), made absolute.
+    /// it is), made absolute. Refused: a file system root, the home folder,
+    /// and the current folder or one holding it — the gate would let the
+    /// agent delete there freely.
     pub fn at(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
         std::fs::create_dir_all(&path).map_err(|e| context(e, &path))?;
         let path = path.canonicalize().map_err(|e| context(e, &path))?;
+        let home = std::env::var_os("HOME").and_then(|h| PathBuf::from(h).canonicalize().ok());
+        let cwd = std::env::current_dir()
+            .ok()
+            .and_then(|d| d.canonicalize().ok());
+        let too_wide = path.parent().is_none()
+            || home.as_deref() == Some(path.as_path())
+            || cwd.is_some_and(|cwd| cwd.starts_with(&path));
+        if too_wide {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is too wide for a scratch folder", path.display()),
+            ));
+        }
         Ok(Self { path })
     }
 
@@ -94,5 +109,14 @@ mod tests {
         assert!(scratch.path().is_absolute());
         assert_eq!(scratch.path(), nested.canonicalize().unwrap());
         assert!(Scratch::at(&nested).is_ok());
+    }
+
+    #[test]
+    fn at_refuses_a_folder_too_wide() {
+        assert!(Scratch::at("/").is_err());
+        assert!(Scratch::at(std::env::current_dir().unwrap()).is_err());
+        if let Some(home) = std::env::var_os("HOME") {
+            assert!(Scratch::at(home).is_err());
+        }
     }
 }

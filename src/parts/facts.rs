@@ -1,36 +1,47 @@
 //! `facts`: what the host counted, after each run.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex as AsyncMutex;
 use yoagent::extension::{Extension, ExtensionError, RunContext, RunEnd, RunHooks, RunOutcome};
 use yoagent::{AgentEvent, AgentMessage, Message};
 
 use super::OpenQuestions;
 use crate::frontend::{NoticeLevel, Session};
 
-/// How long git may take for each snapshot, and for the facts after a run
+/// How long git may take for the snapshot, and for each run's facts
 /// (yoagent gives an extension's `finish` 5 s in all).
 const GIT_TIME: Duration = Duration::from_secs(4);
+
+/// How many names a list shows before it only counts.
+const NAMES: usize = 3;
 
 /// An extension that, when each run ends, tells every frontend (a
 /// [`Notice`](crate::frontend::ServerMessage::Notice)) what the model cannot
 /// make up:
 ///
-/// `Facts: since the start: <git diff --shortstat>, N commit(s), new: a, b;
-/// T tokens in, U out; K tool call(s); Ss; Q question(s) waiting on you.`
+/// `Facts: since the start: <git diff --shortstat>, N new commit(s), new: a,
+/// b; T tokens in, U out; K tool call(s); Ss; Q question(s) waiting on you.`
 ///
-/// - The start is a snapshot of the folder taken when the first run starts:
-///   uncommitted edits already there (stored with `git stash create`, which
-///   touches neither the files, the index nor the stash list) and untracked
-///   files already there are not counted.
+/// - The start is a snapshot of the repository taken when the first run
+///   starts: uncommitted edits already there (stored with `git stash
+///   create`), every branch and tag tip, and the untracked files with their
+///   size and time. Edits, commits and files already there are not counted;
+///   untracked files of the owner's that the agent changed or removed are
+///   named. Files git ignores are not counted.
+/// - Commits are those new to HEAD since the start (not on any branch or tag
+///   then: a branch switch or a pull is not the agent's work); commits HEAD
+///   no longer has (a reset, an amend) are said.
 /// - What git cannot tell is said, never guessed: "not a git repository"
 ///   only when git says so; "changes unknown (git: …)" when git is missing,
 ///   fails or takes too long; a note when the edits already there could not
-///   be told apart (no snapshot).
+///   be told apart.
+/// - git never writes the owner's index: every command works on a private
+///   copy of it (`GIT_INDEX_FILE`), in the repository's top folder, in the C
+///   locale.
 /// - Tokens (input, cache reads and writes; output) and tool calls are this
 ///   run's; the questions are those still open when it ends
 ///   ([`Facts::with_open_questions`]).
@@ -40,7 +51,7 @@ const GIT_TIME: Duration = Duration::from_secs(4);
 pub struct Facts {
     session: Session,
     cwd: PathBuf,
-    start: Arc<OnceCell<Snapshot>>,
+    start: Arc<AsyncMutex<Option<Arc<Snapshot>>>>,
     open: Option<OpenQuestions>,
 }
 
@@ -67,11 +78,17 @@ impl Extension for Facts {
         "facts"
     }
     async fn start_run(&self, _run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
-        let start = self
-            .start
-            .get_or_init(|| Snapshot::take(&self.cwd))
-            .await
-            .clone();
+        let start = {
+            let mut start = self.start.lock().await;
+            match start.as_ref() {
+                Some(snapshot) => snapshot.clone(),
+                None => {
+                    let snapshot = Arc::new(Snapshot::take(&self.cwd).await);
+                    *start = Some(snapshot.clone());
+                    snapshot
+                }
+            }
+        };
         Ok(Box::new(FactsRun {
             session: self.session.clone(),
             cwd: self.cwd.clone(),
@@ -86,7 +103,7 @@ impl Extension for Facts {
 struct FactsRun {
     session: Session,
     cwd: PathBuf,
-    start: Snapshot,
+    start: Arc<Snapshot>,
     open: Option<OpenQuestions>,
     started: Instant,
     /// Tokens in and out, tool calls.
@@ -120,7 +137,7 @@ impl RunHooks for FactsRun {
         let (tokens_in, tokens_out, tools) = *self.counts.lock().unwrap();
         let changed = match tokio::time::timeout(GIT_TIME, self.start.changes(&self.cwd)).await {
             Ok(changed) => changed,
-            Err(_) => "changes unknown (git: timed out)".into(),
+            Err(_) => "changes since the start unknown (git: timed out)".into(),
         };
         let open = match &self.open {
             Some(open) => format!("; {} question(s) waiting on you", open.count()),
@@ -137,183 +154,318 @@ impl RunHooks for FactsRun {
     }
 }
 
-/// The folder as it was when the first run started.
-#[derive(Clone)]
+/// An untracked file's size and time, to tell whether it changed.
+type Stamp = (u64, Option<SystemTime>);
+
+/// The repository as it was when the first run started.
 enum Snapshot {
     NotRepo,
     /// git is missing, failed or took too long.
     Unknown(String),
-    Repo {
-        /// The commit (git's empty tree when the repository has none yet):
-        /// commits after it are the agent's.
-        head: String,
-        /// The working tree, uncommitted edits included, else `head` (and
-        /// `edits_known` false when the snapshot failed).
-        tree: String,
-        edits_known: bool,
-        /// The untracked files then; `None` when git could not list them.
-        untracked: Option<HashSet<String>>,
-    },
+    Repo(Start),
 }
 
-/// Git's empty tree: the base of a repository with no commit yet.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+struct Start {
+    /// The repository's top folder: every command runs there.
+    root: PathBuf,
+    /// HEAD's commit; `None` when it had none yet.
+    head: Option<String>,
+    /// The working tree with uncommitted edits (`git stash create`), the
+    /// staged files when there was no commit (`git write-tree`), else `head`.
+    tree: String,
+    /// False when the edits already there could not be stored.
+    edits_known: bool,
+    /// Every branch and tag tip: commits reachable from them are not new.
+    tips: Vec<String>,
+    /// The untracked files then (paths from `root`); `None` when git could
+    /// not list them.
+    untracked: Option<HashMap<String, Stamp>>,
+    taken: SystemTime,
+}
 
 impl Snapshot {
     async fn take(cwd: &Path) -> Self {
         match tokio::time::timeout(GIT_TIME, Self::take_now(cwd)).await {
-            Ok(snapshot) => snapshot,
+            Ok(Ok(Some(start))) => Snapshot::Repo(start),
+            Ok(Ok(None)) => Snapshot::NotRepo,
+            Ok(Err(why)) => Snapshot::Unknown(why.to_string()),
             Err(_) => Snapshot::Unknown("timed out".into()),
         }
     }
 
-    async fn take_now(cwd: &Path) -> Self {
-        match git(cwd, &["rev-parse", "--git-dir"]).await {
-            Ok(_) => {}
-            Err(Git::NotRepo) => return Snapshot::NotRepo,
-            Err(Git::Failed(why)) => return Snapshot::Unknown(why),
-        }
-        // No HEAD yet: a repository with no commit.
-        let head = git(cwd, &["rev-parse", "--verify", "-q", "HEAD"])
-            .await
-            .unwrap_or_else(|_| EMPTY_TREE.to_owned());
-        let (tree, edits_known) = if head == EMPTY_TREE {
+    async fn take_now(cwd: &Path) -> Result<Option<Start>, GitError> {
+        let root = match Git::at(cwd).run(&["rev-parse", "--show-toplevel"]).await {
+            Ok(root) => PathBuf::from(root.trim()),
+            Err(GitError::NotRepo) => return Ok(None),
+            Err(why) => return Err(why),
+        };
+        let git = Git::at(&root).with_index_copy().await?;
+        let head = git.head().await?;
+        let (tree, edits_known) = match &head {
             // `git stash create` needs a commit: store what is staged as a
-            // tree (`write-tree` leaves the files and the index as they are).
-            // Edits not staged on top of that cannot be told apart.
-            match git(cwd, &["write-tree"]).await {
-                Ok(tree) => {
-                    let unstaged = git(cwd, &["diff", "--quiet"]).await.is_err();
-                    (tree, !unstaged)
-                }
-                Err(why) => {
-                    tracing::warn!(error = %why, "facts: no snapshot of the staged files");
-                    (head.clone(), false)
-                }
+            // tree instead. Edits not staged on top of it cannot be told apart.
+            None => {
+                let tree = git.run(&["write-tree"]).await?.trim().to_owned();
+                let unstaged = git.run(&["diff", "--quiet"]).await.is_err();
+                (tree, !unstaged)
             }
-        } else {
             // Empty output: nothing uncommitted, `head` is the tree.
-            match git(cwd, &["stash", "create"]).await {
-                Ok(snapshot) if !snapshot.is_empty() => (snapshot, true),
+            Some(head) => match git.run(&["stash", "create"]).await {
+                Ok(stash) if !stash.trim().is_empty() => (stash.trim().to_owned(), true),
                 Ok(_) => (head.clone(), true),
                 Err(why) => {
                     tracing::warn!(error = %why, "facts: no snapshot of the uncommitted edits");
                     (head.clone(), false)
                 }
-            }
+            },
         };
-        Snapshot::Repo {
+        let mut tips: Vec<String> = git
+            .run(&["for-each-ref", "--format=%(objectname)"])
+            .await?
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        tips.extend(head.clone());
+        let untracked = git.untracked().await.ok();
+        Ok(Some(Start {
+            root,
             head,
             tree,
             edits_known,
-            untracked: untracked(cwd).await.ok(),
-        }
+            tips,
+            untracked,
+            taken: SystemTime::now(),
+        }))
     }
 
     async fn changes(&self, cwd: &Path) -> String {
-        let (head, tree, edits_known, before) = match self {
-            Snapshot::NotRepo => return "not a git repository".into(),
-            Snapshot::Unknown(why) => return format!("changes unknown (git: {why})"),
-            Snapshot::Repo {
-                head,
-                tree,
-                edits_known,
-                untracked,
-            } => (head, tree, *edits_known, untracked),
-        };
-        let range = if head == EMPTY_TREE {
-            "HEAD".to_owned()
-        } else {
-            format!("{head}..HEAD")
-        };
-        let diff = git(cwd, &["diff", "--shortstat", tree]).await;
-        let commits = match git(cwd, &["rev-parse", "--verify", "-q", "HEAD"]).await {
-            Ok(_) => git(cwd, &["rev-list", "--count", &range])
-                .await
-                .and_then(|n| n.parse::<usize>().map_err(|e| Git::Failed(e.to_string()))),
-            // Still no commit in a repository that had none: none by the agent.
-            Err(Git::Failed(_)) if head == EMPTY_TREE => Ok(0),
-            Err(why) => Err(why),
-        };
-        let mut changed = match (diff, commits) {
-            (Ok(diff), Ok(commits)) => {
-                let diff = if diff.is_empty() {
-                    "no changes".into()
-                } else {
-                    diff
-                };
-                format!("since the start: {diff}, {commits} commit(s)")
+        match self {
+            Snapshot::NotRepo => match Git::at(cwd).run(&["rev-parse", "--git-dir"]).await {
+                Ok(_) => "not a git repository at the start (one was made since)".into(),
+                Err(_) => "not a git repository".into(),
+            },
+            Snapshot::Unknown(why) => {
+                format!("changes unknown: no snapshot at the start (git: {why})")
             }
-            (Err(why), _) | (_, Err(why)) => {
-                return format!("changes since the start unknown (git: {why})")
-            }
-        };
-        if !edits_known {
-            changed.push_str(" (the edits already there could not be told apart)");
+            Snapshot::Repo(start) => match start.changes().await {
+                Ok(changed) => changed,
+                Err(why) => format!("changes since the start unknown (git: {why})"),
+            },
         }
-        // New since the start, named (a test run's bytecode shows as what it is).
-        match (before, untracked(cwd).await) {
-            (Some(before), Ok(now)) => {
-                let mut new: Vec<String> =
-                    now.into_iter().filter(|f| !before.contains(f)).collect();
-                new.sort();
-                match new.len() {
-                    0 => {}
-                    n if n <= 3 => changed.push_str(&format!(", new: {}", new.join(", "))),
-                    n => changed.push_str(&format!(", {n} new files: {}, …", new[..3].join(", "))),
-                }
-            }
-            _ => changed.push_str(", new files unknown"),
-        }
-        changed
     }
 }
 
-/// The untracked files (git's ignore rules apply), names unquoted.
-async fn untracked(cwd: &Path) -> Result<HashSet<String>, Git> {
-    let out = git(cwd, &["ls-files", "-z", "--others", "--exclude-standard"]).await?;
-    Ok(out
-        .split('\0')
-        .filter(|f| !f.is_empty())
-        .map(str::to_owned)
-        .collect())
+impl Start {
+    async fn changes(&self) -> Result<String, GitError> {
+        let git = Git::at(&self.root).with_index_copy().await?;
+        let diff = git
+            .run(&[
+                "diff",
+                "--no-relative",
+                "--no-ext-diff",
+                "--shortstat",
+                &self.tree,
+            ])
+            .await?;
+        let diff = match diff.trim() {
+            "" => "no changes".to_owned(),
+            diff => diff.to_owned(),
+        };
+        let mut changed = match git.head().await? {
+            Some(_) => {
+                let mut args = vec!["rev-list", "--count", "HEAD"];
+                if !self.tips.is_empty() {
+                    args.push("--not");
+                    args.extend(self.tips.iter().map(String::as_str));
+                }
+                let new = git.count(&args).await?;
+                let mut changed = format!("since the start: {diff}, {new} new commit(s)");
+                if let Some(head) = &self.head {
+                    let range = format!("HEAD..{head}");
+                    let dropped = git.count(&["rev-list", "--count", &range]).await?;
+                    if dropped > 0 {
+                        changed.push_str(&format!(", {dropped} commit(s) no longer in HEAD"));
+                    }
+                }
+                changed
+            }
+            None if self.head.is_some() => {
+                format!("since the start: {diff}, HEAD has no commit now")
+            }
+            None => format!("since the start: {diff}, 0 new commit(s)"),
+        };
+        if !self.edits_known {
+            changed.push_str(" (the edits already there could not be told apart)");
+        }
+        let (Some(before), Ok(now)) = (&self.untracked, git.untracked().await) else {
+            changed.push_str(", new files unknown");
+            return Ok(changed);
+        };
+        // New since the start, named (a test run's bytecode shows as what it
+        // is); a file made before the start that only now shows (an ignore
+        // rule removed) is not new.
+        let new: Vec<&String> = now
+            .iter()
+            .filter(|(f, stamp)| {
+                !before.contains_key(*f) && stamp.1.is_none_or(|time| time >= self.taken)
+            })
+            .map(|(f, _)| f)
+            .collect();
+        let edited: Vec<&String> = before
+            .iter()
+            .filter(|(f, stamp)| now.get(*f).is_some_and(|now| now != *stamp))
+            .map(|(f, _)| f)
+            .collect();
+        let gone: Vec<&String> = before
+            .keys()
+            .filter(|f| !now.contains_key(*f) && !self.root.join(f).exists())
+            .collect();
+        changed.push_str(&names("new", new));
+        changed.push_str(&names("changed untracked", edited));
+        changed.push_str(&names("removed untracked", gone));
+        Ok(changed)
+    }
 }
 
-enum Git {
+/// `, <what>: a, b` — sorted, at most [`NAMES`] named.
+fn names(what: &str, files: Vec<&String>) -> String {
+    let mut files: Vec<&str> = files.into_iter().map(String::as_str).collect();
+    files.sort_unstable();
+    match files.len() {
+        0 => String::new(),
+        n if n <= NAMES => format!(", {what}: {}", files.join(", ")),
+        n => format!(", {n} {what}: {}, …", files[..NAMES].join(", ")),
+    }
+}
+
+/// Runs git for the facts: in `dir`, in the C locale, with no repository
+/// chosen by the environment, and — once [`with_index_copy`](Git::with_index_copy)
+/// — on a private copy of the index, so a git killed at a time limit leaves
+/// no lock in the owner's repository and their index is never written.
+struct Git {
+    dir: PathBuf,
+    index: Option<tempfile::TempDir>,
+}
+
+enum GitError {
     NotRepo,
     Failed(String),
 }
 
-impl std::fmt::Display for Git {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Git::NotRepo => f.write_str("not a git repository"),
-            Git::Failed(why) => f.write_str(why),
+impl Git {
+    fn at(dir: &Path) -> Self {
+        Self {
+            dir: dir.to_owned(),
+            index: None,
         }
+    }
+
+    async fn with_index_copy(mut self) -> Result<Self, GitError> {
+        let dir =
+            tempfile::tempdir().map_err(|e| GitError::Failed(format!("no temp dir ({e})")))?;
+        let real = self.run(&["rev-parse", "--git-path", "index"]).await?;
+        let real = self.dir.join(real.trim());
+        let copy = dir.path().join("index");
+        // No index yet (nothing ever staged): git reads a missing one as empty.
+        if real.exists() {
+            tokio::fs::copy(&real, &copy)
+                .await
+                .map_err(|e| GitError::Failed(format!("cannot copy the index ({e})")))?;
+        }
+        self.index = Some(dir);
+        Ok(self)
+    }
+
+    fn command(&self, args: &[&str]) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new("git");
+        command
+            .args(args)
+            .current_dir(&self.dir)
+            .env("LC_ALL", "C")
+            .env("LANGUAGE", "C")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .kill_on_drop(true);
+        if let Some(index) = &self.index {
+            command.env("GIT_INDEX_FILE", index.path().join("index"));
+        }
+        command
+    }
+
+    /// Its output, untouched.
+    async fn run(&self, args: &[&str]) -> Result<String, GitError> {
+        let out = self.output(args).await?;
+        if out.status.success() {
+            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+        Err(failure(args, &out))
+    }
+
+    async fn output(&self, args: &[&str]) -> Result<std::process::Output, GitError> {
+        self.command(args)
+            .output()
+            .await
+            .map_err(|e| GitError::Failed(format!("cannot run git ({e})")))
+    }
+
+    async fn count(&self, args: &[&str]) -> Result<usize, GitError> {
+        let out = self.run(args).await?;
+        out.trim()
+            .parse()
+            .map_err(|_| GitError::Failed(format!("`git {}` gave {out:?}", args[0])))
+    }
+
+    /// HEAD's commit; `None` only when git says there is none yet (`-q`:
+    /// exit 1, nothing on stderr). Any other failure is an error.
+    async fn head(&self) -> Result<Option<String>, GitError> {
+        let args = ["rev-parse", "--verify", "-q", "HEAD"];
+        let out = self.output(&args).await?;
+        if out.status.success() {
+            return Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()));
+        }
+        if out.status.code() == Some(1) && out.stderr.is_empty() {
+            return Ok(None);
+        }
+        Err(failure(&args, &out))
+    }
+
+    /// The untracked files (git's ignore rules apply), from the top folder,
+    /// names as they are, with their size and time.
+    async fn untracked(&self) -> Result<HashMap<String, Stamp>, GitError> {
+        let out = self
+            .run(&[
+                "ls-files",
+                "-z",
+                "--others",
+                "--exclude-standard",
+                "--full-name",
+            ])
+            .await?;
+        Ok(out
+            .split('\0')
+            .filter(|f| !f.is_empty())
+            .map(|f| {
+                let meta = std::fs::symlink_metadata(self.dir.join(f)).ok();
+                let stamp = (
+                    meta.as_ref().map_or(0, |m| m.len()),
+                    meta.and_then(|m| m.modified().ok()),
+                );
+                (f.to_owned(), stamp)
+            })
+            .collect::<HashMap<_, _>>())
     }
 }
 
-/// Runs git in `cwd`; its output trimmed of surrounding whitespace (but not
-/// of `\0`s). The process is killed if the caller stops waiting.
-async fn git(cwd: &Path, args: &[&str]) -> Result<String, Git> {
-    let out = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .kill_on_drop(true)
-        .output()
-        .await
-        .map_err(|e| Git::Failed(format!("cannot run git ({e})")))?;
-    if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout)
-            .trim_matches(|c: char| c != '\0' && c.is_whitespace())
-            .to_owned());
-    }
+fn failure(args: &[&str], out: &std::process::Output) -> GitError {
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.contains("not a git repository") {
-        return Err(Git::NotRepo);
+        return GitError::NotRepo;
     }
     let first = stderr.lines().next().unwrap_or("").trim();
-    Err(Git::Failed(format!(
+    GitError::Failed(format!(
         "`git {}` failed: {}",
         args.first().unwrap_or(&""),
         if first.is_empty() {
@@ -321,5 +473,14 @@ async fn git(cwd: &Path, args: &[&str]) -> Result<String, Git> {
         } else {
             first
         }
-    )))
+    ))
+}
+
+impl std::fmt::Display for GitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GitError::NotRepo => f.write_str("not a git repository"),
+            GitError::Failed(why) => f.write_str(why),
+        }
+    }
 }

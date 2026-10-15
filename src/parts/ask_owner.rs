@@ -44,8 +44,16 @@ impl Question {
         })
     }
 
-    /// From JSON `{question, why?, options?}`; any other shape is an error.
+    /// From JSON `{question, why?, options?}`; any other shape, or another
+    /// key (`choices` for `options`, say), is an error.
     pub fn from_json(value: &Json) -> Result<Self, String> {
+        let object = value.as_object().ok_or("the question must be an object")?;
+        if let Some(key) = object
+            .keys()
+            .find(|k| !["question", "why", "options"].contains(&k.as_str()))
+        {
+            return Err(format!("unknown key `{key}` (use question, why, options)"));
+        }
         let question = value["question"]
             .as_str()
             .ok_or("`question` must be a string")?;
@@ -254,6 +262,8 @@ mod tests {
             json!({ "question": "Q?", "why": 2 }),
             json!({ "question": "Q?", "options": "A" }),
             json!({ "question": "Q?", "options": ["A", 3] }),
+            json!({ "question": "Q?", "choices": ["A", "B"] }),
+            json!("Q?"),
         ] {
             assert!(Question::from_json(&bad).is_err(), "{bad}");
         }

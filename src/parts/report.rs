@@ -14,8 +14,9 @@ use yoagent::{Content, Message};
 ///
 /// It is a required extension: when the agent still has not written the
 /// report after yoagent's limit of send-backs (`max_stop_continues`, 3 by
-/// default), the run fails, and the frontends see why — rather than ending
-/// quietly without one.
+/// default), the run fails — its end carries yoagent's error, "[Extension
+/// failed: report] the answer was still not accepted after 3 continues" —
+/// rather than ending quietly without one.
 ///
 /// Put [`Report::instruction`] in the system prompt so the agent knows the
 /// sections before it is sent back.

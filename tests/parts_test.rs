@@ -415,7 +415,9 @@ async fn a_reset_withdraws_the_question_and_its_answer_goes_nowhere() {
 }
 
 #[tokio::test]
-async fn a_question_open_when_the_session_ends_sends_nothing() {
+/// What a closed session would do with a late steer cannot be seen from
+/// here; this checks the question is counted off.
+async fn a_question_open_when_the_session_ends_is_counted_off() {
     let (session, mut owner, run, open) = drive_asking(vec![
         MockResponse::ToolCalls(vec![call("ask_owner", json!({ "question": "Later?" }))]),
         MockResponse::Text("run 1 done".into()),
@@ -520,10 +522,18 @@ async fn a_run_that_never_reports_fails_visibly() {
             outcome: RunOutcome::Error,
             error: Some(error),
             ..
-        }) => assert!(error.contains("not accepted"), "{error}"),
+        }) => {
+            assert!(error.starts_with("[Extension failed: report]"), "{error}");
+            assert!(error.ends_with("after 3 continues"), "{error}");
+        }
         other => panic!("the run should fail: {other:?}"),
     }
-    quit(&session, run).await;
+    let agent = quit(&session, run).await;
+    let sent_back = texts(&agent)
+        .iter()
+        .filter(|t| t.contains("End with the report: sections ## Done. Missing: Done."))
+        .count();
+    assert_eq!(sent_back, 3);
 }
 
 // -- facts -------------------------------------------------------------------
@@ -629,7 +639,7 @@ async fn facts_count_only_what_changed_since_the_start() {
     // token counts.
     assert!(
         facts.starts_with(
-            "Facts: since the start: 1 file changed, 1 insertion(+), 0 commit(s), new: notes.md; \
+            "Facts: since the start: 1 file changed, 1 insertion(+), 0 new commit(s), new: notes.md; \
              135 tokens in, 10 out; 2 tool call(s); "
         ),
         "{facts}"
@@ -657,7 +667,9 @@ async fn facts_count_the_agents_commits() {
     .await;
     let facts = one(facts);
     assert!(
-        facts.starts_with("Facts: since the start: 1 file changed, 1 insertion(+), 1 commit(s); "),
+        facts.starts_with(
+            "Facts: since the start: 1 file changed, 1 insertion(+), 1 new commit(s); "
+        ),
         "{facts}"
     );
 }
@@ -678,7 +690,7 @@ async fn facts_in_a_repository_with_no_commit_yet() {
     .await;
     let facts = one(facts);
     assert!(
-        facts.starts_with("Facts: since the start: no changes, 0 commit(s), new: a.txt; "),
+        facts.starts_with("Facts: since the start: no changes, 0 new commit(s), new: a.txt; "),
         "{facts}"
     );
 }
@@ -699,7 +711,7 @@ async fn facts_name_three_new_files_and_count_the_rest() {
     .await;
     let facts = one(facts);
     assert!(
-        facts.contains(", 4 new files: a.txt, b.txt, c.txt, …; "),
+        facts.contains(", 4 new: a.txt, b.txt, c.txt, …; "),
         "{facts}"
     );
 }
@@ -784,4 +796,174 @@ async fn facts_warn_when_a_limit_stopped_the_run() {
     // The facts are still told.
     one(notices(&seen, NoticeLevel::Info));
     quit(&session, run).await;
+}
+
+#[tokio::test]
+async fn a_dismissed_question_is_a_skip() {
+    let (session, mut owner, run, _) = drive_asking(vec![
+        MockResponse::ToolCalls(vec![call("ask_owner", json!({ "question": "Colour?" }))]),
+        MockResponse::Text("run 1 done".into()),
+        MockResponse::Text("run 2 done".into()),
+    ]);
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    let seen = until_all(&mut owner, &[is_run_end, is_question]).await;
+    let (id, _) = questions(&seen)[0].clone();
+    session.send(ClientMessage::UiResponse {
+        id,
+        value: json!(null),
+    });
+    let seen = until_run_end(&mut owner).await;
+    assert_eq!(prompts(&seen), ["[Owner skipped #1] Colour?"]);
+    quit(&session, run).await;
+}
+
+/// The owner's edits made after `Facts` is set up but before the first
+/// prompt are theirs: the snapshot is taken when the first run starts.
+#[tokio::test]
+async fn facts_take_the_snapshot_when_the_first_run_starts() {
+    let dir = owners_repo();
+    let path = dir.path().to_owned();
+    let (session, mut owner, run) = drive(|session| {
+        agent(vec![MockResponse::Text("done".into())])
+            .with_extension(Facts::new(session.clone(), &path))
+    });
+    std::fs::write(dir.path().join("tracked.txt"), "rewritten\n").unwrap();
+    std::fs::write(dir.path().join("owner2.txt"), "x").unwrap();
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    let facts = one(notices(&until_run_end(&mut owner).await, NoticeLevel::Info));
+    quit(&session, run).await;
+    assert!(
+        facts.starts_with("Facts: since the start: no changes, 0 new commit(s); "),
+        "{facts}"
+    );
+}
+
+#[tokio::test]
+async fn facts_without_a_snapshot_say_changes_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    // A folder that does not exist: git cannot even start there.
+    let (facts, _) = facts_of(
+        &dir.path().join("missing"),
+        vec![MockResponse::Text("done".into())],
+        || {},
+    )
+    .await;
+    let facts = one(facts);
+    assert!(
+        facts.starts_with("Facts: changes unknown: no snapshot at the start (git: "),
+        "{facts}"
+    );
+    assert!(!facts.contains("not a git repository"), "{facts}");
+}
+
+#[tokio::test]
+async fn facts_say_when_edits_already_there_could_not_be_told_apart() {
+    // No commit yet, a staged file edited again: the edit on top of what is
+    // staged cannot be stored.
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q"]);
+    std::fs::write(dir.path().join("theirs.txt"), "x\n").unwrap();
+    git(dir.path(), &["add", "theirs.txt"]);
+    std::fs::write(dir.path().join("theirs.txt"), "x\ny\n").unwrap();
+    let (facts, _) = facts_of(dir.path(), vec![MockResponse::Text("done".into())], || {}).await;
+    let facts = one(facts);
+    assert!(
+        facts.contains("(the edits already there could not be told apart)"),
+        "{facts}"
+    );
+}
+
+#[tokio::test]
+async fn facts_do_not_count_a_branch_switch_as_the_agents_commits() {
+    let dir = owners_repo();
+    let p = dir.path().to_owned();
+    // A branch with two commits of the owner's.
+    git(&p, &["stash", "-q"]);
+    git(&p, &["checkout", "-q", "-b", "other"]);
+    for n in ["1", "2"] {
+        std::fs::write(p.join(format!("other{n}.txt")), n).unwrap();
+        git(&p, &["add", "."]);
+        git(&p, &["commit", "-q", "-m", n]);
+    }
+    git(&p, &["checkout", "-q", "-"]);
+    let (facts, _) = facts_of(
+        dir.path(),
+        vec![calls(&["work"]), MockResponse::Text("done".into())],
+        move || git(&p, &["checkout", "-q", "other"]),
+    )
+    .await;
+    let facts = one(facts);
+    assert!(facts.contains(", 0 new commit(s)"), "{facts}");
+}
+
+#[tokio::test]
+async fn facts_say_when_commits_left_head() {
+    let dir = owners_repo();
+    let p = dir.path().to_owned();
+    std::fs::write(p.join("second.txt"), "2").unwrap();
+    git(&p, &["add", "second.txt"]);
+    git(&p, &["commit", "-q", "-m", "second"]);
+    let (facts, _) = facts_of(
+        dir.path(),
+        vec![calls(&["work"]), MockResponse::Text("done".into())],
+        move || git(&p, &["reset", "-q", "--soft", "HEAD~1"]),
+    )
+    .await;
+    let facts = one(facts);
+    assert!(
+        facts.contains(", 0 new commit(s), 1 commit(s) no longer in HEAD"),
+        "{facts}"
+    );
+}
+
+#[tokio::test]
+async fn facts_name_untracked_files_of_the_owners_the_agent_changed_or_removed() {
+    let dir = owners_repo();
+    std::fs::write(dir.path().join("gone.txt"), "x").unwrap();
+    let p = dir.path().to_owned();
+    let (facts, _) = facts_of(
+        dir.path(),
+        vec![calls(&["work"]), MockResponse::Text("done".into())],
+        move || {
+            std::fs::write(p.join("theirs.txt"), "changed, longer").unwrap();
+            std::fs::remove_file(p.join("gone.txt")).unwrap();
+        },
+    )
+    .await;
+    let facts = one(facts);
+    assert!(facts.contains(", changed untracked: theirs.txt"), "{facts}");
+    assert!(facts.contains(", removed untracked: gone.txt"), "{facts}");
+}
+
+#[tokio::test]
+async fn facts_cover_the_whole_repository_from_a_subfolder() {
+    let dir = owners_repo();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let p = dir.path().to_owned();
+    let (facts, _) = facts_of(
+        &dir.path().join("sub"),
+        vec![calls(&["work"]), MockResponse::Text("done".into())],
+        move || std::fs::write(p.join("outside.txt"), "x").unwrap(),
+    )
+    .await;
+    let facts = one(facts);
+    assert!(facts.contains(", new: outside.txt"), "{facts}");
+}
+
+#[tokio::test]
+async fn facts_never_write_the_owners_index() {
+    let dir = owners_repo();
+    let index = dir.path().join(".git/index");
+    let before = std::fs::read(&index).unwrap();
+    let modified = std::fs::metadata(&index).unwrap().modified().unwrap();
+    // Wait past the file system's time resolution, so a rewrite would show.
+    std::thread::sleep(Duration::from_millis(1100));
+    let (facts, _) = facts_of(dir.path(), vec![MockResponse::Text("done".into())], || {}).await;
+    one(facts);
+    assert_eq!(std::fs::read(&index).unwrap(), before);
+    assert_eq!(
+        std::fs::metadata(&index).unwrap().modified().unwrap(),
+        modified
+    );
+    assert!(!dir.path().join(".git/index.lock").exists());
 }
