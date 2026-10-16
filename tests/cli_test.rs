@@ -418,3 +418,74 @@ async fn the_web_page_exits_by_how_the_last_run_ended() {
         "{stderr}"
     );
 }
+
+#[test]
+fn a_plugin_tool_named_ask_owner_is_not_free() {
+    if !pi_installed() {
+        return;
+    }
+    // With the part off, a plugin's `ask_owner` is any other tool: the gate
+    // asks, and with nobody there it does not run.
+    let fixture = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/pi/fixture-extension.ts"),
+    )
+    .unwrap();
+    let dir = project(
+        "[[plugin]]\npi = \"./node_modules/fake/ext.ts\"\n",
+        r#"[{ "tools": [{ "name": "ask_owner", "arguments": { "text": "hi" } }] }, { "text": "done" }]"#,
+    );
+    let ext = dir.path().join("node_modules/fake");
+    std::fs::create_dir_all(&ext).unwrap();
+    std::fs::write(
+        ext.join("package.json"),
+        r#"{ "name": "fake", "version": "1.0.0", "type": "module" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        ext.join("ext.ts"),
+        fixture.replace("'pi_echo'", "'ask_owner'"),
+    )
+    .unwrap();
+    let out = yobuild(
+        &[
+            "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+        ],
+        dir.path(),
+    );
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("  ask_owner ✗ Tool call denied: not allowed"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn ctrl_c_stops_a_once_run_as_aborted() {
+    let dir = project(
+        "[parts]\ngate = \"off\"\n",
+        r#"[{ "tools": [{ "name": "bash", "arguments": { "command": "sleep 30" } }] }, { "text": "done" }]"#,
+    );
+    let child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
+        .args([
+            "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+        ])
+        .current_dir(dir.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Ready, then the run under way.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    let started = std::time::Instant::now();
+    let out = child.wait_with_output().unwrap();
+    assert!(started.elapsed().as_secs() < 20, "it stopped promptly");
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout).lines().last(),
+        Some("Aborted: stopped with Ctrl+C")
+    );
+}

@@ -82,30 +82,104 @@ pub(crate) fn installed(
     Ok(dir)
 }
 
-/// Runs one of the adapters' helper scripts with Node; its JSON output.
-fn node_json(script: &Path, args: &[&Path]) -> Result<Json, BoxError> {
-    let out = std::process::Command::new("node")
+/// How long a helper script may take (it reads package files and imports
+/// a plugin's modules).
+const HELPER_TIME: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Runs one of the adapters' helper scripts with Node; its JSON output, an
+/// object (its stderr goes to the debug log).
+fn node_json(script: &Path, args: &[&Path]) -> Result<Helper, BoxError> {
+    use std::io::Read;
+    let failed = |e: &dyn std::fmt::Display| format!("node {}: {e}", script.display());
+    let mut child = std::process::Command::new("node")
         .arg(script)
         .args(args)
-        .output()
-        .map_err(|e| format!("node {}: {e}", script.display()))?;
-    if !out.status.success() {
-        return Err(format!(
-            "node {}: {}",
-            script.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )
-        .into());
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| failed(&e))?;
+    let read = |mut from: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = from.read_to_end(&mut bytes);
+            bytes
+        })
+    };
+    let stdout = read(Box::new(child.stdout.take().expect("piped")));
+    let stderr = read(Box::new(child.stderr.take().expect("piped")));
+    let deadline = std::time::Instant::now() + HELPER_TIME;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| failed(&e))? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(failed(&format!("no answer in {} s", HELPER_TIME.as_secs())).into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
+    if !status.success() {
+        return Err(failed(&stderr.trim()).into());
     }
-    serde_json::from_slice(&out.stdout).map_err(|e| {
-        let text = String::from_utf8_lossy(&out.stdout);
-        let head: String = text.chars().take(200).collect();
-        format!("node {}: {e} in {head:?}", script.display()).into()
-    })
+    if !stderr.trim().is_empty() {
+        tracing::debug!("node {}: {}", script.display(), stderr.trim());
+    }
+    let text = String::from_utf8_lossy(&stdout);
+    let head: String = text.chars().take(200).collect();
+    match serde_json::from_slice(&stdout) {
+        Ok(Json::Object(fields)) => Ok(Helper {
+            script: script.display().to_string(),
+            fields,
+        }),
+        Ok(_) => Err(failed(&format!("not an object: {head:?}")).into()),
+        Err(e) => Err(failed(&format!("{e} in {head:?}")).into()),
+    }
 }
 
-/// What the manifest's plugins load. Every refusal comes from here, before
-/// anything starts.
+/// A helper script's answer, read by key: a key missing or of another kind
+/// is an error naming the script (never read as "nothing there").
+struct Helper {
+    script: String,
+    fields: serde_json::Map<String, Json>,
+}
+
+impl Helper {
+    fn field(&self, key: &str) -> Result<&Json, BoxError> {
+        self.fields
+            .get(key)
+            .ok_or_else(|| format!("node {}: no {key:?} in its answer", self.script).into())
+    }
+
+    fn list(&self, key: &str) -> Result<&Vec<Json>, BoxError> {
+        self.field(key)?
+            .as_array()
+            .ok_or_else(|| format!("node {}: {key:?} is not a list", self.script).into())
+    }
+
+    fn map(&self, key: &str) -> Result<&serde_json::Map<String, Json>, BoxError> {
+        self.field(key)?
+            .as_object()
+            .ok_or_else(|| format!("node {}: {key:?} is not an object", self.script).into())
+    }
+
+    fn texts(&self, key: &str) -> Result<Vec<String>, BoxError> {
+        self.list(key)?
+            .iter()
+            .map(|v| {
+                v.as_str().map(str::to_owned).ok_or_else(|| -> BoxError {
+                    format!("node {}: {key:?} holds {v}, not text", self.script).into()
+                })
+            })
+            .collect()
+    }
+}
+
+/// What the manifest's plugins load. Every refusal about their files and
+/// packages comes from here, before anything starts (what a running DSH
+/// runtime lacks is checked once it runs: `run::dsh_services`).
 pub(crate) fn plan(
     manifest: &Manifest,
     layout: &Layout,
@@ -247,15 +321,17 @@ fn pi_extensions(
     }
     // What pi's package manager finds in it.
     let found = node_json(&layout.adapters.join("pi/resolve-package.mjs"), &[&dir])?;
-    let list = |key: &str| found[key].as_array().cloned().unwrap_or_default();
-    let extensions = list("extensions");
+    let extensions = found.list("extensions")?.clone();
     if extensions.is_empty() {
         return Err(format!("no pi extension in {}", dir.display()).into());
     }
     let skipped: Vec<String> = ["skills", "prompts", "themes"]
         .into_iter()
-        .filter(|key| !list(key).is_empty())
-        .map(|key| format!("{} {key}", list(key).len()))
+        .map(|key| Ok((key, found.list(key)?.len())))
+        .collect::<Result<Vec<_>, BoxError>>()?
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(key, n)| format!("{n} {key}"))
         .collect();
     let notes = match skipped.is_empty() {
         true => Vec::new(),
@@ -301,38 +377,32 @@ fn dsh_rows_of(
         &layout.adapters.join("dsh/inspect-package.mjs"),
         &[&base, Path::new(p.name())],
     )?;
-    if let Some(errors) = inspected["importErrors"]
-        .as_object()
-        .filter(|e| !e.is_empty())
-    {
+    let errors = inspected.map("importErrors")?;
+    if !errors.is_empty() {
         return Err(format!(
             "its rows cannot be imported: {}",
             Json::Object(errors.clone())
         )
         .into());
     }
-    if let Some(ops) = inspected["otherPatchOps"]
-        .as_array()
-        .filter(|o| !o.is_empty())
-    {
+    let ops = inspected.texts("otherPatchOps")?;
+    if !ops.is_empty() {
         return Err(format!(
             "its bundle patch does more than insert rows ({}), which yobuild does not apply",
-            Json::Array(ops.clone())
+            ops.join(", ")
         )
         .into());
     }
-    let mut peers = Vec::new();
-    for peer in inspected["peers"].as_array().into_iter().flatten() {
-        let peer = peer.as_str().unwrap_or_default();
+    let peers = inspected.texts("peers")?;
+    for peer in &peers {
         if !modules.join(peer).join("package.json").is_file() {
             return Err(format!("it needs {peer}, not installed in {}", modules.display()).into());
         }
-        peers.push(peer.to_owned());
     }
-    let rows = inspected["rows"]
-        .as_array()
-        .filter(|rows| !rows.is_empty())
-        .ok_or_else(|| format!("no rows in what DSH would install: {inspected}"))?;
+    let rows = inspected.list("rows")?;
+    if rows.is_empty() {
+        return Err("no rows in what DSH would install".into());
+    }
     let mut out = Vec::new();
     for (at, row) in rows.iter().enumerate() {
         let fields = row

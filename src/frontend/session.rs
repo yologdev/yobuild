@@ -54,13 +54,13 @@ struct UiState {
 /// An attached frontend, or an observer ([`Session::observe`]).
 struct Client {
     tx: mpsc::UnboundedSender<ServerMessage>,
+    /// Watching only ([`Session::observe`]): not a frontend a question can
+    /// be put to.
     observer: bool,
 }
 
 struct Inner {
     clients: Mutex<HashMap<u64, Client>>,
-    /// Connections that only watch ([`Session::observe`]): not frontends
-    /// a question can be put to.
     next_client: AtomicU64,
     ui: Mutex<UiState>,
     /// Offered browser components, with their module source.
@@ -187,6 +187,11 @@ impl Session {
     pub fn frontends(&self) -> usize {
         let clients = self.inner.clients.lock().unwrap();
         clients.values().filter(|c| !c.observer).count()
+    }
+
+    /// Whether a run is in progress (as the driver sees it).
+    pub fn is_running(&self) -> bool {
+        self.inner.running.load(Ordering::SeqCst)
     }
 
     /// Whether the session ended: the driver stopped, nothing sent is heard.

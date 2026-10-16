@@ -36,7 +36,9 @@ and facts the model cannot make up. Of what it does:
 The agent is mostly a *selection*. That example is about 600 lines of Rust,
 mostly wiring (a third is its scripted demo). yobuild turns the wiring into a manifest
 (this one comes as `handoff.toml` in a later step of M2a: until then its prompt file
-is not there, and its plugins must be installed by hand at these versions):
+is not there, its plugins must be installed by hand at these versions — the pi
+package with `--legacy-peer-deps`, as `frontend/plugins/.npmrc` does — and, with no
+`free_tools` key yet, the gate asks before each `todo` and search call):
 
 ```toml
 [agent]
@@ -66,10 +68,12 @@ yobuild run handoff.toml
 ```
 
 To run an agent today, from a checkout (`yobuild run` loads its plugins'
-adapters from the checkout it was built from):
+adapters from the checkout it was built from). This one has an MCP server
+(bash: Unix) and needs no Node; plugins and the terminal UI need the setup
+line (Node 22.19+, npm) first:
 
 ```sh
-scripts/try-coding-agent.sh --setup-only   # adapters, npm ci
+scripts/try-coding-agent.sh --setup-only   # for plugins and the terminal UI
 cargo run -- run tests/fixtures/echo/agent.toml \
   --scripted tests/fixtures/echo/script.json --once "echo hi"
 ```

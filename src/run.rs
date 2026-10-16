@@ -125,13 +125,16 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         ..
     } = options;
     let name = &manifest.agent.name;
-    for note in &checked.notes {
-        eprintln!("{name}: note: {note}");
-    }
     let terminal = manifest.frontend.terminal && !once;
 
     // A terminal UI ends the session when it quits, as does a `once` run.
     let (session, driver) = Session::new(terminal || once);
+    // What loads only in part: a warning every frontend gets (kept in the
+    // session's history for those that come later), and in the log.
+    for note in &checked.notes {
+        tracing::warn!("{note}");
+        session.notice(NoticeLevel::Warning, note.clone());
+    }
     let bridge = RutisBridge::install(root)?;
     services::provide(root, &session)?;
     let scratch = match manifest.parts.scratch {
@@ -180,7 +183,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     }
 
     // The tools: yoagent's (in `cwd`), `ask_owner`, each MCP server's; no
-    // two of one name, a plugin's included.
+    // two of one name. (A plugin's tools come with each run; yoagent keeps
+    // one of these over a plugin's of the same name, and says so.)
     let ask_owner = manifest
         .parts
         .ask_owner
@@ -188,13 +192,13 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     let mut tools = Tools::default();
     tools.add("yoagent", tools_in(&cwd));
     if let Some(ask) = &ask_owner {
-        tools.add("ask_owner", vec![Box::new(ask.clone())]);
+        tools.add(AskOwner::TOOL, vec![Box::new(ask.clone())]);
     }
     for server in &manifest.mcp {
         let found = mcp(server, &checked.servers[&server.name]).await?;
         tools.add(&format!("mcp {}", server.name), found);
     }
-    tools.check(&bridge.registry().tool_names())?;
+    tools.check()?;
 
     let prompt = checked.prompt.fill(&cwd, scratch.as_ref());
     let mut agent = match checked.provider {
@@ -211,6 +215,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         let mut gate = Gate::new(session.clone(), &cwd);
         if let Some(scratch) = &scratch {
             gate = gate.with_scratch(scratch);
+        }
+        // Free only when it is yobuild's: a plugin's tool of that name asks.
+        if ask_owner.is_some() {
+            gate = gate.with_free_tools([AskOwner::TOOL]);
         }
         agent = agent.with_extension(gate);
     }
@@ -229,90 +237,128 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     }
     eprintln!("{name}: ready in {:.1}s", started.elapsed().as_secs_f64());
 
-    // What the frontends see; in `once`, written out as it comes.
-    let (seen, mut ended_runs, watching) = watch(&session, once);
-    if once {
-        session.send(ClientMessage::Prompt {
-            text: task.unwrap_or_default(),
-        });
-        let running = tokio::spawn(driver.run(agent));
-        // The task's run ends (or the session does, without it).
-        while *ended_runs.borrow_and_update() == 0 && !seen.lock().unwrap().closed {
-            if ended_runs.changed().await.is_err() {
-                break;
-            }
-        }
-        session.send(ClientMessage::Quit);
-        let agent = running.await?;
-        let mut ended = finish(seen, watching, Some(agent)).await;
-        if ended.outcome.is_none() {
-            ended.outcome = Some(RunOutcome::Error);
-            ended.error = Some("the session ended before the run did".into());
-        }
-        return Ok(ended);
-    }
+    let ui = "terminal-ui";
+    let mut served = None;
     if terminal {
-        let ui = "terminal-ui";
         host.load([
             Row::new(ui, layout.frontend.join("plugins/terminal-ui.ts").display()).runtime("ui"),
         ])
         .await?;
-        if let Some(task) = task {
-            session.send(ClientMessage::Prompt { text: task });
-        }
-        let driving = driver.run(agent);
-        tokio::pin!(driving);
-        // The terminal UI ends the session when it quits; one whose runtime
-        // stopped would leave it waiting with nobody there.
-        let agent = loop {
-            tokio::select! {
-                agent = &mut driving => break agent,
-                _ = tokio::time::sleep(Duration::from_millis(250)) => {
-                    if !host.is_running(ui) {
-                        session.send(ClientMessage::Quit);
-                        drop(driving.await);
-                        drop(finish(seen, watching, None).await);
-                        return Err(format!("the terminal UI stopped: {:?}", host.status()).into());
-                    }
-                }
+    } else if !once {
+        let phone = manifest.frontend.phone;
+        let addr = addr.unwrap_or_else(|| match phone {
+            true => "0.0.0.0:8787".parse().expect("an address"),
+            false => "127.0.0.1:8787".parse().expect("an address"),
+        });
+        let web = web::serve(session.clone(), addr).await?;
+        // Every interface: a link the phone can open.
+        let url = match (web.addr().ip().is_unspecified(), lan_ip()) {
+            (true, Some(ip)) => format!("http://{ip}:{}/?t={}", web.addr().port(), web.token()),
+            (true, None) => {
+                eprintln!("{name}: no address on the local network found; use this machine's");
+                web.url()
             }
+            _ => web.url(),
         };
-        return Ok(finish(seen, watching, Some(agent)).await);
+        println!("{name}: {url}  (Ctrl+C to stop)");
+        served = Some(web);
     }
-    let phone = manifest.frontend.phone;
-    let addr = addr.unwrap_or_else(|| match phone {
-        true => "0.0.0.0:8787".parse().expect("an address"),
-        false => "127.0.0.1:8787".parse().expect("an address"),
-    });
-    let served = web::serve(session.clone(), addr).await?;
-    // Every interface: a link the phone can open.
-    let url = match (served.addr().ip().is_unspecified(), lan_ip()) {
-        (true, Some(ip)) => format!("http://{ip}:{}/?t={}", served.addr().port(), served.token()),
-        _ => served.url(),
-    };
-    println!("{name}: {url}  (Ctrl+C to stop)");
+
+    // What the frontends see; in `once`, written out as it comes.
+    let (seen, mut ended_runs, watching) = watch(&session, once);
     if let Some(task) = task {
         session.send(ClientMessage::Prompt { text: task });
     }
-    // Whether a run was going is read as Ctrl+C comes: `select!` drops the
-    // driver (ending that run as an error) before its branch runs.
-    let interrupt = async {
-        let stop = tokio::signal::ctrl_c().await;
-        let mut seen = seen.lock().unwrap();
-        seen.interrupted = seen.running;
-        stop
-    };
-    let agent = tokio::select! {
-        agent = driver.run(agent) => Some(agent),
-        stop = interrupt => {
-            if let Err(e) = stop {
-                eprintln!("cannot listen for Ctrl+C ({e}); stopping");
+    let mut driving = tokio::spawn(driver.run(agent));
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    let mut tick = tokio::time::interval(Duration::from_millis(250));
+    let mut reported = std::collections::HashSet::new();
+    let mut quitting = false;
+    // Until the session ends: the frontend quits (terminal), its run ends
+    // (`once`), or Ctrl+C. Meanwhile a plugin that stops is said.
+    let end = loop {
+        tokio::select! {
+            joined = &mut driving => break End::Driven(Box::new(joined)),
+            stop = &mut ctrl_c => {
+                // As the driver sees it: the observer's copy may lag.
+                let interrupted = session.is_running();
+                break match stop {
+                    Ok(()) => End::Interrupted { running: interrupted },
+                    Err(e) => End::NoSignal(e),
+                };
             }
-            None
+            changed = ended_runs.changed(), if once && !quitting => {
+                if changed.is_err() || *ended_runs.borrow_and_update() > 0 {
+                    session.send(ClientMessage::Quit);
+                    quitting = true;
+                }
+            }
+            _ = tick.tick() => {
+                for failure in host.failures() {
+                    if reported.insert(failure.clone()) {
+                        tracing::error!("{failure}");
+                        session.notice(NoticeLevel::Error, format!("A plugin stopped: {failure}"));
+                    }
+                }
+                if terminal && !host.is_running(ui) {
+                    break End::UiGone;
+                }
+            }
         }
     };
-    served.stop();
-    Ok(finish(seen, watching, agent).await)
+    let (agent, interrupted, failure) = match end {
+        End::Driven(joined) => match *joined {
+            Ok(agent) => (Some(agent), false, None),
+            Err(e) => (None, false, Some(format!("the agent's task failed: {e}"))),
+        },
+        End::Interrupted { running } => {
+            driving.abort();
+            drop(driving.await);
+            (None, running, None)
+        }
+        End::NoSignal(e) => {
+            driving.abort();
+            drop(driving.await);
+            (None, false, Some(format!("cannot listen for Ctrl+C: {e}")))
+        }
+        End::UiGone => {
+            // Nobody is there to quit: the session would wait for ever.
+            session.send(ClientMessage::Quit);
+            let agent = driving.await.ok();
+            let status = format!("{:?}", host.status());
+            (
+                agent,
+                false,
+                Some(format!("the terminal UI stopped: {status}")),
+            )
+        }
+    };
+    drop(served);
+    let ended = finish(seen, watching, agent, once, interrupted).await;
+    match failure {
+        Some(failure) => Err(match ended.outcome {
+            Some(outcome) => format!(
+                "{failure} (the last run ended {outcome:?}{})",
+                ended.error.map(|e| format!(": {e}")).unwrap_or_default()
+            ),
+            None => failure,
+        }
+        .into()),
+        None => Ok(ended),
+    }
+}
+
+/// Why the session ended.
+enum End {
+    /// The driver returned (or its task failed).
+    Driven(Box<Result<Agent, tokio::task::JoinError>>),
+    /// Ctrl+C; whether a run was in progress.
+    Interrupted { running: bool },
+    /// Ctrl+C cannot be listened for.
+    NoSignal(std::io::Error),
+    /// The terminal UI's runtime stopped.
+    UiGone,
 }
 
 /// What `run` needs that can be checked before anything starts.
@@ -454,25 +500,20 @@ impl Tools {
         }
     }
 
-    /// No two tools of one name — the plugins' (`plugin`) included — and
-    /// none named `ask_owner` but yobuild's: the gate lets that one run
-    /// without asking.
-    fn check(&self, plugin: &[String]) -> Result<(), BoxError> {
-        let plugin = plugin
-            .iter()
-            .map(|name| (name.clone(), "a plugin".to_owned()));
-        let mut seen: HashMap<String, String> = HashMap::new();
-        for (name, source) in self.from.iter().cloned().chain(plugin) {
-            if name == "ask_owner" && source != "ask_owner" {
+    /// No two tools of one name, and none named `ask_owner` but yobuild's
+    /// (a server's would be freed by the gate when the part is on).
+    fn check(&self) -> Result<(), BoxError> {
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        for (name, source) in &self.from {
+            if name == AskOwner::TOOL && source != AskOwner::TOOL {
                 return Err(format!(
                     "tool ask_owner from {source}: the name is yobuild's ([parts] ask_owner)"
                 )
                 .into());
             }
-            if let Some(first) = seen.get(&name) {
+            if let Some(first) = seen.insert(name, source) {
                 return Err(format!("two tools named {name}: from {first} and {source}").into());
             }
-            seen.insert(name, source);
         }
         Ok(())
     }
@@ -496,20 +537,17 @@ fn tools_in(cwd: &Path) -> Vec<Box<dyn AgentTool>> {
 /// only observers there gets its default answer at once).
 #[derive(Default)]
 struct Seen {
-    /// A run started and has not ended.
-    running: bool,
-    /// Ctrl+C stopped the session during a run.
-    interrupted: bool,
+    /// The first run's end (`once`: the task's) and the last's.
+    first: Option<(RunOutcome, Option<String>)>,
     last: Option<(RunOutcome, Option<String>)>,
     notices: Vec<(NoticeLevel, String)>,
-    closed: bool,
 }
 
 type Shared = Arc<std::sync::Mutex<Seen>>;
 
-/// Watches the session: how many runs ended (`ended`), and what was seen;
-/// with `print`, each tool call and notice on stderr. Ends with the
-/// session.
+/// Watches the session: how many runs ended (`ended`; it closes with the
+/// session), and what was seen; with `print`, each tool call and notice on
+/// stderr. Ends with the session.
 fn watch(
     session: &Session,
     print: bool,
@@ -524,13 +562,13 @@ fn watch(
     let record = seen.clone();
     let task = tokio::spawn(async move {
         loop {
-            let message = watching.messages.recv().await;
-            let mut seen = record.lock().unwrap();
-            match message {
-                Some(ServerMessage::RunStart { .. }) => seen.running = true,
+            match watching.messages.recv().await {
                 Some(ServerMessage::RunEnd { outcome, error, .. }) => {
-                    seen.running = false;
-                    seen.last = Some((outcome, error));
+                    {
+                        let mut seen = record.lock().unwrap();
+                        seen.first.get_or_insert_with(|| (outcome, error.clone()));
+                        seen.last = Some((outcome, error));
+                    }
                     ended.send_modify(|n| *n += 1);
                 }
                 Some(ServerMessage::Event { event, .. }) if print => {
@@ -561,14 +599,10 @@ fn watch(
                     if print {
                         eprintln!("  {level:?}: {message}");
                     }
-                    seen.notices.push((level, message));
+                    record.lock().unwrap().notices.push((level, message));
                 }
-                Some(ServerMessage::Closed) | None => {
-                    seen.closed = true;
-                    // Wakes a `once` run waiting for its run's end.
-                    ended.send_modify(|_| {});
-                    return;
-                }
+                // The sender goes with the task: a waiting `once` wakes.
+                Some(ServerMessage::Closed) | None => return,
                 Some(_) => {}
             }
         }
@@ -576,22 +610,49 @@ fn watch(
     (seen, ended_rx, task)
 }
 
-/// How the session ended, once the watch saw it close.
+/// How the session ended, once the watch saw it close: its first run's
+/// outcome with `once`, else its last's; `Aborted` when Ctrl+C came
+/// during a run (the run itself then ends as an error: the driver is gone).
 async fn finish(
     seen: Shared,
     watching: tokio::task::JoinHandle<()>,
     agent: Option<Agent>,
+    once: bool,
+    interrupted: bool,
 ) -> Ended {
     // The session closes once its driver is gone; the watch then ends.
-    let _ = tokio::time::timeout(Duration::from_secs(5), watching).await;
-    let mut seen = std::mem::take(&mut *seen.lock().unwrap());
-    // Its run then ends as an error (the driver is gone): it was stopped.
-    if seen.interrupted {
-        seen.last = Some((RunOutcome::Aborted, Some("stopped with Ctrl+C".into())));
+    let unsure = match tokio::time::timeout(Duration::from_secs(5), watching).await {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(format!("the session's watch failed: {e}")),
+        Err(_) => Some("the session did not close within 5 s".to_owned()),
+    };
+    let seen = std::mem::take(&mut *seen.lock().unwrap());
+    let ran = match once {
+        true => seen.first,
+        false => seen.last,
+    };
+    let (mut outcome, mut error) = match ran {
+        Some((outcome, error)) => (Some(outcome), error),
+        None => (None, None),
+    };
+    if interrupted {
+        (outcome, error) = (
+            Some(RunOutcome::Aborted),
+            Some("stopped with Ctrl+C".into()),
+        );
     }
-    let (outcome, error) = seen
-        .last
-        .map_or((None, None), |(outcome, error)| (Some(outcome), error));
+    if outcome.is_none() {
+        // A `once` run that never ended; or a session whose end was not seen.
+        let why = match (once, unsure) {
+            (_, Some(why)) => Some(format!("could not tell how the session ended: {why}")),
+            (true, None) => Some("the session ended before the run did".to_owned()),
+            (false, None) => None,
+        };
+        if let Some(why) = why {
+            tracing::warn!("{why}");
+            (outcome, error) = (Some(RunOutcome::Error), Some(why));
+        }
+    }
     Ended {
         outcome,
         error,
@@ -600,17 +661,57 @@ async fn finish(
     }
 }
 
-/// Whether the services the DSH plugins' rows inject (`modules`) exist in
-/// the DSH runtime: a plugin missing one never starts, while its row reads
-/// as started (the waiting is inside DSH's own loader) — so ask from inside,
-/// with the adapters' service probe.
+/// Whether the services the DSH plugins' rows inject (`plan.dsh_modules`)
+/// exist in the DSH runtime, and their modules import there: a plugin
+/// missing a service never starts, while its row reads as started (the
+/// waiting is inside DSH's own loader) — so ask from inside, with the
+/// adapters' service probe. A service still missing after a short look is
+/// looked for again, longer, before the run is refused (a provider may
+/// start slowly).
 async fn dsh_services(
     host: &mut PluginHost,
     layout: &Layout,
     plan: &plugins::Plan,
     host_services: bool,
 ) -> Result<(), BoxError> {
-    let modules = &plan.dsh_modules;
+    let mut missing = Vec::new();
+    for wait in [1000, 3000] {
+        missing = probe_services(host, layout, &plan.dsh_modules, wait).await?;
+        if missing.is_empty() {
+            return Ok(());
+        }
+    }
+    let mut hints = Vec::new();
+    if !host_services {
+        hints.push("DSH's own host services come with [dsh] host_services = true".to_owned());
+    }
+    if !plan.dsh_peers.is_empty() {
+        hints.push(format!(
+            "peers the plugins list, not loaded as plugins: {}",
+            plan.dsh_peers.join(", ")
+        ));
+    }
+    let hints = match hints.is_empty() {
+        true => String::new(),
+        false => format!(" ({})", hints.join("; ")),
+    };
+    Err(format!(
+        "DSH plugins wait for services nobody provides: {}{hints}",
+        missing.join(", ")
+    )
+    .into())
+}
+
+/// One look by `adapters/dsh/probe-services.ts` after `wait_ms`: the
+/// services missing; an error for modules that cannot be imported, an
+/// answer not in its shape, or a probe that fails or does not answer. The
+/// probe is unloaded however it went.
+async fn probe_services(
+    host: &mut PluginHost,
+    layout: &Layout,
+    modules: &[String],
+    wait_ms: u64,
+) -> Result<Vec<String>, BoxError> {
     let base = layout.adapters.join("dsh");
     let out = tempfile::NamedTempFile::new()?.into_temp_path();
     std::fs::remove_file(&out)?;
@@ -621,57 +722,47 @@ async fn dsh_services(
             "modules": modules,
             "base": base,
             "out": &*out,
-            "waitMs": 1000,
+            "waitMs": wait_ms,
         }))])
     .await?;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let found = loop {
+    let deadline = Instant::now() + Duration::from_millis(wait_ms) + Duration::from_secs(15);
+    let answer = loop {
         if let Ok(text) = std::fs::read_to_string(&out) {
-            if let Ok(found) = serde_json::from_str::<serde_json::Value>(&text) {
-                break found;
-            }
+            // Written whole once: an unreadable answer is a broken one.
+            break Ok(text);
+        }
+        let failures = host.failures();
+        if !failures.is_empty() {
+            break Err(format!(
+                "the DSH service check failed: {}",
+                failures.join("; ")
+            ));
         }
         if Instant::now() >= deadline {
-            return Err("the DSH service check gave no answer in 15 s".into());
+            break Err(format!(
+                "the DSH service check gave no answer: {:?}",
+                host.status()
+            ));
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
     host.unload(id).await?;
-    if let Some(errors) = found["importErrors"].as_object().filter(|e| !e.is_empty()) {
+    let text = answer?;
+    let broken = || format!("the DSH service check answered {text:?}");
+    let found: serde_json::Value = serde_json::from_str(&text).map_err(|_| broken())?;
+    let errors = found["importErrors"].as_object().ok_or_else(broken)?;
+    if !errors.is_empty() {
         return Err(format!(
             "DSH plugins that cannot be imported: {}",
             serde_json::Value::Object(errors.clone())
         )
         .into());
     }
-    let missing: Vec<&str> = found["missing"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|m| m.as_str())
-        .collect();
-    if !missing.is_empty() {
-        let mut hints = Vec::new();
-        if !host_services {
-            hints.push("DSH's own host services come with [dsh] host_services = true".to_owned());
-        }
-        if !plan.dsh_peers.is_empty() {
-            hints.push(format!(
-                "peers the plugins list, not loaded as plugins: {}",
-                plan.dsh_peers.join(", ")
-            ));
-        }
-        let hints = match hints.is_empty() {
-            true => String::new(),
-            false => format!(" ({})", hints.join("; ")),
-        };
-        return Err(format!(
-            "DSH plugins wait for services nobody provides: {}{hints}",
-            missing.join(", ")
-        )
-        .into());
-    }
-    Ok(())
+    let missing = found["missing"].as_array().ok_or_else(broken)?;
+    Ok(missing
+        .iter()
+        .map(|m| m.as_str().map(str::to_owned).ok_or_else(broken))
+        .collect::<Result<_, _>>()?)
 }
 
 /// Waits until the plugins' `handlers` are registered; a plugin that failed
@@ -930,16 +1021,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut tools = Tools::default();
         tools.add("yoagent", tools_in(dir.path()));
-        assert!(tools.check(&["todo".into()]).is_ok());
-        let e = tools.check(&["bash".into()]).unwrap_err().to_string();
-        assert_eq!(e, "two tools named bash: from yoagent and a plugin");
-        let e = tools.check(&["ask_owner".into()]).unwrap_err().to_string();
-        assert!(e.starts_with("tool ask_owner from a plugin"), "{e}");
-        let e = tools
-            .check(&["todo".into(), "todo".into()])
-            .unwrap_err()
-            .to_string();
-        assert_eq!(e, "two tools named todo: from a plugin and a plugin");
+        assert!(tools.check().is_ok());
+        let (session, _driver) = Session::new(false);
+        let mut ours = Tools::default();
+        ours.add(
+            AskOwner::TOOL,
+            vec![Box::new(AskOwner::new(session.clone()))],
+        );
+        assert!(ours.check().is_ok());
+        let mut theirs = Tools::default();
+        theirs.add("mcp x", vec![Box::new(AskOwner::new(session))]);
+        let e = theirs.check().unwrap_err().to_string();
+        assert!(e.starts_with("tool ask_owner from mcp x"), "{e}");
+        tools.add("mcp files", tools_in(dir.path()));
+        let e = tools.check().unwrap_err().to_string();
+        assert_eq!(e, "two tools named bash: from yoagent and mcp files");
     }
 
     #[test]

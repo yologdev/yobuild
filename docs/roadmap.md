@@ -66,7 +66,8 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
 - `model = "provider/id"` → `ModelConfig` (design §2, Models); an unknown
   provider is an error listing the known ones.
 - `yobuild run` with plugins that are local paths or already installed —
-  pi packages and stdio MCP servers in `node_modules/` beside the manifest,
+  pi packages, stdio MCP servers and the rutis runtime in `node_modules/`
+  beside the manifest,
   DSH plugins in `adapters/dsh`, installed by hand — so M2a does not need
   M2b's cache: start runtimes, load rows, connect `[[mcp]]` servers
   (yoagent's MCP client, stdio and HTTP with headers), wire parts and

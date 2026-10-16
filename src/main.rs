@@ -20,7 +20,7 @@
 //!
 //! The agent works in the current folder. Its log goes to stderr
 //! (`RUST_LOG`, default warnings), or under a terminal UI to
-//! `$TMPDIR/yobuild-<agent>.log`.
+//! `$TMPDIR/yobuild-<agent>-<pid>.log` (named at the end, failed or not).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -101,7 +101,8 @@ fn start() -> Result<ExitCode, BoxError> {
     runtime.block_on(async {
         let root = Ctx::root()?;
         let ended = run(&root, options).await;
-        // A runtime that does not stop is said, after the run's own error.
+        // A runtime that does not stop is said after the run's own error;
+        // then where the log is.
         let stopped = match tokio::time::timeout(Duration::from_secs(10), root.shutdown()).await {
             Ok(Ok(())) => None,
             Ok(Err(e)) => Some(format!("shutting down: {e}")),
@@ -109,10 +110,8 @@ fn start() -> Result<ExitCode, BoxError> {
         };
         let code = match ended {
             Err(e) => {
-                if let Some(stopped) = &stopped {
-                    eprintln!("yobuild: {stopped}");
-                }
-                return Err(e);
+                eprintln!("yobuild: {e}");
+                ExitCode::FAILURE
             }
             // The last run's answer (`--once`: the task's) and how it ended.
             Ok(ended) => {
@@ -147,15 +146,23 @@ fn start() -> Result<ExitCode, BoxError> {
 /// The log: stderr, or a file when a terminal UI owns the screen (`agent`).
 fn logging(agent: Option<&str>) -> Result<Option<PathBuf>, BoxError> {
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env()
-        // The registry warns of no key for `--scripted`'s mock provider, which needs none.
-        .unwrap_or_else(|_| EnvFilter::new("warn,yoagent::provider::registry=error"));
+    // The registry warns of no key for `--scripted`'s mock provider, which
+    // needs none.
+    let default = "warn,yoagent::provider::registry=error";
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(set) => EnvFilter::try_new(&set).unwrap_or_else(|e| {
+            eprintln!("yobuild: RUST_LOG={set:?} is not a log filter ({e}); using {default:?}");
+            EnvFilter::new(default)
+        }),
+        Err(_) => EnvFilter::new(default),
+    };
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
     let Some(agent) = agent else {
         builder.with_writer(std::io::stderr).init();
         return Ok(None);
     };
-    let path = std::env::temp_dir().join(format!("yobuild-{agent}.log"));
+    // One per process: two runs of one agent keep their own.
+    let path = std::env::temp_dir().join(format!("yobuild-{agent}-{}.log", std::process::id()));
     let file = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     builder
         .with_ansi(false)

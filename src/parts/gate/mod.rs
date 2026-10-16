@@ -36,8 +36,11 @@ use super::Scratch;
 use crate::frontend::{session::UI_TIMEOUT, Session, UiRequest};
 
 /// Tools that only read, free by default: yoagent's `read_file`,
-/// `list_files` and `search`, and this crate's `ask_owner`.
-pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "ask_owner"];
+/// `list_files` and `search`. Not [`AskOwner`](super::AskOwner)'s
+/// `ask_owner`: whoever adds that tool frees it
+/// (`with_free_tools([AskOwner::TOOL])`), so a plugin's tool of that name
+/// is not freed by its name alone.
+pub const READ_ONLY_TOOLS: [&str; 3] = ["read_file", "list_files", "search"];
 
 /// An extension that asks the owner before a tool call does anything it
 /// does not know to be harmless, and refuses it when nobody answers "Allow"

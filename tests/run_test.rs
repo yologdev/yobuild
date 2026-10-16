@@ -1,6 +1,9 @@
-//! `yobuild run` end to end: an agent from a manifest, its model's replies
-//! from a script, an MCP server over stdio (a bash script, as in yoagent's
-//! own tests), run `once` without a frontend. Unix (the server is bash).
+//! `yobuild::run::run` end to end, `once`, from manifests, the model's
+//! replies from a script: MCP over stdio (a bash server) and HTTP, DSH
+//! plugins (files, a pinned package, the service check), limits, the
+//! report, `ask_owner`, tool-name refusals, warnings. In this process's
+//! folder, where nothing is written (pi, which writes there, is tested
+//! through the binary: `cli_test`). Unix (the server is bash).
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
@@ -480,5 +483,19 @@ async fn a_dsh_plugin_waiting_for_services_nobody_provides_is_refused() {
         Some(RunOutcome::Completed),
         "{:?}",
         ended.error
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_loads_only_in_part_is_a_warning_every_frontend_gets() {
+    let dir = project("[parts]\ngate = \"off\"\n[dsh]\nhost_services = true\n");
+    let ended = run_once(dir.path()).await;
+    assert!(
+        ended.notices.iter().any(|(level, message)| {
+            *level == yobuild::frontend::NoticeLevel::Warning
+                && message == "[dsh] host_services has no effect: no DSH plugin"
+        }),
+        "{:?}",
+        ended.notices
     );
 }

@@ -59,12 +59,24 @@ use yobuild::parts::{AskOwner, Facts, Gate, Report, Scratch};
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// The plugin tools that only plan or search: rpiv-todo's plan and
-/// dsh-free-search's searches (not its `npm` or test tools). yoagent's
-/// read-only tools and `ask_owner` are free by default.
-const FREE_TOOLS: [&str; 14] = [
-    "todo", "multi_search", "research", "web_search", "search_web_pages", "advanced_search",
-    "global_search", "domain_search", "platform_search", "video_search", "zhihu_search",
-    "cache_search", "search_pro", "web_search_exa",
+/// dsh-free-search's searches (not its `npm` or test tools), and
+/// `ask_owner` (yoagent's read-only tools are free by default).
+const FREE_TOOLS: [&str; 15] = [
+    AskOwner::TOOL,
+    "todo",
+    "multi_search",
+    "research",
+    "web_search",
+    "search_web_pages",
+    "advanced_search",
+    "global_search",
+    "domain_search",
+    "platform_search",
+    "video_search",
+    "zhihu_search",
+    "cache_search",
+    "search_pro",
+    "web_search_exa",
 ];
 
 /// `frontend/`, where the TypeScript plugins live.
