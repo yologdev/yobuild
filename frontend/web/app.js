@@ -319,6 +319,7 @@ function showNextQuestion() {
   dialog.append(title)
   if (request.message) {
     const p = document.createElement('p')
+    p.className = 'message'
     p.textContent = request.message
     dialog.append(p)
   }

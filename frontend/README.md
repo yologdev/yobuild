@@ -206,15 +206,25 @@ path/to/yobuild/scripts/try-handoff.sh --demo               # headless, scripted
   "skipped", and the agent decides itself and says so. A reset withdraws
   open questions: they belong to the conversation it forgot.
 - **Guardrails:**
-  - A pi extension (`confirm-dangerous.ts`) asks before selected
-    operations that delete, discard or overwrite what you already have:
-    `rm`, `git reset --hard`, `git clean`, `git restore`, a forced push, a
-    write or `>` over an existing file, and more. Files the agent created
-    this session, and its own scratch folder, are exempt. These questions
-    do wait, and with nobody connected they are refused. It is a guardrail,
-    not a sandbox: edits of existing files, `sed -i`, and what a script
-    does inside are not checked.
-  - Every run needs that policy (`require_policy`).
+  - The gate (`yobuild::parts::Gate`, in Rust) is an allow-list: it lets
+    through the programs it knows, with the options it knows — reading,
+    building and testing, git that does not discard, writing new files in the project —
+    and asks before everything else, above all deleting, discarding or
+    overwriting what you already have (`rm`, `git reset --hard`, a forced
+    push, `>` or `cp` over an existing file, `sed -i`, …). Files the agent
+    created this session (by calls that ran without asking), and its own
+    scratch folder, are exempt. These
+    questions do wait, and with nobody connected they are refused. It is a
+    guardrail, not a sandbox: targeted edits of existing files go through,
+    and builds and tests run the project's code — including what the agent
+    edited — without the gate judging what that code does. Nor does it
+    keep data in: what the agent can read (`.env` included) it can send.
+    (The coding
+    agent uses the pi extension `confirm-dangerous.ts` instead: a
+    deny-list, kept as the example of a gate written as a plugin.)
+  - The gate is a required extension in the Rust process: no plugin
+    runtime has to be up for it to hold. It also asks before any plugin
+    tool it has no rule for (the plan and search tools are declared free).
   - Runs are capped in turns and minutes (`--max-minutes`), and in dollars
     (`--budget-usd`) when the model has a price. DeepSeek has none in the
     bundled table.

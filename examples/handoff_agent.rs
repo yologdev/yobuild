@@ -10,10 +10,13 @@
 //!   at once, so the agent carries on with what does not depend on it. The
 //!   answer, whenever it comes, is sent in as a steer message: picked up by
 //!   the run in progress, or starting a new run when the agent had stopped.
-//! - Guardrails, not a sandbox: a pi extension asks before selected
-//!   commands that delete, discard or overwrite existing files (those do
-//!   wait); every run needs that policy (`require_policy`); runs are capped
-//!   in turns, tokens and minutes, and in dollars when the model has a price.
+//! - Guardrails, not a sandbox: the gate (`yobuild::parts::Gate`, in Rust)
+//!   is an allow-list — reading, building, testing, committing and writing
+//!   new files run; anything else, above all deleting, discarding or
+//!   overwriting what the owner has, waits for their yes, and is refused
+//!   with nobody there;
+//!   runs are capped in turns, tokens and minutes, and in dollars when the
+//!   model has a price.
 //! - Every run ends with a handoff report (Done / Waiting on you /
 //!   Decisions / Next — the agent is sent back until it writes one), and
 //!   the host adds what the model cannot make up: the files changed, the
@@ -50,10 +53,19 @@ use yoagent::tools::default_tools;
 use yoagent::{Agent, AgentEvent, AgentMessage, Content, Message};
 use yoagent_rutis::RutisBridge;
 use yobuild::frontend::host::{rows_from_file, DshHome, PluginHost, Row};
-use yobuild::frontend::{services, session, web, ClientMessage, ServerMessage, Session};
-use yobuild::parts::{AskOwner, Facts, Report, Scratch};
+use yobuild::frontend::{services, web, ClientMessage, ServerMessage, Session};
+use yobuild::parts::{AskOwner, Facts, Gate, Report, Scratch};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// The plugin tools that only plan or search: rpiv-todo's plan and
+/// dsh-free-search's searches (not its `npm` or test tools). yoagent's
+/// read-only tools and `ask_owner` are free by default.
+const FREE_TOOLS: [&str; 14] = [
+    "todo", "multi_search", "research", "web_search", "search_web_pages", "advanced_search",
+    "global_search", "domain_search", "platform_search", "video_search", "zhihu_search",
+    "cache_search", "search_pro", "web_search_exa",
+];
 
 /// `frontend/`, where the TypeScript plugins live.
 fn here() -> PathBuf {
@@ -173,13 +185,9 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     let bridge = RutisBridge::install(root)?;
     services::provide(root, &session)?;
 
-    // The approval gate (confirm-dangerous.ts, in the pi runtime) lets the
-    // agent delete and overwrite freely in its scratch, and nowhere else it
-    // did not create.
     let mut builder = PluginHost::builder()
         .node("ui", here().join("plugins"))
-        .node("pi", rutis_plugins().join("pi"))
-        .env("pi", Scratch::ENV, scratch.path());
+        .node("pi", rutis_plugins().join("pi"));
     // DSH's own host services, on request: in a home of their own, never
     // the user's `~/.dsh` (see `DshHome` for what that does not cover).
     let dsh_home = match options.dsh && options.dsh_services {
@@ -199,7 +207,7 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         .start(root)
         .await?;
     let mut rows = vec![
-        // pi extensions, unchanged: the plan, and approval of dangerous commands.
+        // pi extensions, unchanged: the plan.
         Row::new(
             "pi",
             rutis_plugins()
@@ -210,7 +218,6 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         .config(json!({
             "extensions": [
                 here().join("plugins/node_modules/@juicesharp/rpiv-todo/index.ts"),
-                here().join("plugins/pi-extensions/confirm-dangerous.ts"),
             ],
             "cwd": cwd,
         })),
@@ -252,7 +259,7 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     }
     host.load(rows).await?;
     // A TypeScript row runs before its async start-up is done: wait for the
-    // handlers the agent depends on, the pi policy above all.
+    // handlers the agent depends on.
     let mut needed = vec!["pi-extensions"];
     if options.dsh {
         needed.push("dsh-tools");
@@ -308,12 +315,15 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
             .with_max_total_tokens(options.max_tokens)
             .with_max_duration(Duration::from_secs(options.max_minutes * 60)),
     )
-    // Questions from pi's approval wait up to the frontends' timeout.
+    .with_extension(bridge.extension())
+    // The approval gate: what it knows to be harmless runs; the agent
+    // deletes and overwrites freely in its scratch and in what it created;
+    // everything else asks.
     .with_extension(
-        bridge
-            .extension()
-            .require_policy()
-            .with_policy_timeout(Some(session::UI_TIMEOUT + Duration::from_secs(30))),
+        Gate::new(session.clone(), &cwd)
+            .with_scratch(&scratch)
+            // Tools that only plan or look things up; any other plugin tool asks.
+            .with_free_tools(FREE_TOOLS),
     )
     .with_extension(report)
     .with_extension(facts);

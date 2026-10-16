@@ -16,8 +16,8 @@ publish = false
 async-trait = "0.1"
 # DshHome: a private, per-process home for DSH's own services.
 tempfile = "3"
-# Floors: 0.25.4 for `ToolGate` (the gate part), 0.3.1 for the DSH host
-# services behind `--dsh-services`.
+# Floors: 0.25.4 (the release the parts were built and tested on), 0.3.1
+# for the DSH host services behind `--dsh-services`.
 yoagent = "0.25.4"
 yoagent-rutis = { version = "0.3.1", features = ["node"] }
 rutis = "0.9"

@@ -267,11 +267,7 @@ impl Start {
         let git = Git::at(&self.root).with_index_copy().await?;
         let diff = git
             .run(&[
-                "diff",
-                "--no-relative",
-                "--no-ext-diff",
-                "--shortstat",
-                &self.tree,
+                "diff", "--no-relative", "--no-ext-diff", "--shortstat", &self.tree,
             ])
             .await?;
         let diff = match diff.trim() {
@@ -444,11 +440,7 @@ impl Git {
     async fn untracked(&self) -> Result<HashMap<String, Stamp>, GitError> {
         let out = self
             .run(&[
-                "ls-files",
-                "-z",
-                "--others",
-                "--exclude-standard",
-                "--full-name",
+                "ls-files", "-z", "--others", "--exclude-standard", "--full-name",
             ])
             .await?;
         Ok(out
