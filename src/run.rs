@@ -211,15 +211,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     .with_tools(tools.list)
     .with_execution_limits(limits(&manifest))
     .with_extension(bridge.extension());
-    if manifest.parts.gate == GateMode::AllowList {
-        let mut gate = Gate::new(session.clone(), &cwd);
-        if let Some(scratch) = &scratch {
-            gate = gate.with_scratch(scratch);
-        }
-        // Free only when it is yobuild's: a plugin's tool of that name asks.
-        if ask_owner.is_some() {
-            gate = gate.with_free_tools([AskOwner::TOOL]);
-        }
+    if let Some(gate) = gate(&manifest, &session, &cwd, scratch.as_ref()) {
         agent = agent.with_extension(gate);
     }
     if let Some(report) = &manifest.parts.report {
@@ -295,10 +287,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                 }
             }
             _ = tick.tick() => {
-                for failure in host.failures() {
-                    if reported.insert(failure.clone()) {
-                        tracing::error!("{failure}");
-                        session.notice(NoticeLevel::Error, format!("A plugin stopped: {failure}"));
+                // A row that fails, stops, or loses its runtime: said once.
+                for stopped in host.stopped() {
+                    if reported.insert(stopped.clone()) {
+                        tracing::error!("{stopped}");
+                        session.notice(NoticeLevel::Error, format!("A plugin stopped: {stopped}"));
                     }
                 }
                 if terminal && !host.is_running(ui) {
@@ -359,6 +352,28 @@ enum End {
     NoSignal(std::io::Error),
     /// The terminal UI's runtime stopped.
     UiGone,
+}
+
+/// The gate the manifest asks for: free in the scratch folder, and for
+/// `ask_owner` only when the part adds yobuild's (a plugin's tool of that
+/// name asks).
+fn gate(
+    manifest: &Manifest,
+    session: &Session,
+    cwd: &Path,
+    scratch: Option<&Scratch>,
+) -> Option<Gate> {
+    if manifest.parts.gate != GateMode::AllowList {
+        return None;
+    }
+    let mut gate = Gate::new(session.clone(), cwd);
+    if let Some(scratch) = scratch {
+        gate = gate.with_scratch(scratch);
+    }
+    if manifest.parts.ask_owner {
+        gate = gate.with_free_tools([AskOwner::TOOL]);
+    }
+    Some(gate)
 }
 
 /// What `run` needs that can be checked before anything starts.
@@ -1036,6 +1051,46 @@ mod tests {
         tools.add("mcp files", tools_in(dir.path()));
         let e = tools.check().unwrap_err().to_string();
         assert_eq!(e, "two tools named bash: from yoagent and mcp files");
+    }
+
+    #[test]
+    fn the_gate_is_free_in_the_scratch_and_for_ask_owner_only_with_the_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("p");
+        std::fs::create_dir(&project).unwrap();
+        let scratch = Scratch::at(dir.path().join("s")).unwrap();
+        let (session, _driver) = Session::new(false);
+        let write = |gate: &Gate, path: &Path| {
+            gate.check(
+                "write_file",
+                &serde_json::json!({ "path": path, "content": "x" }),
+            )
+            .question()
+            .is_none()
+        };
+        let ask = |gate: &Gate| {
+            gate.check(AskOwner::TOOL, &serde_json::json!({ "question": "q?" }))
+                .question()
+                .is_none()
+        };
+        let both = manifest(dir.path(), "[parts]\nscratch = true\nask_owner = true\n");
+        let judge = gate(&both, &session, &project, Some(&scratch)).unwrap();
+        let elsewhere = dir.path().join("elsewhere.md");
+        assert!(
+            write(&judge, &scratch.path().join("notes.md")),
+            "free in the scratch"
+        );
+        assert!(!write(&judge, &elsewhere), "outside both asks");
+        assert!(ask(&judge), "ask_owner is free with the part");
+        let neither = manifest(dir.path(), "");
+        let judge = gate(&neither, &session, &project, None).unwrap();
+        assert!(
+            !write(&judge, &scratch.path().join("notes.md")),
+            "no scratch: it asks"
+        );
+        assert!(!ask(&judge), "a tool named ask_owner asks without the part");
+        let off = manifest(dir.path(), "[parts]\ngate = \"off\"\n");
+        assert!(gate(&off, &session, &project, None).is_none());
     }
 
     #[test]

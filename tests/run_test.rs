@@ -499,3 +499,76 @@ async fn what_loads_only_in_part_is_a_warning_every_frontend_gets() {
         ended.notices
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pinned_mcp_server_runs_its_installed_bin() {
+    let dir = project_with("", SCRIPT);
+    let package = dir.path().join("node_modules/srv");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::rename(dir.path().join("server.sh"), package.join("server.sh")).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{ "name": "srv", "version": "1.0.0", "bin": "./server.sh" }"#,
+    )
+    .unwrap();
+    let manifest = |spec: &str| {
+        std::fs::write(
+            dir.path().join("agent.toml"),
+            format!(
+                "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[mcp]]\nnpm = \"{spec}\"\nargs = [\"first\"]\nenv = {{ MODE = \"loud\" }}\n[parts]\ngate = \"off\"\n"
+            ),
+        )
+        .unwrap()
+    };
+    manifest("srv@1.0.0");
+    let ended = run_once(dir.path()).await;
+    assert_eq!(
+        results(&ended),
+        [("echoed hi (loud, first)".to_string(), false)]
+    );
+    manifest("srv@1.0.1");
+    let e = try_once(dir.path()).await.err().unwrap();
+    assert!(
+        e.starts_with("mcp srv: srv is installed at 1.0.0") && e.contains("not 1.0.1"),
+        "{e}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_that_stops_during_the_session_is_said() {
+    if !installed("dsh") {
+        return;
+    }
+    // It starts, then a while later takes its runtime down with it (an
+    // error nothing catches), while the run is still going.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    std::fs::write(
+        dir.path().join("fails-later.ts"),
+        "export const name = 'fails-later'\n\
+         export function apply(ctx: any) {\n\
+           setTimeout(() => { throw new Error('gave up') }, 4000)\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        r#"[{ "tools": [{ "name": "bash", "arguments": { "command": "sleep 7" } }] }, { "text": "done" }]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        format!(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\ndsh = \"{}\"\n[parts]\ngate = \"off\"\n",
+            dir.path().join("fails-later.ts").display()
+        ),
+    )
+    .unwrap();
+    let ended = run_once(dir.path()).await;
+    let said = ended.notices.iter().any(|(level, message)| {
+        *level == yobuild::frontend::NoticeLevel::Error
+            && message.starts_with("A plugin stopped: plugin plugin:fails-later (")
+            && message.ends_with(") is not running")
+    });
+    assert!(said, "{:?}", ended.notices);
+}

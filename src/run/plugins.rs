@@ -273,13 +273,19 @@ pub(crate) fn plan(
     plan.dsh_peers.dedup();
     // The manifest's rows are `plugin:…`, yobuild's are not; and a bundle
     // could still repeat a row.
+    unique(&plan.rows)?;
+    Ok(plan)
+}
+
+/// No two rows of one id (one would replace the other).
+fn unique(rows: &[Row]) -> Result<(), BoxError> {
     let mut ids = HashSet::new();
-    for row in &plan.rows {
+    for row in rows {
         if !ids.insert(row.id()) {
             return Err(format!("two plugin rows named {}", row.id()).into());
         }
     }
-    Ok(plan)
+    Ok(())
 }
 
 fn exists(path: &Path) -> Result<(), BoxError> {
@@ -377,6 +383,18 @@ fn dsh_rows_of(
         &layout.adapters.join("dsh/inspect-package.mjs"),
         &[&base, Path::new(p.name())],
     )?;
+    rows_of_bundle(&id, &inspected, config, &modules)
+}
+
+/// The rows of what DSH would install (`inspected`, from
+/// `inspect-package.mjs`), each `<id>:<row id>`, `config` replacing the
+/// first row's own, and the package's peers (each installed in `modules`).
+fn rows_of_bundle(
+    id: &str,
+    inspected: &Helper,
+    config: Option<serde_json::Map<String, Json>>,
+    modules: &Path,
+) -> Result<(Vec<Row>, Vec<String>), BoxError> {
     let errors = inspected.map("importErrors")?;
     if !errors.is_empty() {
         return Err(format!(
@@ -575,5 +593,129 @@ mod tests {
             .unwrap()
             .notes;
         assert_eq!(notes, ["[dsh] host_services has no effect: no DSH plugin"]);
+    }
+
+    fn inspected(value: Json) -> Helper {
+        match value {
+            Json::Object(fields) => Helper {
+                script: "inspect".into(),
+                fields,
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn a_bundle_gives_its_rows_with_the_plugins_config_on_the_first() {
+        let modules = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(modules.path().join("@d/peer")).unwrap();
+        std::fs::write(modules.path().join("@d/peer/package.json"), "{}").unwrap();
+        let bundle = |rows: Json| {
+            inspected(json!({
+                "importErrors": {}, "otherPatchOps": [], "peers": ["@d/peer"], "rows": rows,
+            }))
+        };
+        let rows = json!([
+            { "id": "a", "name": "@d/a", "config": { "own": 1 } },
+            { "name": "@d/b", "config": { "own": 2 } },
+        ]);
+        let config = json!({ "mine": true }).as_object().cloned();
+        let (built, peers) =
+            rows_of_bundle("plugin:p", &bundle(rows.clone()), config, modules.path()).unwrap();
+        assert_eq!(peers, ["@d/peer"]);
+        let ids: Vec<&str> = built.iter().map(Row::id).collect();
+        assert_eq!(ids, ["plugin:p:a", "plugin:p:1"]);
+        assert_eq!(built[0].config_json(), &json!({ "mine": true }));
+        assert_eq!(built[1].config_json(), &json!({ "own": 2 }));
+        // Without the plugin's config, each row keeps its own.
+        let (built, _) = rows_of_bundle("plugin:p", &bundle(rows), None, modules.path()).unwrap();
+        assert_eq!(built[0].config_json(), &json!({ "own": 1 }));
+    }
+
+    #[test]
+    fn a_bundle_yobuild_cannot_apply_whole_is_refused() {
+        let modules = tempfile::tempdir().unwrap();
+        let good_row = json!({ "id": "a", "name": "@d/a" });
+        let cases = [
+            (
+                json!({ "importErrors": { "a": "boom" } }),
+                "its rows cannot be imported",
+            ),
+            (
+                json!({ "otherPatchOps": ["remove"] }),
+                "does more than insert rows (remove)",
+            ),
+            (
+                json!({ "peers": ["@d/gone"] }),
+                "it needs @d/gone, not installed in",
+            ),
+            (json!({ "peers": [1] }), "\"peers\" holds 1, not text"),
+            (json!({ "rows": [] }), "no rows in what DSH would install"),
+            (
+                json!({ "rows": [{ "id": "a", "name": "@d/a", "when": "x" }] }),
+                "a row with \"when\"",
+            ),
+            (json!({ "rows": [{ "id": "a" }] }), "a row without a name"),
+            (
+                json!({ "rows": [{ "id": 3, "name": "@d/a" }] }),
+                "a row whose id is not text",
+            ),
+            (json!({ "rows": "x" }), "\"rows\" is not a list"),
+        ];
+        for (change, expected) in cases {
+            let mut value = json!({
+                "importErrors": {}, "otherPatchOps": [], "peers": [], "rows": [good_row],
+            });
+            for (key, v) in change.as_object().unwrap() {
+                value[key] = v.clone();
+            }
+            let e = rows_of_bundle("plugin:p", &inspected(value), None, modules.path())
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(e.contains(expected), "{change}: {e}");
+        }
+        let missing = inspected(json!({ "otherPatchOps": [], "peers": [], "rows": [] }));
+        let e = rows_of_bundle("plugin:p", &missing, None, modules.path())
+            .err()
+            .unwrap()
+            .to_string();
+        assert_eq!(e, "node inspect: no \"importErrors\" in its answer");
+    }
+
+    #[test]
+    fn two_rows_of_one_id_are_refused() {
+        let rows = [Row::new("plugin:a", "x"), Row::new("plugin:b", "y")];
+        assert!(unique(&rows).is_ok());
+        let rows = [Row::new("plugin:a", "x"), Row::new("plugin:a", "y")];
+        assert_eq!(
+            unique(&rows).unwrap_err().to_string(),
+            "two plugin rows named plugin:a"
+        );
+    }
+
+    #[test]
+    fn a_rutis_plugin_runs_beside_the_manifest_with_the_rutis_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("p.ts"), "").unwrap();
+        let pins = Layout::default().frontend.join("plugins/package.json");
+        let pins: Json = serde_json::from_str(&std::fs::read_to_string(pins).unwrap()).unwrap();
+        let version = pins["dependencies"][RUTIS_RUNTIME].as_str().unwrap();
+        let runtime = dir.path().join("node_modules").join(RUTIS_RUNTIME);
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(
+            runtime.join("package.json"),
+            format!(r#"{{"version":"{version}"}}"#),
+        )
+        .unwrap();
+        let plan = plan_of(
+            dir.path(),
+            "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\nconfig = { a = 1 }\n",
+        )
+        .unwrap();
+        assert!(plan.rutis && !plan.pi && !plan.dsh);
+        assert_eq!(plan.rows.len(), 1);
+        assert_eq!(plan.rows[0].id(), "plugin:p");
+        assert_eq!(plan.rows[0].config_json(), &json!({ "a": 1 }));
     }
 }

@@ -326,6 +326,14 @@ mod web {
         >,
     }
 
+    /// A test that fails before `interrupt` leaves no `yobuild` running.
+    impl Drop for Page {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
     impl Page {
         /// Starts it with `task`, connects once it serves.
         pub async fn open(dir: &std::path::Path, task: &str) -> Page {
@@ -367,14 +375,16 @@ mod web {
         }
 
         /// Ctrl+C, then its exit code and stderr.
-        pub fn interrupt(self) -> (Option<i32>, String) {
+        pub fn interrupt(mut self) -> (Option<i32>, String) {
+            use std::io::Read;
             let pid = self.child.id().to_string();
             Command::new("kill").args(["-INT", &pid]).status().unwrap();
-            let out = self.child.wait_with_output().unwrap();
-            (
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr).into_owned(),
-            )
+            let status = self.child.wait().unwrap();
+            let mut stderr = String::new();
+            if let Some(mut err) = self.child.stderr.take() {
+                let _ = err.read_to_string(&mut stderr);
+            }
+            (status.code(), stderr)
         }
     }
 }
@@ -487,5 +497,27 @@ fn ctrl_c_stops_a_once_run_as_aborted() {
     assert_eq!(
         text(&out.stdout).lines().last(),
         Some("Aborted: stopped with Ctrl+C")
+    );
+}
+
+#[test]
+fn facts_count_the_questions_left_open() {
+    let dir = project(
+        "[parts]\nask_owner = true\nfacts = true\n",
+        r#"[{ "tools": [{ "name": "ask_owner", "arguments": { "question": "Which?" } }] }, { "text": "done" }]"#,
+    );
+    let out = yobuild(
+        &[
+            "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+        ],
+        dir.path(),
+    );
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    // Free (yobuild's own), asked, and counted as waiting.
+    assert!(stderr.contains("  ask_owner ✓"), "{stderr}");
+    assert!(
+        stderr.contains("; 1 question(s) waiting on you."),
+        "{stderr}"
     );
 }

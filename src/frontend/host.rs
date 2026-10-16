@@ -504,6 +504,20 @@ impl PluginHost {
             .collect()
     }
 
+    /// The loaded rows that do not run now, each with why: failed, stopped,
+    /// or waiting — a row whose runtime died waits for it (`Pending`), and
+    /// nothing restarts it.
+    pub fn stopped(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter_map(|row| match self.state(&row.id) {
+                Started::Running => None,
+                Started::Failed(why) => Some(why),
+                Started::Waiting(what) => Some(format!("plugin {what} is not running")),
+            })
+            .collect()
+    }
+
     /// Whether the row `id` runs, waits, or failed (and why).
     fn state(&self, id: &str) -> Started {
         let stopped = || Started::Failed(format!("plugin `{id}` stopped itself"));
