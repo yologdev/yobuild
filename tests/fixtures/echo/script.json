@@ -1,4 +1,4 @@
 [
-  { "tools": [{ "name": "echo", "arguments": { "text": "hi" } }] },
+  { "tools": [{ "name": "server__echo", "arguments": { "text": "hi" } }] },
   { "text": "done" }
 ]

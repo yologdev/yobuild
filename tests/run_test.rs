@@ -35,7 +35,7 @@ done
 "#;
 
 const SCRIPT: &str = r#"[
-  { "tools": [{ "name": "echo", "arguments": { "text": "hi" } }] },
+  { "tools": [{ "name": "server__echo", "arguments": { "text": "hi" } }] },
   { "text": "done" }
 ]"#;
 
@@ -219,7 +219,7 @@ async fn a_dsh_plugin_from_the_manifest_gives_its_tool() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_a_limit_stops_is_stopped_not_completed() {
-    let echo = r#"{ "tools": [{ "name": "echo", "arguments": { "text": "hi" } }] }"#;
+    let echo = r#"{ "tools": [{ "name": "server__echo", "arguments": { "text": "hi" } }] }"#;
     let dir = project_with(
         "[limits]\nmax_turns = 1\n[parts]\ngate = \"off\"\n",
         &format!("[{echo}, {echo}, {{ \"text\": \"done\" }}]"),
@@ -283,24 +283,37 @@ async fn ask_owner_is_offered_when_the_manifest_asks_for_it_and_the_gate_lets_it
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn two_tools_of_one_name_and_a_server_without_tools_are_refused() {
-    let twice =
-        project("[[mcp]]\nname = \"other\"\nnpm = \"./server.sh\"\n[parts]\ngate = \"off\"\n");
-    let e = try_once(twice.path()).await.err().unwrap();
-    assert_eq!(e, "two tools named echo: from mcp server and mcp other");
+async fn two_servers_tools_of_one_name_both_run_under_their_servers_names() {
+    let both = project_with(
+        "[[mcp]]\nname = \"other\"\nnpm = \"./server.sh\"\nargs = [\"second\"]\n[parts]\ngate = \"off\"\n",
+        r#"[{ "tools": [
+              { "name": "server__echo", "arguments": { "text": "a" } },
+              { "name": "other__echo", "arguments": { "text": "b" } }
+            ] }, { "text": "done" }]"#,
+    );
+    let ended = run_once(both.path()).await;
+    assert_eq!(
+        results(&ended),
+        [
+            ("echoed a (loud, first)".to_string(), false),
+            ("echoed b (, second)".to_string(), false)
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_without_tools_or_with_a_name_tools_cannot_take_is_refused() {
     let empty =
         project("[[mcp]]\nname = \"empty\"\nnpm = \"./server.sh\"\nenv = { TOOLS = \"none\" }\n");
     let e = try_once(empty.path()).await.err().unwrap();
     assert_eq!(e, "mcp empty: the server lists no tools");
-    let bash = project_with("", SCRIPT);
-    std::fs::write(
-        bash.path().join("agent.toml"),
-        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[mcp]]\nnpm = \"./server.sh\"\nenv = { TOOLS = \"none\" }\n",
-    )
-    .unwrap();
+    // Named after its host by default: dots, which a tool name cannot hold.
+    // Refused before anything starts (nothing listens there).
+    let dotted = project("[[mcp]]\nurl = \"https://tools.example.com/mcp\"\n");
+    let e = try_once(dotted.path()).await.err().unwrap();
     assert_eq!(
-        try_once(bash.path()).await.err().unwrap(),
-        "mcp server: the server lists no tools"
+        e,
+        "mcp tools.example.com: its name prefixes its tools (tools.example.com__<tool>), and tool names take only letters, digits, _ and -: give the server a `name`"
     );
 }
 
@@ -363,7 +376,11 @@ async fn an_http_server_gets_its_headers_with_their_values_filled_in() {
     // Set for this test only: no other test reads it.
     std::env::set_var("YOBUILD_RUN_TEST_TOKEN", "t0ken");
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("script.json"), SCRIPT).unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        SCRIPT.replace("server__echo", "web__echo"),
+    )
+    .unwrap();
     std::fs::write(
         dir.path().join("agent.toml"),
         format!(
@@ -502,7 +519,7 @@ async fn what_loads_only_in_part_is_a_warning_every_frontend_gets() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pinned_mcp_server_runs_its_installed_bin() {
-    let dir = project_with("", SCRIPT);
+    let dir = project_with("", &SCRIPT.replace("server__echo", "srv__echo"));
     let package = dir.path().join("node_modules/srv");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::rename(dir.path().join("server.sh"), package.join("server.sh")).unwrap();

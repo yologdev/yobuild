@@ -852,6 +852,14 @@ fn launch(
 ) -> Result<Launch, BoxError> {
     let failed =
         |e: &dyn std::fmt::Display| -> BoxError { format!("mcp {}: {e}", server.name).into() };
+    // Its name prefixes its tools' (`<name>__<tool>`), which models take
+    // only of letters, digits, `_` and `-`.
+    if !tool_name(&format!("{}__x", server.name)) {
+        return Err(failed(&format!(
+            "its name prefixes its tools ({}__<tool>), and tool names take only letters, digits, _ and -: give the server a `name`",
+            server.name
+        )));
+    }
     Ok(match &server.transport {
         Transport::Stdio {
             source,
@@ -894,7 +902,8 @@ fn launch(
     })
 }
 
-/// An MCP server's tools (named as the server names them).
+/// An MCP server's tools, each `<server>__<tool>` (the server is called with
+/// its own names).
 async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, BoxError> {
     let failed = |e: &dyn std::fmt::Display| format!("mcp {}: {e}", server.name);
     let client = match launch {
@@ -917,16 +926,33 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
         }
     };
     let client = Arc::new(tokio::sync::Mutex::new(client));
-    let tools = McpToolAdapter::from_client(client)
+    // `<server>__<tool>`: two servers' tools of one name, or a server's
+    // named like a built-in, do not meet.
+    let tools = McpToolAdapter::from_client_with_prefix(client, server.name.clone())
         .await
         .map_err(|e| failed(&e))?;
     if tools.is_empty() {
         return Err(failed(&"the server lists no tools").into());
     }
+    if let Some(bad) = tools.iter().find(|t| !tool_name(t.name())) {
+        return Err(failed(&format!(
+            "its tool {:?} cannot be offered to a model (names take up to 64 letters, digits, _ and -)",
+            bad.name()
+        ))
+        .into());
+    }
     Ok(tools
         .into_iter()
         .map(|t| Box::new(t) as Box<dyn AgentTool>)
         .collect())
+}
+
+/// A tool name providers take: 1 to 64 letters, digits, `_` and `-`.
+fn tool_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// The program an installed package runs: its `bin` — the one named `bin`
@@ -1091,6 +1117,13 @@ mod tests {
         assert!(!ask(&judge), "a tool named ask_owner asks without the part");
         let off = manifest(dir.path(), "[parts]\ngate = \"off\"\n");
         assert!(gate(&off, &session, &project, None).is_none());
+    }
+
+    #[test]
+    fn tool_names_models_take() {
+        assert!(tool_name("server__echo") && tool_name("a-b_c9"));
+        assert!(!tool_name("tools.example.com__x") && !tool_name("a b") && !tool_name(""));
+        assert!(tool_name(&"x".repeat(64)) && !tool_name(&"x".repeat(65)));
     }
 
     #[test]

@@ -41,7 +41,10 @@ fn a_once_run_prints_its_answer_and_how_it_ended() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(text(&out.stdout), "done\nCompleted\n");
     let stderr = text(&out.stderr);
-    assert!(stderr.contains("  echo ✓"), "each tool call: {stderr}");
+    assert!(
+        stderr.contains("  server__echo ✓"),
+        "each tool call: {stderr}"
+    );
 }
 
 #[test]
