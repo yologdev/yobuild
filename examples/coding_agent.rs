@@ -27,9 +27,10 @@
 //! Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
 //! `$TMPDIR/yoagent-coding-agent.log` (the terminal UI owns the screen).
 //!
-//! Setup (once): `npm ci` in `frontend/plugins/` and in
-//! `adapters/pi/` (and `adapters/dsh/` for DSH's
-//! search and dialogs), or `scripts/try-coding-agent.sh --setup-only`.
+//! Setup (once): `scripts/try-coding-agent.sh --setup-only`; or by hand,
+//! `scripts/copy-adapters.sh` (the adapters into `adapters/`), then `npm ci`
+//! in `frontend/plugins/`, `adapters/pi/` (and `adapters/dsh/` for DSH's
+//! search and dialogs).
 //!
 //! Run: `cargo run --example coding_agent [-- --web]`
 
@@ -91,7 +92,11 @@ fn main() -> Result<(), BoxError> {
     }
     for dir in [here().join("plugins"), rutis_plugins().join("pi")] {
         if !dir.join("node_modules").exists() {
-            return Err(format!("run `npm ci` in {} first", dir.display()).into());
+            return Err(format!(
+                "{} is not installed: scripts/try-coding-agent.sh --setup-only",
+                dir.display()
+            )
+            .into());
         }
     }
     // Fail before any frontend owns the terminal.
@@ -221,7 +226,9 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         // (none of the rows below does).
         if options.dsh_services {
             rows.extend(rows_from_file(
-                &rutis_plugins().join("dsh/host-services.json"),
+                &yoagent_rutis::adapters::adapters()
+                    .dsh
+                    .join("host-services.json"),
                 "dsh",
             )?);
         }

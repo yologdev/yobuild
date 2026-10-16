@@ -117,7 +117,7 @@ card (the bridge reports them by their text).
 
 pi extensions' `ctx.ui.select`, `confirm`, `input`, `editor` and `notify` reach the
 user when the host provides `ui` and loads
-[`yoagent-rutis/plugins/pi/host-ui.ts`](https://github.com/yologdev/yoagent/blob/main/integrations/yoagent-rutis/plugins/pi/host-ui.ts)
+[`yoagent-rutis/plugins/pi/host-ui.ts`](https://github.com/yologdev/yoagent/blob/yoagent-rutis-v0.4.0/integrations/yoagent-rutis/plugins/pi/host-ui.ts)
 in the pi runtime (rutis shows a host service only to plugins that inject it,
 and the adapter cannot require one). The adapter is then in pi's RPC mode
 (`hasUI` true). Without them it stays in print mode, as before. A question
@@ -129,7 +129,7 @@ yoagent-rutis's default is 60 s, so the example raises it
 
 An approval a DSH tool policy asks for, and DSH's `ask_user_question`, reach
 the user when
-[`yoagent-rutis/plugins/dsh/host-dialogs.ts`](https://github.com/yologdev/yoagent/blob/main/integrations/yoagent-rutis/plugins/dsh/host-dialogs.ts)
+[`yoagent-rutis/plugins/dsh/host-dialogs.ts`](https://github.com/yologdev/yoagent/blob/yoagent-rutis-v0.4.0/integrations/yoagent-rutis/plugins/dsh/host-dialogs.ts)
 is loaded in the DSH runtime with `ui` shared into it (`.share(services::UI)`;
 `@deepseek-ai/dsh-user-questions` and `@deepseek-ai/dsh-tool-ask-user` for
 the tool). An approval is a `confirm` showing the reason and the arguments:

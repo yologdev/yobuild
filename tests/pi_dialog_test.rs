@@ -2,7 +2,7 @@
 //! extension's `ctx.ui.select` reaches a frontend through `host-ui.ts` and
 //! the `ui` service, and the answer decides whether the command runs.
 //!
-//! Needs `npm ci` in `adapters/pi/`; skipped
+//! Needs `scripts/copy-adapters.sh` and `npm ci` in `adapters/pi/`; skipped
 //! (passing, with `SKIPPED:`) without it unless
 //! `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 
@@ -35,10 +35,13 @@ fn runtimes_installed() -> bool {
     if !installed {
         assert!(
             std::env::var("YOAGENT_RUTIS_REQUIRE_RUNTIMES").as_deref() != Ok("1"),
-            "pi's packages are not installed (npm ci in {})",
+            "pi's packages are not installed in {} (scripts/copy-adapters.sh, then npm ci there)",
             pi_plugins().display()
         );
-        println!("SKIPPED: npm ci in {} first", pi_plugins().display());
+        println!(
+            "SKIPPED: scripts/copy-adapters.sh, then npm ci in {}",
+            pi_plugins().display()
+        );
     }
     installed
 }

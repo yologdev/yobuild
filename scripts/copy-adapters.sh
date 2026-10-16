@@ -2,9 +2,16 @@
 # Copy the pi and DeepSeek Harness (DSH) adapters of the yoagent-rutis crate
 # Cargo.lock resolves (its `plugins/`: `pi/`, `dsh/`, `yoagent.d.ts`) into
 # `adapters/`, where the examples and tests load them and `npm ci` installs
-# their packages. The crate's own files, in cargo's registry, are never
-# installed into (`yoagent_rutis::adapters`). A copy of another version is
-# replaced; one of this version is left as it is (with its node_modules).
+# their packages. The crate's own files (in cargo's registry, the folder
+# `yoagent_rutis::adapters` names; found here through `cargo metadata`) are
+# never installed into.
+#
+# The copy is kept while it is that version, from that folder, with the
+# same files (a checksum, node_modules aside); otherwise it is copied again,
+# its node_modules dropped: a changed source (a path or `[patch]`
+# dependency) and a copy edited by hand are both replaced.
+#
+# Needs cargo and node.
 #
 #   scripts/copy-adapters.sh     # then: npm ci in adapters/pi and adapters/dsh
 set -euo pipefail
@@ -22,7 +29,15 @@ crate=$(cargo metadata --format-version 1 --manifest-path "$repo/Cargo.toml" --l
 version=${crate%% *}
 src="${crate#* }/plugins"
 
-if [ "$(cat "$dest/.version" 2>/dev/null)" = "$version" ]; then
+# A checksum of the adapters' files in `$1` (paths relative, node_modules aside).
+files_sum() {
+  (cd "$1" && find pi dsh yoagent.d.ts -type f ! -path '*/node_modules/*' -print0 2>/dev/null |
+    LC_ALL=C sort -z | xargs -0 cksum | cksum)
+}
+
+stamp="$version $src $(files_sum "$src")"
+if [ -f "$dest/.stamp" ] && [ "$(cat "$dest/.stamp")" = "$stamp" ] &&
+  [ "$(files_sum "$dest")" = "$(files_sum "$src")" ]; then
   echo "up to date: adapters/ (yoagent-rutis $version)"
   exit 0
 fi
@@ -33,5 +48,6 @@ for d in pi dsh; do
   (cd "$src/$d" && tar -cf - --exclude node_modules .) | (cd "$dest/$d" && tar -xf -)
 done
 cp "$src/yoagent.d.ts" "$dest/yoagent.d.ts"
-echo "$version" > "$dest/.version"
+# Last: an interrupted copy has no stamp, so the next run copies again.
+echo "$stamp" > "$dest/.stamp"
 echo "copied: adapters/ (yoagent-rutis $version)"

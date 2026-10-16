@@ -598,8 +598,9 @@ mod tests {
 
     #[test]
     fn the_shared_dsh_host_services_list_parses() {
-        let file =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("adapters/dsh/host-services.json");
+        let file = yoagent_rutis::adapters::adapters()
+            .dsh
+            .join("host-services.json");
         let rows = rows_from_file(&file, "dsh").unwrap();
         assert_eq!(rows.len(), 7);
         assert!(rows

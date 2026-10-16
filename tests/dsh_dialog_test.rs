@@ -3,7 +3,7 @@
 //! `host-dialogs.ts` and the `ui` service; a DSH tool's presenters reach the
 //! frontend as `details.view`.
 //!
-//! Needs `npm ci` in `adapters/dsh/`; skipped (passing, with
+//! Needs `scripts/copy-adapters.sh` and `npm ci` in `adapters/dsh/`; skipped (passing, with
 //! `SKIPPED:`) without it unless `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 
 use std::path::PathBuf;
@@ -33,10 +33,13 @@ fn runtime_installed() -> bool {
     if !installed {
         assert!(
             std::env::var("YOAGENT_RUTIS_REQUIRE_RUNTIMES").as_deref() != Ok("1"),
-            "DSH's packages are not installed (npm ci in {})",
+            "DSH's packages are not installed in {} (scripts/copy-adapters.sh, then npm ci there)",
             dsh_plugins().display()
         );
-        println!("SKIPPED: npm ci in {} first", dsh_plugins().display());
+        println!(
+            "SKIPPED: scripts/copy-adapters.sh, then npm ci in {}",
+            dsh_plugins().display()
+        );
     }
     installed
 }
