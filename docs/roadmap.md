@@ -22,23 +22,27 @@ the removal.
 Done: yobuild CI green, yoagent#314 merged (with pointers at the old
 paths).
 
-## M1 — Parts
+## M1 — Parts (done 2026-10-16)
 
 - One crate, `yobuild` (decided 2026-10-15): the frontend is
   `yobuild::frontend` (done, #2); the parts become `yobuild::parts`.
 
 - `yobuild::parts`: `ask_owner`, `report`, `facts`, `scratch`, `gate`,
-  extracted from `handoff_agent` with their own tests.
+  extracted from `handoff_agent` with their own tests (done: #3, #7).
+  `ask_owner` is a tool here; offering it to plugins as a host service
+  moves to M2a, once Python and Go plugins are confirmed able to call
+  one.
 - The gate is a Rust `before_tool` (decided 2026-10-15: no Node needed
   for safety, microseconds instead of ~3 ms, tests beside the Rust),
   asking the owner through the session. It started as a port of
   `confirm-dangerous.ts`'s deny-list; after four review rounds kept finding
   ways around it, it became an allow-list (programs, each with its
-  options). The pi extension stays as an example. (yoagent's `ToolGate` is a
+  options), read through one pipeline (#7, after three more reviews). The
+  pi extension stays as an example. (yoagent's `ToolGate` is a
   different thing — a decision model judging each call — and could be
   added on top later.)
-- `handoff_agent` rebuilt on the parts: the same behaviour, except the
-  gate is now an allow-list (it asks about more), in much less code.
+- `handoff_agent` rebuilt on the parts (done): the same behaviour, except
+  the gate is now an allow-list (it asks about more), in much less code.
 - **In parallel, in yoagent** (separate PRs, so M2 is not blocked waiting
   on a release):
   - yoagent-rutis exposes the ecosystem probe as a public module, and a
@@ -49,11 +53,14 @@ paths).
   - DeepSeek pricing in yoagent's price table (in progress), so
     `budget_usd` and cost facts work for DeepSeek models too.
 
-**Done when** the handoff demo passes on the parts.
+**Done when** the handoff demo passes on the parts. It does (CI, every
+push). The yoagent-rutis PR above continues alongside M2a (decided
+2026-10-16): M2a does not need it; M2b's `yobuild check` does.
 
 ## M2a — Manifest and runner
 
-- Manifest schema (§2 of the design), strict parsing, good errors.
+- Manifest schema (§2 of the design), in TOML (decided 2026-10-16),
+  strict parsing, good errors.
   `budget_usd` refused for an unpriced model, naming it.
 - `model = "provider/id"` → `ModelConfig` (design §2, Models); an unknown
   provider is an error listing the known ones.
@@ -69,6 +76,8 @@ paths).
   (design §9), so the decision to promote a part to Rust rests on
   measurements.
 - `handoff.toml`, `coding.toml`, `minimal.toml` replace the three examples.
+- `ask_owner` as a host service, so plugins can ask the owner too — after
+  checking that Python and Go plugins can call host services.
 
 **Done when** `yobuild run handoff.toml --scripted` reproduces today's
 demo, plus the new per-plugin hook time and per-runtime memory lines.
@@ -140,8 +149,8 @@ never loading, and a denied approval leaves the agent without the plugin.
 3. **The probe as a library.** Decided: exposed from yoagent-rutis as a
    public module (so `check` and the compatibility matrix cannot drift
    apart), together with the adapter files' location.
-4. **Manifest format.** TOML (proposed) vs YAML vs a TypeScript config for
-   people who live in npm.
+4. **Manifest format.** Decided (2026-10-16): TOML — read by serde in
+   the Rust core, strictly, with no runtime needed to read a manifest.
 5. **Plugin installs.** One cache per ecosystem and lockfile hash (proposed),
    or per agent folder (simpler, bigger)?
 6. **The gate.** Decided: Rust (it is on the safety path — design §9), an
