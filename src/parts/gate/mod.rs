@@ -31,7 +31,7 @@ use yoagent::extension::{
 };
 use yoagent::{ToolCallRequest, ToolDecision};
 
-use self::paths::{identity, locate, protected, real, single, Here};
+use self::paths::{identity, locate, protected, real, single, Here, Identity};
 use super::Scratch;
 use crate::frontend::{session::UI_TIMEOUT, Session, UiRequest};
 
@@ -297,7 +297,7 @@ struct Rules {
     /// Files the agent made this session, as the files they were (device
     /// and inode): it may overwrite or delete them while they still are.
     /// Shared by every clone of the gate.
-    created: Arc<Mutex<HashMap<PathBuf, (u64, u64)>>>,
+    created: Arc<Mutex<HashMap<PathBuf, Identity>>>,
 }
 
 impl Rules {

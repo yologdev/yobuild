@@ -131,19 +131,42 @@ pub(super) fn system_binary(path: &str) -> bool {
     Path::new(path).is_absolute() && SYSTEM.iter().any(|dir| resolved.starts_with(dir))
 }
 
-/// A file's device and inode (not following a symlink at the end).
+/// Which file a path names: device and inode, and when that file was made.
+/// A filesystem reuses a deleted file's inode (Linux's do at once), so the
+/// inode alone could make a file the owner wrote in place of the agent's
+/// pass for the agent's. Its birth time tells them apart; where the
+/// filesystem keeps none, its change time does — which an edit of the
+/// agent's own file changes too, so that file then asks: more, never less.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Identity {
+    dev: u64,
+    ino: u64,
+    made: (i64, i64),
+}
+
+/// A file's identity (not following a symlink at the end).
 #[cfg(unix)]
-pub(super) fn identity(path: &Path) -> Option<(u64, u64)> {
+pub(super) fn identity(path: &Path) -> Option<Identity> {
     use std::os::unix::fs::MetadataExt;
-    std::fs::symlink_metadata(path)
-        .ok()
-        .map(|m| (m.dev(), m.ino()))
+    let m = std::fs::symlink_metadata(path).ok()?;
+    let made = match m.created() {
+        Ok(born) => match born.duration_since(std::time::UNIX_EPOCH) {
+            Ok(after) => (after.as_secs() as i64, i64::from(after.subsec_nanos())),
+            Err(before) => (-(before.duration().as_secs() as i64), 0),
+        },
+        Err(_) => (m.ctime(), m.ctime_nsec()),
+    };
+    Some(Identity {
+        dev: m.dev(),
+        ino: m.ino(),
+        made,
+    })
 }
 
 /// Elsewhere no identity is known: nothing is ever the agent's own, so the
 /// gate asks more, never less.
 #[cfg(not(unix))]
-pub(super) fn identity(_path: &Path) -> Option<(u64, u64)> {
+pub(super) fn identity(_path: &Path) -> Option<Identity> {
     None
 }
 
