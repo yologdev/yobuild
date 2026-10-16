@@ -97,19 +97,22 @@ impl Options {
     }
 }
 
-/// How a `once` run ended, the notices it gave, and the agent (its
-/// messages).
+/// How the session ended: its last run's outcome (none when no run was
+/// made), the notices it gave, and the agent (its messages) unless the
+/// session was stopped with Ctrl+C.
 #[non_exhaustive]
 pub struct Ended {
-    pub outcome: RunOutcome,
+    /// `Aborted` when Ctrl+C stopped a run in progress.
+    pub outcome: Option<RunOutcome>,
     pub error: Option<String>,
     pub notices: Vec<(NoticeLevel, String)>,
-    pub agent: Agent,
+    pub agent: Option<Agent>,
 }
 
-/// Runs the agent: until the frontend ends the session (terminal), Ctrl+C
-/// (web), or the task's run ends (`once`, returning how it ended).
-pub async fn run(root: &Ctx, options: Options) -> Result<Option<Ended>, BoxError> {
+/// Runs the agent: until the frontend ends the session (terminal; an error
+/// when the terminal UI stops on its own), Ctrl+C (web), or the task's run
+/// ends (`once`).
+pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     let started = Instant::now();
     let cwd = std::env::current_dir()?;
     let checked = check(&options, &cwd)?;
@@ -226,23 +229,55 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Option<Ended>, BoxError
     }
     eprintln!("{name}: ready in {:.1}s", started.elapsed().as_secs_f64());
 
+    // What the frontends see; in `once`, written out as it comes.
+    let (seen, mut ended_runs, watching) = watch(&session, once);
     if once {
-        return Ok(Some(
-            run_once(&session, driver, agent, task.unwrap_or_default()).await?,
-        ));
+        session.send(ClientMessage::Prompt {
+            text: task.unwrap_or_default(),
+        });
+        let running = tokio::spawn(driver.run(agent));
+        // The task's run ends (or the session does, without it).
+        while *ended_runs.borrow_and_update() == 0 && !seen.lock().unwrap().closed {
+            if ended_runs.changed().await.is_err() {
+                break;
+            }
+        }
+        session.send(ClientMessage::Quit);
+        let agent = running.await?;
+        let mut ended = finish(seen, watching, Some(agent)).await;
+        if ended.outcome.is_none() {
+            ended.outcome = Some(RunOutcome::Error);
+            ended.error = Some("the session ended before the run did".into());
+        }
+        return Ok(ended);
     }
     if terminal {
-        host.load([Row::new(
-            "terminal-ui",
-            layout.frontend.join("plugins/terminal-ui.ts").display(),
-        )
-        .runtime("ui")])
-            .await?;
+        let ui = "terminal-ui";
+        host.load([
+            Row::new(ui, layout.frontend.join("plugins/terminal-ui.ts").display()).runtime("ui"),
+        ])
+        .await?;
         if let Some(task) = task {
             session.send(ClientMessage::Prompt { text: task });
         }
-        drop(driver.run(agent).await);
-        return Ok(None);
+        let driving = driver.run(agent);
+        tokio::pin!(driving);
+        // The terminal UI ends the session when it quits; one whose runtime
+        // stopped would leave it waiting with nobody there.
+        let agent = loop {
+            tokio::select! {
+                agent = &mut driving => break agent,
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                    if !host.is_running(ui) {
+                        session.send(ClientMessage::Quit);
+                        drop(driving.await);
+                        drop(finish(seen, watching, None).await);
+                        return Err(format!("the terminal UI stopped: {:?}", host.status()).into());
+                    }
+                }
+            }
+        };
+        return Ok(finish(seen, watching, Some(agent)).await);
     }
     let phone = manifest.frontend.phone;
     let addr = addr.unwrap_or_else(|| match phone {
@@ -259,16 +294,25 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Option<Ended>, BoxError
     if let Some(task) = task {
         session.send(ClientMessage::Prompt { text: task });
     }
-    tokio::select! {
-        _ = driver.run(agent) => {}
-        stop = tokio::signal::ctrl_c() => {
+    // Whether a run was going is read as Ctrl+C comes: `select!` drops the
+    // driver (ending that run as an error) before its branch runs.
+    let interrupt = async {
+        let stop = tokio::signal::ctrl_c().await;
+        let mut seen = seen.lock().unwrap();
+        seen.interrupted = seen.running;
+        stop
+    };
+    let agent = tokio::select! {
+        agent = driver.run(agent) => Some(agent),
+        stop = interrupt => {
             if let Err(e) = stop {
                 eprintln!("cannot listen for Ctrl+C ({e}); stopping");
             }
+            None
         }
-    }
+    };
     served.stop();
-    Ok(None)
+    Ok(finish(seen, watching, agent).await)
 }
 
 /// What `run` needs that can be checked before anything starts.
@@ -448,66 +492,112 @@ fn tools_in(cwd: &Path) -> Vec<Box<dyn AgentTool>> {
     ]
 }
 
-/// Runs `task` with only an observer attached (a question gets its default
-/// answer at once), writing each tool call and notice to stderr.
-async fn run_once(
+/// What the frontends saw, as an observer sees it (a question asked with
+/// only observers there gets its default answer at once).
+#[derive(Default)]
+struct Seen {
+    /// A run started and has not ended.
+    running: bool,
+    /// Ctrl+C stopped the session during a run.
+    interrupted: bool,
+    last: Option<(RunOutcome, Option<String>)>,
+    notices: Vec<(NoticeLevel, String)>,
+    closed: bool,
+}
+
+type Shared = Arc<std::sync::Mutex<Seen>>;
+
+/// Watches the session: how many runs ended (`ended`), and what was seen;
+/// with `print`, each tool call and notice on stderr. Ends with the
+/// session.
+fn watch(
     session: &Session,
-    driver: crate::frontend::Driver,
-    agent: Agent,
-    task: String,
-) -> Result<Ended, BoxError> {
+    print: bool,
+) -> (
+    Shared,
+    tokio::sync::watch::Receiver<u64>,
+    tokio::task::JoinHandle<()>,
+) {
+    let seen: Shared = Arc::default();
+    let (ended, ended_rx) = tokio::sync::watch::channel(0u64);
     let mut watching = session.observe();
-    session.send(ClientMessage::Prompt { text: task });
-    let running = tokio::spawn(driver.run(agent));
-    let mut notices = Vec::new();
-    let (outcome, error) = loop {
-        match watching.messages.recv().await {
-            Some(ServerMessage::RunEnd { outcome, error, .. }) => break (outcome, error),
-            Some(ServerMessage::Event { event, .. }) => {
-                if let AgentEvent::ToolExecutionEnd {
-                    tool_name,
-                    result,
-                    is_error,
-                    ..
-                } = *event
-                {
-                    let text: Vec<&str> = result
-                        .content
-                        .iter()
-                        .filter_map(|c| match c {
-                            Content::Text { text } => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect();
-                    let first = text.join(" ");
-                    let first = first.lines().next().unwrap_or_default();
-                    match is_error {
-                        true => eprintln!("  {tool_name} ✗ {first}"),
-                        false => eprintln!("  {tool_name} ✓"),
+    let record = seen.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let message = watching.messages.recv().await;
+            let mut seen = record.lock().unwrap();
+            match message {
+                Some(ServerMessage::RunStart { .. }) => seen.running = true,
+                Some(ServerMessage::RunEnd { outcome, error, .. }) => {
+                    seen.running = false;
+                    seen.last = Some((outcome, error));
+                    ended.send_modify(|n| *n += 1);
+                }
+                Some(ServerMessage::Event { event, .. }) if print => {
+                    if let AgentEvent::ToolExecutionEnd {
+                        tool_name,
+                        result,
+                        is_error,
+                        ..
+                    } = *event
+                    {
+                        let text: Vec<&str> = result
+                            .content
+                            .iter()
+                            .filter_map(|c| match c {
+                                Content::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect();
+                        let text = text.join(" ");
+                        let first = text.lines().next().unwrap_or_default();
+                        match is_error {
+                            true => eprintln!("  {tool_name} ✗ {first}"),
+                            false => eprintln!("  {tool_name} ✓"),
+                        }
                     }
                 }
+                Some(ServerMessage::Notice { level, message }) => {
+                    if print {
+                        eprintln!("  {level:?}: {message}");
+                    }
+                    seen.notices.push((level, message));
+                }
+                Some(ServerMessage::Closed) | None => {
+                    seen.closed = true;
+                    // Wakes a `once` run waiting for its run's end.
+                    ended.send_modify(|_| {});
+                    return;
+                }
+                Some(_) => {}
             }
-            Some(ServerMessage::Notice { level, message }) => {
-                eprintln!("  {level:?}: {message}");
-                notices.push((level, message));
-            }
-            Some(ServerMessage::Closed) | None => {
-                break (
-                    RunOutcome::Error,
-                    Some("the session ended before the run did".into()),
-                )
-            }
-            Some(_) => {}
         }
-    };
-    session.send(ClientMessage::Quit);
-    let agent = running.await?;
-    Ok(Ended {
+    });
+    (seen, ended_rx, task)
+}
+
+/// How the session ended, once the watch saw it close.
+async fn finish(
+    seen: Shared,
+    watching: tokio::task::JoinHandle<()>,
+    agent: Option<Agent>,
+) -> Ended {
+    // The session closes once its driver is gone; the watch then ends.
+    let _ = tokio::time::timeout(Duration::from_secs(5), watching).await;
+    let mut seen = std::mem::take(&mut *seen.lock().unwrap());
+    // Its run then ends as an error (the driver is gone): it was stopped.
+    if seen.interrupted {
+        seen.last = Some((RunOutcome::Aborted, Some("stopped with Ctrl+C".into())));
+    }
+    let (outcome, error) = seen
+        .last
+        .map_or((None, None), |(outcome, error)| (Some(outcome), error));
+    Ended {
         outcome,
         error,
-        notices,
+        notices: seen.notices,
         agent,
-    })
+    }
 }
 
 /// Whether the services the DSH plugins' rows inject (`modules`) exist in

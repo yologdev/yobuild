@@ -70,9 +70,7 @@ async fn try_once(dir: &Path) -> Result<Ended, String> {
     let root = Ctx::root().unwrap();
     let ended = run(&root, options).await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), root.shutdown()).await;
-    ended
-        .map(|ended| ended.expect("a once run ends"))
-        .map_err(|e| e.to_string())
+    ended.map_err(|e| e.to_string())
 }
 
 async fn run_once(dir: &Path) -> Ended {
@@ -83,6 +81,8 @@ async fn run_once(dir: &Path) -> Ended {
 fn answers(ended: &Ended) -> Vec<String> {
     ended
         .agent
+        .as_ref()
+        .expect("a once run keeps its agent")
         .messages()
         .iter()
         .filter_map(|m| match m {
@@ -105,6 +105,8 @@ fn answers(ended: &Ended) -> Vec<String> {
 fn results(ended: &Ended) -> Vec<(String, bool)> {
     ended
         .agent
+        .as_ref()
+        .expect("a once run keeps its agent")
         .messages()
         .iter()
         .filter_map(|m| match m {
@@ -129,7 +131,12 @@ fn results(ended: &Ended) -> Vec<(String, bool)> {
 async fn a_manifest_runs_an_mcp_servers_tool() {
     let dir = project("[parts]\ngate = \"off\"\n");
     let ended = run_once(dir.path()).await;
-    assert_eq!(ended.outcome, RunOutcome::Completed, "{:?}", ended.error);
+    assert_eq!(
+        ended.outcome,
+        Some(RunOutcome::Completed),
+        "{:?}",
+        ended.error
+    );
     assert_eq!(
         results(&ended),
         [("echoed hi (loud, first)".to_string(), false)]
@@ -193,7 +200,12 @@ async fn a_dsh_plugin_from_the_manifest_gives_its_tool() {
     }
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/dsh/fixture-tools.ts");
     let ended = run_plugin(&format!("dsh = \"{}\"", fixture.display()), "fixture_echo").await;
-    assert_eq!(ended.outcome, RunOutcome::Completed, "{:?}", ended.error);
+    assert_eq!(
+        ended.outcome,
+        Some(RunOutcome::Completed),
+        "{:?}",
+        ended.error
+    );
     let results = results(&ended);
     assert_eq!(results.len(), 1, "{results:?}");
     assert!(
@@ -210,7 +222,12 @@ async fn a_run_a_limit_stops_is_stopped_not_completed() {
         &format!("[{echo}, {echo}, {{ \"text\": \"done\" }}]"),
     );
     let ended = run_once(dir.path()).await;
-    assert_eq!(ended.outcome, RunOutcome::Stopped, "{:?}", ended.error);
+    assert_eq!(
+        ended.outcome,
+        Some(RunOutcome::Stopped),
+        "{:?}",
+        ended.error
+    );
     let error = ended.error.clone().unwrap_or_default();
     assert!(error.contains("Max turns"), "{error}");
     assert_eq!(results(&ended).len(), 1);
@@ -223,7 +240,12 @@ async fn the_report_sends_the_agent_back_until_it_is_there() {
         r###"[{ "text": "finished" }, { "text": "## Done\nall of it" }]"###,
     );
     let ended = run_once(dir.path()).await;
-    assert_eq!(ended.outcome, RunOutcome::Completed, "{:?}", ended.error);
+    assert_eq!(
+        ended.outcome,
+        Some(RunOutcome::Completed),
+        "{:?}",
+        ended.error
+    );
     assert_eq!(answers(&ended), ["finished", "## Done\nall of it"]);
 }
 
@@ -234,7 +256,7 @@ async fn a_report_never_given_fails_the_run() {
         r#"[{ "text": "finished" }]"#,
     );
     let ended = run_once(dir.path()).await;
-    assert_eq!(ended.outcome, RunOutcome::Error);
+    assert_eq!(ended.outcome, Some(RunOutcome::Error));
     let error = ended.error.unwrap_or_default();
     assert!(error.contains("not accepted after 3 continues"), "{error}");
 }
@@ -401,7 +423,12 @@ async fn a_pinned_dsh_package_is_found_in_the_dsh_runtime() {
     );
     manifest(&version, true);
     let ended = run_once(dir.path()).await;
-    assert_eq!(ended.outcome, RunOutcome::Completed, "{:?}", ended.error);
+    assert_eq!(
+        ended.outcome,
+        Some(RunOutcome::Completed),
+        "{:?}",
+        ended.error
+    );
     // Its tool ran and reached the peer's service, which found nobody there
     // to answer.
     let ran = results(&ended);
@@ -448,5 +475,10 @@ async fn a_dsh_plugin_waiting_for_services_nobody_provides_is_refused() {
     );
     manifest("[dsh]\nhost_services = true\n");
     let ended = run_once(dir.path()).await;
-    assert_eq!(ended.outcome, RunOutcome::Completed, "{:?}", ended.error);
+    assert_eq!(
+        ended.outcome,
+        Some(RunOutcome::Completed),
+        "{:?}",
+        ended.error
+    );
 }

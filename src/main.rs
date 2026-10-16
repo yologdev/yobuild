@@ -13,6 +13,11 @@
 //!   frontend is the web page (default 127.0.0.1:8787; 0.0.0.0:8787 with
 //!   `phone`).
 //!
+//! The exit code is non-zero unless the last run completed (or none was
+//! made): with `--once` the task's run, with the web page or the terminal
+//! UI the session's last — a run Ctrl+C stopped is aborted, and a terminal
+//! UI that stopped on its own is an error.
+//!
 //! The agent works in the current folder. Its log goes to stderr
 //! (`RUST_LOG`, default warnings), or under a terminal UI to
 //! `$TMPDIR/yobuild-<agent>.log`.
@@ -90,6 +95,7 @@ fn start() -> Result<ExitCode, BoxError> {
         return Err("--web: this run has no web frontend (--once, or a terminal manifest)".into());
     }
     let log = logging(terminal.then_some(options.manifest.agent.name.as_str()))?;
+    let once = options.once;
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
@@ -108,21 +114,25 @@ fn start() -> Result<ExitCode, BoxError> {
                 }
                 return Err(e);
             }
-            Ok(Some(ended)) => {
-                if let Some(answer) = last_answer(ended.agent.messages()) {
+            // The last run's answer (`--once`: the task's) and how it ended.
+            Ok(ended) => {
+                let answer = ended.agent.as_ref().and_then(|a| last_answer(a.messages()));
+                if let (true, Some(answer)) = (once, answer) {
                     println!("{answer}");
                 }
-                println!(
-                    "{:?}{}",
-                    ended.outcome,
-                    ended.error.map(|e| format!(": {e}")).unwrap_or_default()
-                );
+                let error = ended.error.map(|e| format!(": {e}")).unwrap_or_default();
+                match (ended.outcome, once) {
+                    (Some(outcome), true) => println!("{outcome:?}{error}"),
+                    (Some(RunOutcome::Completed) | None, false) | (None, true) => {}
+                    (Some(outcome), false) => {
+                        eprintln!("yobuild: the last run ended {outcome:?}{error}")
+                    }
+                }
                 match ended.outcome {
-                    RunOutcome::Completed => ExitCode::SUCCESS,
-                    _ => ExitCode::FAILURE,
+                    Some(RunOutcome::Completed) | None => ExitCode::SUCCESS,
+                    Some(_) => ExitCode::FAILURE,
                 }
             }
-            Ok(None) => ExitCode::SUCCESS,
         };
         if let Some(stopped) = stopped {
             eprintln!("yobuild: {stopped}");

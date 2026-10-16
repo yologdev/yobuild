@@ -80,6 +80,11 @@ jobs:
           cargo run --locked -- run tests/fixtures/echo/agent.toml \
             --scripted tests/fixtures/echo/script.json --once "echo hi" | tee run-out.txt
           grep -qx Completed run-out.txt
+      - name: yobuild run with the terminal UI on a pty (a typed task, Ctrl+C quits with 0, a dead UI is an error)
+        timeout-minutes: 5
+        run: |
+          cargo build --locked
+          python3 tests/run_terminal_pty.py target/debug/yobuild
       - name: Handoff example (scripted; asks without waiting, the answer starts the next run)
         shell: bash
         timeout-minutes: 5

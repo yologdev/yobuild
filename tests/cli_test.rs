@@ -307,3 +307,114 @@ fn a_pinned_pi_package_is_found_beside_the_manifest() {
         "{stderr}"
     );
 }
+
+/// The web page's session, as a browser holds it: `yobuild run` in `dir`,
+/// its URL read from stdout, connected over its WebSocket.
+mod web {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Child, Command, Stdio};
+    use std::time::Duration;
+
+    use futures::StreamExt;
+    use serde_json::Value as Json;
+    use tokio_tungstenite::tungstenite::Message;
+
+    pub struct Page {
+        pub child: Child,
+        socket: tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    }
+
+    impl Page {
+        /// Starts it with `task`, connects once it serves.
+        pub async fn open(dir: &std::path::Path, task: &str) -> Page {
+            let mut child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
+                .args(["run", "agent.toml", "--scripted", "script.json"])
+                .args(["--web", "127.0.0.1:0", task])
+                .current_dir(dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut line = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            // "a: http://127.0.0.1:PORT/?t=TOKEN  (Ctrl+C to stop)"
+            let url = line.split_whitespace().nth(1).expect("the URL");
+            let ws = url.replace("http://", "ws://").replace("/?t=", "/ws?t=");
+            let (socket, _) = tokio_tungstenite::connect_async(ws).await.unwrap();
+            Page { child, socket }
+        }
+
+        /// The next message of type `kind`.
+        pub async fn until(&mut self, kind: &str) -> Json {
+            let wait = async {
+                while let Some(Ok(message)) = self.socket.next().await {
+                    if let Message::Text(text) = message {
+                        let message: Json = serde_json::from_str(&text).unwrap();
+                        if message["type"] == kind {
+                            return message;
+                        }
+                    }
+                }
+                panic!("the page closed before a {kind}")
+            };
+            tokio::time::timeout(Duration::from_secs(60), wait)
+                .await
+                .unwrap_or_else(|_| panic!("no {kind} in 60 s"))
+        }
+
+        /// Ctrl+C, then its exit code and stderr.
+        pub fn interrupt(self) -> (Option<i32>, String) {
+            let pid = self.child.id().to_string();
+            Command::new("kill").args(["-INT", &pid]).status().unwrap();
+            let out = self.child.wait_with_output().unwrap();
+            (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).into_owned(),
+            )
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_web_page_exits_by_how_the_last_run_ended() {
+    // The last run completed: 0.
+    let dir = project("[parts]\ngate = \"off\"\n", r#"[{ "text": "done" }]"#);
+    let mut page = web::Page::open(dir.path(), "go").await;
+    assert_eq!(page.until("runEnd").await["outcome"], "completed");
+    let (code, stderr) = page.interrupt();
+    assert_eq!(code, Some(0), "{stderr}");
+
+    // Stopped by a limit: 1, and said.
+    let echo =
+        r#"{ "tools": [{ "name": "write_file", "arguments": { "path": "a", "content": "a" } }] }"#;
+    let dir = project(
+        "[limits]\nmax_turns = 1\n[parts]\ngate = \"off\"\n",
+        &format!("[{echo}, {echo}, {{ \"text\": \"done\" }}]"),
+    );
+    let mut page = web::Page::open(dir.path(), "go").await;
+    assert_eq!(page.until("runEnd").await["outcome"], "stopped");
+    let (code, stderr) = page.interrupt();
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("yobuild: the last run ended Stopped: "),
+        "{stderr}"
+    );
+
+    // Ctrl+C during a run: aborted, 1.
+    let dir = project(
+        "[parts]\ngate = \"off\"\n",
+        r#"[{ "tools": [{ "name": "bash", "arguments": { "command": "sleep 30" } }] }, { "text": "done" }]"#,
+    );
+    let mut page = web::Page::open(dir.path(), "go").await;
+    page.until("runStart").await;
+    let (code, stderr) = page.interrupt();
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("yobuild: the last run ended Aborted: stopped with Ctrl+C"),
+        "{stderr}"
+    );
+}
