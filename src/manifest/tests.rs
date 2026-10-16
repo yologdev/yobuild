@@ -131,14 +131,14 @@ phone = true
                 transport: Transport::Stdio {
                     source: package("@modelcontextprotocol/server-filesystem", "1.2.3"),
                     bin: Some("mcp-fs".into()),
-                    args: vec![".".into()],
+                    args: vec![Value::new(".").unwrap()],
                     env: [("MODE".into(), Value::new("fast").unwrap())].into(),
                 },
             },
             Mcp {
                 name: "mcp.example.com".into(),
                 transport: Transport::Http {
-                    url: "https://mcp.example.com/mcp".into(),
+                    url: Value::new("https://mcp.example.com/mcp").unwrap(),
                     headers: [
                         ("Accept".into(), Value::new("application/json").unwrap()),
                         (
@@ -695,4 +695,137 @@ fn loading_a_file_makes_its_paths_absolute() {
     let m = Manifest::load(&file).unwrap();
     assert!(m.dir.is_absolute());
     assert_eq!(m.agent.prompt, Some(m.dir.join("prompts/p.md")));
+}
+
+#[test]
+fn local_providers_take_no_key() {
+    let m = read("[agent]\nname = \"a\"\nmodel = \"ollama/llama3.2\"\n").unwrap();
+    assert_eq!(m.agent.model.base_url(), Some(OLLAMA));
+    assert!(!m.agent.model.needs_key());
+    assert_eq!(m.agent.model.config().base_url, OLLAMA);
+    let m = read(
+        "[agent]\nname = \"a\"\nmodel = \"local/qwen\"\nbase_url = \"http://127.0.0.1:1234/v1\"\n",
+    )
+    .unwrap();
+    assert_eq!(m.agent.model.config().base_url, "http://127.0.0.1:1234/v1");
+    assert_eq!(m.agent.model.config().provider, "local");
+    assert!(read(MINIMAL).unwrap().agent.model.needs_key());
+    assert_eq!(
+        error("[agent]\nname = \"a\"\nmodel = \"local/qwen\"\n"),
+        "3:9: local needs base_url: its OpenAI-compatible endpoint"
+    );
+    assert_eq!(
+        error("[agent]\nname = \"a\"\nmodel = \"ollama/x\"\napi_key_env = \"K\"\n"),
+        "4:15: ollama takes no key: leave out api_key_env"
+    );
+    assert_eq!(
+        error(
+            "[agent]\nname = \"a\"\nmodel = \"ollama/x\"\nbase_url = \"http://gpu.lan:11434/v1\"\n"
+        ),
+        "4:12: base_url \"http://gpu.lan:11434/v1\": https, or http on this machine (localhost)"
+    );
+}
+
+#[test]
+fn a_secret_after_a_flag_is_a_secret() {
+    for args in [
+        r#"["--token", "abc"]"#,
+        r#"["--api-key=abc"]"#,
+        r#"["-p", "x", "--password", "hunter2"]"#,
+    ] {
+        let e = error(&with(&format!(
+            "[[mcp]]\nnpm = \"s@1.0.0\"\nargs = {args}\n"
+        )));
+        assert!(
+            e.starts_with("6:") && e.contains("looks like a secret"),
+            "{args}: {e}"
+        );
+    }
+    let m = read(&with(
+        "[[mcp]]\nnpm = \"s@1.0.0\"\nargs = [\"--token\", \"${TOKEN}\", \"--api-key=${KEY}\", \"--port\", \"8080\", \".\"]\n",
+    ))
+    .unwrap();
+    let Transport::Stdio { args, .. } = &m.mcp[0].transport else {
+        panic!("stdio")
+    };
+    let lookup = |n: &str| Some(format!("<{n}>"));
+    let filled: Vec<String> = args
+        .iter()
+        .map(|a| a.resolve_with(lookup).unwrap())
+        .collect();
+    assert_eq!(
+        filled,
+        ["--token", "<TOKEN>", "--api-key=<KEY>", "--port", "8080", "."]
+    );
+}
+
+#[test]
+fn a_secret_in_a_url_query_is_a_reference() {
+    assert_eq!(
+        error(&with("[[mcp]]\nurl = \"https://x.example/mcp?api_key=abc&v=1\"\n")),
+        "5:7: url: api_key looks like a secret: take it from the environment (`\"${NAME}\"`, or `\"Bearer ${NAME}\"`), never write it here"
+    );
+    let m = read(&with(
+        "[[mcp]]\nurl = \"https://x.example/mcp?api_key=${KEY}&v=1\"\n",
+    ))
+    .unwrap();
+    let Transport::Http { url, .. } = &m.mcp[0].transport else {
+        panic!("http")
+    };
+    assert_eq!(
+        url.resolve_with(|_| Some("k".into())).unwrap(),
+        "https://x.example/mcp?api_key=k&v=1"
+    );
+    assert_eq!(m.mcp[0].name, "x.example");
+}
+
+#[test]
+fn a_password_in_a_url_is_a_reference_wherever_it_is() {
+    let refused = [
+        "[[mcp]]\nnpm = \"s@1.0.0\"\nenv = { DATABASE_URL = \"postgres://u:hunter2@db/x\" }\n",
+        "[[mcp]]\nnpm = \"s@1.0.0\"\nargs = [\"--db\", \"postgres://u:hunter2@db/x\"]\n",
+        "[[plugin]]\npi = \"a@1.0.0\"\nconfig = { db = \"mysql://root:pw@localhost/app\" }\n",
+    ];
+    for text in refused {
+        let e = error(&with(text));
+        assert!(e.contains("password written in"), "{text}: {e}");
+    }
+    let allowed = [
+        "[[mcp]]\nnpm = \"s@1.0.0\"\nenv = { DATABASE_URL = \"postgres://u:${DB_PASSWORD}@db/x\" }\n",
+        "[[mcp]]\nnpm = \"s@1.0.0\"\nargs = [\"git@github.com:a/b.git\", \"https://user@host/x\"]\n",
+        "[[plugin]]\npi = \"a@1.0.0\"\nconfig = { home = \"https://example.com/a:b@c\" }\n",
+    ];
+    for text in allowed {
+        read(&with(text)).unwrap_or_else(|e| panic!("{text}: {e}"));
+    }
+}
+
+#[test]
+fn a_plugins_config_takes_secrets_from_the_environment() {
+    assert_eq!(
+        error(&with("[[plugin]]\ndsh = \"a@1.0.0\"\nconfig = { provider = \"bing\", apiKey = \"sk-1\" }\n")),
+        "6:10: config.apiKey: apiKey looks like a secret: take it from the environment (`\"${NAME}\"`, or `\"Bearer ${NAME}\"`), never write it here"
+    );
+    let nested =
+        "[[plugin]]\ndsh = \"a@1.0.0\"\nconfig = { engines = { tavily = { token = \"t\" } } }\n";
+    assert!(error(&with(nested)).contains("config.token"));
+    let bad_ref = "[[plugin]]\ndsh = \"a@1.0.0\"\nconfig = { x = \"${\" }\n";
+    assert!(error(&with(bad_ref)).contains("is not closed"));
+
+    let m = read(&with(
+        "[[plugin]]\ndsh = \"a@1.0.0\"\nconfig = { apiKey = \"${SEARCH_KEY}\", hosts = [\"a\", \"${HOST}\"], n = 3 }\n",
+    ))
+    .unwrap();
+    let filled = m.plugins[0]
+        .config_with(|n| Some(format!("<{n}>")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::Value::Object(filled),
+        serde_json::json!({ "apiKey": "<SEARCH_KEY>", "hosts": ["a", "<HOST>"], "n": 3 })
+    );
+    assert_eq!(
+        m.plugins[0].config_with(|_| None),
+        Err(Unset("SEARCH_KEY".into()))
+    );
 }

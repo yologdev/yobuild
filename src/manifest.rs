@@ -85,6 +85,14 @@ pub const PROVIDERS: [(&str, &[&str]); 11] = [
     ("meta", &["META_API_KEY", "MODEL_API_KEY"]),
 ];
 
+/// Local servers yoagent has a constructor for, which take no key: `ollama`
+/// (`base_url` defaults to [`OLLAMA`]) and `local` (any OpenAI-compatible
+/// server on this machine: LM Studio, llama.cpp, …; `base_url` required).
+pub const LOCAL_PROVIDERS: [&str; 2] = ["ollama", "local"];
+
+/// Ollama's OpenAI-compatible endpoint, `ollama`'s default `base_url`.
+pub const OLLAMA: &str = "http://localhost:11434/v1";
+
 impl Model {
     pub fn provider(&self) -> &str {
         &self.provider
@@ -99,9 +107,15 @@ impl Model {
         self.base_url.as_deref()
     }
 
-    /// The variables the API key is read from, first set first.
+    /// The variables the API key is read from, first set first (none for a
+    /// local provider).
     pub fn key_env(&self) -> &[String] {
         &self.key_env
+    }
+
+    /// Whether the provider takes a key: not a local one ([`LOCAL_PROVIDERS`]).
+    pub fn needs_key(&self) -> bool {
+        !self.key_env.is_empty()
     }
 
     /// The yoagent model configuration. It carries a price only once the
@@ -121,6 +135,8 @@ impl Model {
             "zai" => ModelConfig::zai(id, name),
             "minimax" => ModelConfig::minimax(id, name),
             "meta" => ModelConfig::meta(id, name),
+            "ollama" => ModelConfig::ollama(self.base_url.as_deref().unwrap_or(OLLAMA), id),
+            "local" => ModelConfig::local(self.base_url.clone().unwrap_or_default(), id),
             provider => ModelConfig::openai_compat(
                 self.base_url.clone().unwrap_or_default(),
                 id,
@@ -131,9 +147,10 @@ impl Model {
     }
 
     /// The API key: the first of [`key_env`](Self::key_env) set and not
-    /// empty. `yobuild run` must pass it (or refuse to start without one):
-    /// with none, yoagent would fall back to `API_KEY`, and send that to a
-    /// custom endpoint.
+    /// empty. `yobuild run` must pass it (or, when the provider
+    /// [needs one](Self::needs_key), refuse to start without one; for a
+    /// local provider, pass an empty key): with none, yoagent would fall
+    /// back to `API_KEY`, and send that to the endpoint.
     pub fn api_key(&self) -> Option<String> {
         self.api_key_with(|name| std::env::var(name).ok())
     }
@@ -199,8 +216,27 @@ pub struct Plugin {
     /// or the file's stem.
     pub name: String,
     pub kind: PluginKind,
-    /// The plugin's own configuration (a table), passed as it is.
+    /// The plugin's own configuration (a table), passed as it is — its
+    /// strings' `${NAME}` references filled in at start
+    /// ([`config_with`](Self::config_with)).
     pub config: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl Plugin {
+    /// The configuration with its strings' references filled in by
+    /// `lookup` (the environment, at start).
+    pub fn config_with(
+        &self,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, Unset> {
+        let Some(config) = &self.config else {
+            return Ok(None);
+        };
+        match fill(&serde_json::Value::Object(config.clone()), &lookup)? {
+            serde_json::Value::Object(map) => Ok(Some(map)),
+            _ => unreachable!("a table stays a table"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,12 +279,12 @@ pub enum Transport {
     Stdio {
         source: Source,
         bin: Option<String>,
-        args: Vec<String>,
+        args: Vec<Value>,
         env: BTreeMap<String, Value>,
     },
-    /// An HTTP server: the URL is the pin.
+    /// An HTTP server: the URL is the pin (references filled in at start).
     Http {
-        url: String,
+        url: Value,
         headers: BTreeMap<String, Value>,
     },
 }
@@ -501,7 +537,7 @@ struct RawMcp {
     bin: Option<Spanned<String>>,
     url: Option<Spanned<String>>,
     #[serde(default)]
-    args: Vec<String>,
+    args: Vec<Spanned<String>>,
     #[serde(default)]
     env: BTreeMap<String, Spanned<String>>,
     #[serde(default)]
@@ -658,6 +694,29 @@ fn model(raw: &RawAgent) -> Result<Model, Located> {
     else {
         return Err((at, format!("model {spec:?} is not `provider/id`")));
     };
+    if LOCAL_PROVIDERS.contains(&provider) {
+        if let Some(env) = &raw.api_key_env {
+            let m = format!("{provider} takes no key: leave out api_key_env");
+            return Err((env.span(), m));
+        }
+        let base_url = match (&raw.base_url, provider) {
+            (Some(url), _) => {
+                endpoint(url.get_ref()).map_err(|m| (url.span(), format!("base_url {m}")))?;
+                url.get_ref().clone()
+            }
+            (None, "ollama") => OLLAMA.to_owned(),
+            (None, _) => {
+                let m = format!("{provider} needs base_url: its OpenAI-compatible endpoint");
+                return Err((at, m));
+            }
+        };
+        return Ok(Model {
+            provider: provider.to_owned(),
+            id: id.to_owned(),
+            base_url: Some(base_url),
+            key_env: Vec::new(),
+        });
+    }
     let known = PROVIDERS.iter().find(|(p, _)| *p == provider);
     let key_env = match (known, &raw.base_url, &raw.api_key_env) {
         (Some((_, envs)), None, None) => envs.iter().map(|e| e.to_string()).collect(),
@@ -674,7 +733,11 @@ fn model(raw: &RawAgent) -> Result<Model, Located> {
             return Err((env.span(), m));
         }
         (None, None, _) => {
-            let names: Vec<&str> = PROVIDERS.iter().map(|(p, _)| *p).collect();
+            let names: Vec<&str> = PROVIDERS
+                .iter()
+                .map(|(p, _)| *p)
+                .chain(LOCAL_PROVIDERS)
+                .collect();
             let m = format!(
                 "provider {provider:?} is not one yoagent knows ({}): for an OpenAI-compatible endpoint, set base_url and api_key_env under [agent]",
                 names.join(", ")
@@ -917,7 +980,11 @@ fn plugin(
     let config = match raw.config {
         None => None,
         Some(config) => match json(config.get_ref().clone()) {
-            serde_json::Value::Object(map) => Some(map),
+            serde_json::Value::Object(map) => {
+                check_config(&serde_json::Value::Object(map.clone()), "")
+                    .map_err(|m| (config.span(), m))?;
+                Some(map)
+            }
             _ => {
                 let m = "config is a table: the plugin's own settings";
                 return Err((config.span(), m.into()));
@@ -980,24 +1047,153 @@ fn secret(name: &str) -> bool {
     words.iter().any(|w| WORDS.contains(&w.as_str()))
 }
 
+/// The one rule for a value the manifest gives a plugin or a server — a
+/// variable, a header, an argument, a URL, a string in a plugin's config:
+/// a secret is never written into the manifest. A value named like a
+/// secret (`name`) is only `${NAME}` references, with at most a scheme word
+/// (`Bearer ${TOKEN}`); a URL in any value (`scheme://user:password@host`)
+/// has its password as a reference.
+fn guard(name: &str, value: &Value) -> Result<(), String> {
+    if secret(name) {
+        let literal = value.literal().to_ascii_lowercase();
+        let scheme = ["", "bearer", "basic", "token"].contains(&literal.as_str());
+        if value.references().is_empty() || !scheme {
+            return Err(format!(
+                "{name} looks like a secret: take it from the environment (`\"${{NAME}}\"`, or `\"Bearer ${{NAME}}\"`), never write it here"
+            ));
+        }
+    }
+    if written_password(value.as_str()) {
+        return Err(format!(
+            "{} has a URL with its password written in: take it from the environment (`://user:${{PASSWORD}}@`)",
+            if name.is_empty() { "a value" } else { name }
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `text` holds a URL whose password (`://user:password@`) is
+/// written, not a `${NAME}` reference.
+fn written_password(text: &str) -> bool {
+    text.match_indices("://").any(|(at, _)| {
+        let rest = &text[at + 3..];
+        let authority = rest
+            .split(|c: char| c == '/' || c == '?' || c == '#' || c.is_whitespace())
+            .next()
+            .unwrap_or("");
+        let Some(user_info) = authority.rfind('@').map(|end| &authority[..end]) else {
+            return false;
+        };
+        let Some((_, password)) = user_info.split_once(':') else {
+            return false;
+        };
+        let reference = password
+            .strip_prefix("${")
+            .and_then(|p| p.strip_suffix('}'))
+            .is_some_and(identifier);
+        !password.is_empty() && !reference
+    })
+}
+
 fn values(raw: BTreeMap<String, Spanned<String>>) -> Result<BTreeMap<String, Value>, Located> {
     raw.into_iter()
         .map(|(name, value)| {
             let span = value.span();
             let value = Value::new(value.into_inner()).map_err(|m| (span.clone(), m))?;
-            if secret(&name) {
-                let literal = value.literal().to_ascii_lowercase();
-                let scheme = ["", "bearer", "basic", "token"].contains(&literal.as_str());
-                if value.references().is_empty() || !scheme {
-                    let m = format!(
-                        "{name} looks like a secret: take it from the environment (`\"${{NAME}}\"`, or `\"Bearer ${{NAME}}\"`), never write it here"
-                    );
-                    return Err((span, m));
-                }
-            }
+            guard(&name, &value).map_err(|m| (span, m))?;
             Ok((name, value))
         })
         .collect()
+}
+
+/// A stdio server's arguments: a value after a flag named like a secret
+/// (`--token X`, `--api-key=X`) is that secret.
+fn arguments(raw: Vec<Spanned<String>>) -> Result<Vec<Value>, Located> {
+    let mut out = Vec::new();
+    let mut flag: Option<String> = None;
+    for arg in raw {
+        let span = arg.span();
+        let text = arg.into_inner();
+        let value = Value::new(text.clone()).map_err(|m| (span.clone(), m))?;
+        let name = match (text.strip_prefix('-'), flag.take()) {
+            (Some(option), _) => {
+                let option = option.trim_start_matches('-');
+                match option.split_once('=') {
+                    Some((name, given)) => {
+                        let given = Value::new(given).map_err(|m| (span.clone(), m))?;
+                        guard(name, &given).map_err(|m| (span.clone(), m))?;
+                    }
+                    None => flag = Some(option.to_owned()),
+                }
+                String::new()
+            }
+            (None, Some(name)) => name,
+            (None, None) => String::new(),
+        };
+        guard(&name, &value).map_err(|m| (span, m))?;
+        out.push(value);
+    }
+    Ok(out)
+}
+
+/// A server's URL: references checked, the endpoint (with each reference
+/// standing in as `x`) https or this machine's, and a query parameter named
+/// like a secret (`?api_key=…`) a reference.
+fn server_url(raw: Spanned<String>) -> Result<(Value, String), Located> {
+    let span = raw.span();
+    let value = Value::new(raw.into_inner()).map_err(|m| (span.clone(), m))?;
+    let filled = value
+        .resolve_with(|_| Some("x".into()))
+        .expect("every reference filled");
+    let host = endpoint(&filled)
+        .map_err(|m| (span.clone(), format!("url {m}")))?
+        .host_str()
+        .unwrap_or_default()
+        .to_owned();
+    let query = value.as_str().split_once('?').map_or("", |(_, q)| q);
+    for pair in query.split(['&', '#']).filter(|p| !p.is_empty()) {
+        let (name, given) = pair.split_once('=').unwrap_or((pair, ""));
+        let given = Value::new(given).map_err(|m| (span.clone(), m))?;
+        guard(name, &given).map_err(|m| (span.clone(), format!("url: {m}")))?;
+    }
+    Ok((value, host))
+}
+
+/// Every string in a plugin's configuration, by the key it is under (in a
+/// list, the list's key): references checked, and the rule of [`guard`].
+fn check_config(value: &serde_json::Value, key: &str) -> Result<(), String> {
+    match value {
+        serde_json::Value::String(text) => {
+            let value = Value::new(text.clone()).map_err(|m| format!("config.{key}: {m}"))?;
+            guard(key, &value).map_err(|m| format!("config.{key}: {m}"))
+        }
+        serde_json::Value::Array(items) => items.iter().try_for_each(|v| check_config(v, key)),
+        serde_json::Value::Object(map) => map.iter().try_for_each(|(k, v)| check_config(v, k)),
+        _ => Ok(()),
+    }
+}
+
+/// `value` with each string's `${NAME}` references filled in by `lookup`.
+fn fill(
+    value: &serde_json::Value,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<serde_json::Value, Unset> {
+    Ok(match value {
+        serde_json::Value::String(text) => Value::new(text.clone())
+            .expect("checked when read")
+            .resolve_with(lookup)?
+            .into(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(|v| fill(v, lookup))
+            .collect::<Result<_, _>>()?,
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| Ok((k.clone(), fill(v, lookup)?)))
+            .collect::<Result<serde_json::Map<_, _>, _>>()?
+            .into(),
+        other => other.clone(),
+    })
 }
 
 fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<usize>), Located> {
@@ -1012,7 +1208,7 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
             let transport = Transport::Stdio {
                 source,
                 bin: raw.bin.map(Spanned::into_inner),
-                args: raw.args,
+                args: arguments(raw.args)?,
                 env: values(raw.env)?,
             };
             (transport, span, default)
@@ -1023,10 +1219,9 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
                 let m = "args, env and bin are for a stdio server (npm)";
                 return Err((span, m.into()));
             }
-            let parsed = endpoint(url.get_ref()).map_err(|m| (span.clone(), format!("url {m}")))?;
-            let default = parsed.host_str().unwrap_or_default().to_owned();
+            let (url, default) = server_url(url)?;
             let transport = Transport::Http {
-                url: url.into_inner(),
+                url,
                 headers: values(raw.headers)?,
             };
             (transport, span, default)

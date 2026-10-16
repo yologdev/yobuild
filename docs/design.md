@@ -103,13 +103,21 @@ Rules:
   yobuild does not translate it.
 - **Unknown keys are errors.** A typo in a safety setting must not pass.
   Every error names the file, line and column.
-- **Secrets come from the environment.** A header or server variable whose
-  name has a secret's word in it (split at `_`, `-` and case changes: key,
-  apikey, token, secret, password, passwd, pwd, auth, authorization,
-  cookie, credential(s)) is only `${NAME}` references, plus at most a scheme
-  word (`Bearer ${TOKEN}`, `Basic`, `Token`); a value written into the file
-  is refused. References are checked when the file is read (closed, a
-  plain name).
+- **Secrets come from the environment.** One rule for every value the
+  manifest hands a plugin or a server — a server's variable, header,
+  argument and URL, and every string in a plugin's `config` (whose
+  `${NAME}` references are filled in at start too):
+  - a value named with a secret's word (split at `_`, `-` and case
+    changes: key, apikey, token, secret, password, passwd, pwd, auth,
+    authorization, cookie, credential(s)) is only `${NAME}` references,
+    plus at most a scheme word (`Bearer ${TOKEN}`, `Basic`, `Token`). An
+    argument is named by the flag before it (`--token X`, `--api-key=X`),
+    a string in `config` by its key, a URL's query parameter by its own;
+  - a URL in any value (`postgres://user:password@host`) has its password
+    as a reference (`://user:${DB_PASSWORD}@`).
+
+  A value written into the file is refused. References are checked when
+  the file is read (closed, a plain name).
 - **Endpoints over https** (MCP servers, a custom model's `base_url`):
   plain http only to this machine (`localhost`, `127.0.0.1`, `[::1]`), and
   no user in the URL.
@@ -144,11 +152,15 @@ by yobuild and passed to the agent: without one, yoagent would fall back to
 | `groq`, `mistral`, `xai`, `zai`, `minimax` | the constructor of the same name | OpenAI-compatible, the provider's base URL and compat flags | `<PROVIDER>_API_KEY` |
 | `qwen` | `ModelConfig::qwen` | OpenAI-compatible (DashScope) | `DASHSCOPE_API_KEY` |
 | `meta` | `ModelConfig::meta` | OpenAI-compatible | `META_API_KEY`, then `MODEL_API_KEY` |
+| `ollama` | `ModelConfig::ollama` | OpenAI-compatible, `base_url` (default `http://localhost:11434/v1`) | none |
+| `local` | `ModelConfig::local` | any OpenAI-compatible server on this machine (LM Studio, llama.cpp, …); needs `base_url` | none |
 | anything else | `ModelConfig::openai_compat`, default compat flags | needs `base_url` under `[agent]` | `api_key_env` under `[agent]` |
 
 An unknown provider without `base_url` is an error that lists the known
 providers; `base_url` without `api_key_env` says it is missing; either key
-for a known provider is refused. Prices come from the bundled table; a provider missing from it
+for a known provider is refused, and `api_key_env` for a local one (it
+takes no key; `yobuild run` passes an empty one, so yoagent's fallback key
+never reaches it). A `base_url` is https, or http on this machine. Prices come from the bundled table; a provider missing from it
 runs, but without `budget_usd` or cost facts.
 
 ## 3. The parts
