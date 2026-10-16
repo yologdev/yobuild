@@ -8,6 +8,7 @@ pub(super) const READ: Spec = Spec::new(
     &["-r", "-s", "-e"],
     &["-p", "-t", "-n", "-N", "-d", "-u", "-a"],
 );
+pub(super) const WAIT: Spec = Spec::new(&["-n", "-f"], &["-p"]);
 pub(super) const PRINTF: Spec = Spec::new(&[], &["-v"]).posix();
 pub(super) const SHELL: Spec = Spec::new(
     &[

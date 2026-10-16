@@ -19,7 +19,7 @@ use std::path::Path;
 use super::args::{Parsed, Spec};
 use super::git;
 use super::grammars::*;
-use super::invocation::safe_variable;
+use super::invocation::{identifier, safe_variable};
 use super::judge::{ok_if, Ask, Ctx, Verdict};
 use super::parse::Word;
 use super::specs::*;
@@ -81,8 +81,10 @@ pub(super) fn entry(name: &str) -> Option<Entry> {
         })),
         "trap" => Some(Raw(trap)),
         "unset" => Some(Raw(unset)),
-        // `wait -p NAME` sets a variable, by name.
-        "wait" => Some(Raw(|args, _| names_after(args, &["-p"]))),
+        // `wait -p NAME` sets a variable, by name (also `-np NAME`, `-pNAME`).
+        "wait" => spec(WAIT, |p, _| {
+            ok_if(p.value("-p").is_none_or(|w| w.known && identifier(&w.text)))
+        }),
         "test" | "[" => Some(Raw(test)),
         "[[" => Some(Raw(double_bracket)),
         // Shells whose text reads as bash's (not zsh's `=( … )` or ksh's
@@ -379,10 +381,11 @@ fn copy(p: &Parsed, ctx: &mut Ctx, moves: bool, recursive: bool) -> Verdict {
 }
 
 /// Whether an awk program only reads: no `system`, `getline` (both run
-/// commands), `@include`/`@load`, and no `>` or `|` after its first `print`
-/// or `printf`, string literals aside — where an output redirection could
-/// be (`> file`, `| cmd`). A `>` before it is a comparison (`$3 > 100
-/// { print }`); one after it asks, comparison or not.
+/// commands), `@include`/`@load`, and no `>` or `|` anywhere after its
+/// first `print` or `printf`, where an output redirection could be (`>
+/// file`, `| cmd`). Strings and regexes are not told apart from code: a
+/// `>` in them after a `print` asks too. A `>` before it is a comparison
+/// (`$3 > 100 { print }`).
 fn awk_reads(program: &str) -> bool {
     if ["system", "getline", "@"]
         .iter()
@@ -390,26 +393,7 @@ fn awk_reads(program: &str) -> bool {
     {
         return false;
     }
-    // The program with its string literals emptied (`"a>b"` → `""`).
-    let mut code = String::new();
-    let mut chars = program.chars();
-    while let Some(c) = chars.next() {
-        code.push(c);
-        if c == '"' {
-            while let Some(c) = chars.next() {
-                match c {
-                    '\\' => {
-                        chars.next();
-                    }
-                    '"' => {
-                        code.push('"');
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    code.find("print")
-        .is_none_or(|at| !code[at..].contains(['>', '|']))
+    program
+        .find("print")
+        .is_none_or(|at| !program[at..].contains(['>', '|']))
 }

@@ -98,7 +98,7 @@ const fn check_names(names: &[&str], single_dash: bool) {
             _ => false,
         };
         if !fine {
-            panic!("an option name that could never be given");
+            panic!("an option name the parser can never produce");
         }
         i += 1;
     }
@@ -286,6 +286,7 @@ mod tests {
     #[test]
     fn an_expansion_where_an_option_could_be_is_not_read() {
         let unknown = |text: &str, opens_unknown| Word {
+            quoted: false,
             text: text.into(),
             known: false,
             opens_unknown,

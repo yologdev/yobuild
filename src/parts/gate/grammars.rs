@@ -346,7 +346,6 @@ pub(super) fn cargo(args: &[Word], ctx: &mut Ctx) -> Verdict {
             // Its build folder inside the project.
             each_value(&p, &["--target-dir"], |w| ctx.inside(w))
         }
-        // `cargo fmt --check`, or `-- --check` (passed to rustfmt).
         // `cargo fmt --check`, or `-- --check`: what follows `--` goes to
         // rustfmt, read by its own spec (not `--print-config … PATH`).
         "fmt" => {
@@ -484,9 +483,12 @@ pub(super) fn test(args: &[Word], _: &mut Ctx) -> Verdict {
     names_after(args, &["-v"])
 }
 
-/// `[[ … ]]`: also its arithmetic comparisons, which evaluate both sides
-/// as arithmetic (a variable's value too): literal numbers only, or `$#`,
-/// `$?`.
+/// `[[ … ]]`: a whole test in this one command, ending in an unquoted
+/// `]]`. bash reads a test across `&&`, `||`, `(`, redirections and
+/// newlines, which this reading splits into commands; then this piece does
+/// not end in `]]`, and the line asks rather than judge the rest as commands.
+/// Its arithmetic comparisons evaluate both sides as arithmetic (a
+/// variable's value too): literal numbers only, or `$#`, `$?`.
 pub(super) fn double_bracket(args: &[Word], _: &mut Ctx) -> Verdict {
     const ARITHMETIC: [&str; 6] = ["-eq", "-ne", "-lt", "-le", "-gt", "-ge"];
     let number = |w: Option<&Word>| {
@@ -497,6 +499,10 @@ pub(super) fn double_bracket(args: &[Word], _: &mut Ctx) -> Verdict {
                 || w.text == "$?"
         })
     };
+    ok_if(
+        args.last()
+            .is_some_and(|w| w.text == "]]" && w.known && !w.quoted),
+    )?;
     for (at, w) in args.iter().enumerate() {
         if w.known && ARITHMETIC.contains(&w.text.as_str()) {
             ok_if(at > 0 && number(args.get(at - 1)) && number(args.get(at + 1)))?;

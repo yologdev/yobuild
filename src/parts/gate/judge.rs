@@ -203,12 +203,12 @@ impl Ctx<'_> {
             return Ok(());
         };
         let entry = catalogue::entry(&run.name).ok_or(Ask)?;
-        // A build runs the project's code; asking its version does not
-        // (each tool's own way: `ctest -V` is verbose, `jest version` a pattern).
+        // A build runs the project's code; asking its version does not:
+        // `cargo --version`/`-V`/`version`, `go version` (the other tools'
+        // specs do not list their version options: they ask).
         let version = match (run.name.as_str(), run.args) {
             ("cargo", [v]) => ["--version", "-V", "version"].contains(&v.text.as_str()),
             ("go", [v]) => v.text == "version",
-            (_, [v]) => v.text == "--version",
             _ => false,
         };
         if catalogue::BUILDS.contains(&run.name.as_str()) && !version {

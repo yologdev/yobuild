@@ -1866,16 +1866,25 @@ fn bash_reads_some_things_as_one_unit() {
     pairs(
         &p,
         &[
-            // `[[ … ]]` to its `]]`: `&&` and `(` inside are the test's.
-            ("[[ -f a.md && -f x ]] && ls", "[[ -f a.md && n -eq 1 ]]"),
-            ("[[ ( 1 -eq 1 ) ]]", "[[ ( n -gt 1 ) ]]"),
+            // A test free only whole in one command: bash reads `[[ … ]]`
+            // across `&&`, `||`, `(`, redirections and newlines.
             (
-                "[[ -f a.md || -d sub ]]",
-                "[[ -f a.md || -v 'a[$(touch p)]' ]]",
+                "[[ -f a.md ]] && [[ -f x ]] && ls",
+                "[[ -f a.md && n -eq 1 ]]",
             ),
+            ("[[ 1 -eq 1 ]]", "[[ ( 1 -eq 1 ) ]]"),
+            ("[[ -f a.md ]] || ls", "[[ -f a.md || -v 'a[$(touch p)]' ]]"),
+            ("[[ x ]] && ls", "[[ x ]]&& rm owner.txt"),
+            ("[[ x ]] && ls", "[[ x ]]|| rm owner.txt"),
+            ("[[ -n x ]] && ls", "[[ -n x ]]>owner.txt"),
+            ("[[ -n x ]]", "[[ -n <(rm owner.txt) ]]"),
+            ("[[ x ]]", ">new.txt [[ x || rm owner.txt ]]"),
+            ("[[ y == z ]]", "[[ y == \"]]\" || echo -eq x ]]"),
+            ("[[ y == z ]]", "[[ y == z ||\n echo -eq x ]]"),
+            ("time -p [[ y == z ]]", "time -p [[ y == z || echo -eq x ]]"),
+            ("{ [[ -f a.md ]]; }", "{ [[ $a && b ]]; }"),
             ("echo \"[[\" && ls", "echo \"[[\" && rm owner.txt"),
-            // An unclosed `[[` ends with its command.
-            ("[[ -f a.md ; ls && ls", "[[ -f a.md ; ls && rm owner.txt"),
+            ("[[ -f a.md ]]; ls && ls", "[[ -f a.md ; ls && rm owner.txt"),
             // `${ … }` to its `}`: a space and `#` inside do not end it.
             ("echo ${x:- a # b}", "echo ${x:- # } ; rm owner.txt"),
             ("echo ${x:-$(date)}", "echo ${x:-$(rm owner.txt)}"),
@@ -1888,12 +1897,14 @@ fn bash_reads_some_things_as_one_unit() {
             ("for f in a; do ls; done", "for ((; ls ; )); do break; done"),
             ("wait", "true & wait -n -p 'a[$(touch p)]'"),
             ("wait -n -p pid", "wait -p \"$n\""),
+            ("wait -np pid", "true & wait -np 'a[$(touch p)]'"),
+            ("wait -ppid", "true & wait -n -p'a[$(touch p)]'"),
         ],
     );
 }
 
 #[test]
-fn awk_redirections_inside_strings_are_seen_past() {
+fn awk_redirections_after_a_print_ask_wherever_they_are() {
     let p = Project::new();
     pairs(
         &p,
@@ -1907,11 +1918,18 @@ fn awk_redirections_inside_strings_are_seen_past() {
                 "awk '{ print \"}\" | \"sh\" }' a.md",
             ),
             (
-                "awk '{ print \"a > b\" }' a.md", "awk '{ print $1 } $2 > 3' a.md",
+                "awk '{ print \"a b\" }' a.md", "awk '{ print $1 } $2 > 3' a.md",
             ),
             (
                 "awk '{ print }' a.md",
                 "awk 'BEGIN { \"ls\" | getline }' a.md",
+            ),
+            (
+                "awk '/x/ { print }' a.md",
+                "awk '/\"/ { print > \"owner.txt\" }' a.md",
+            ),
+            (
+                "awk '$3 > 100 { print }' a.md", "awk '{ print \"a > b\" }' a.md",
             ),
         ],
     );
@@ -1938,7 +1956,11 @@ fn a_version_query_is_each_tools_own() {
             ),
             (
                 format!("cd {o} && go version"),
-                format!("cd {o} && go -version"),
+                format!("cd {o} && go test"),
+            ),
+            (
+                format!("cd {o} && cargo -V"),
+                format!("cd {o} && cargo -V build"),
             ),
         ],
     );
@@ -1998,4 +2020,36 @@ fn a_symlink_out_of_the_project_is_followed() {
         ],
     );
     assert!(p.file_tool("write_file", "out/new.md"));
+}
+
+#[test]
+fn the_latest_reviews_pairs() {
+    let p = Project::new();
+    pairs(
+        &p,
+        &[
+            // A `${ … }` word is unknown, wherever it points.
+            ("echo x > new.txt", "echo x > ${HOME}/new.txt"),
+            ("cp a.md new.md", "cp a.md ${HOME}/x.md"),
+            // What follows `cargo fmt --check --` is read by rustfmt's spec.
+            (
+                "cargo fmt --check -- --edition 2021",
+                "cargo fmt --check -- --print-config default owner.txt",
+            ),
+            ("cargo fmt --check", "cargo fmt --check -- --emit files"),
+            // From the first `print` on.
+            (
+                "awk '{ print; print }' a.md",
+                "awk '{ print > \"owner.txt\"; print }' a.md",
+            ),
+            // A quoted `[[` is a command named `[[`, not a test.
+            ("[[ -f a.md ]] || ls", "\"[[\" || rm owner.txt"),
+            ("echo [[ ; ls", "echo [[ && rm owner.txt"),
+            // `${ … }` forms with quotes, escapes and nesting stay one word.
+            ("echo ${x:-\\'}", "echo ${x:-\\'} > owner.txt"),
+            ("echo ${x:-'\"'}", "echo ${x:-'\"'} > owner.txt"),
+            ("echo ${x:-\"'\"}", "echo ${x:-\"'\"} > owner.txt"),
+            ("echo ${x:-${y:-a}}", "echo ${x:-${y:-a}} > owner.txt"),
+        ],
+    );
 }

@@ -172,17 +172,15 @@ pub(super) fn invocation(words: &[Word]) -> Result<Option<Invocation<'_>>, Unrea
             return Err(Unread);
         }
         let text = word.text.strip_prefix('\\').unwrap_or(&word.text);
-        // A lone `{` or `}` is a keyword, not a brace expansion.
-        let literal = word.known || text == "{" || text == "}";
-        if literal && KEYWORDS.contains(&text) {
+        if word.known && KEYWORDS.contains(&text) {
             i += 1;
             continue;
         }
-        if literal && CLOSERS.contains(&text) {
+        if word.known && CLOSERS.contains(&text) {
             return Ok(None);
         }
-        // `[` and `[[` are tests, not globs; anything else must be literal.
-        if !(word.known || text == "[" || text == "[[") {
+        // The program's name is literal (a lone `[`, `[[`, `{` is: parse.rs).
+        if !word.known {
             return Err(Unread);
         }
         let name = if text.contains('/') {

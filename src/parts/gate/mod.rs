@@ -78,8 +78,9 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 /// redirections, heredocs, keywords, comments, line continuations — and
 /// `cd` is followed as bash's logical `cd` does it. Where bash would
 /// evaluate a value as code (arithmetic on a variable, `${!x}`, a subscript
-/// that is not a literal number, `${x@P}`), it asks: a value set earlier
-/// (`x='a[$(rm f)]'`) would run. Everything it cannot
+/// that is not a literal number, `${x@P}`, `(( … ))`), it asks: a value set
+/// earlier (`x='a[$(rm f)]'`) would run; so does an expansion that assigns
+/// (`${x:=…}`), and a `[[ … ]]` test that is not whole in one command. Everything it cannot
 /// read asks: an expansion where an option or a path could be, anything
 /// naming a path after a `cd` it cannot follow, a name linked earlier in
 /// the same line.
