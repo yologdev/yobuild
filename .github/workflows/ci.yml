@@ -74,6 +74,8 @@ jobs:
           python3 "$GITHUB_WORKSPACE/tests/terminal_pty.py" \
             "$GITHUB_WORKSPACE/target/debug/examples/coding_agent"
       - name: yobuild run (a manifest with an MCP server, scripted, once)
+        # bash's pipefail: the run's own exit code counts, not only tee's.
+        shell: bash
         run: |
           cargo run --locked -- run tests/fixtures/echo/agent.toml \
             --scripted tests/fixtures/echo/script.json --once "echo hi" | tee run-out.txt

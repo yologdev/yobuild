@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value as Json;
 use tokio::sync::{mpsc, oneshot};
+use yoagent::agent_loop::AGENT_STOPPED_PREFIX;
 use yoagent::{Agent, AgentEvent, AgentMessage, Message, SessionStats, StopReason, StreamDelta};
 
 use crate::frontend::protocol::{
@@ -50,11 +51,16 @@ struct UiState {
     held: HashSet<u64>,
 }
 
+/// An attached frontend, or an observer ([`Session::observe`]).
+struct Client {
+    tx: mpsc::UnboundedSender<ServerMessage>,
+    observer: bool,
+}
+
 struct Inner {
-    clients: Mutex<HashMap<u64, mpsc::UnboundedSender<ServerMessage>>>,
+    clients: Mutex<HashMap<u64, Client>>,
     /// Connections that only watch ([`Session::observe`]): not frontends
     /// a question can be put to.
-    observers: Mutex<std::collections::HashSet<u64>>,
     next_client: AtomicU64,
     ui: Mutex<UiState>,
     /// Offered browser components, with their module source.
@@ -101,7 +107,6 @@ impl Session {
         let session = Session {
             inner: Arc::new(Inner {
                 clients: Mutex::default(),
-                observers: Mutex::default(),
                 next_client: AtomicU64::new(1),
                 ui: Mutex::default(),
                 ui_plugins: Mutex::default(),
@@ -128,6 +133,19 @@ impl Session {
     /// messages, oldest first: a page opened late shows what happened), then
     /// [`ServerMessage::Closed`] at once if the session already ended.
     pub fn connect(&self) -> Connection {
+        self.attach(false)
+    }
+
+    /// Watch the session as a frontend would — the same messages — without
+    /// being one: a question asked while only observers are attached gets
+    /// its default answer at once, as with nobody there (a host waiting for
+    /// a run to end, a log). A question held for later ([`Session::ask_later`])
+    /// stays open, as it does with nobody there.
+    pub fn observe(&self) -> Connection {
+        self.attach(true)
+    }
+
+    fn attach(&self, observer: bool) -> Connection {
         let id = self.inner.next_client.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::unbounded_channel();
         // Under the clients lock, every later broadcast reaches this frontend
@@ -156,31 +174,19 @@ impl Session {
         if self.inner.closed.load(Ordering::SeqCst) {
             let _ = tx.send(ServerMessage::Closed);
         }
-        clients.insert(id, tx);
+        clients.insert(id, Client { tx, observer });
         Connection { id, messages: rx }
     }
 
     /// Detach a frontend.
     pub fn disconnect(&self, id: u64) {
         self.inner.clients.lock().unwrap().remove(&id);
-        self.inner.observers.lock().unwrap().remove(&id);
-    }
-
-    /// Watch the session as a frontend would — the same messages — without
-    /// being one: a question asked while only observers are attached gets
-    /// its default answer at once, as with nobody there (a host waiting for
-    /// a run to end, a log).
-    pub fn observe(&self) -> Connection {
-        let connection = self.connect();
-        self.inner.observers.lock().unwrap().insert(connection.id);
-        connection
     }
 
     /// Number of attached frontends (observers not counted).
     pub fn frontends(&self) -> usize {
         let clients = self.inner.clients.lock().unwrap();
-        let observers = self.inner.observers.lock().unwrap();
-        clients.keys().filter(|id| !observers.contains(id)).count()
+        clients.values().filter(|c| !c.observer).count()
     }
 
     /// Whether the session ended: the driver stopped, nothing sent is heard.
@@ -228,7 +234,7 @@ impl Session {
 
     /// Send one frontend a message (a reply to something only it sent).
     pub(crate) fn send_to(&self, id: u64, message: ServerMessage) {
-        if let Some(tx) = self.inner.clients.lock().unwrap().get(&id) {
+        if let Some(Client { tx, .. }) = self.inner.clients.lock().unwrap().get(&id) {
             let _ = tx.send(message);
         }
     }
@@ -484,7 +490,7 @@ impl Inner {
             }
             history.push_back(message.clone());
         }
-        clients.retain(|_, tx| tx.send(message.clone()).is_ok());
+        clients.retain(|_, c| c.tx.send(message.clone()).is_ok());
     }
 }
 
@@ -512,7 +518,7 @@ impl Drop for Ending {
         // either from `connect` or from this broadcast, never both.
         let mut clients = self.inner.clients.lock().unwrap();
         self.inner.closed.store(true, Ordering::SeqCst);
-        clients.retain(|_, tx| tx.send(ServerMessage::Closed).is_ok());
+        clients.retain(|_, c| c.tx.send(ServerMessage::Closed).is_ok());
         // Open questions end with their default (a question held for an
         // absent owner would otherwise wait forever). `clients` then `ui`.
         self.inner.ui.lock().unwrap().pending.clear();
@@ -568,7 +574,12 @@ impl Driver {
                         let Some(event) = event else { break };
                         match &event {
                             AgentEvent::AgentEnd { messages, stats, .. } => {
-                                end = Some((stats.clone(), run_error(messages)));
+                                end = Some((
+                                    stats.clone(),
+                                    stopped(messages)
+                                        .map(|reason| (RunOutcome::Stopped, reason))
+                                        .or_else(|| run_error(messages)),
+                                ));
                             }
                             AgentEvent::InputRejected { reason } => {
                                 rejected = Some(format!("input rejected: {reason}"));
@@ -710,6 +721,21 @@ fn run_error(messages: &[AgentMessage]) -> Option<(RunOutcome, String)> {
             message.clone().unwrap_or_else(|| "error".into()),
         )),
         (StopReason::Aborted, _) => Some((RunOutcome::Aborted, "aborted".into())),
+        _ => None,
+    }
+}
+
+/// The reason a run was stopped before it finished — a limit, loop
+/// detection, an extension's `Stop` — from the stop marker yoagent ends it
+/// with (its last message).
+fn stopped(messages: &[AgentMessage]) -> Option<String> {
+    let AgentMessage::Llm(Message::User { content, .. }) = messages.last()? else {
+        return None;
+    };
+    match content.first()? {
+        yoagent::Content::Text { text } if text.starts_with(AGENT_STOPPED_PREFIX) => {
+            Some(text.clone())
+        }
         _ => None,
     }
 }

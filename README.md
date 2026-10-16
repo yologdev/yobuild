@@ -34,7 +34,9 @@ and facts the model cannot make up. Of what it does:
   (browser, phone).
 
 The agent is mostly a *selection*. That example is about 600 lines of Rust,
-mostly wiring (a third is its scripted demo). yobuild turns the wiring into a manifest:
+mostly wiring (a third is its scripted demo). yobuild turns the wiring into a manifest
+(this one comes as `handoff.toml` in a later step of M2a: until then its prompt file
+is not there, and its plugins must be installed by hand at these versions):
 
 ```toml
 [agent]
@@ -52,7 +54,7 @@ config = { provider = "bing", bingMarket = "en-US" }
 [parts]
 ask_owner = true          # questions that do not block the run
 report    = "handoff"     # Done / Waiting on you / Decisions / Next, then facts
-gate      = "destructive" # ask before deleting or overwriting the owner's files
+gate      = "allow-list"  # ask before anything not known to be harmless
 
 [frontend]
 web = true
@@ -62,6 +64,20 @@ phone = true
 ```sh
 yobuild run handoff.toml
 ```
+
+To run an agent today, from a checkout (`yobuild run` loads its plugins'
+adapters from the checkout it was built from):
+
+```sh
+scripts/try-coding-agent.sh --setup-only   # adapters, npm ci
+cargo run -- run tests/fixtures/echo/agent.toml \
+  --scripted tests/fixtures/echo/script.json --once "echo hi"
+```
+
+A manifest's pi packages, stdio MCP servers and the rutis runtime are
+installed in `node_modules/` beside it, DSH plugins with
+`npm install --no-save --prefix adapters/dsh …`, at exactly their pinned
+versions; installing them is M2b.
 
 ## Documents
 

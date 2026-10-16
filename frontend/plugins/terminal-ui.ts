@@ -238,6 +238,8 @@ export default definePlugin<{ demo?: string }>({
           return yellow('  stopped')
         case 'rejected':
           return red(`  refused: ${m.error ?? 'input rejected'}`)
+        case 'stopped':
+          return yellow(`  stopped early: ${m.error ?? 'a limit'}`)
         default:
           return red(`  failed: ${m.error ?? 'unknown error'}`)
       }

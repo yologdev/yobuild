@@ -35,10 +35,11 @@ url = "2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "process", "signal"] }
 tokio-util = "0.7"
 tracing = "0.1"
+# The `yobuild` binary's log (stderr, or a file under a terminal UI).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "signal"] }
 tokio-tungstenite = "0.28"
 tempfile = "3"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
