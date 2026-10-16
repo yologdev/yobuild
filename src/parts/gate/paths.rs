@@ -135,8 +135,11 @@ pub(super) fn system_binary(path: &str) -> bool {
 /// A filesystem reuses a deleted file's inode (Linux's do at once), so the
 /// inode alone could make a file the owner wrote in place of the agent's
 /// pass for the agent's. Its birth time tells them apart; where the
-/// filesystem keeps none, its change time does — which an edit of the
-/// agent's own file changes too, so that file then asks: more, never less.
+/// filesystem keeps none (or reports 0), its change time does: the gate
+/// records a file again after each free call that changes it, so an edit
+/// keeps it the agent's. Either time is only as fine as the filesystem's
+/// clock (a millisecond or so; a second on some): a file replaced within
+/// that, at the same inode, still reads as the same file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Identity {
     dev: u64,
@@ -149,12 +152,15 @@ pub(super) struct Identity {
 pub(super) fn identity(path: &Path) -> Option<Identity> {
     use std::os::unix::fs::MetadataExt;
     let m = std::fs::symlink_metadata(path).ok()?;
-    let made = match m.created() {
-        Ok(born) => match born.duration_since(std::time::UNIX_EPOCH) {
-            Ok(after) => (after.as_secs() as i64, i64::from(after.subsec_nanos())),
-            Err(before) => (-(before.duration().as_secs() as i64), 0),
-        },
-        Err(_) => (m.ctime(), m.ctime_nsec()),
+    // A birth time of 0 is a filesystem that keeps none (some report it).
+    let born = m.created().ok().filter(|t| *t != std::time::UNIX_EPOCH);
+    let made = match born.map(|t| t.duration_since(std::time::UNIX_EPOCH)) {
+        Some(Ok(after)) => (after.as_secs() as i64, i64::from(after.subsec_nanos())),
+        Some(Err(before)) => {
+            let d = before.duration();
+            (-(d.as_secs() as i64), -i64::from(d.subsec_nanos()))
+        }
+        None => (m.ctime(), m.ctime_nsec()),
     };
     Some(Identity {
         dev: m.dev(),

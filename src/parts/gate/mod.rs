@@ -97,9 +97,12 @@ pub const READ_ONLY_TOOLS: [&str; 3] = ["read_file", "list_files", "search"];
 ///
 /// The agent's own files are those created by calls the gate let through
 /// without asking (a call the owner allowed makes nothing the agent's):
-/// recorded after the call, only if they exist, as that very file (device and inode;
-/// a hard link to the owner's file under that name is the owner's). Where
-/// file identity is not known (not Unix), nothing is the agent's own.
+/// recorded after the call, only if they exist, as that very file
+/// (device, inode and when it was made — a hard link
+/// to the owner's file under that name is the owner's, and so is a file
+/// the owner wrote in its place), and recorded again after each free call
+/// that changes them. Where file identity is not known (not Unix), nothing
+/// is the agent's own.
 ///
 /// **Its folder must be the shell's:** relative paths are judged against
 /// the `cwd` given to [`Gate::new`], so the agent's `bash` tool and file
@@ -294,8 +297,8 @@ struct Rules {
     start: Here,
     scratch: Option<PathBuf>,
     free_tools: HashSet<String>,
-    /// Files the agent made this session, as the files they were (device
-    /// and inode): it may overwrite or delete them while they still are.
+    /// Files the agent made this session, as the files they were
+    /// ([`Identity`]): it may overwrite or delete them while they still are.
     /// Shared by every clone of the gate.
     created: Arc<Mutex<HashMap<PathBuf, Identity>>>,
 }
@@ -340,7 +343,9 @@ impl Rules {
                     // A new file elsewhere too: one a program reads and runs
                     // (`~/.config/git/config`, a login item).
                     ask(format!("Change {file}, outside the project?"))
-                } else if writes && !path.exists() {
+                } else if !path.exists() || self.free(&path) {
+                    // Made, or the agent's own changed: recorded again (an
+                    // edit may alter its identity).
                     free(vec![path])
                 } else {
                     free(Vec::new())

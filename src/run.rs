@@ -130,9 +130,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // A terminal UI ends the session when it quits, as does a `once` run.
     let (session, driver) = Session::new(terminal || once);
     // What loads only in part: a warning every frontend gets (kept in the
-    // session's history for those that come later), and in the log.
+    // session's history for those that come later; `--once` prints it).
     for note in &checked.notes {
-        tracing::warn!("{note}");
+        tracing::info!("{note}");
         session.notice(NoticeLevel::Warning, note.clone());
     }
     let bridge = RutisBridge::install(root)?;
@@ -253,13 +253,22 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             _ => web.url(),
         };
         println!("{name}: {url}  (Ctrl+C to stop)");
+        if task.is_some() {
+            println!("{name}: the task starts when the page is open");
+        }
         served = Some(web);
     }
 
     // What the frontends see; in `once`, written out as it comes.
     let (seen, mut ended_runs, watching) = watch(&session, once);
-    if let Some(task) = task {
-        session.send(ClientMessage::Prompt { text: task });
+    // With a frontend, the task waits for it: a question its run asks must
+    // reach the owner (with nobody there it would get its default — a
+    // refusal — unseen). `--once` has no owner to wait for.
+    let mut task = task;
+    if once {
+        if let Some(task) = task.take() {
+            session.send(ClientMessage::Prompt { text: task });
+        }
     }
     let mut driving = tokio::spawn(driver.run(agent));
     let ctrl_c = tokio::signal::ctrl_c();
@@ -287,8 +296,13 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                 }
             }
             _ = tick.tick() => {
+                if task.is_some() && session.frontends() > 0 {
+                    let text = task.take().expect("a task");
+                    session.send(ClientMessage::Prompt { text });
+                }
                 // A row that fails, stops, or loses its runtime: said once.
-                for stopped in host.stopped() {
+                // (The terminal UI's own row is watched below.)
+                for stopped in host.stopped(&[ui]) {
                     if reported.insert(stopped.clone()) {
                         tracing::error!("{stopped}");
                         session.notice(NoticeLevel::Error, format!("A plugin stopped: {stopped}"));
@@ -319,11 +333,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             // Nobody is there to quit: the session would wait for ever.
             session.send(ClientMessage::Quit);
             let agent = driving.await.ok();
-            let status = format!("{:?}", host.status());
+            let why = host.stopped(&[]).join("; ");
             (
                 agent,
                 false,
-                Some(format!("the terminal UI stopped: {status}")),
+                Some(format!("the terminal UI stopped: {why}")),
             )
         }
     };
@@ -488,7 +502,18 @@ impl Prompt {
     fn fill(&self, cwd: &Path, scratch: Option<&Scratch>) -> String {
         let cwd = cwd.display().to_string();
         match &self.plain {
-            Some(name) => format!("You are {name}, an agent working in {cwd}.{}", self.text),
+            Some(name) => {
+                let scratch = scratch.map_or_else(String::new, |s| {
+                    format!(
+                        " Your scratch folder, for what is not a deliverable: {}.",
+                        s.path().display()
+                    )
+                });
+                format!(
+                    "You are {name}, an agent working in {cwd}.{scratch}{}",
+                    self.text
+                )
+            }
             None => {
                 let text = self.text.replace("{cwd}", &cwd);
                 match scratch {
@@ -746,7 +771,7 @@ async fn probe_services(
             // Written whole once: an unreadable answer is a broken one.
             break Ok(text);
         }
-        let failures = host.failures();
+        let failures = host.stopped(&[]);
         if !failures.is_empty() {
             break Err(format!(
                 "the DSH service check failed: {}",
@@ -798,7 +823,7 @@ async fn wait_for(
     };
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        let failures = host.failures();
+        let failures = host.stopped(&[]);
         if !failures.is_empty() {
             return Err(failures.join("; ").into());
         }
@@ -935,11 +960,19 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
         return Err(failed(&"the server lists no tools").into());
     }
     if let Some(bad) = tools.iter().find(|t| !tool_name(t.name())) {
-        return Err(failed(&format!(
-            "its tool {:?} cannot be offered to a model (names take up to 64 letters, digits, _ and -)",
-            bad.name()
-        ))
-        .into());
+        let own = &bad.name()[server.name.len() + 2..];
+        let why = match tool_name(own) {
+            // Too long only with the prefix.
+            true => format!(
+                "with the prefix {}__ its tool {own:?} is {} characters, more than 64: give the server a shorter `name`",
+                server.name,
+                bad.name().len()
+            ),
+            false => format!(
+                "its tool {own:?} cannot be offered to a model (names take up to 64 letters, digits, _ and -)"
+            ),
+        };
+        return Err(failed(&why).into());
     }
     Ok(tools
         .into_iter()
@@ -1037,6 +1070,16 @@ mod tests {
             .unwrap()
             .fill(Path::new("/w"), None);
         assert_eq!(plain, "You are a, an agent working in /w.");
+        let named = Prompt::read(&manifest(dir.path(), ""))
+            .unwrap()
+            .fill(Path::new("/w"), Some(&scratch));
+        assert_eq!(
+            named,
+            format!(
+                "You are a, an agent working in /w. Your scratch folder, for what is not a deliverable: {}.",
+                scratch.path().display()
+            )
+        );
         let gone = manifest(dir.path(), "prompt = \"./gone.md\"\n");
         assert!(Prompt::read(&gone)
             .err()

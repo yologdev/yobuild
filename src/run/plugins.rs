@@ -443,7 +443,7 @@ fn rows_of_bundle(
         let mut built = Row::new(format!("{id}:{row_id}"), name).runtime("dsh");
         match (at, &config, row.get("config")) {
             (0, Some(config), _) => built = built.config(Json::Object(config.clone())),
-            (_, _, Some(own)) => built = built.config(own.clone()),
+            (_, _, Some(own)) if !own.is_null() => built = built.config(own.clone()),
             _ => {}
         }
         out.push(built);

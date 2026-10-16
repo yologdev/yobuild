@@ -340,6 +340,11 @@ mod web {
     impl Page {
         /// Starts it with `task`, connects once it serves.
         pub async fn open(dir: &std::path::Path, task: &str) -> Page {
+            Self::open_after(dir, task, Duration::ZERO).await
+        }
+
+        /// The same, connecting `late` after it serves.
+        pub async fn open_after(dir: &std::path::Path, task: &str, late: Duration) -> Page {
             let mut child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
                 .args(["run", "agent.toml", "--scripted", "script.json"])
                 .args(["--web", "127.0.0.1:0", task])
@@ -355,6 +360,7 @@ mod web {
             // "a: http://127.0.0.1:PORT/?t=TOKEN  (Ctrl+C to stop)"
             let url = line.split_whitespace().nth(1).expect("the URL");
             let ws = url.replace("http://", "ws://").replace("/?t=", "/ws?t=");
+            tokio::time::sleep(late).await;
             let (socket, _) = tokio_tungstenite::connect_async(ws).await.unwrap();
             Page { child, socket }
         }
@@ -380,14 +386,17 @@ mod web {
         /// Ctrl+C, then its exit code and stderr.
         pub fn interrupt(mut self) -> (Option<i32>, String) {
             use std::io::Read;
+            // Read while it ends: a full pipe would keep it from ending.
+            let mut err = self.child.stderr.take().expect("piped");
+            let reading = std::thread::spawn(move || {
+                let mut text = String::new();
+                let _ = err.read_to_string(&mut text);
+                text
+            });
             let pid = self.child.id().to_string();
             Command::new("kill").args(["-INT", &pid]).status().unwrap();
             let status = self.child.wait().unwrap();
-            let mut stderr = String::new();
-            if let Some(mut err) = self.child.stderr.take() {
-                let _ = err.read_to_string(&mut stderr);
-            }
-            (status.code(), stderr)
+            (status.code(), reading.join().unwrap_or_default())
         }
     }
 }
@@ -523,4 +532,29 @@ fn facts_count_the_questions_left_open() {
         stderr.contains("; 1 question(s) waiting on you."),
         "{stderr}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_task_waits_for_the_page_so_its_question_reaches_the_owner() {
+    // Its first call asks (a file outside the project). Started before the
+    // page opened, nobody would be there and it would be refused unseen.
+    let outside = tempfile::tempdir().unwrap();
+    let dir = project(
+        "",
+        &format!(
+            r#"[{{ "tools": [{{ "name": "write_file", "arguments": {{ "path": "{}", "content": "x" }} }}] }}, {{ "text": "done" }}]"#,
+            outside.path().join("x.md").display()
+        ),
+    );
+    let mut page =
+        web::Page::open_after(dir.path(), "go", std::time::Duration::from_millis(1500)).await;
+    let asked = page.until("uiRequest").await;
+    assert!(
+        asked["request"]["title"]
+            .as_str()
+            .is_some_and(|t| t.contains("outside the project")),
+        "{asked}"
+    );
+    let (code, stderr) = page.interrupt();
+    assert_eq!(code, Some(1), "{stderr}");
 }

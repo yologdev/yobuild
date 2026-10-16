@@ -492,30 +492,38 @@ impl PluginHost {
         self.wait_running(started).await
     }
 
-    /// The loaded rows that failed or stopped, each with why: they do not
-    /// come back on their own.
-    pub fn failures(&self) -> Vec<String> {
-        self.rows
+    /// What of the loaded plugins does not run now, each with why: a row
+    /// that failed or stopped itself; and, per runtime, the rows waiting —
+    /// a runtime that died leaves its rows `Pending`, and nothing restarts
+    /// it — said once for the runtime, without their passing states.
+    /// `except` rows are left out (one the caller watches itself).
+    pub fn stopped(&self, except: &[&str]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut waiting: Vec<(String, Vec<&str>)> = Vec::new();
+        for row in self
+            .rows
             .iter()
-            .filter_map(|row| match self.state(&row.id) {
-                Started::Failed(why) => Some(why),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The loaded rows that do not run now, each with why: failed, stopped,
-    /// or waiting — a row whose runtime died waits for it (`Pending`), and
-    /// nothing restarts it.
-    pub fn stopped(&self) -> Vec<String> {
-        self.rows
-            .iter()
-            .filter_map(|row| match self.state(&row.id) {
-                Started::Running => None,
-                Started::Failed(why) => Some(why),
-                Started::Waiting(what) => Some(format!("plugin {what} is not running")),
-            })
-            .collect()
+            .filter(|r| !except.contains(&r.id.as_str()))
+        {
+            match self.state(&row.id) {
+                Started::Running => {}
+                Started::Failed(why) => out.push(why),
+                Started::Waiting(_) => {
+                    let runtime = row.runtime.clone().unwrap_or_else(|| "?".into());
+                    match waiting.iter_mut().find(|(r, _)| *r == runtime) {
+                        Some((_, rows)) => rows.push(&row.id),
+                        None => waiting.push((runtime, vec![&row.id])),
+                    }
+                }
+            }
+        }
+        for (runtime, rows) in waiting {
+            out.push(format!(
+                "the `{runtime}` runtime is not running (its plugins wait: {})",
+                rows.join(", ")
+            ));
+        }
+        out
     }
 
     /// Whether the row `id` runs, waits, or failed (and why).

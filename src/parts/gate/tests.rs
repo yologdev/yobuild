@@ -2053,3 +2053,38 @@ fn the_latest_reviews_pairs() {
         ],
     );
 }
+
+// -- the agent's own files, recorded again when changed ----------------------
+
+/// A free call that changes one of the agent's own files records it again
+/// (its identity may change: a new file in its place, or a new change time
+/// where the filesystem keeps no birth time); a change of the owner's file
+/// never makes it the agent's.
+#[test]
+fn a_change_to_the_agents_own_file_records_it_again() {
+    let p = Project::new();
+    p.agent_writes("own.txt");
+    let own = p.root().join("own.txt");
+    let creates = |command: &str| match p.rules.check("bash", &json!({ "command": command })) {
+        Check::Free { creates } => creates,
+        asked => panic!("{command}: {asked:?}"),
+    };
+    for command in [
+        "echo y >> own.txt", "chmod +x own.txt", "touch own.txt", "echo z > own.txt",
+    ] {
+        assert_eq!(creates(command), std::slice::from_ref(&own), "{command}");
+    }
+    let tool = |tool: &str| match p.rules.check(tool, &json!({ "path": own })) {
+        Check::Free { creates } => creates,
+        asked => panic!("{tool}: {asked:?}"),
+    };
+    assert_eq!(tool("write_file"), std::slice::from_ref(&own));
+    assert_eq!(tool("edit_file"), std::slice::from_ref(&own));
+    // Appending to the owner's file is free (the work), but records nothing.
+    assert_eq!(creates("echo y >> owner.txt"), Vec::<PathBuf>::new());
+    let owners = p.root().join("owner.txt");
+    match p.rules.check("edit_file", &json!({ "path": owners })) {
+        Check::Free { creates } => assert!(creates.is_empty(), "{creates:?}"),
+        asked => panic!("{asked:?}"),
+    }
+}

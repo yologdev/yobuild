@@ -556,36 +556,51 @@ async fn a_plugin_that_stops_during_the_session_is_said() {
     if !installed("dsh") {
         return;
     }
-    // It starts, then a while later takes its runtime down with it (an
-    // error nothing catches), while the run is still going.
+    // It starts, then — once the run makes a file it waits for — takes its
+    // runtime down with it (an error nothing catches), while the run is
+    // still going.
     let dir = tempfile::tempdir().unwrap();
+    let signal = dir.path().join("crash-now");
     std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
     std::fs::write(
         dir.path().join("fails-later.ts"),
-        "export const name = 'fails-later'\n\
-         export function apply(ctx: any) {\n\
-           setTimeout(() => { throw new Error('gave up') }, 4000)\n\
+        "import { existsSync } from 'node:fs'\n\
+         export const name = 'fails-later'\n\
+         export function apply(_ctx: any, config: { file: string }) {\n\
+           const timer = setInterval(() => {\n\
+             if (existsSync(config.file)) { clearInterval(timer); setTimeout(() => { throw new Error('gave up') }) }\n\
+           }, 50)\n\
          }\n",
     )
     .unwrap();
     std::fs::write(
         dir.path().join("script.json"),
-        r#"[{ "tools": [{ "name": "bash", "arguments": { "command": "sleep 7" } }] }, { "text": "done" }]"#,
+        format!(
+            r#"[{{ "tools": [{{ "name": "bash", "arguments": {{ "command": "touch {}; sleep 2" }} }}] }}, {{ "text": "done" }}]"#,
+            signal.display()
+        ),
     )
     .unwrap();
     std::fs::write(
         dir.path().join("agent.toml"),
         format!(
-            "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\ndsh = \"{}\"\n[parts]\ngate = \"off\"\n",
-            dir.path().join("fails-later.ts").display()
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\ndsh = \"{}\"\nconfig = {{ file = \"{}\" }}\n[parts]\ngate = \"off\"\n",
+            dir.path().join("fails-later.ts").display(),
+            signal.display()
         ),
     )
     .unwrap();
     let ended = run_once(dir.path()).await;
-    let said = ended.notices.iter().any(|(level, message)| {
-        *level == yobuild::frontend::NoticeLevel::Error
-            && message.starts_with("A plugin stopped: plugin plugin:fails-later (")
-            && message.ends_with(") is not running")
-    });
+    // Once for the runtime, naming its plugins.
+    let said: Vec<&String> = ended
+        .notices
+        .iter()
+        .filter(|(level, _)| *level == yobuild::frontend::NoticeLevel::Error)
+        .map(|(_, message)| message)
+        .collect();
+    assert_eq!(said.len(), 1, "{said:?}");
+    let said = said[0]
+        .starts_with("A plugin stopped: the `dsh` runtime is not running (its plugins wait: ")
+        && said[0].contains("plugin:fails-later");
     assert!(said, "{:?}", ended.notices);
 }
