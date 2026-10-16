@@ -9,8 +9,11 @@
 //!   without waiting, a required report, host-counted facts, a scratch
 //!   folder.
 //!
-//! The approval gate, the manifest and MCP servers are coming (see
-//! `docs/roadmap.md`). Not published yet and without an API promise.
+//! - [`manifest`]: an agent in one TOML file, read strictly.
+//!
+//! `yobuild run` and MCP servers are coming (see `docs/roadmap.md`). Not
+//! published yet and without an API promise.
 
 pub mod frontend;
+pub mod manifest;
 pub mod parts;

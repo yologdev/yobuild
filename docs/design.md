@@ -73,7 +73,7 @@ headers = { Authorization = "Bearer ${EXAMPLE_MCP_TOKEN}" }  # ${…} from the e
 ask_owner = true                     # non-blocking questions; answers arrive as steering
 report    = "handoff"                # or a list of required sections
 facts     = true                     # host-counted facts after each report
-gate      = "destructive"            # approval before deleting/overwriting; "off" to disable
+gate      = "allow-list"             # the approval gate (the default); "off" to disable
 scratch   = true                     # a scratch dir the gate leaves alone
 
 [dsh]
@@ -94,6 +94,16 @@ Rules:
 - **One plugin, one line of intent.** Configuration is the plugin's own;
   yobuild does not translate it.
 - **Unknown keys are errors.** A typo in a safety setting must not pass.
+  Every error names the file, line and column.
+- **Secrets come from the environment.** A header or server variable whose
+  name looks like a secret (`Authorization`, `*token*`, `*key*`,
+  `*secret*`, `*password*`, `*cookie*`) must be a `${NAME}` reference; a
+  value written into the file is refused.
+- **HTTP servers over https** (plain http only on this machine).
+- **Plugins**: each `[[plugin]]` names exactly one of `pi`, `dsh`, `rutis`
+  (a local file, with its `runtime`: node, bun, python, go), and its own
+  `config`. Each `[[mcp]]` names exactly one of `npm` (stdio, with `args`
+  and `env`) or `url` (HTTP, with `headers`).
 - **A budget needs a price.** `budget_usd` uses yoagent's `Budget::for_model`
   with the bundled price table (`prices::enable_bundled()`, called once at
   start). A manifest that sets it for an unpriced model is refused:
