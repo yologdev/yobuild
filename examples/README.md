@@ -25,7 +25,8 @@ Most agents assume you are watching them. A handoff agent assumes you are not:
 
   Files it created itself, and its own scratch folder, stay free, so it can keep its deliverable up to date. These are guardrails, not a sandbox:
   - targeted edits of your existing files (the edit tool) go through;
-  - builds and tests run your project's code as it is, including what the agent edited or added (a test, a `build.rs`, a `Makefile` rule); the gate does not judge what code does.
+  - builds and tests run your project's code as it is, including what the agent edited or added (a test, a `build.rs`, a `Makefile` rule); the gate does not judge what code does;
+  - it guards your files against being changed, not your data against being read or sent: anything the agent can read (`.env` included) it can also send.
 
   For a guarantee, run it in a container or on a disposable copy.
 - **What it says is checked.**

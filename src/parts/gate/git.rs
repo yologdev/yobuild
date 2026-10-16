@@ -139,9 +139,11 @@ fn subcommand(name: &str, rest: &[Word]) -> Option<(Spec, Judge)> {
         "checkout" => pair(CHECKOUT, |p, _| {
             ok_if((p.has("-b") || p.has("--orphan")) && p.operands.len() <= 1)
         }),
+        // A new branch, or another one: git refuses to switch over local
+        // changes it would lose (`--discard-changes`, `-f` are not listed).
         "switch" => pair(SWITCH, |p, _| {
             let creates = ["-c", "--create", "--orphan"].iter().any(|o| p.has(o));
-            ok_if(creates && p.operands.len() <= 1)
+            ok_if(p.operands.len() <= 1 && (creates || p.operands.len() == 1))
         }),
         "restore" => pair(RESTORE, |p, _| ok_if(p.has("--staged") || p.has("-S"))),
         "rm" => pair(RM, |p, _| ok_if(p.has("--cached"))),

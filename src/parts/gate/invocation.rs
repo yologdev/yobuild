@@ -45,11 +45,47 @@ const SAFE_GIT: [&str; 7] = [
 
 /// Whether a program may be given this variable.
 pub(super) fn safe_env(assignment: &Word) -> bool {
-    let name = assignment.text.split('=').next().unwrap_or("");
+    let (name, value) = assignment
+        .text
+        .split_once('=')
+        .unwrap_or((&assignment.text, ""));
     if name.starts_with("GIT_") {
         return assignment.known && SAFE_GIT.contains(&assignment.text.as_str());
     }
+    if name == "RUSTFLAGS" || name == "RUSTDOCFLAGS" {
+        return assignment.known && lint_flags(value);
+    }
     SAFE_ENV.contains(&name) || name.starts_with("LC_")
+}
+
+/// Rust flags that only set lint levels (`-Dwarnings`, `-D warnings`), not
+/// `-C linker=…` or a plugin.
+fn lint_flags(value: &str) -> bool {
+    let mut words = value.split_whitespace();
+    while let Some(word) = words.next() {
+        let lint = match word {
+            "-D" | "-W" | "-A" | "-F" => words.next().unwrap_or(""),
+            word => match word.strip_prefix(['-']) {
+                Some(rest) if rest.starts_with(['D', 'W', 'A', 'F']) => &rest[1..],
+                _ => return false,
+            },
+        };
+        let name = |c: char| c.is_ascii_lowercase() || matches!(c, '_' | '-' | ':');
+        if lint.is_empty() || !lint.chars().all(name) {
+            return false;
+        }
+    }
+    true
+}
+
+/// A plain shell variable name (`[A-Za-z_][A-Za-z0-9_]*`): not `a[$(…)]`,
+/// whose subscript bash evaluates as arithmetic.
+pub(super) fn identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Whether a shell variable may be set (`x=1` alone, `read x`): a lowercase
@@ -57,7 +93,7 @@ pub(super) fn safe_env(assignment: &Word) -> bool {
 /// program reads (`PATH`, `IFS`, `BASH_ENV`), so it must be a safe one.
 pub(super) fn safe_variable(assignment: &Word) -> bool {
     let name = assignment.text.split('=').next().unwrap_or("");
-    name.chars().any(|c| c.is_ascii_lowercase()) || safe_env(assignment)
+    identifier(name) && (name.chars().any(|c| c.is_ascii_lowercase()) || safe_env(assignment))
 }
 
 /// A wrapper: a program that runs the command after its own arguments.

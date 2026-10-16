@@ -30,7 +30,11 @@ pub(super) struct Spec {
 }
 
 impl Spec {
+    /// Every name `-x` (one letter) or `--name`; checked when the spec is
+    /// built (at compile time for a `const` spec).
     pub const fn new(flags: &'static [&'static str], valued: &'static [&'static str]) -> Self {
+        check_names(flags, false);
+        check_names(valued, false);
         Self {
             flags,
             valued,
@@ -50,9 +54,25 @@ impl Spec {
         self
     }
 
-    pub const fn single_dash(mut self) -> Self {
-        self.single_dash = true;
-        self
+    /// Long options with one dash, as Go's flags (`-tags`): names `-name`,
+    /// checked as for [`new`](Self::new).
+    pub const fn single_dash(
+        flags: &'static [&'static str],
+        valued: &'static [&'static str],
+    ) -> Self {
+        check_names(flags, true);
+        check_names(valued, true);
+        Self {
+            flags,
+            valued,
+            numbers: false,
+            posix: false,
+            single_dash: true,
+        }
+    }
+
+    fn knows(&self, name: &str) -> bool {
+        name == "-NUM" || self.flag(name).is_some() || self.valued(name).is_some()
     }
 
     fn flag(&self, name: &str) -> Option<&'static str> {
@@ -64,20 +84,44 @@ impl Spec {
     }
 }
 
+/// Panics on a name that is not an option: one that could never be given
+/// (the program would ask for it, but a judge looking it up would never see it).
+const fn check_names(names: &[&str], single_dash: bool) {
+    let mut i = 0;
+    while i < names.len() {
+        let name = names[i].as_bytes();
+        let fine = match (name, single_dash) {
+            ([b'-', b'-', _, ..], false) => true,
+            ([b'-', c], false) => *c != b'-',
+            ([b'-', c, ..], true) => *c != b'-',
+            _ => false,
+        };
+        if !fine {
+            panic!("an option name that could never be given");
+        }
+        i += 1;
+    }
+}
+
 /// A program's arguments, read by its [`Spec`].
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct Parsed {
+    spec: Spec,
     /// Options in order, with their values.
     pub options: Vec<(&'static str, Option<Word>)>,
     pub operands: Vec<Word>,
 }
 
 impl Parsed {
+    /// Whether `name` was given. A name not in the spec is a judge's
+    /// mistake (it would never be seen): it fails in tests.
     pub fn has(&self, name: &str) -> bool {
+        debug_assert!(self.spec.knows(name), "{name} is not in the spec");
         self.options.iter().any(|(o, _)| *o == name)
     }
 
     pub fn value(&self, name: &str) -> Option<&Word> {
+        debug_assert!(self.spec.knows(name), "{name} is not in the spec");
         self.options
             .iter()
             .find(|(o, _)| *o == name)
@@ -85,6 +129,10 @@ impl Parsed {
     }
 
     pub fn values<'a>(&'a self, names: &'a [&str]) -> impl Iterator<Item = &'a Word> {
+        debug_assert!(
+            names.iter().all(|n| self.spec.knows(n)),
+            "{names:?} are not all in the spec"
+        );
         self.options
             .iter()
             .filter(move |(o, _)| names.contains(o))
@@ -107,7 +155,11 @@ pub(super) fn parse(spec: &Spec, args: &[Word]) -> Option<Parsed> {
 /// Reads options and up to `operands` operands, stopping there (a wrapper's
 /// own arguments before the command it runs). Returns where it stopped.
 pub(super) fn parse_until(spec: &Spec, args: &[Word], operands: usize) -> Option<(Parsed, usize)> {
-    let mut out = Parsed::default();
+    let mut out = Parsed {
+        spec: *spec,
+        options: Vec::new(),
+        operands: Vec::new(),
+    };
     let mut i = 0;
     let mut options_end = false;
     while i < args.len() {
@@ -147,10 +199,7 @@ pub(super) fn parse_until(spec: &Spec, args: &[Word], operands: usize) -> Option
             match (joined, spec.flag(&name), spec.valued(&name)) {
                 (None, Some(option), _) => out.options.push((option, None)),
                 (Some(value), _, Some(option)) => {
-                    let value = Word {
-                        text: value.to_owned(),
-                        ..word.clone()
-                    };
+                    let value = word.part(value);
                     out.options.push((option, Some(value)));
                 }
                 (None, None, Some(option)) => {
@@ -175,10 +224,7 @@ pub(super) fn parse_until(spec: &Spec, args: &[Word], operands: usize) -> Option
                     i += 1;
                     next_value(args, i)?
                 } else {
-                    Word {
-                        text: rest,
-                        ..word.clone()
-                    }
+                    word.part(&rest)
                 };
                 out.options.push((option, Some(value)));
                 break;
@@ -287,7 +333,7 @@ mod tests {
 
     #[test]
     fn single_dash_long_options() {
-        const GO: Spec = Spec::new(&["-v"], &["-o", "-tags"]).single_dash();
+        const GO: Spec = Spec::single_dash(&["-v"], &["-o", "-tags"]);
         let p = parse(&GO, &words("-tags=x --o out -v ./...")).unwrap();
         assert_eq!(p.value("-tags").unwrap().text, "x");
         assert_eq!(p.value("-o").unwrap().text, "out");

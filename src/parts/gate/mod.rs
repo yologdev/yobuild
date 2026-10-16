@@ -48,8 +48,9 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 /// **An allow-list.** A shell command (`bash`) is free only when every
 /// command in it runs a program the gate knows, with options it knows, and
 /// everything it would write, append to, delete or run is allowed:
-/// - **writing** (replacing): a new file, one the agent made, or in its
-///   [`Scratch`]; **deleting** or moving away: only those of the agent's;
+/// - **writing** (replacing): a new file inside the project, one the agent
+///   made, or in its [`Scratch`] (a new file elsewhere asks: it could be
+///   one a program reads and runs); **deleting** or moving away: only those of the agent's;
 ///   **touching** or **changing a mode** (`chmod`, `chown`): a new file or
 ///   the agent's own; **appending**, making a folder or a file: inside the
 ///   project or the agent's own; never a name starting `.env`, nor `.git`
@@ -60,7 +61,9 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 /// - **programs**: readers, and writers whose targets are judged as above
 ///   (`cp`, `mv`, `tee`, `tar -c`, `curl -o`, …); builds and tests, with the
 ///   line inside the project (`cargo test`, `go test ./...`, `npm test`,
-///   `make`, `pytest`); git that reads, or adds, commits and shares without
+///   `pytest`; `make` and `npm run` only for targets that build or check:
+///   `test`, `build`, `lint`, …; checkers through `npx` only when the
+///   project has them installed); git that reads, or adds, commits and shares without
 ///   discarding the working tree (`reset --soft`, `commit --amend` move
 ///   history; the reflog keeps it). Each
 ///   with its own list of options: an option not on it asks, as does an
@@ -71,14 +74,17 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 ///
 /// The line is read as bash reads it — quotes, escapes, operators,
 /// redirections, heredocs, keywords, comments, line continuations — and
-/// `cd` is followed as bash's logical `cd` does it. Everything it cannot
+/// `cd` is followed as bash's logical `cd` does it. Where bash would
+/// evaluate a value as code (arithmetic on a variable, `${!x}`, a subscript
+/// that is not a literal number, `${x@P}`), it asks: a value set earlier
+/// (`x='a[$(rm f)]'`) would run. Everything it cannot
 /// read asks: an expansion where an option or a path could be, anything
 /// naming a path after a `cd` it cannot follow, a name linked earlier in
 /// the same line.
 ///
 /// File tools: `write_file` (or pi's `write`) over a file that exists,
-/// `edit_file` (`edit`) of a file outside the project that is not the
-/// agent's, either of `.env*` or `.git`, or of a path it cannot read (not a
+/// either tool on a file outside the project that is not the agent's (a
+/// new one too), either of `.env*` or `.git`, or of a path it cannot read (not a
 /// string, `~`, `@`), ask. Other tools: free when named in
 /// [`with_free_tools`](Self::with_free_tools) (by default
 /// [`READ_ONLY_TOOLS`]), else they ask.
@@ -96,9 +102,13 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 /// **Not a sandbox.** Builds, tests and the owner's scripts run the
 /// project's code as it is — including what the agent has edited, since
 /// editing a file is free (a test it wrote, a `build.rs`, a `Makefile`, a
-/// `package.json` script). The gate keeps the agent from deleting or
-/// replacing the owner's files by command; it does not judge what code
-/// does. For a guarantee, run the agent in a container or a disposable copy.
+/// `package.json` script) — and the owner's scripts run with any
+/// arguments. The gate keeps the agent from deleting or replacing the
+/// owner's files by command; it does not judge what code does, and it does
+/// not keep data in: reading is free (`.env` included, as it is to the
+/// `read_file` tool), and so is sending what was read (`curl`, `git
+/// push`). For a guarantee, run the agent in a container or a disposable
+/// copy, without secrets it should not have.
 ///
 /// It is a required extension; it judges a call again when a later
 /// extension rewrote it; its state (the files the agent created) lasts
@@ -219,8 +229,10 @@ impl RunHooks for Gate {
                     )
                 }
             }
+            // Allowed by the owner: what it makes stays theirs.
+            return ToolDecision::Allow;
         }
-        // The files it makes become the agent's own once it has run.
+        // The files a free call makes become the agent's own once it has run.
         if !check.creates.is_empty() {
             self.pending
                 .lock()
@@ -302,8 +314,10 @@ impl Rules {
                     ask(format!("Change the protected file {file}?"))
                 } else if writes && self.owners(&path) {
                     ask(format!("Overwrite the existing file {file}?"))
-                } else if !writes && !path.starts_with(&self.start.physical) && !self.free(&path) {
-                    ask(format!("Edit {file}, outside the project?"))
+                } else if !path.starts_with(&self.start.physical) && !self.free(&path) {
+                    // A new file elsewhere too: one a program reads and runs
+                    // (`~/.config/git/config`, a login item).
+                    ask(format!("Change {file}, outside the project?"))
                 } else if writes && !path.exists() {
                     free(vec![path])
                 } else {

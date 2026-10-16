@@ -23,6 +23,16 @@ impl Word {
         }
     }
 
+    /// A word made of part of this one (`--file=X`'s `X`): unknown if this
+    /// one is, and then it could begin with anything.
+    pub fn part(&self, text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            known: self.known,
+            opens_unknown: !self.known,
+        }
+    }
+
     fn empty() -> Self {
         Self::literal("")
     }
@@ -130,15 +140,110 @@ fn text(s: &[char], from: usize, to: usize) -> String {
     s[from.min(to)..to].iter().collect()
 }
 
+/// Whether the `${ … }` at `at` expands without evaluating anything as code.
+/// bash evaluates array subscripts, `${x:offset}` and the value of a
+/// variable used in arithmetic as arithmetic, and arithmetic runs any `$( … )`
+/// in a subscript it meets (`x='a[$(rm f)]'; echo ${a[x]}`); `${!x}`
+/// expands a name it reads at run time, `${x@P}` a prompt. Only the plain
+/// forms are read: `${name}`, `${#name}`, `${name[0]}`, `${name[@]}`, and
+/// `${name<op>word}` for the default, pattern and case operators.
+fn plain_parameter(s: &[char], at: usize) -> bool {
+    // The body up to the matching `}`.
+    let mut depth = 0usize;
+    let mut end = None;
+    for (i, c) in s.iter().enumerate().skip(at + 1) {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        return false;
+    };
+    let body = &s[at + 2..end];
+    let mut i = usize::from(body.first() == Some(&'#') && body.len() > 1);
+    let length = i == 1;
+    let start = i;
+    match body.get(i) {
+        Some(c) if c.is_ascii_alphabetic() || *c == '_' => {
+            while body.get(i).is_some_and(|c| is_word_char(*c)) {
+                i += 1;
+            }
+        }
+        Some(c) if c.is_ascii_digit() => {
+            while body.get(i).is_some_and(char::is_ascii_digit) {
+                i += 1;
+            }
+        }
+        Some('@' | '*' | '#' | '?' | '-' | '$') => i += 1,
+        _ => return false,
+    }
+    if i == start {
+        return false;
+    }
+    if body.get(i) == Some(&'[') {
+        let Some(close) = body[i..].iter().position(|c| *c == ']') else {
+            return false;
+        };
+        let subscript = &body[i + 1..i + close];
+        let literal = matches!(subscript, ['@'] | ['*'])
+            || (!subscript.is_empty() && subscript.iter().all(char::is_ascii_digit));
+        if !literal {
+            return false;
+        }
+        i += close + 1;
+    }
+    match (body.get(i), length) {
+        (None, _) => true,
+        (Some(_), true) => false,
+        (Some(':'), false) => match body.get(i + 1) {
+            Some('-' | '=' | '+' | '?') => true,
+            // `${x:offset:length}`: only literal numbers.
+            _ => body[i + 1..]
+                .iter()
+                .all(|c| c.is_ascii_digit() || matches!(c, ':' | ' ' | '-')),
+        },
+        (Some('-' | '=' | '+' | '?' | '#' | '%' | '/' | '^' | ','), false) => true,
+        _ => false,
+    }
+}
+
+/// Arithmetic `$(( … ))` text bash evaluates without running anything:
+/// literal numbers and operators only (a variable's value would be
+/// evaluated as arithmetic too).
+fn plain_arithmetic(body: &[char]) -> bool {
+    body.iter()
+        .all(|c| c.is_ascii_digit() || c.is_whitespace() || "+-*/%()<>=!&|^~?:,".contains(*c))
+}
+
+/// Whether the `$` at `at` starts an expansion the gate can read: not
+/// `$[ … ]` (old arithmetic), and a `${ … }` only in its plain forms.
+fn plain_dollar(s: &[char], at: usize) -> bool {
+    match s.get(at + 1) {
+        Some('[') => false,
+        Some('{') => plain_parameter(s, at),
+        _ => true,
+    }
+}
+
 /// The commands that expanding `body` runs (as in double quotes or an
-/// unquoted heredoc body): every `$( … )` and backquoted command, and those
-/// inside `$(( … ))`. `None` when one is not closed.
+/// unquoted heredoc body): every `$( … )` and backquoted command. `None`
+/// when one is not closed, or when it holds an expansion bash would
+/// evaluate as code (see [`plain_dollar`]).
 fn substitutions(body: &[char]) -> Option<Vec<String>> {
     let mut runs = Vec::new();
     let mut i = 0;
     while i < body.len() {
         match body[i] {
             '\\' => i += 1,
+            '$' if !plain_dollar(body, i) => return None,
             '`' => {
                 let end = end_of_backquote(body, i)?;
                 runs.push(text(body, i + 1, end).replace("\\`", "`"));
@@ -151,8 +256,9 @@ fn substitutions(body: &[char]) -> Option<Vec<String>> {
                 let arithmetic =
                     body.get(i + 2) == Some(&'(') && closing(body, i + 2) == Some(end - 1);
                 if arithmetic {
-                    // Arithmetic `$(( … ))`: only what it substitutes runs.
-                    runs.extend(substitutions(&body[i + 3..end - 1])?);
+                    if !plain_arithmetic(&body[i + 3..end - 1]) {
+                        return None;
+                    }
                 } else {
                     runs.push(text(body, i + 2, end));
                 }
@@ -258,10 +364,13 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
     macro_rules! finish_command {
         ($after:expr) => {
             finish_word!();
+            // A command that only feeds a heredoc keeps its place: what
+            // the body runs, runs there (`<<EOF; cd sub` runs it before the cd).
             if !cur.words.is_empty()
                 || !cur.truncates.is_empty()
                 || !cur.appends.is_empty()
                 || !cur.runs.is_empty()
+                || heredocs.iter().any(|h| h.feeds == cur_id)
             {
                 cur.after = $after.to_string();
                 out.push((Some(cur_id), Item::Command(std::mem::take(&mut cur))));
@@ -455,6 +564,9 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                 // bash expands `~` at a word's start, and after `=` or `:`
                 // (`of=~/x`, `PATH=a:~/b`).
                 let tilde = c == '~' && (w.text.is_empty() || w.text.ends_with(['=', ':']));
+                if c == '$' && !plain_dollar(&s, i) {
+                    return None;
+                }
                 if matches!(c, '$' | '*' | '?' | '{' | '[') || tilde {
                     w.expands();
                 }
@@ -465,22 +577,13 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
     }
     finish_command!("end");
 
-    // What heredoc bodies run goes with the command they feed (or on its own
-    // when that command had nothing else).
+    // What heredoc bodies run goes with the command they feed, which kept
+    // its place in the line.
     for (feeds, runs) in fed {
-        if runs.is_empty() {
-            continue;
-        }
         match out.iter_mut().find(|(id, _)| *id == Some(feeds)) {
             Some((_, Item::Command(cmd))) => cmd.runs.extend(runs),
-            _ => out.push((
-                Some(feeds),
-                Item::Command(Simple {
-                    runs,
-                    after: "end".into(),
-                    ..Simple::default()
-                }),
-            )),
+            _ if runs.is_empty() => {}
+            _ => return None,
         }
     }
     Some(out.into_iter().map(|(_, item)| item).collect())
@@ -532,6 +635,32 @@ mod tests {
         assert_eq!(words(&c[1]), ["ls"]);
         let c = commands("cat <<'EOF'\n$(date)\nEOF");
         assert!(c[0].runs.is_empty());
+    }
+
+    #[test]
+    fn a_heredoc_alone_keeps_its_place() {
+        let c = commands("<<EOF; cd sub\n$(rm x.txt)\nEOF");
+        assert_eq!(c[0].runs, ["rm x.txt"]);
+        assert_eq!(words(&c[1]), ["cd", "sub"]);
+    }
+
+    #[test]
+    fn expansions_bash_evaluates_as_code_cannot_be_read() {
+        for line in [
+            "echo ${!x}", "echo \"${x@P}\"", "echo ${a[x]}", "echo ${a[$i]}", "echo ${x:y}",
+            "echo ${x:$(( n ))}", "echo $[x+1]", "echo $((x))", "echo $(( $x + 1 ))",
+            "cat <<EOF\n${!x}\nEOF", "echo ${x",
+        ] {
+            assert!(parse(line).is_none(), "{line}");
+        }
+        for line in [
+            "echo ${x} ${#x} ${a[0]} ${a[@]} ${#a[@]} ${x:-d} ${x%.rs} ${x//a/b}",
+            "echo ${x:2:3} ${1} ${#} ${@} \"${x^^}\"",
+            "echo $(( 1 + 2 * 3 ))",
+            "echo ${x:-$(date)}",
+        ] {
+            assert!(parse(line).is_some(), "{line}");
+        }
     }
 
     #[test]

@@ -246,12 +246,13 @@ pub(super) const CARGO_BUILD: Spec = Spec::new(
         "--examples", "--workspace", "--all", "--all-features", "--no-default-features", "-q",
         "-v", "--quiet", "--verbose", "--locked", "--frozen", "--offline", "--no-fail-fast",
         "--doc", "--keep-going", "--no-deps", "--document-private-items", "--no-run",
+        // `cargo nextest run`'s own.
         "--no-capture", "--nocapture",
     ],
     &[
         "-p", "--package", "--features", "-F", "--target", "--bin", "--example", "--test",
-        "--bench", "--profile", "-j", "--jobs", "--color", "--message-format", "--exclude", "-E",
-        "--filterset",
+        "--bench", "--profile", "-j", "--jobs", "--color", "--message-format", "--exclude",
+        "--target-dir", "-E", "--filterset",
     ],
 );
 pub(super) const CARGO_FMT: Spec = Spec::new(
@@ -269,12 +270,11 @@ pub(super) const CARGO_READ: Spec = Spec::new(
         "--message-format",
     ],
 );
-pub(super) const GO_BUILD: Spec = Spec::new(
+pub(super) const GO_BUILD: Spec = Spec::single_dash(
     &["-v", "-race", "-x", "-a", "-n", "-trimpath", "-cover"],
     &["-o", "-tags", "-ldflags", "-gcflags", "-p", "-mod"],
-)
-.single_dash();
-pub(super) const GO_TEST: Spec = Spec::new(
+);
+pub(super) const GO_TEST: Spec = Spec::single_dash(
     &[
         "-v", "-race", "-short", "-cover", "-failfast", "-json", "-x", "-benchmem", "-trimpath",
     ],
@@ -283,22 +283,19 @@ pub(super) const GO_TEST: Spec = Spec::new(
         "-coverpkg", "-covermode", "-benchtime", "-coverprofile", "-cpuprofile", "-memprofile",
         "-o", "-mod",
     ],
-)
-.single_dash();
-pub(super) const GO_VET: Spec = Spec::new(&["-v", "-json"], &["-tags"]).single_dash();
-pub(super) const GO_RUN: Spec = Spec::new(
+);
+pub(super) const GO_VET: Spec = Spec::single_dash(&["-v", "-json"], &["-tags"]);
+pub(super) const GO_RUN: Spec = Spec::single_dash(
     &["-v", "-race", "-x", "-a", "-trimpath"],
     &["-tags", "-ldflags", "-gcflags", "-mod"],
-)
-.single_dash();
-pub(super) const GO_LIST: Spec = Spec::new(
+);
+pub(super) const GO_LIST: Spec = Spec::single_dash(
     &["-m", "-json", "-e", "-deps", "-test", "-u"],
     &["-f", "-tags"],
-)
-.single_dash();
-pub(super) const GO_ENV: Spec = Spec::new(&["-json"], &[]).single_dash();
-pub(super) const GO_VERSION: Spec = Spec::new(&["-m", "-v"], &[]).single_dash();
-pub(super) const GO_MOD: Spec = Spec::new(&["-m", "-json", "-x", "-vendor"], &[]).single_dash();
+);
+pub(super) const GO_ENV: Spec = Spec::single_dash(&["-json"], &[]);
+pub(super) const GO_VERSION: Spec = Spec::single_dash(&["-m", "-v"], &[]);
+pub(super) const GO_MOD: Spec = Spec::single_dash(&["-m", "-json", "-x", "-vendor"], &[]);
 pub(super) const NPM: Spec = Spec::new(
     &[
         "--silent", "-s", "--if-present", "--json", "--workspaces", "--long", "--all",
@@ -327,7 +324,7 @@ pub(super) const CTEST: Spec = Spec::new(
     &[
         "--output-on-failure", "-V", "--verbose", "-N", "--show-only",
     ],
-    &["-R", "-E", "-j", "-L", "-C", "--timeout"],
+    &["-R", "-E", "-j", "-L", "-C", "--timeout", "--test-dir"],
 );
 pub(super) const TSC: Spec = Spec::new(
     &[
@@ -342,6 +339,7 @@ pub(super) const ESLINT: Spec = Spec::new(
         "--color",
         "--no-color",
         "--no-error-on-unmatched-pattern",
+        "--cache",
     ],
     &["--max-warnings", "--format", "-f", "--ext"],
 );
@@ -382,7 +380,7 @@ pub(super) const RUSTFMT: Spec = Spec::new(
     &["--check", "-q", "-v", "--quiet", "--verbose"],
     &["--edition", "--color"],
 );
-pub(super) const GOFMT: Spec = Spec::new(&["-l", "-d", "-s", "-e"], &[]).single_dash();
+pub(super) const GOFMT: Spec = Spec::single_dash(&["-l", "-d", "-s", "-e"], &[]);
 pub(super) const NODE: Spec = Spec::new(
     &[
         "--test", "--enable-source-maps", "--no-warnings", "--trace-warnings", "--trace-uncaught",

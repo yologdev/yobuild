@@ -180,8 +180,10 @@ Inherited from yoagent and the handoff work, and kept on by default:
 Not covered, and said so: plugins run with the process's rights; the
 environment they inherit is visible to them; the gate judges command
 lines and file tools, not what code does once it runs (a build or a test
-runs the project's code, including what the agent edited). A sandbox (container, VM) is the
-deployment's job.
+runs the project's code, including what the agent edited); and it guards
+the owner's files against change, not their data against being read or
+sent. A sandbox (container, VM), without secrets the agent should not
+have, is the deployment's job.
 
 ## 7. What moved, what it becomes
 

@@ -72,7 +72,15 @@ impl Ctx<'_> {
         }
     }
 
-    /// Writing (replacing) `w`: a new file, the agent's own, or in its scratch.
+    /// The agent's own (a file it made, its scratch), not through a link
+    /// made earlier in the line.
+    fn own(&self, path: &Path) -> bool {
+        self.plain(path) && self.rules.free(path)
+    }
+
+    /// Writing (replacing) `w`: a new file inside the project, or the
+    /// agent's own (a new file elsewhere could be one a program reads and
+    /// runs: `~/.config/git/config`, a login item).
     pub fn write(&mut self, w: &Word) -> Verdict {
         if DEVICES.contains(&w.text.as_str()) {
             return Ok(());
@@ -81,8 +89,14 @@ impl Ctx<'_> {
         self.write_path(path)
     }
 
+    /// The same for a path [`path`](Self::path) resolved (`cp` landing
+    /// inside a folder).
     pub fn write_path(&mut self, path: PathBuf) -> Verdict {
-        ok_if(self.plain(&path) && !self.rules.owners(&path))?;
+        let fine = match path.exists() {
+            true => self.own(&path),
+            false => self.plain(&path) && self.in_reach(&path),
+        };
+        ok_if(fine)?;
         self.created(path);
         Ok(())
     }
@@ -100,25 +114,25 @@ impl Ctx<'_> {
     }
 
     /// Touching `w`: a new empty file inside the project, or one of the
-    /// agent's own (not the owner's file's time: builds and the facts read it).
+    /// agent's own. The owner's file asks: touching it is never needed, and
+    /// its time is what builds and the facts read (appending to it or
+    /// editing it, which change it more, are free: the work).
     pub fn touch(&mut self, w: &Word) -> Verdict {
         let path = self.path(w)?;
         match path.exists() {
-            true => ok_if(self.plain(&path) && self.rules.free(&path)),
+            true => ok_if(self.own(&path)),
             false => self.add_to(w),
         }
     }
 
     /// Changing `w`'s mode or owner: only the agent's own.
     pub fn change(&self, w: &Word) -> Verdict {
-        let path = self.path(w)?;
-        ok_if(self.plain(&path) && self.rules.free(&path))
+        ok_if(self.own(&self.path(w)?))
     }
 
     /// Deleting `w` (or moving it away): only the agent's own.
     pub fn delete(&self, w: &Word) -> Verdict {
-        let path = self.path(w)?;
-        ok_if(self.plain(&path) && self.rules.free(&path))
+        ok_if(self.own(&self.path(w)?))
     }
 
     /// A folder something is put into whole (`rsync`, `cp -R`, `git clone`):
@@ -143,10 +157,9 @@ impl Ctx<'_> {
         ok_if(path.starts_with(&self.rules.start.physical))
     }
 
-    /// A file a program sends away (`curl -d @FILE`): not a protected one.
-    pub fn send(&self, w: &Word) -> Verdict {
-        let path = self.path(w)?;
-        ok_if(!self.rules.protected(&path))
+    /// Whether the project has `relative` (an installed tool).
+    pub fn project_has(&self, relative: &str) -> bool {
+        self.rules.start.physical.join(relative).exists()
     }
 
     /// A script of the owner's to run: inside the project, there, and not
@@ -190,7 +203,10 @@ impl Ctx<'_> {
             return Ok(());
         };
         let entry = catalogue::entry(&run.name).ok_or(Ask)?;
-        if catalogue::BUILDS.contains(&run.name.as_str()) {
+        // A build runs the project's code; asking its version does not.
+        let version =
+            matches!(run.args, [v] if ["--version", "-V", "version"].contains(&v.text.as_str()));
+        if catalogue::BUILDS.contains(&run.name.as_str()) && !version {
             self.in_project()?;
         }
         // What `xargs` runs gets arguments the line does not show.

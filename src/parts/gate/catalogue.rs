@@ -35,7 +35,7 @@ pub(super) enum Entry {
 /// Programs none of whose options writes a file or runs anything.
 const READERS: &[&str] = &[
     "ls", "cat", "tac", "head", "tail", "wc", "grep", "egrep", "fgrep", "zcat", "stat", "du", "df",
-    "pwd", "echo", "true", "false", "test", "[", "[[", ":", "which", "type", "whereis",
+    "pwd", "echo", "true", "false", ":", "which", "type", "whereis",
     // Only `command -v`/`-V` (a lookup) reaches here; otherwise it is a wrapper.
     "command", "basename", "dirname", "realpath", "readlink", "printenv", "whoami", "id", "uname",
     "nproc", "uptime", "cut", "tr", "rev", "paste", "join", "comm", "diff", "cmp", "md5sum",
@@ -53,7 +53,7 @@ pub(super) const BUILDS: &[&str] = &[
 /// Shell builtins that change only the shell's own state (or end it), and
 /// loop headers (`for x in …`, `select`): their words are data.
 const BUILTINS: &[&str] = &[
-    "unset", "shift", "break", "continue", "return", "exit", "for", "select",
+    "shift", "break", "continue", "return", "exit", "for", "select",
 ];
 
 pub(super) fn entry(name: &str) -> Option<Entry> {
@@ -80,7 +80,12 @@ pub(super) fn entry(name: &str) -> Option<Entry> {
             ctx.run(&text.join(" "))
         })),
         "trap" => Some(Raw(trap)),
-        "sh" | "bash" | "zsh" | "dash" | "ksh" => spec(SHELL, |p, ctx| {
+        "unset" => Some(Raw(unset)),
+        "test" | "[" => Some(Raw(test)),
+        "[[" => Some(Raw(double_bracket)),
+        // Shells whose text reads as bash's (not zsh's `=( … )` or ksh's
+        // `${ cmd; }`: those ask).
+        "sh" | "bash" | "dash" => spec(SHELL, |p, ctx| {
             let first = p.operand(0).ok_or(Ask)?;
             match p.has("-c") {
                 true if first.known => ctx.run(&first.text),
@@ -97,17 +102,20 @@ pub(super) fn entry(name: &str) -> Option<Entry> {
             ok_if(p.operands.len() >= 2)?;
             each(&p.operands[1..], |w| ctx.change(w))
         }),
+        // The owner's script, run in this shell (`.venv/bin/activate`).
+        "source" | "." => Some(Raw(|args, ctx| ctx.owners_file(args.first().ok_or(Ask)?))),
         "rm" => spec(RM, |p, ctx| each(&p.operands, |w| ctx.delete(w))),
         "rmdir" => spec(RMDIR, |p, ctx| each(&p.operands, |w| ctx.delete(w))),
-        "unlink" => spec(Spec::new(&[], &[]), |p, ctx| {
-            each(&p.operands, |w| ctx.delete(w))
+        "unlink" => spec(NO_OPTIONS, |p, ctx| each(&p.operands, |w| ctx.delete(w))),
+        "cp" => spec(CP, |p, ctx| {
+            let recursive = ["-r", "-R", "-a", "--recursive", "--archive"];
+            copy(p, ctx, false, recursive.iter().any(|o| p.has(o)))
         }),
-        "cp" => spec(CP, |p, ctx| copy(p, ctx, false)),
-        "mv" => spec(MV, |p, ctx| copy(p, ctx, true)),
+        "mv" => spec(MV, |p, ctx| copy(p, ctx, true, false)),
         "install" => spec(INSTALL, |p, ctx| {
             match p.has("-d") || p.has("--directory") {
                 true => each(&p.operands, |w| ctx.add_to(w)),
-                false => copy(p, ctx, false),
+                false => copy(p, ctx, false, false),
             }
         }),
         "ln" => spec(LN, |p, ctx| {
@@ -147,22 +155,7 @@ pub(super) fn entry(name: &str) -> Option<Entry> {
                 "-o", "--output", "-D", "--dump-header", "-c", "--cookie-jar", "--trace",
                 "--trace-ascii", "--stderr",
             ];
-            each_value(p, &outputs, |w| ctx.write(w))?;
-            // A file it sends (`-d @FILE`, `-F f=@FILE`, `-F f=<FILE`): not
-            // a protected one (`.env`).
-            let sends = [
-                "-d", "--data", "--data-binary", "--data-urlencode", "-F", "--form",
-            ];
-            each_value(p, &sends, |w| match w.text.find(['@', '<']) {
-                Some(at) => {
-                    let file = w.text[at + 1..].split(';').next().unwrap_or("");
-                    ctx.send(&Word {
-                        text: file.to_owned(),
-                        ..w.clone()
-                    })
-                }
-                None => Ok(()),
-            })
+            each_value(p, &outputs, |w| ctx.write(w))
         }),
         "wget" => spec(WGET, |p, ctx| {
             // Without `-O`, a new file named from the URL (never replacing one).
@@ -184,11 +177,8 @@ pub(super) fn entry(name: &str) -> Option<Entry> {
             ok_if(scripts.iter().all(|s| s.known && sed_reads(&s.text)))
         }),
         "awk" | "gawk" | "mawk" | "nawk" => spec(AWK, |p, _| {
-            // Its program can write files and run commands; gawk's `@include`
-            // and `@load` bring in more.
             let program = p.operand(0).filter(|w| w.known).ok_or(Ask)?;
-            let writes_or_runs = ["system", ">", "|", "getline", "@"];
-            ok_if(!writes_or_runs.iter().any(|t| program.text.contains(t)))
+            ok_if(awk_reads(&program.text))
         }),
         "sort" => spec(SORT, free),
         "uniq" => spec(UNIQ, |p, ctx| match p.operands.as_slice() {
@@ -236,26 +226,24 @@ pub(super) fn entry(name: &str) -> Option<Entry> {
         "cargo" => Some(Raw(cargo)),
         "go" => Some(Raw(go)),
         "npm" | "pnpm" | "yarn" => Some(Raw(npm)),
-        "make" | "gmake" => {
-            spec(MAKE, |p, _| {
-                // Targets of the project's Makefile; `VAR=value` changes what it runs.
-                let changes = ["install", "uninstall", "clean", "distclean"];
-                ok_if(p.operands.iter().all(|w| {
-                    w.known && !w.text.contains('=') && !changes.contains(&w.text.as_str())
-                }))
-            })
-        }
+        // The default target, or ones that build or check (`TARGETS`).
+        "make" | "gmake" => spec(MAKE, |p, _| {
+            ok_if(
+                p.operands
+                    .iter()
+                    .all(|w| w.known && TARGETS.contains(&w.text.as_str())),
+            )
+        }),
         // Test files and folders inside the project (`tests/x.py::name`).
         "pytest" => spec(PYTEST, |p, ctx| {
             each(&p.operands, |w| {
                 let path = w.text.split("::").next().unwrap_or("");
-                ctx.inside(&Word {
-                    text: path.to_owned(),
-                    ..w.clone()
-                })
+                ctx.inside(&w.part(path))
             })
         }),
-        "ctest" => spec(CTEST, free),
+        "ctest" => spec(CTEST, |p, ctx| {
+            each_value(p, &["--test-dir"], |w| ctx.inside(w))
+        }),
         "tsc" => spec(TSC, |p, _| ok_if(p.has("--noEmit"))),
         "eslint" => spec(ESLINT, |p, _| {
             // A formatter named by its path is code it loads.
@@ -285,8 +273,11 @@ pub(super) fn entry(name: &str) -> Option<Entry> {
         // Runners: the command they run is judged as if it ran alone.
         "npx" => Some(Raw(|args, ctx| {
             let tool = args.first().filter(|w| w.known).ok_or(Ask)?;
-            // Only checkers the project has (npx would fetch anything else).
-            ok_if(["tsc", "eslint", "prettier", "vitest", "jest"].contains(&tool.text.as_str()))?;
+            let checkers = ["tsc", "eslint", "prettier", "vitest", "jest"];
+            ok_if(checkers.contains(&tool.text.as_str()))?;
+            // Installed in the project: npx would fetch one it does not have
+            // from the registry and run it.
+            ok_if(ctx.project_has(&format!("node_modules/.bin/{}", tool.text)))?;
             ctx.command(args, false)
         })),
         "uv" | "poetry" => Some(Raw(|args, ctx| match args {
@@ -356,8 +347,11 @@ pub(super) fn local(w: &Word) -> bool {
 }
 
 /// `cp`/`mv`/`install`: each source lands at the destination (inside it,
-/// when it is a folder); moving also deletes the source.
-fn copy(p: &Parsed, ctx: &mut Ctx, moves: bool) -> Verdict {
+/// when it is a folder); moving also deletes the source. A `recursive` copy
+/// into a folder that is there asks unless the folder is the agent's: what
+/// lands where is not read from the line (`cp -R dir/ .` copies dir's
+/// contents).
+fn copy(p: &Parsed, ctx: &mut Ctx, moves: bool, recursive: bool) -> Verdict {
     let into = p.value("-t").or(p.value("--target-directory"));
     let (sources, dest) = match into {
         Some(dir) => (p.operands.as_slice(), dir),
@@ -371,11 +365,6 @@ fn copy(p: &Parsed, ctx: &mut Ctx, moves: bool) -> Verdict {
         each(sources, |s| ctx.delete(s))?;
     }
     let dest = ctx.path(dest)?;
-    let recursive = ["-r", "-R", "-a", "--recursive", "--archive"]
-        .iter()
-        .any(|o| p.has(o));
-    // A tree into a folder that is there: what lands where is not read
-    // from the line (`cp -R dir/ .` copies dir's contents).
     ok_if(!(recursive && dest.is_dir() && !ctx.free(&dest)))?;
     if into.is_none() && !dest.is_dir() {
         return ctx.write_path(dest);
@@ -384,5 +373,22 @@ fn copy(p: &Parsed, ctx: &mut Ctx, moves: bool) -> Verdict {
         ok_if(s.known)?;
         let name = Path::new(&s.text).file_name().ok_or(Ask)?;
         ctx.write_path(dest.join(name))
+    })
+}
+
+/// Whether an awk program only reads: no `system`, `getline` (both run
+/// commands), `@include`/`@load`, and no `print` or `printf` statement
+/// with an output redirection (`> file`, `>> file`, `| cmd`). A `>`
+/// elsewhere is a comparison (`$3 > 100`).
+fn awk_reads(program: &str) -> bool {
+    if ["system", "getline", "@"]
+        .iter()
+        .any(|t| program.contains(t))
+    {
+        return false;
+    }
+    program.match_indices("print").all(|(at, _)| {
+        let statement = program[at..].split([';', '}', '\n']).next().unwrap_or("");
+        !statement.contains(['>', '|'])
     })
 }

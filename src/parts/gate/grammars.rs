@@ -6,10 +6,18 @@
 
 use super::args::{parse, parse_until, Parsed, Spec};
 use super::catalogue::{each, each_value};
-use super::invocation::{safe_env, safe_variable};
+use super::invocation::{identifier, safe_env, safe_variable};
 use super::judge::{ok_if, Ask, Ctx, Verdict};
 use super::parse::Word;
 use super::specs::*;
+
+/// The `make` targets and package scripts that run freely: building,
+/// testing and checking, by their usual names. Others (`deploy`, `clean`,
+/// `install`, `publish`) ask.
+pub(super) const TARGETS: &[&str] = &[
+    "all", "build", "test", "tests", "check", "lint", "typecheck", "fmt-check", "format-check",
+    "ci",
+];
 
 /// A program or subcommand with no options of its own.
 pub(super) const NO_OPTIONS: Spec = Spec::new(&[], &[]);
@@ -54,7 +62,8 @@ pub(super) fn declare(args: &[Word], mut exports: bool) -> Verdict {
             options = false;
         } else if options && (t.starts_with('-') || t.starts_with('+')) && t.len() > 1 {
             // Not `-n` (a name for another variable).
-            ok_if(t[1..].chars().all(|c| "xraAigpfFltu".contains(c)))?;
+            // Not `-i` (the value is evaluated as arithmetic) nor `-n`.
+            ok_if(t[1..].chars().all(|c| "xraAgpfFltu".contains(c)))?;
             exports |= t.starts_with('-') && t.contains('x');
         } else {
             options = false;
@@ -86,10 +95,7 @@ pub(super) fn dd(args: &[Word], ctx: &mut Ctx) -> Verdict {
         ok_if(!w.opens_unknown)?;
         let (key, value) = w.text.split_once('=').ok_or(Ask)?;
         match key {
-            "of" => ctx.write(&Word {
-                text: value.to_owned(),
-                ..w.clone()
-            }),
+            "of" => ctx.write(&w.part(value)),
             "conv" => Ok(()),
             key => ok_if(READ.contains(&key)),
         }
@@ -165,15 +171,32 @@ pub(super) fn find(args: &[Word], ctx: &mut Ctx) -> Verdict {
 pub(super) fn sed_reads(script: &str) -> bool {
     let chars: Vec<char> = script.chars().collect();
     let mut i = 0;
-    // Past the delimited text that starts at `i` (`/re/`, `|a|`).
-    let skip = |i: &mut usize, delim: char| {
+    // Past the delimited text that starts at `i` (`/re/`, `|a|`); in a regex,
+    // a bracket expression holds the delimiter as a character (`[/]`,
+    // `[]/]`, `[^]/]`). False when it is not closed.
+    let skip = |i: &mut usize, delim: char, regex: bool| -> bool {
         while *i < chars.len() && chars[*i] != delim {
-            if chars[*i] == '\\' {
-                *i += 1;
+            match chars[*i] {
+                '\\' => *i += 1,
+                '[' if regex => {
+                    let mut at = *i + 1;
+                    if chars.get(at) == Some(&'^') {
+                        at += 1;
+                    }
+                    if chars.get(at) == Some(&']') {
+                        at += 1;
+                    }
+                    match chars[at.min(chars.len())..].iter().position(|c| *c == ']') {
+                        Some(close) => *i = at + close,
+                        None => return false,
+                    }
+                }
+                _ => {}
             }
             *i += 1;
         }
         *i += 1;
+        *i <= chars.len()
     };
     while i < chars.len() {
         while i < chars.len() && (chars[i].is_whitespace() || chars[i] == ';') {
@@ -185,7 +208,9 @@ pub(super) fn sed_reads(script: &str) -> bool {
                 Some(c) if c.is_ascii_digit() || matches!(c, '$' | ',' | '!' | '~' | '+') => i += 1,
                 Some('/') => {
                     i += 1;
-                    skip(&mut i, '/');
+                    if !skip(&mut i, '/', true) {
+                        return false;
+                    }
                 }
                 _ => break,
             }
@@ -201,8 +226,9 @@ pub(super) fn sed_reads(script: &str) -> bool {
                     return false;
                 };
                 i += 2;
-                skip(&mut i, delim);
-                skip(&mut i, delim);
+                if !skip(&mut i, delim, true) || !skip(&mut i, delim, false) {
+                    return false;
+                }
                 while chars.get(i).is_some_and(|c| {
                     matches!(c, 'g' | 'i' | 'I' | 'p' | 'm' | 'M') || c.is_ascii_digit()
                 }) {
@@ -306,15 +332,24 @@ pub(super) fn subcommand<'a>(
     }
 }
 
-pub(super) fn cargo(args: &[Word], _: &mut Ctx) -> Verdict {
+pub(super) fn cargo(args: &[Word], ctx: &mut Ctx) -> Verdict {
     let Some((sub, rest)) = subcommand(&CARGO, args)? else {
         return Ok(());
     };
     let reads = |spec: &Spec| ok_if(parse(spec, rest).is_some());
     match sub {
         "build" | "b" | "check" | "c" | "test" | "t" | "bench" | "run" | "r" | "doc" | "d"
-        | "clippy" => reads(&CARGO_BUILD),
-        "fmt" => ok_if(parse(&CARGO_FMT, rest).is_some_and(|p| p.has("--check"))),
+        | "clippy" => {
+            let p = parse(&CARGO_BUILD, rest).ok_or(Ask)?;
+            // Its build folder inside the project.
+            each_value(&p, &["--target-dir"], |w| ctx.inside(w))
+        }
+        // `cargo fmt --check`, or `-- --check` (passed to rustfmt).
+        "fmt" => {
+            ok_if(parse(&CARGO_FMT, rest).is_some_and(|p| {
+                p.has("--check") || p.operands.iter().any(|w| w.text == "--check")
+            }))
+        }
         "tree" | "metadata" | "version" | "search" | "locate-project" | "pkgid"
         | "verify-project" => reads(&CARGO_READ),
         "nextest" => match rest {
@@ -385,8 +420,12 @@ pub(super) fn npm(args: &[Word], _: &mut Ctx) -> Verdict {
     };
     let p = parse(&NPM, rest).ok_or(Ask)?;
     match sub {
-        "test" | "t" | "run" | "run-script" | "ls" | "list" | "view" | "info" | "outdated"
-        | "why" => Ok(()),
+        "test" | "t" | "ls" | "list" | "view" | "info" | "outdated" | "why" => Ok(()),
+        // Scripts by a name that builds or checks (not `deploy`, `clean`).
+        "run" | "run-script" => ok_if(
+            p.operand(0)
+                .is_some_and(|w| w.known && TARGETS.contains(&w.text.as_str())),
+        ),
         "audit" => ok_if(p.operands.is_empty()),
         _ => Err(Ask),
     }
@@ -433,4 +472,51 @@ pub(super) fn rustup(args: &[Word], _: &mut Ctx) -> Verdict {
                     | ["target" | "component", "list", "--installed"]
             ),
     )
+}
+
+/// `test` / `[`: free, except `-v NAME` with a name bash would evaluate
+/// (`test -v 'a[$(rm f)]'`).
+pub(super) fn test(args: &[Word], _: &mut Ctx) -> Verdict {
+    names_after(args, &["-v"])
+}
+
+/// `[[ … ]]`: also its arithmetic comparisons, which evaluate both sides
+/// as arithmetic (a variable's value too): literal numbers only, or `$#`,
+/// `$?`.
+pub(super) fn double_bracket(args: &[Word], _: &mut Ctx) -> Verdict {
+    const ARITHMETIC: [&str; 6] = ["-eq", "-ne", "-lt", "-le", "-gt", "-ge"];
+    let number = |w: Option<&Word>| {
+        w.is_some_and(|w| {
+            let digits = w.text.strip_prefix('-').unwrap_or(&w.text);
+            (w.known && !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+                || w.text == "$#"
+                || w.text == "$?"
+        })
+    };
+    for (at, w) in args.iter().enumerate() {
+        if w.known && ARITHMETIC.contains(&w.text.as_str()) {
+            ok_if(at > 0 && number(args.get(at - 1)) && number(args.get(at + 1)))?;
+        }
+    }
+    names_after(args, &["-v"])
+}
+
+/// `unset`: plain names only (`unset 'a[$(rm f)]'` evaluates the subscript).
+pub(super) fn unset(args: &[Word], _: &mut Ctx) -> Verdict {
+    each(args, |w| {
+        ok_if(w.known && (["-v", "-f"].contains(&w.text.as_str()) || identifier(&w.text)))
+    })
+}
+
+/// The word after each of `options` is a plain variable name.
+fn names_after(args: &[Word], options: &[&str]) -> Verdict {
+    for (at, w) in args.iter().enumerate() {
+        if w.known && options.contains(&w.text.as_str()) {
+            ok_if(
+                args.get(at + 1)
+                    .is_some_and(|n| n.known && identifier(&n.text)),
+            )?;
+        }
+    }
+    Ok(())
 }

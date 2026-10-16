@@ -216,7 +216,9 @@ path/to/yobuild/scripts/try-handoff.sh --demo               # headless, scripted
     questions do wait, and with nobody connected they are refused. It is a
     guardrail, not a sandbox: targeted edits of existing files go through,
     and builds and tests run the project's code — including what the agent
-    edited — without the gate judging what that code does. (The coding
+    edited — without the gate judging what that code does. Nor does it
+    keep data in: what the agent can read (`.env` included) it can send.
+    (The coding
     agent uses the pi extension `confirm-dangerous.ts` instead: a
     deny-list, kept as the example of a gate written as a plugin.)
   - The gate is a required extension in the Rust process: no plugin
