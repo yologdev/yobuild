@@ -3,7 +3,7 @@
 //! `host-dialogs.ts` and the `ui` service; a DSH tool's presenters reach the
 //! frontend as `details.view`.
 //!
-//! Needs `npm ci` in `vendor/yoagent-rutis/plugins/dsh/`; skipped (passing, with
+//! Needs `npm ci` in `adapters/dsh/`; skipped (passing, with
 //! `SKIPPED:`) without it unless `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ use yobuild::frontend::{
 const WAIT: Duration = Duration::from_secs(60);
 
 fn dsh_plugins() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/yoagent-rutis/plugins/dsh")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("adapters/dsh")
 }
 
 fn runtime_installed() -> bool {

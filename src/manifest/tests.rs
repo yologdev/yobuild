@@ -829,3 +829,13 @@ fn a_plugins_config_takes_secrets_from_the_environment() {
         Err(Unset("SEARCH_KEY".into()))
     );
 }
+
+#[test]
+fn deepseek_takes_a_budget() {
+    // Priced in yoagent's bundled table since 0.25.6 (at its peak rate).
+    let m = read(
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-flash\"\n[limits]\nbudget_usd = 2.0\n",
+    )
+    .unwrap();
+    assert_eq!(m.limits.budget_usd, Some(2.0));
+}

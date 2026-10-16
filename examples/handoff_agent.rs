@@ -72,7 +72,7 @@ fn here() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend")
 }
 fn rutis_plugins() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/yoagent-rutis/plugins")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("adapters")
 }
 
 struct Options {

@@ -28,7 +28,7 @@
 //! `$TMPDIR/yoagent-coding-agent.log` (the terminal UI owns the screen).
 //!
 //! Setup (once): `npm ci` in `frontend/plugins/` and in
-//! `vendor/yoagent-rutis/plugins/pi/` (and `vendor/yoagent-rutis/plugins/dsh/` for DSH's
+//! `adapters/pi/` (and `adapters/dsh/` for DSH's
 //! search and dialogs), or `scripts/try-coding-agent.sh --setup-only`.
 //!
 //! Run: `cargo run --example coding_agent [-- --web]`
@@ -54,7 +54,7 @@ fn here() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend")
 }
 fn rutis_plugins() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/yoagent-rutis/plugins")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("adapters")
 }
 
 struct Options {

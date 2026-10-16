@@ -48,10 +48,11 @@ paths).
   - yoagent-rutis exposes the ecosystem probe as a public module, and a
     way to locate the pi and DSH adapter files (decided 2026-10-15);
     `yobuild check` needs the first, and the second lets yobuild drop
-    `vendor/`. An API addition, so it ships in a yoagent-rutis release
-    (0.3.2 or 0.4.0).
-  - DeepSeek pricing in yoagent's price table (in progress), so
-    `budget_usd` and cost facts work for DeepSeek models too.
+    `vendor/`. Done: yoagent-rutis 0.4.0 (`adapters`, `probe`; yoagent
+    #318); yobuild copies the adapters with `scripts/copy-adapters.sh`.
+  - DeepSeek pricing in yoagent's price table, so `budget_usd` and cost
+    facts work for DeepSeek models too. Done: yoagent 0.25.6, at the peak
+    rate (an upper bound; off-peak is half).
 
 **Done when** the handoff demo passes on the parts. It does (CI, every
 push). The yoagent-rutis PR above continues alongside M2a (decided
@@ -66,7 +67,7 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
   provider is an error listing the known ones.
 - `yobuild run` with plugins that are local paths or already installed —
   the plugin folders with their `node_modules` that the examples here use
-  today (`frontend/plugins/`, `vendor/yoagent-rutis/plugins/`), installed by
+  today (`frontend/plugins/`, `adapters/`), installed by
   hand — so M2a does not need M2b's cache: start
   runtimes, load rows, connect `[[mcp]]` servers (yoagent's MCP client,
   stdio and HTTP with headers), wire parts and frontend.
@@ -161,4 +162,4 @@ never loading, and a denied approval leaves the agent without the plugin.
 7. **Windows.** rutis 0.9 supports it; the frontend's terminal UI and the
    tests are Unix-only today. In scope for 0.1?
 8. **Models.** DeepSeek and Claude first? (Any provider in design §2's
-   table runs.) DeepSeek pricing: **in progress** in yoagent, not open.
+   table runs.) DeepSeek pricing: done (yoagent 0.25.6).
