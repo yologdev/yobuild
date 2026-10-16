@@ -1253,13 +1253,13 @@ async fn a_call_that_ran_makes_its_new_files_the_agents() {
     assert!(dir.path().join("new.txt").exists(), "the call ran");
     // The clone made before the run shares what its hooks recorded.
     let check = gate.check("bash", &json!({ "command": "rm new.txt" }));
-    assert!(check.ask.is_none(), "{check:?}");
+    assert!(check.question().is_none(), "{check:?}");
     // The owner replaces it: no longer the file the agent made.
     std::fs::remove_file(dir.path().join("new.txt")).unwrap();
     std::fs::write(dir.path().join("other"), "the owner's").unwrap();
     std::fs::write(dir.path().join("new.txt"), "the owner's").unwrap();
     let check = gate.check("bash", &json!({ "command": "rm new.txt" }));
-    assert!(check.ask.is_some(), "{check:?}");
+    assert!(check.question().is_some(), "{check:?}");
 }
 
 #[tokio::test]
@@ -1273,7 +1273,7 @@ async fn a_failed_call_does_not_make_its_files_the_agents() {
     // The file is there, but the call ended in an error: not the agent's.
     assert!(dir.path().join("new.txt").exists(), "the call ran");
     let check = gate.check("bash", &json!({ "command": "rm new.txt" }));
-    assert!(check.ask.is_some(), "{check:?}");
+    assert!(check.question().is_some(), "{check:?}");
 }
 
 #[tokio::test]
@@ -1311,8 +1311,8 @@ fn a_question_shows_a_long_command_as_written() {
     let gate = yobuild::parts::Gate::new(session, dir.path());
     let command = "ls\nrm owner.txt";
     let check = gate.check("bash", &json!({ "command": command }));
-    assert_eq!(check.ask.as_deref(), Some("Run this command?"));
-    assert_eq!(check.details, command);
+    assert_eq!(check.question(), Some("Run this command?"));
+    assert_eq!(check.details(), Some(command));
 }
 
 /// A tool with a given name that only says it ran.

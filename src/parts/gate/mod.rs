@@ -174,18 +174,41 @@ impl Gate {
     }
 }
 
-/// The gate's reading of one call.
+/// The gate's reading of one call: it runs freely, or it needs the
+/// owner's yes — never both, so a call the owner allowed makes nothing the
+/// agent's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Check {
-    /// The question for the owner (a short title), when it needs their yes.
-    pub ask: Option<String>,
-    /// What the question is about, in full (the command as written, the
-    /// arguments), shown under the title.
-    pub details: String,
-    /// Files it creates (only when it needs no yes): the agent's own once
-    /// the call has run and they exist.
-    pub creates: Vec<PathBuf>,
+pub enum Check {
+    /// It runs without asking. The files it creates become the agent's own
+    /// once the call has run, if they are there.
+    Free { creates: Vec<PathBuf> },
+    /// It needs the owner's yes.
+    Ask {
+        /// A short title.
+        question: String,
+        /// What it is about, in full (the command as written, or the
+        /// arguments), shown under the title.
+        details: String,
+    },
+}
+
+impl Check {
+    /// The question, when it needs the owner's yes.
+    pub fn question(&self) -> Option<&str> {
+        match self {
+            Check::Ask { question, .. } => Some(question),
+            Check::Free { .. } => None,
+        }
+    }
+
+    /// What the question is about, in full.
+    pub fn details(&self) -> Option<&str> {
+        match self {
+            Check::Ask { details, .. } => Some(details),
+            Check::Free { .. } => None,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -210,34 +233,33 @@ impl RunHooks for Gate {
         // Each look replaces what an earlier one found (a recheck), and a
         // denied call leaves nothing behind.
         self.pending.lock().unwrap().remove(call.tool_call_id);
-        let check = self.rules.check(call.tool_name, call.args);
-        if let Some(question) = check.ask {
-            let request = UiRequest::Select {
-                title: question,
-                // The command as written (several lines stay several lines).
-                message: check.details,
-                options: vec!["Allow".into(), "Block".into()],
-                multiple: false,
-            };
-            let answer = self.session.ask(request, UI_TIMEOUT).await;
-            match answer.as_str() {
-                Some("Allow") => {}
-                Some(_) => return ToolDecision::Deny("the owner blocked it".into()),
-                None => {
-                    return ToolDecision::Deny(
+        let creates = match self.rules.check(call.tool_name, call.args) {
+            Check::Free { creates } => creates,
+            Check::Ask { question, details } => {
+                let request = UiRequest::Select {
+                    title: question,
+                    // The command as written (several lines stay several lines).
+                    message: details,
+                    options: vec!["Allow".into(), "Block".into()],
+                    multiple: false,
+                };
+                let answer = self.session.ask(request, UI_TIMEOUT).await;
+                return match answer.as_str() {
+                    // Allowed by the owner: what it makes stays theirs.
+                    Some("Allow") => ToolDecision::Allow,
+                    Some(_) => ToolDecision::Deny("the owner blocked it".into()),
+                    None => ToolDecision::Deny(
                         "not allowed: the owner declined, or nobody answered".into(),
-                    )
-                }
+                    ),
+                };
             }
-            // Allowed by the owner: what it makes stays theirs.
-            return ToolDecision::Allow;
-        }
+        };
         // The files a free call makes become the agent's own once it has run.
-        if !check.creates.is_empty() {
+        if !creates.is_empty() {
             self.pending
                 .lock()
                 .unwrap()
-                .insert(call.tool_call_id.to_owned(), check.creates);
+                .insert(call.tool_call_id.to_owned(), creates);
         }
         ToolDecision::Allow
     }
@@ -274,16 +296,11 @@ struct Rules {
 
 impl Rules {
     fn check(&self, tool: &str, args: &Json) -> Check {
-        let ask = |question: String| Check {
-            ask: Some(question),
+        let ask = |question: String| Check::Ask {
+            question,
             details: pretty(args),
-            creates: Vec::new(),
         };
-        let free = |creates: Vec<PathBuf>| Check {
-            ask: None,
-            details: String::new(),
-            creates,
-        };
+        let free = |creates: Vec<PathBuf>| Check::Free { creates };
         match tool {
             "bash" => {
                 let Some(command) = args["command"].as_str() else {
@@ -291,14 +308,13 @@ impl Rules {
                 };
                 match judge::line(self, command, &self.start) {
                     Ok(creates) => free(creates),
-                    Err(judge::Ask) => Check {
-                        ask: Some(match command.lines().count() {
+                    Err(judge::Ask) => Check::Ask {
+                        question: match command.lines().count() {
                             1 if command.chars().count() <= 80 => format!("Run `{command}`?"),
                             _ => "Run this command?".into(),
-                        }),
+                        },
                         // The command as written (several lines stay several lines).
                         details: command.to_owned(),
-                        creates: Vec::new(),
                     },
                 }
             }
@@ -309,12 +325,12 @@ impl Rules {
                     Some(file) if !file.is_empty() && !file.starts_with(['~', '@']) => file,
                     _ => return ask(format!("Run `{tool}` with these arguments?")),
                 };
-                let path = locate(&self.start.physical, file);
+                let path = locate(self.start.physical(), file);
                 if self.protected(&path) {
                     ask(format!("Change the protected file {file}?"))
                 } else if writes && self.owners(&path) {
                     ask(format!("Overwrite the existing file {file}?"))
-                } else if !path.starts_with(&self.start.physical) && !self.free(&path) {
+                } else if !path.starts_with(self.start.physical()) && !self.free(&path) {
                     // A new file elsewhere too: one a program reads and runs
                     // (`~/.config/git/config`, a login item).
                     ask(format!("Change {file}, outside the project?"))
@@ -349,7 +365,7 @@ impl Rules {
     /// path inside it (the project may sit in `~/.envs/`), anywhere for
     /// one outside.
     fn protected(&self, path: &Path) -> bool {
-        protected(path.strip_prefix(&self.start.physical).unwrap_or(path))
+        protected(path.strip_prefix(self.start.physical()).unwrap_or(path))
     }
 
     /// A path the agent may not replace without asking: there, and not its own.

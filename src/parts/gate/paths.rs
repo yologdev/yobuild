@@ -7,11 +7,22 @@ use std::path::{Component, Path, PathBuf};
 /// works on) and the real folder (where relative paths land).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Here {
-    pub logical: PathBuf,
-    pub physical: PathBuf,
+    logical: PathBuf,
+    physical: PathBuf,
 }
 
 impl Here {
+    /// The logical path (what `$PWD` says).
+    #[cfg(test)]
+    pub fn logical(&self) -> &Path {
+        &self.logical
+    }
+
+    /// The real folder, where relative paths land.
+    pub fn physical(&self) -> &Path {
+        &self.physical
+    }
+
     /// `cwd`; logically `pwd` (the inherited `$PWD`) when it names the same
     /// folder, as bash takes it; otherwise the real folder (`getcwd`).
     pub fn start(cwd: &Path, pwd: Option<&Path>) -> Self {

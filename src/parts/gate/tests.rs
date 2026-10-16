@@ -60,7 +60,7 @@ impl Project {
     }
 
     fn root(&self) -> PathBuf {
-        self.rules.start.physical.clone()
+        self.rules.start.physical().to_owned()
     }
 
     /// Whether `command` needs the owner's yes.
@@ -81,10 +81,13 @@ impl Project {
             }
         }
         let check = self.rules.check(tool, &args);
-        if check.ask.is_none() {
-            *self.pending.borrow_mut() = check.creates;
+        match check {
+            Check::Free { creates } => {
+                *self.pending.borrow_mut() = creates;
+                false
+            }
+            _ => true,
         }
-        check.ask.is_some()
     }
 
     /// Makes `file` the agent's: written by a call that ran.
@@ -958,7 +961,12 @@ fn cd_follows_the_logical_path_as_bash_does() {
         free_tools: HashSet::new(),
         created: Arc::default(),
     };
-    let asks = |c: &str| rules.check("bash", &json!({ "command": c })).ask.is_some();
+    let asks = |c: &str| {
+        rules
+            .check("bash", &json!({ "command": c }))
+            .question()
+            .is_some()
+    };
     assert!(asks("cd .. && echo x > notes.txt"), "the link's parent");
     // Logically back into the project (the real parent has no `proj`).
     assert!(
@@ -995,21 +1003,21 @@ fn the_logical_start_comes_from_pwd_when_it_names_the_folder() {
     let link = other.path().join("link");
     std::os::unix::fs::symlink(&root, &link).unwrap();
     assert_eq!(
-        Here::start(&root, Some(&link)).logical,
+        Here::start(&root, Some(&link)).logical(),
         link,
         "a link to it"
     );
     assert_eq!(
-        Here::start(&root, Some(other.path())).logical,
+        Here::start(&root, Some(other.path())).logical(),
         root,
         "another folder"
     );
     assert_eq!(
-        Here::start(&root, Some(Path::new("rel"))).logical,
+        Here::start(&root, Some(Path::new("rel"))).logical(),
         root,
         "relative"
     );
-    assert_eq!(Here::start(&root, None).logical, root);
+    assert_eq!(Here::start(&root, None).logical(), root);
 }
 
 #[test]
@@ -1243,37 +1251,44 @@ fn the_question_names_what_it_asks_about_and_shows_it_in_full() {
     let check = |tool: &str, args: Json| p.rules.check(tool, &args);
 
     let c = check("bash", json!({ "command": "rm owner.txt" }));
-    assert_eq!(c.ask.as_deref(), Some("Run `rm owner.txt`?"));
-    assert_eq!(c.details, "rm owner.txt");
+    assert_eq!(c.question(), Some("Run `rm owner.txt`?"));
+    assert_eq!(c.details().unwrap(), "rm owner.txt");
     let long = format!("rm owner.txt {}", "x".repeat(80 - 13));
     assert_eq!(long.chars().count(), 80);
     assert_eq!(
-        check("bash", json!({ "command": long })).ask,
+        check("bash", json!({ "command": long }))
+            .question()
+            .map(str::to_owned),
         Some(format!("Run `{long}`?"))
     );
     let longer = format!("{long}x");
     let c = check("bash", json!({ "command": longer }));
-    assert_eq!(c.ask.as_deref(), Some("Run this command?"));
-    assert_eq!(c.details, longer);
+    assert_eq!(c.question(), Some("Run this command?"));
+    assert_eq!(c.details().unwrap(), longer);
     let c = check("bash", json!({ "command": "rm a\nrm b" }));
-    assert_eq!(c.ask.as_deref(), Some("Run this command?"));
+    assert_eq!(c.question(), Some("Run this command?"));
 
     let c = check(
         "write_file",
         json!({ "path": "owner.txt", "content": "new" }),
     );
-    assert_eq!(
-        c.ask.as_deref(),
-        Some("Overwrite the existing file owner.txt?")
+    assert_eq!(c.question(), Some("Overwrite the existing file owner.txt?"));
+    assert!(
+        c.details().unwrap().contains("\"content\": \"new\""),
+        "{c:?}"
     );
-    assert!(c.details.contains("\"content\": \"new\""), "{}", c.details);
     let c = check("bash", json!({ "command": 1 }));
-    assert_eq!(c.details, "{\n  \"command\": 1\n}");
+    assert_eq!(c.details().unwrap(), "{\n  \"command\": 1\n}");
     let c = check("multi_search", json!({ "q": "x" }));
-    assert_eq!(c.ask.as_deref(), Some("Run `multi_search`?"));
-    assert_eq!(c.details, "{\n  \"q\": \"x\"\n}");
+    assert_eq!(c.question(), Some("Run `multi_search`?"));
+    assert_eq!(c.details().unwrap(), "{\n  \"q\": \"x\"\n}");
     let c = check("bash", json!({ "command": "ls" }));
-    assert_eq!((c.ask, c.details.as_str()), (None, ""));
+    assert_eq!(
+        c,
+        Check::Free {
+            creates: Vec::new()
+        }
+    );
 }
 
 // -- found by the mutation tests of #7: each pair fails if its rule goes -----

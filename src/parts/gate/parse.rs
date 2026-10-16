@@ -47,7 +47,7 @@ impl Word {
 /// One simple command: its words, the redirections that truncate a file, the
 /// commands its substitutions run (`$( … )`, backquotes, `<( … )`, `>( … )`,
 /// also inside double quotes and unquoted heredoc bodies), and the operator
-/// after it (`;`, `\n`, `&&`, `||`, `|`, `&`, or `end`).
+/// after it.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Simple {
     pub words: Vec<Word>,
@@ -55,7 +55,25 @@ pub(super) struct Simple {
     /// Files appended to (`>>`, `&>>`).
     pub appends: Vec<Word>,
     pub runs: Vec<String>,
-    pub after: String,
+    pub after: Op,
+}
+
+/// What follows a command.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum Op {
+    /// `;` or a newline (also before a `(`).
+    Then,
+    /// `&&`
+    And,
+    /// `||`: what follows runs if it failed.
+    Or,
+    /// `|`
+    Pipe,
+    /// `&`: it runs in the background, in a subshell.
+    Background,
+    /// The end of the line or of a `( … )`.
+    #[default]
+    End,
 }
 
 /// A command, or the start / end of a `( … )` subshell.
@@ -372,7 +390,7 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                 || !cur.runs.is_empty()
                 || heredocs.iter().any(|h| h.feeds == cur_id)
             {
-                cur.after = $after.to_string();
+                cur.after = $after;
                 out.push((Some(cur_id), Item::Command(std::mem::take(&mut cur))));
             } else {
                 cur = Simple::default();
@@ -437,7 +455,7 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                 i = end;
             }
             '\n' => {
-                finish_command!("\n");
+                finish_command!(Op::Then);
                 for doc in heredocs.drain(..) {
                     let mut body: Vec<String> = Vec::new();
                     loop {
@@ -475,10 +493,10 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                 }
             }
             ';' => {
-                finish_command!(";");
+                finish_command!(Op::Then);
             }
             '(' | ')' => {
-                finish_command!(if c == '(' { ";" } else { "end" });
+                finish_command!(if c == '(' { Op::Then } else { Op::End });
                 out.push((None, if c == '(' { Item::Open } else { Item::Close }));
             }
             '|' | '&' => {
@@ -497,12 +515,12 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                     if double {
                         i += 1;
                     }
-                    let op: String = if double {
-                        [c, c].iter().collect()
-                    } else {
-                        c.to_string()
-                    };
-                    finish_command!(op);
+                    finish_command!(match (c, double) {
+                        ('|', false) => Op::Pipe,
+                        ('|', true) => Op::Or,
+                        (_, false) => Op::Background,
+                        (_, true) => Op::And,
+                    });
                 }
             }
             '<' => {
@@ -575,7 +593,7 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
         }
         i += 1;
     }
-    finish_command!("end");
+    finish_command!(Op::End);
 
     // What heredoc bodies run goes with the command they feed, which kept
     // its place in the line.
@@ -612,10 +630,10 @@ mod tests {
     fn quotes_escapes_and_operators() {
         let c = commands("echo 'a b' \"c d\" e\\ f && ls|wc");
         assert_eq!(words(&c[0]), ["echo", "a b", "c d", "e f"]);
-        assert_eq!(c[0].after, "&&");
+        assert_eq!(c[0].after, Op::And);
         assert_eq!(words(&c[1]), ["ls"]);
-        assert_eq!(c[1].after, "|");
-        assert_eq!(c[2].after, "end");
+        assert_eq!(c[1].after, Op::Pipe);
+        assert_eq!(c[2].after, Op::End);
     }
 
     #[test]

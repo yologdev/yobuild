@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use super::catalogue::{self, Entry};
 use super::invocation::{invocation, Unread};
-use super::parse::{parse, Item, Word};
+use super::parse::{parse, Item, Op, Word};
 use super::paths::{locate, Here};
 use super::Rules;
 
@@ -51,7 +51,7 @@ impl Ctx<'_> {
     /// Where `w` lands: only for a literal word in a folder that is known.
     pub fn path(&self, w: &Word) -> Result<PathBuf, Ask> {
         match &self.cwd {
-            Some(here) if w.known => Ok(locate(&here.physical, &w.text)),
+            Some(here) if w.known => Ok(locate(here.physical(), &w.text)),
             _ => Err(Ask),
         }
     }
@@ -63,7 +63,7 @@ impl Ctx<'_> {
 
     /// Inside the project, or the agent's own.
     fn in_reach(&self, path: &Path) -> bool {
-        path.starts_with(&self.rules.start.physical) || self.rules.free(path)
+        path.starts_with(self.rules.start.physical()) || self.rules.free(path)
     }
 
     fn created(&mut self, path: PathBuf) {
@@ -148,18 +148,18 @@ impl Ctx<'_> {
     /// project's code, not code elsewhere (`cd /tmp/x && make`).
     pub fn in_project(&self) -> Verdict {
         let here = self.cwd.as_ref().ok_or(Ask)?;
-        ok_if(here.physical.starts_with(&self.rules.start.physical))
+        ok_if(here.physical().starts_with(self.rules.start.physical()))
     }
 
     /// A path inside the project (a test file or folder to run).
     pub fn inside(&self, w: &Word) -> Verdict {
         let path = self.path(w)?;
-        ok_if(path.starts_with(&self.rules.start.physical))
+        ok_if(path.starts_with(self.rules.start.physical()))
     }
 
     /// Whether the project has `relative` (an installed tool).
     pub fn project_has(&self, relative: &str) -> bool {
-        self.rules.start.physical.join(relative).exists()
+        self.rules.start.physical().join(relative).exists()
     }
 
     /// A script of the owner's to run: inside the project, there, and not
@@ -168,7 +168,7 @@ impl Ctx<'_> {
         let path = self.path(w)?;
         ok_if(
             path.is_file()
-                && path.starts_with(&self.rules.start.physical)
+                && path.starts_with(self.rules.start.physical())
                 && !self.rules.free(&path)
                 && self.plain(&path),
         )
@@ -234,7 +234,7 @@ pub(super) fn line(rules: &Rules, text: &str, start: &Here) -> Result<Vec<PathBu
     };
     // Folders to return to when a `( … )` subshell ends.
     let mut saved: Vec<Option<Here>> = Vec::new();
-    let mut before = ";".to_owned();
+    let mut before = Op::Then;
     for item in items {
         let command = match item {
             Item::Open => {
@@ -247,8 +247,8 @@ pub(super) fn line(rules: &Rules, text: &str, start: &Here) -> Result<Vec<PathBu
             }
             Item::Command(command) => command,
         };
-        let piped = before == "|" || command.after == "|";
-        before = command.after.clone();
+        let piped = before == Op::Pipe || command.after == Op::Pipe;
+        before = command.after;
         // What its substitutions run, where it runs.
         for inner in &command.runs {
             ctx.run(inner)?;
@@ -267,9 +267,8 @@ pub(super) fn line(rules: &Rules, text: &str, start: &Here) -> Result<Vec<PathBu
                 (Some(to), Some(here)) => Some(here.cd(&to.text)),
                 _ => None,
             };
-            let after = command.after.as_str();
-            ctx.cwd =
-                next.filter(|d| d.physical.is_dir() && !piped && after != "&" && after != "||");
+            let applies = !piped && !matches!(command.after, Op::Background | Op::Or);
+            ctx.cwd = next.filter(|d| d.physical().is_dir() && applies);
             continue;
         }
         ctx.command(&command.words, false)?;
