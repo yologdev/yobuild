@@ -13,7 +13,7 @@ set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 frontend="$repo/frontend"
-rutis_plugins="$repo/vendor/yoagent-rutis/plugins"
+rutis_plugins="$repo/adapters"
 
 fail() { echo "error: $*" >&2; exit 1; }
 
@@ -59,6 +59,7 @@ install() {
   echo "installing: ${dir#"$repo"/}"
   npm ci --prefix "$dir" --no-audit --no-fund --loglevel=error
 }
+"$repo/scripts/copy-adapters.sh"
 install "$frontend/plugins"
 install "$rutis_plugins/pi"
 install "$rutis_plugins/dsh"

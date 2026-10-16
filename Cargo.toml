@@ -16,10 +16,11 @@ publish = false
 async-trait = "0.1"
 # DshHome: a private, per-process home for DSH's own services.
 tempfile = "3"
-# Floors: 0.25.4 (the release the parts were built and tested on), 0.3.1
-# for the DSH host services behind `--dsh-services`.
-yoagent = "0.25.4"
-yoagent-rutis = { version = "0.3.1", features = ["node"] }
+# Floors: 0.25.6 (DeepSeek priced in the bundled table); 0.4, whose adapters
+# `scripts/copy-adapters.sh` copies (and whose `adapters()` names the crate's
+# own files, read in place: `dsh/host-services.json`).
+yoagent = "0.25.6"
+yoagent-rutis = { version = "0.4", features = ["node"] }
 rutis = "0.9"
 rutis-bridge = { version = "0.9", default-features = false, features = ["node"] }
 rutis-loader = { version = "0.9", features = ["node"] }

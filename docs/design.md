@@ -133,7 +133,8 @@ Rules:
   `yobuild run` enables once at start (`prices::enable_bundled()`); reading
   the manifest looks the price up without enabling anything. A manifest
   that sets it for an unpriced model is refused:
-  `budget_usd set, but deepseek/deepseek-flash has no price`.
+  `budget_usd set, but acme/m1 has no price`. (DeepSeek is priced since
+  yoagent 0.25.6, at its peak rate: an upper bound.)
 
 ### Models
 

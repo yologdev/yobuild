@@ -129,7 +129,7 @@ Per tool call, the loop and the policy round trip take a few milliseconds (above
 
 The Node runtimes are the cost of running other ecosystems' plugins unchanged. An agent with Rust tools only is the 21 MB process. yoagent's loop alone also runs in a Cloudflare Worker: about 4 ms to start, and a median of about 45 ms of CPU per agent run there (see [yoagent's README](https://github.com/yologdev/yoagent#runs-where-agents-run)).
 
-**Cost.** DeepSeek's off-peak price is $0.15 per million input tokens on a cache miss and $0.003 on a hit. Peak hours cost double. A run like the one above (a few hundred thousand tokens in, mostly cache hits) costs cents. The example caps each run at 4M tokens (`--max-tokens`), 30 minutes and 80 turns. `--budget-usd` only applies to models in yoagent's price table, which DeepSeek is not yet.
+**Cost.** DeepSeek's off-peak price is $0.15 per million input tokens on a cache miss and $0.003 on a hit. Peak hours cost double. A run like the one above (a few hundred thousand tokens in, mostly cache hits) costs cents. The example caps each run at 4M tokens (`--max-tokens`), 30 minutes and 80 turns, and all runs together at $2 (`--budget-usd`): yoagent prices DeepSeek at its peak rate, so off-peak the real spend is below what the cap counts.
 
 ## Perspective
 

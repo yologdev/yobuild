@@ -32,17 +32,17 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          # The adapters' locks come with the yoagent-rutis version Cargo.lock pins.
           cache-dependency-path: |
             frontend/plugins/package-lock.json
-            vendor/yoagent-rutis/plugins/dsh/package-lock.json
-            vendor/yoagent-rutis/plugins/pi/package-lock.json
-      - name: The vendored adapters match the yoagent-rutis crate
-        run: scripts/check-vendor.sh
+            Cargo.lock
+      - name: Copy the adapters of the yoagent-rutis crate (adapters/)
+        run: scripts/copy-adapters.sh
       - name: Install the npm packages
         run: |
           npm ci --prefix frontend/plugins
-          npm ci --prefix vendor/yoagent-rutis/plugins/pi
-          npm ci --prefix vendor/yoagent-rutis/plugins/dsh
+          npm ci --prefix adapters/pi
+          npm ci --prefix adapters/dsh
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy

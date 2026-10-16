@@ -72,7 +72,7 @@ fn here() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend")
 }
 fn rutis_plugins() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("vendor/yoagent-rutis/plugins")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("adapters")
 }
 
 struct Options {
@@ -135,7 +135,7 @@ fn main() -> Result<(), BoxError> {
     for dir in [here().join("plugins"), rutis_plugins().join("pi")] {
         if !dir.join("node_modules").exists() {
             return Err(format!(
-                "run `npm ci` in {} first (or scripts/try-coding-agent.sh --setup-only)",
+                "{} is not installed: scripts/try-coding-agent.sh --setup-only",
                 dir.display()
             )
             .into());
@@ -233,7 +233,9 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         // (none of the rows below does).
         if options.dsh_services {
             rows.extend(rows_from_file(
-                &rutis_plugins().join("dsh/host-services.json"),
+                &yoagent_rutis::adapters::adapters()
+                    .dsh
+                    .join("host-services.json"),
                 "dsh",
             )?);
         }
