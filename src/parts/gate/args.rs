@@ -84,8 +84,9 @@ impl Spec {
     }
 }
 
-/// Panics on a name that is not an option: one that could never be given
-/// (the program would ask for it, but a judge looking it up would never see it).
+/// Panics on a name the parser can never produce (`-tags` in a spec that
+/// is not `single_dash` reads as `-t -a -g -s`), so a judge looking it up
+/// would never see it.
 const fn check_names(names: &[&str], single_dash: bool) {
     let mut i = 0;
     while i < names.len() {
@@ -114,7 +115,9 @@ pub(super) struct Parsed {
 
 impl Parsed {
     /// Whether `name` was given. A name not in the spec is a judge's
-    /// mistake (it would never be seen): it fails in tests.
+    /// mistake (it would never be seen): it panics in a debug build, so
+    /// tests catch it (as for [`value`](Self::value) and
+    /// [`values`](Self::values)).
     pub fn has(&self, name: &str) -> bool {
         debug_assert!(self.spec.knows(name), "{name} is not in the spec");
         self.options.iter().any(|(o, _)| *o == name)

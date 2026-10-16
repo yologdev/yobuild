@@ -143,6 +143,7 @@ fn end_of_double(s: &[char], open: usize) -> Option<usize> {
             '"' => return Some(i),
             '`' => i = end_of_backquote(s, i)?,
             '$' if s.get(i + 1) == Some(&'(') => i = closing(s, i + 1)?,
+            '$' if s.get(i + 1) == Some(&'{') => i = brace_end(s, i)?,
             _ => {}
         }
         i += 1;
@@ -166,23 +167,7 @@ fn text(s: &[char], from: usize, to: usize) -> String {
 /// forms are read: `${name}`, `${#name}`, `${name[0]}`, `${name[@]}`, and
 /// `${name<op>word}` for the default, pattern and case operators.
 fn plain_parameter(s: &[char], at: usize) -> bool {
-    // The body up to the matching `}`.
-    let mut depth = 0usize;
-    let mut end = None;
-    for (i, c) in s.iter().enumerate().skip(at + 1) {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(i);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let Some(end) = end else {
+    let Some(end) = brace_end(s, at) else {
         return false;
     };
     let body = &s[at + 2..end];
@@ -222,15 +207,38 @@ fn plain_parameter(s: &[char], at: usize) -> bool {
         (None, _) => true,
         (Some(_), true) => false,
         (Some(':'), false) => match body.get(i + 1) {
-            Some('-' | '=' | '+' | '?') => true,
+            // Not `:=`: it assigns the variable (`${PS4:=…}`), past the
+            // rules for assignments.
+            Some('-' | '+' | '?') => true,
             // `${x:offset:length}`: only literal numbers.
             _ => body[i + 1..]
                 .iter()
                 .all(|c| c.is_ascii_digit() || matches!(c, ':' | ' ' | '-')),
         },
-        (Some('-' | '=' | '+' | '?' | '#' | '%' | '/' | '^' | ','), false) => true,
+        (Some('-' | '+' | '?' | '#' | '%' | '/' | '^' | ','), false) => true,
         _ => false,
     }
+}
+
+/// The index of the `}` closing the `${` at `at`: bash reads everything
+/// up to it as one word (spaces, `;` and `#` included), past quotes,
+/// nested expansions and substitutions.
+fn brace_end(s: &[char], at: usize) -> Option<usize> {
+    let mut i = at + 2;
+    while i < s.len() {
+        match s[i] {
+            '\\' => i += 1,
+            '\'' => i = find(s, '\'', i + 1)?,
+            '"' => i = end_of_double(s, i)?,
+            '`' => i = end_of_backquote(s, i)?,
+            '$' if s.get(i + 1) == Some(&'(') => i = closing(s, i + 1)?,
+            '$' if s.get(i + 1) == Some(&'{') => i = brace_end(s, i)?,
+            '}' => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Arithmetic `$(( … ))` text bash evaluates without running anything:
@@ -239,6 +247,16 @@ fn plain_parameter(s: &[char], at: usize) -> bool {
 fn plain_arithmetic(body: &[char]) -> bool {
     body.iter()
         .all(|c| c.is_ascii_digit() || c.is_whitespace() || "+-*/%()<>=!&|^~?:,".contains(*c))
+}
+
+/// Before a command's first real word: only keywords so far.
+fn command_position(words: &[Word]) -> bool {
+    const KEYWORDS: [&str; 10] = [
+        "if", "then", "else", "elif", "while", "until", "do", "!", "{", "time",
+    ];
+    words
+        .iter()
+        .all(|w| w.known && KEYWORDS.contains(&w.text.as_str()))
 }
 
 /// Whether the `$` at `at` starts an expansion the gate can read: not
@@ -355,6 +373,8 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
     let mut cur = Simple::default();
     let mut cur_id = 0usize;
     let mut word: Option<Word> = None;
+    // Inside `[[ … ]]`.
+    let mut in_test = false;
     let mut redirect = Redirect::None;
     let mut heredocs: Vec<Heredoc> = Vec::new();
     // Runs found in heredoc bodies, for the command each feeds.
@@ -373,7 +393,16 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                                     && w.text.chars().all(|c| c.is_ascii_digit()))) => {}
                     Redirect::Duplicate => cur.truncates.push(w),
                     Redirect::Skip => {}
-                    Redirect::None => cur.words.push(w),
+                    Redirect::None => {
+                        // `[[` where a command starts: a test up to `]]`. Unquoted,
+                        // its `[` marks the word unknown; quoted, it is an argument.
+                        if w.text == "[[" && !w.known && command_position(&cur.words) {
+                            in_test = true;
+                        } else if w.text == "]]" && w.known {
+                            in_test = false;
+                        }
+                        cur.words.push(w)
+                    }
                 }
                 redirect = Redirect::None;
             }
@@ -397,6 +426,7 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
             }
             next_id += 1;
             cur_id = next_id;
+            in_test = false;
         };
     }
 
@@ -441,10 +471,30 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                 word.get_or_insert_with(Word::empty).expands();
                 i = end;
             }
+            // Inside `[[ … ]]`, operators and parentheses are part of the test.
+            c if in_test && "&|()<>".contains(c) => {
+                finish_word!();
+                let double = matches!(c, '&' | '|') && s.get(i + 1) == Some(&c);
+                let op: String = std::iter::repeat_n(c, 1 + usize::from(double)).collect();
+                cur.words.push(Word::literal(op));
+                i += usize::from(double);
+            }
             '$' if s.get(i + 1) == Some(&'(') => {
                 let end = closing(&s, i + 1)?;
                 cur.runs.extend(substitutions(&s[i..=end])?);
                 word.get_or_insert_with(Word::empty).expands();
+                i = end;
+            }
+            // `${ … }`: one word to its `}`, whatever it holds.
+            '$' if s.get(i + 1) == Some(&'{') => {
+                if !plain_parameter(&s, i) {
+                    return None;
+                }
+                let end = brace_end(&s, i)?;
+                cur.runs.extend(substitutions(&s[i + 2..end])?);
+                let w = word.get_or_insert_with(Word::empty);
+                w.expands();
+                w.text.push_str(&text(&s, i, end + 1));
                 i = end;
             }
             '<' | '>' if s.get(i + 1) == Some(&'(') => {
@@ -495,6 +545,9 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
             ';' => {
                 finish_command!(Op::Then);
             }
+            // `(( … ))` and `for (( … ))`: arithmetic on variables' values,
+            // which runs any `$( … )` a value's subscript holds.
+            '(' if s.get(i + 1) == Some(&'(') => return None,
             '(' | ')' => {
                 finish_command!(if c == '(' { Op::Then } else { Op::End });
                 out.push((None, if c == '(' { Item::Open } else { Item::Close }));

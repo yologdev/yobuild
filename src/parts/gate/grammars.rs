@@ -1,5 +1,6 @@
 //! Programs with a grammar of their own, read by a judge rather than a
-//! single [`Spec`]: shell state (`set`, `declare`), shell text (`trap`),
+//! single [`Spec`]: shell state (`set`, `declare`, `unset`), tests (`test`,
+//! `[`, `[[`), shell text (`trap`),
 //! `dd`'s `key=value`, `find`'s expressions, `sed` scripts, `tar`'s old
 //! style, and the tools with subcommands (`cargo`, `go`, `npm`, `ruff`,
 //! `gh`, `rustup`, `python -m`).
@@ -13,7 +14,8 @@ use super::specs::*;
 
 /// The `make` targets and package scripts that run freely: building,
 /// testing and checking, by their usual names. Others (`deploy`, `clean`,
-/// `install`, `publish`) ask.
+/// `install`, `publish`) ask. (`make` with no target runs the Makefile's
+/// default, and `npm test` the `test` script: both free.)
 pub(super) const TARGETS: &[&str] = &[
     "all", "build", "test", "tests", "check", "lint", "typecheck", "fmt-check", "format-check",
     "ci",
@@ -345,10 +347,12 @@ pub(super) fn cargo(args: &[Word], ctx: &mut Ctx) -> Verdict {
             each_value(&p, &["--target-dir"], |w| ctx.inside(w))
         }
         // `cargo fmt --check`, or `-- --check` (passed to rustfmt).
+        // `cargo fmt --check`, or `-- --check`: what follows `--` goes to
+        // rustfmt, read by its own spec (not `--print-config … PATH`).
         "fmt" => {
-            ok_if(parse(&CARGO_FMT, rest).is_some_and(|p| {
-                p.has("--check") || p.operands.iter().any(|w| w.text == "--check")
-            }))
+            let p = parse(&CARGO_FMT, rest).ok_or(Ask)?;
+            let rustfmt = parse(&RUSTFMT, &p.operands).ok_or(Ask)?;
+            ok_if(p.has("--check") || rustfmt.has("--check"))
         }
         "tree" | "metadata" | "version" | "search" | "locate-project" | "pkgid"
         | "verify-project" => reads(&CARGO_READ),
@@ -509,7 +513,7 @@ pub(super) fn unset(args: &[Word], _: &mut Ctx) -> Verdict {
 }
 
 /// The word after each of `options` is a plain variable name.
-fn names_after(args: &[Word], options: &[&str]) -> Verdict {
+pub(super) fn names_after(args: &[Word], options: &[&str]) -> Verdict {
     for (at, w) in args.iter().enumerate() {
         if w.known && options.contains(&w.text.as_str()) {
             ok_if(

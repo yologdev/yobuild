@@ -51,9 +51,10 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 /// - **writing** (replacing): a new file inside the project, one the agent
 ///   made, or in its [`Scratch`] (a new file elsewhere asks: it could be
 ///   one a program reads and runs); **deleting** or moving away: only those of the agent's;
-///   **touching** or **changing a mode** (`chmod`, `chown`): a new file or
-///   the agent's own; **appending**, making a folder or a file: inside the
-///   project or the agent's own; never a name starting `.env`, nor `.git`
+///   **touching**: a new file inside the project, or the agent's own;
+///   **changing a mode or owner** (`chmod`, `chown`, `chgrp`): only the
+///   agent's own; **appending**, making a folder: inside the project or the
+///   agent's own; never a name starting `.env`, nor `.git`
 ///   itself, in any case;
 /// - **running shell text** (`bash -c`, `eval`, `trap`, substitutions): read
 ///   as a command line too; **a script** given to an interpreter: one of
@@ -61,8 +62,9 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 /// - **programs**: readers, and writers whose targets are judged as above
 ///   (`cp`, `mv`, `tee`, `tar -c`, `curl -o`, …); builds and tests, with the
 ///   line inside the project (`cargo test`, `go test ./...`, `npm test`,
-///   `pytest`; `make` and `npm run` only for targets that build or check:
-///   `test`, `build`, `lint`, …; checkers through `npx` only when the
+///   `pytest`; `make` with no target (its default, whatever that is) or only
+///   targets that build or check — `test`, `build`, `lint`, … — and `npm
+///   run` only for those; checkers through `npx` only when the
 ///   project has them installed); git that reads, or adds, commits and shares without
 ///   discarding the working tree (`reset --soft`, `commit --amend` move
 ///   history; the reflog keeps it). Each

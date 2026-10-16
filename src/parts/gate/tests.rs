@@ -1857,3 +1857,145 @@ fn a_literal_dollar_folder_is_not_a_variable() {
         &[("cd sub && echo x > new.txt", "cd $DIR && echo x > new.txt")],
     );
 }
+
+// -- the review of the latest updates to #7 ------------------------------------
+
+#[test]
+fn bash_reads_some_things_as_one_unit() {
+    let p = Project::new();
+    pairs(
+        &p,
+        &[
+            // `[[ … ]]` to its `]]`: `&&` and `(` inside are the test's.
+            ("[[ -f a.md && -f x ]] && ls", "[[ -f a.md && n -eq 1 ]]"),
+            ("[[ ( 1 -eq 1 ) ]]", "[[ ( n -gt 1 ) ]]"),
+            (
+                "[[ -f a.md || -d sub ]]",
+                "[[ -f a.md || -v 'a[$(touch p)]' ]]",
+            ),
+            ("echo \"[[\" && ls", "echo \"[[\" && rm owner.txt"),
+            // An unclosed `[[` ends with its command.
+            ("[[ -f a.md ; ls && ls", "[[ -f a.md ; ls && rm owner.txt"),
+            // `${ … }` to its `}`: a space and `#` inside do not end it.
+            ("echo ${x:- a # b}", "echo ${x:- # } ; rm owner.txt"),
+            ("echo ${x:-$(date)}", "echo ${x:-$(rm owner.txt)}"),
+            ("echo \"${x:-\"a\"}\"", "echo \"${x:-\"a\"}\" > owner.txt"),
+            // Assigning through an expansion.
+            ("echo ${x:-1}", "echo ${x:=1}"),
+            ("echo ${x-1}", "echo ${PS4=x}"),
+            // Arithmetic commands.
+            ("( ls )", "(( ls ))"),
+            ("for f in a; do ls; done", "for ((; ls ; )); do break; done"),
+            ("wait", "true & wait -n -p 'a[$(touch p)]'"),
+            ("wait -n -p pid", "wait -p \"$n\""),
+        ],
+    );
+}
+
+#[test]
+fn awk_redirections_inside_strings_are_seen_past() {
+    let p = Project::new();
+    pairs(
+        &p,
+        &[
+            (
+                "awk '{ print \"a;b\" }' a.md",
+                "awk '{ print \"a;b\" > \"owner.txt\" }' a.md",
+            ),
+            (
+                "awk '{ print \"}\" }' a.md",
+                "awk '{ print \"}\" | \"sh\" }' a.md",
+            ),
+            (
+                "awk '{ print \"a > b\" }' a.md", "awk '{ print $1 } $2 > 3' a.md",
+            ),
+            (
+                "awk '{ print }' a.md",
+                "awk 'BEGIN { \"ls\" | getline }' a.md",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_version_query_is_each_tools_own() {
+    let p = Project::new();
+    let (_o, o) = outside();
+    pairs(
+        &p,
+        &[
+            (
+                format!("cd {o} && cargo -V"),
+                format!("cd {o} && cargo test version"),
+            ),
+            (
+                format!("cd {o} && cargo --version"),
+                format!("cd {o} && ctest -V"),
+            ),
+            (
+                format!("cd {o} && cargo version"),
+                format!("cd {o} && jest version"),
+            ),
+            (
+                format!("cd {o} && go version"),
+                format!("cd {o} && go -version"),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn rustfmt_after_cargo_fmt_is_read_by_its_spec() {
+    let p = Project::new();
+    pairs(
+        &p,
+        &[
+            (
+                "cargo fmt -- --check",
+                "cargo fmt -- --check --print-config default owner.txt",
+            ),
+            (
+                "cargo fmt --check -- --edition 2021",
+                "cargo fmt -- src/x.rs",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn the_checks_on_names_targets_and_flags() {
+    let p = Project::new();
+    pairs(
+        &p,
+        &[
+            ("unset x", "unset \"$n\""),
+            ("test -v x", "test -v \"$n\""),
+            ("make test", "make \"$T\""),
+            ("sed 's/[^]/]/x/' a.md", "sed 's/[^]/]/x/w x' a.md"),
+            ("sed 's/a/[/;s/b/]/' a.md", "sed 's/a/[/;s/b/]/w x' a.md"),
+            (
+                "RUSTFLAGS='-A dead_code' cargo build",
+                "RUSTFLAGS='-A -Clinker=./x' cargo build",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_symlink_out_of_the_project_is_followed() {
+    let p = Project::new();
+    let (_o, o) = outside();
+    std::os::unix::fs::symlink(&o, p.root().join("out")).unwrap();
+    std::os::unix::fs::symlink(Path::new(&o).join("not-there"), p.root().join("dangling")).unwrap();
+    pairs(
+        &p,
+        &[
+            ("echo x > sub/new.txt", "echo x > out/new.txt"),
+            ("mkdir sub/d", "mkdir out/d"),
+            ("echo x >> a.md", "echo x >> out/theirs.txt"),
+            ("touch sub/n", "touch out/n"),
+            ("echo x > new2.txt", "echo x > dangling"),
+        ],
+    );
+    assert!(p.file_tool("write_file", "out/new.md"));
+}

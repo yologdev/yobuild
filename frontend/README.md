@@ -208,11 +208,12 @@ path/to/yobuild/scripts/try-handoff.sh --demo               # headless, scripted
 - **Guardrails:**
   - The gate (`yobuild::parts::Gate`, in Rust) is an allow-list: it lets
     through the programs it knows, with the options it knows — reading,
-    building and testing, git that does not discard, writing new files —
+    building and testing, git that does not discard, writing new files in the project —
     and asks before everything else, above all deleting, discarding or
     overwriting what you already have (`rm`, `git reset --hard`, a forced
     push, `>` or `cp` over an existing file, `sed -i`, …). Files the agent
-    created this session, and its own scratch folder, are exempt. These
+    created this session (by calls that ran without asking), and its own
+    scratch folder, are exempt. These
     questions do wait, and with nobody connected they are refused. It is a
     guardrail, not a sandbox: targeted edits of existing files go through,
     and builds and tests run the project's code — including what the agent

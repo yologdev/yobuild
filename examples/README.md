@@ -19,14 +19,14 @@ Most agents assume you are watching them. A handoff agent assumes you are not:
   - The question stays open while nobody is connected, and a page opened later shows it.
   - The answer, whenever it comes, goes in as a steer message. It is picked up mid-run, or it starts the next run if the agent had stopped.
   - Dismissing a question means "decide yourself"; the agent does, and says so.
-- **Approval guardrails: an allow-list.** The gate (`yobuild::parts::Gate`) lets through what it knows to be harmless — reading, building and testing, `git status`/`add`/`commit`/`push`, writing new files — and asks first about everything else; with nobody there it is refused:
+- **Approval guardrails: an allow-list.** The gate (`yobuild::parts::Gate`) lets through what it knows to be harmless — reading, building and testing, `git status`/`add`/`commit`/`push`, writing new files in the project — and asks first about everything else; with nobody there it is refused:
   - anything that deletes, discards or overwrites what you already have (`rm`, `git reset --hard`, `mv` or `cp` over a file, `>` onto one, …);
   - any program, git subcommand or option it does not know (each program it knows has its own list of options), a program run from a path that is not a system folder (`./cat`), an environment variable that changes what runs (`PATH=…`), an interpreter running code that is not your script, a plugin tool not declared free (the plan and search tools are).
 
-  Files it created itself, and its own scratch folder, stay free, so it can keep its deliverable up to date. These are guardrails, not a sandbox:
+  Files it created itself (by calls that ran without asking), and its own scratch folder, stay free, so it can keep its deliverable up to date. These are guardrails, not a sandbox:
   - targeted edits of your existing files (the edit tool) go through;
   - builds and tests run your project's code as it is, including what the agent edited or added (a test, a `build.rs`, a `Makefile` rule); the gate does not judge what code does;
-  - it guards your files against being changed, not your data against being read or sent: anything the agent can read (`.env` included) it can also send.
+  - it guards your files against being deleted or replaced (not edited), and not your data against being read or sent: anything the agent can read (`.env` included) it can also send.
 
   For a guarantee, run it in a container or on a disposable copy.
 - **What it says is checked.**

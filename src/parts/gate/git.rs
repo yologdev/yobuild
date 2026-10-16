@@ -141,6 +141,8 @@ fn subcommand(name: &str, rest: &[Word]) -> Option<(Spec, Judge)> {
         }),
         // A new branch, or another one: git refuses to switch over local
         // changes it would lose (`--discard-changes`, `-f` are not listed).
+        // It does replace ignored files the other branch tracks, and runs
+        // the `post-checkout` hook (the owner's, in `.git`).
         "switch" => pair(SWITCH, |p, _| {
             let creates = ["-c", "--create", "--orphan"].iter().any(|o| p.has(o));
             ok_if(p.operands.len() <= 1 && (creates || p.operands.len() == 1))

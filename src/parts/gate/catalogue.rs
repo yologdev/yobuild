@@ -40,7 +40,7 @@ const READERS: &[&str] = &[
     "command", "basename", "dirname", "realpath", "readlink", "printenv", "whoami", "id", "uname",
     "nproc", "uptime", "cut", "tr", "rev", "paste", "join", "comm", "diff", "cmp", "md5sum",
     "sha1sum", "sha256sum", "sha512sum", "shasum", "od", "hexdump", "nl", "column", "fold",
-    "expand", "unexpand", "seq", "sleep", "jq", "wait", "jobs", "pyflakes", "ps",
+    "expand", "unexpand", "seq", "sleep", "jq", "jobs", "pyflakes", "ps",
 ];
 
 /// Builds, tests and checks: they run the project's code, so only with the
@@ -81,6 +81,8 @@ pub(super) fn entry(name: &str) -> Option<Entry> {
         })),
         "trap" => Some(Raw(trap)),
         "unset" => Some(Raw(unset)),
+        // `wait -p NAME` sets a variable, by name.
+        "wait" => Some(Raw(|args, _| names_after(args, &["-p"]))),
         "test" | "[" => Some(Raw(test)),
         "[[" => Some(Raw(double_bracket)),
         // Shells whose text reads as bash's (not zsh's `=( … )` or ksh's
@@ -377,9 +379,10 @@ fn copy(p: &Parsed, ctx: &mut Ctx, moves: bool, recursive: bool) -> Verdict {
 }
 
 /// Whether an awk program only reads: no `system`, `getline` (both run
-/// commands), `@include`/`@load`, and no `print` or `printf` statement
-/// with an output redirection (`> file`, `>> file`, `| cmd`). A `>`
-/// elsewhere is a comparison (`$3 > 100`).
+/// commands), `@include`/`@load`, and no `>` or `|` after its first `print`
+/// or `printf`, string literals aside — where an output redirection could
+/// be (`> file`, `| cmd`). A `>` before it is a comparison (`$3 > 100
+/// { print }`); one after it asks, comparison or not.
 fn awk_reads(program: &str) -> bool {
     if ["system", "getline", "@"]
         .iter()
@@ -387,8 +390,26 @@ fn awk_reads(program: &str) -> bool {
     {
         return false;
     }
-    program.match_indices("print").all(|(at, _)| {
-        let statement = program[at..].split([';', '}', '\n']).next().unwrap_or("");
-        !statement.contains(['>', '|'])
-    })
+    // The program with its string literals emptied (`"a>b"` → `""`).
+    let mut code = String::new();
+    let mut chars = program.chars();
+    while let Some(c) = chars.next() {
+        code.push(c);
+        if c == '"' {
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => {
+                        chars.next();
+                    }
+                    '"' => {
+                        code.push('"');
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    code.find("print")
+        .is_none_or(|at| !code[at..].contains(['>', '|']))
 }
