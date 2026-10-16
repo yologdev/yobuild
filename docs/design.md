@@ -34,21 +34,22 @@ Three ways in, one engine:
 
 ## 2. The manifest
 
-TOML, one file per agent. Paths are relative to the manifest.
+TOML, one file per agent (`yobuild::manifest`). Paths are relative to the
+manifest's folder.
 
 ```toml
 [agent]
 name   = "handoff"
 model  = "deepseek/deepseek-flash"   # provider/id; the key from the provider's env var
-prompt = "prompts/handoff.md"        # system prompt; {cwd}, {scratch} interpolated
+prompt = "prompts/handoff.md"        # system prompt; yobuild run fills in {cwd}, {scratch}
 
 [limits]
 max_turns  = 80
 max_tokens = 4_000_000               # per run
 max_minutes = 30
-budget_usd = 2.0                     # refused if the model has no price
+budget_usd = 2.0                     # dollars per run; refused if the model has no price
 
-# Plugins, by ecosystem. Versions pinned; `yobuild check` refuses unpinned.
+# Plugins, by ecosystem. Versions pinned, or a local path.
 [[plugin]]
 pi = "@juicesharp/rpiv-todo@2.12.0"
 
@@ -59,11 +60,12 @@ config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }
 [[plugin]]
 rutis = "plugins/word_count.ts"      # a local TS/Bun/Python/Go plugin
 runtime = "bun"
+name  = "words"                      # optional: the default is the package's name or the file's stem
 
 # MCP servers, through yoagent's own MCP client. Same rules as plugins.
 [[mcp]]                              # stdio: the pinned package is installed (no scripts), its bin run
 npm  = "@modelcontextprotocol/server-filesystem@1.2.3"   # version illustrative
-args = ["."]
+args = ["."]                         # also `env`, and `bin` when the package has several
 
 [[mcp]]                              # HTTP: the URL is the pin
 url     = "https://mcp.example.com/mcp"
@@ -87,45 +89,66 @@ terminal = false
 
 Rules:
 
-- **Pinned or refused.** Every plugin and every stdio MCP server carries an
-  exact version (or is a local path). Reproducible agents, and the vetting
-  result stays valid. No `npx -y`: it resolves the latest version and runs
-  install scripts.
+- **Pinned or refused.** Every plugin and every stdio MCP server is an npm
+  registry package (`name`, `@scope/name`) at an exact semver version
+  (`1.2.3`, `1.2.3-beta.1`), or a local path (`./`, `../`, `/`; a rutis
+  plugin is always a local file, so `plugins/x.ts` is one too). Tags,
+  ranges, git, URL and `file:` specs are refused. Reproducible agents, and
+  the vetting result stays valid. No `npx -y`: it resolves the latest
+  version and runs install scripts.
+- **Names.** Every plugin and MCP server has a name, unique in the
+  manifest: `name`, else the package's name without its scope, the file's
+  stem, or an HTTP server's host.
 - **One plugin, one line of intent.** Configuration is the plugin's own;
   yobuild does not translate it.
 - **Unknown keys are errors.** A typo in a safety setting must not pass.
   Every error names the file, line and column.
 - **Secrets come from the environment.** A header or server variable whose
-  name looks like a secret (`Authorization`, `*token*`, `*key*`,
-  `*secret*`, `*password*`, `*cookie*`) must be a `${NAME}` reference; a
-  value written into the file is refused.
-- **HTTP servers over https** (plain http only on this machine).
+  name has a secret's word in it (split at `_`, `-` and case changes: key,
+  apikey, token, secret, password, passwd, pwd, auth, authorization,
+  cookie, credential(s)) is only `${NAME}` references, plus at most a scheme
+  word (`Bearer ${TOKEN}`, `Basic`, `Token`); a value written into the file
+  is refused. References are checked when the file is read (closed, a
+  plain name).
+- **Endpoints over https** (MCP servers, a custom model's `base_url`):
+  plain http only to this machine (`localhost`, `127.0.0.1`, `[::1]`), and
+  no user in the URL.
+- **Limits** are more than zero; the agent's name is one plain name (it
+  names its scratch folder); `config` is a table (dates become text).
+- **Frontends**: `phone` needs `web`; the terminal or the web, not both.
 - **Plugins**: each `[[plugin]]` names exactly one of `pi`, `dsh`, `rutis`
   (a local file, with its `runtime`: node, bun, python, go), and its own
   `config`. Each `[[mcp]]` names exactly one of `npm` (stdio, with `args`
   and `env`) or `url` (HTTP, with `headers`).
-- **A budget needs a price.** `budget_usd` uses yoagent's `Budget::for_model`
-  with the bundled price table (`prices::enable_bundled()`, called once at
-  start). A manifest that sets it for an unpriced model is refused:
+- **A budget needs a price.** `budget_usd` (dollars, more than zero) uses
+  yoagent's `Budget::for_model` with the bundled price table, which
+  `yobuild run` enables once at start (`prices::enable_bundled()`); reading
+  the manifest looks the price up without enabling anything. A manifest
+  that sets it for an unpriced model is refused:
   `budget_usd set, but deepseek/deepseek-flash has no price`.
 
 ### Models
 
 `model = "<provider>/<id>"` maps to a yoagent `ModelConfig` constructor;
-`<id>` is passed as the model id. The API key comes from the provider's
-environment variable, read by yobuild (yoagent reads none).
+`<id>` (everything after the first `/`) is passed as the model id. The API
+key comes from the provider's environment variables (the first set), read
+by yobuild and passed to the agent: without one, yoagent would fall back to
+`YOAGENT_API_KEY` / `API_KEY`, so `yobuild run` refuses to start instead.
 
 | Provider | Constructor | Protocol, base URL | Key from |
 |---|---|---|---|
 | `anthropic` | `ModelConfig::anthropic` | Anthropic Messages, `api.anthropic.com/v1` | `ANTHROPIC_API_KEY` |
 | `openai` | `ModelConfig::openai` | OpenAI Chat Completions, `api.openai.com/v1` | `OPENAI_API_KEY` |
 | `deepseek` | `ModelConfig::deepseek` | OpenAI-compatible, `api.deepseek.com`, `OpenAiCompat::deepseek()` | `DEEPSEEK_API_KEY` |
-| `google` | `ModelConfig::google` | Google Generative AI | `GEMINI_API_KEY` |
-| `groq`, `mistral`, `xai`, `qwen`, `zai`, `minimax`, `meta` | the constructor of the same name | OpenAI-compatible, the provider's base URL and compat flags | `<PROVIDER>_API_KEY` |
-| anything else | `ModelConfig::openai_compat` | needs `base_url` (and compat flags) under `[agent]` | `api_key_env` under `[agent]` |
+| `google` | `ModelConfig::google` | Google Generative AI | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` |
+| `groq`, `mistral`, `xai`, `zai`, `minimax` | the constructor of the same name | OpenAI-compatible, the provider's base URL and compat flags | `<PROVIDER>_API_KEY` |
+| `qwen` | `ModelConfig::qwen` | OpenAI-compatible (DashScope) | `DASHSCOPE_API_KEY` |
+| `meta` | `ModelConfig::meta` | OpenAI-compatible | `META_API_KEY`, then `MODEL_API_KEY` |
+| anything else | `ModelConfig::openai_compat`, default compat flags | needs `base_url` under `[agent]` | `api_key_env` under `[agent]` |
 
 An unknown provider without `base_url` is an error that lists the known
-providers. Prices come from the bundled table; a provider missing from it
+providers; `base_url` without `api_key_env` says it is missing; either key
+for a known provider is refused. Prices come from the bundled table; a provider missing from it
 runs, but without `budget_usd` or cost facts.
 
 ## 3. The parts

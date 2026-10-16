@@ -2512,6 +2512,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "yoagent",
  "yoagent-rutis",

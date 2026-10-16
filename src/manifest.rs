@@ -1,7 +1,8 @@
 //! The agent manifest: one TOML file per agent (design §2). Read strictly —
 //! an unknown key, an unpinned plugin, a budget for an unpriced model, a
 //! secret written into the file are errors, each naming the file, line and
-//! column — into typed parts `yobuild run` wires up.
+//! column (a file that cannot be read names the file) — into typed parts
+//! `yobuild run` wires up.
 //!
 //! ```toml
 //! [agent]
@@ -15,17 +16,19 @@
 //! report = "handoff"
 //! ```
 //!
-//! Paths in the manifest are relative to its folder.
+//! Paths in the manifest are relative to its folder. Reading a manifest has
+//! no effect on the process: the budget's price is looked up in yoagent's
+//! bundled table directly.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 use toml::Spanned;
 use yoagent::provider::model::OpenAiCompat;
-use yoagent::provider::ModelConfig;
+use yoagent::provider::{ModelConfig, PriceTable};
 
 use crate::parts::Report;
 
@@ -33,7 +36,8 @@ use crate::parts::Report;
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Manifest {
-    /// The manifest's folder: what its paths are relative to.
+    /// The manifest's folder (absolute when read by [`Manifest::load`]):
+    /// what its paths are relative to.
     pub dir: PathBuf,
     pub agent: Agent,
     pub limits: Limits,
@@ -47,42 +51,62 @@ pub struct Manifest {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Agent {
+    /// One plain path component (it names the agent's scratch folder).
     pub name: String,
     pub model: Model,
-    /// The system prompt's file (`{cwd}` and `{scratch}` are filled in).
+    /// The system prompt's file; `yobuild run` fills in `{cwd}` and
+    /// `{scratch}`.
     pub prompt: Option<PathBuf>,
 }
 
-/// `provider/id`, and how to reach a provider yoagent has no constructor for.
+/// `provider/id`: a provider yoagent has a constructor for, or an
+/// OpenAI-compatible endpoint (`base_url`, `api_key_env`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct Model {
-    pub provider: String,
-    pub id: String,
-    /// For a provider not in [`PROVIDERS`]: its OpenAI-compatible endpoint.
-    pub base_url: Option<String>,
-    /// The environment variable holding the API key.
-    pub key_env: String,
+    provider: String,
+    id: String,
+    base_url: Option<String>,
+    key_env: Vec<String>,
 }
 
-/// The providers yoagent has a constructor for, and their key's variable.
-pub const PROVIDERS: [(&str, &str); 11] = [
-    ("anthropic", "ANTHROPIC_API_KEY"),
-    ("openai", "OPENAI_API_KEY"),
-    ("deepseek", "DEEPSEEK_API_KEY"),
-    ("google", "GEMINI_API_KEY"),
-    ("groq", "GROQ_API_KEY"),
-    ("mistral", "MISTRAL_API_KEY"),
-    ("xai", "XAI_API_KEY"),
-    ("qwen", "QWEN_API_KEY"),
-    ("zai", "ZAI_API_KEY"),
-    ("minimax", "MINIMAX_API_KEY"),
-    ("meta", "META_API_KEY"),
+/// The providers yoagent has a constructor for, and the variables its key
+/// is read from, first set first (yoagent 0.25's `resolve_api_key`).
+pub const PROVIDERS: [(&str, &[&str]); 11] = [
+    ("anthropic", &["ANTHROPIC_API_KEY"]),
+    ("openai", &["OPENAI_API_KEY"]),
+    ("deepseek", &["DEEPSEEK_API_KEY"]),
+    ("google", &["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
+    ("groq", &["GROQ_API_KEY"]),
+    ("mistral", &["MISTRAL_API_KEY"]),
+    ("xai", &["XAI_API_KEY"]),
+    ("qwen", &["DASHSCOPE_API_KEY"]),
+    ("zai", &["ZAI_API_KEY"]),
+    ("minimax", &["MINIMAX_API_KEY"]),
+    ("meta", &["META_API_KEY", "MODEL_API_KEY"]),
 ];
 
 impl Model {
-    /// The yoagent model configuration (priced from the bundled table once
-    /// the process enabled it: `yoagent::provider::prices::enable_bundled`).
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The OpenAI-compatible endpoint of a provider yoagent does not know.
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref()
+    }
+
+    /// The variables the API key is read from, first set first.
+    pub fn key_env(&self) -> &[String] {
+        &self.key_env
+    }
+
+    /// The yoagent model configuration. It carries a price only once the
+    /// process enabled yoagent's price table
+    /// (`yoagent::provider::prices::enable_bundled`, done by `yobuild run`).
     pub fn config(&self) -> ModelConfig {
         let (id, name) = (self.id.clone(), self.id.clone());
         match self.provider.as_str() {
@@ -106,9 +130,19 @@ impl Model {
         }
     }
 
-    /// The API key, from [`key_env`](Self::key_env).
+    /// The API key: the first of [`key_env`](Self::key_env) set and not
+    /// empty. `yobuild run` must pass it (or refuse to start without one):
+    /// with none, yoagent would fall back to `API_KEY`, and send that to a
+    /// custom endpoint.
     pub fn api_key(&self) -> Option<String> {
-        std::env::var(&self.key_env).ok().filter(|k| !k.is_empty())
+        self.api_key_with(|name| std::env::var(name).ok())
+    }
+
+    /// [`api_key`](Self::api_key), from `lookup` instead of the environment.
+    pub fn api_key_with(&self, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+        self.key_env
+            .iter()
+            .find_map(|name| lookup(name).filter(|k| !k.is_empty()))
     }
 }
 
@@ -119,42 +153,70 @@ pub struct Limits {
     /// Per run.
     pub max_tokens: Option<u64>,
     pub max_minutes: Option<u64>,
-    /// Checked when read: the model has a price.
+    /// Checked when read: positive, and the model has a price.
     pub budget_usd: Option<f64>,
 }
 
-/// Where a plugin comes from.
+/// Where a plugin or an MCP server comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Source {
-    /// A package at an exact version (`name@1.2.3`, `@scope/name@1.2.3`).
-    Package { name: String, version: String },
-    /// A local file or folder, relative to the manifest (`./x.ts`, `/abs`).
+    /// A registry package at an exact version.
+    Package(Package),
+    /// A local file or folder, absolute or relative to the manifest (`./`
+    /// components removed).
     Path(PathBuf),
 }
 
+/// An npm package (`name`, `@scope/name`) at an exact semver version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Package {
+    name: String,
+    version: String,
+}
+
+impl Package {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// `name@version`, as npm reads it.
+    pub fn spec(&self) -> String {
+        format!("{}@{}", self.name, self.version)
+    }
+}
+
+/// A plugin: its name (unique among the manifest's plugins and MCP
+/// servers), what it is, and its own configuration.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
-pub enum Plugin {
+pub struct Plugin {
+    /// `name` in the manifest, else the package's name (without its scope)
+    /// or the file's stem.
+    pub name: String,
+    pub kind: PluginKind,
+    /// The plugin's own configuration (a table), passed as it is.
+    pub config: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PluginKind {
     /// A pi extension package.
-    Pi {
-        source: Source,
-        config: Option<serde_json::Value>,
-    },
+    Pi(Source),
     /// A DeepSeek Harness plugin.
-    Dsh {
-        source: Source,
-        config: Option<serde_json::Value>,
-    },
+    Dsh(Source),
     /// A rutis plugin (TypeScript, Python, Go), from a local file.
-    Rutis {
-        path: PathBuf,
-        runtime: Runtime,
-        config: Option<serde_json::Value>,
-    },
+    Rutis { path: PathBuf, runtime: Runtime },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Runtime {
     Node,
     Bun,
@@ -162,12 +224,25 @@ pub enum Runtime {
     Go,
 }
 
+/// An MCP server: its name (unique among the manifest's plugins and
+/// servers), and how to reach it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Mcp {
-    /// A stdio server: a pinned npm package's bin, run with `args`.
+pub struct Mcp {
+    /// `name` in the manifest, else the package's name (without its scope),
+    /// the file's stem, or the URL's host.
+    pub name: String,
+    pub transport: Transport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Transport {
+    /// A stdio server: a pinned npm package's bin (`bin`, when it has
+    /// several), or a local one, run with `args` and `env`.
     Stdio {
-        package: Source,
+        source: Source,
+        bin: Option<String>,
         args: Vec<String>,
         env: BTreeMap<String, Value>,
     },
@@ -178,31 +253,118 @@ pub enum Mcp {
     },
 }
 
-/// A value with `${NAME}` references filled in from the environment when
-/// the agent starts (never written into the manifest).
+/// A header or variable's value: text with `${NAME}` references, filled in
+/// from the environment when the agent starts. A value whose name looks
+/// like a secret is only references (and a scheme word: `Bearer ${TOKEN}`):
+/// a secret is never written into the manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Value(pub String);
+pub struct Value {
+    text: String,
+}
+
+/// A `${NAME}` a value refers to is not set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unset(pub String);
+
+impl fmt::Display for Unset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the environment variable {} is not set", self.0)
+    }
+}
+
+impl std::error::Error for Unset {}
 
 impl Value {
-    /// The value with each `${NAME}` replaced; the first name not set, as
-    /// the error.
-    pub fn resolve(&self) -> Result<String, String> {
+    /// `text`, its `${NAME}` references checked (closed, a plain name).
+    pub fn new(text: impl Into<String>) -> Result<Self, String> {
+        let text = text.into();
+        pieces(&text)?;
+        Ok(Self { text })
+    }
+
+    /// As written.
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    /// The names it refers to.
+    pub fn references(&self) -> Vec<&str> {
+        pieces(&self.text)
+            .expect("checked when made")
+            .into_iter()
+            .filter_map(|p| match p {
+                Piece::Name(n) => Some(n),
+                Piece::Text(_) => None,
+            })
+            .collect()
+    }
+
+    /// The value with each reference filled in from the environment.
+    pub fn resolve(&self) -> Result<String, Unset> {
+        self.resolve_with(|name| std::env::var(name).ok())
+    }
+
+    /// [`resolve`](Self::resolve), from `lookup` instead of the environment.
+    pub fn resolve_with(&self, lookup: impl Fn(&str) -> Option<String>) -> Result<String, Unset> {
         let mut out = String::new();
-        let mut rest = self.0.as_str();
-        while let Some(at) = rest.find("${") {
-            out.push_str(&rest[..at]);
-            let end = rest[at..].find('}').ok_or_else(|| rest[at..].to_owned())? + at;
-            let name = &rest[at + 2..end];
-            out.push_str(&std::env::var(name).map_err(|_| name.to_owned())?);
-            rest = &rest[end + 1..];
+        for piece in pieces(&self.text).expect("checked when made") {
+            match piece {
+                Piece::Text(t) => out.push_str(t),
+                Piece::Name(n) => out.push_str(&lookup(n).ok_or_else(|| Unset(n.to_owned()))?),
+            }
         }
-        out.push_str(rest);
         Ok(out)
     }
 
-    fn references(&self) -> bool {
-        self.0.contains("${")
+    /// The text outside references, trimmed.
+    fn literal(&self) -> String {
+        pieces(&self.text)
+            .expect("checked when made")
+            .into_iter()
+            .filter_map(|p| match p {
+                Piece::Text(t) => Some(t),
+                Piece::Name(_) => None,
+            })
+            .collect::<String>()
+            .trim()
+            .to_owned()
     }
+}
+
+enum Piece<'a> {
+    Text(&'a str),
+    Name(&'a str),
+}
+
+/// `text` split into literal text and `${NAME}` references.
+fn pieces(text: &str) -> Result<Vec<Piece<'_>>, String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("${") {
+        out.push(Piece::Text(&rest[..at]));
+        let Some(end) = rest[at..].find('}').map(|e| e + at) else {
+            return Err(format!("{:?} is not closed with `}}`", &rest[at..]));
+        };
+        let name = &rest[at + 2..end];
+        if !identifier(name) {
+            return Err(format!(
+                "${{{name}}}: a variable's name is letters, digits and `_`"
+            ));
+        }
+        out.push(Piece::Name(name));
+        rest = &rest[end + 1..];
+    }
+    out.push(Piece::Text(rest));
+    Ok(out)
+}
+
+/// `[A-Za-z_][A-Za-z0-9_]*`.
+fn identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,14 +372,23 @@ impl Value {
 pub struct Parts {
     /// The `ask_owner` tool: questions that do not wait for the answer.
     pub ask_owner: bool,
-    /// The report every run must end with: its required sections.
-    pub report: Option<Vec<String>>,
+    /// The report every run must end with.
+    pub report: Option<Report>,
     /// Host-counted facts after each run.
     pub facts: bool,
-    /// The approval gate: on unless the manifest says `"off"`.
-    pub gate: bool,
+    pub gate: Gate,
     /// A scratch folder the gate leaves to the agent.
     pub scratch: bool,
+}
+
+/// The approval gate (`yobuild::parts::Gate`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Gate {
+    /// The allow-list (the default).
+    AllowList,
+    /// No gate: every call runs.
+    Off,
 }
 
 impl Default for Parts {
@@ -226,7 +397,7 @@ impl Default for Parts {
             ask_owner: false,
             report: None,
             facts: false,
-            gate: true,
+            gate: Gate::AllowList,
             scratch: false,
         }
     }
@@ -239,20 +410,22 @@ pub struct Dsh {
     pub host_services: bool,
 }
 
+/// Which frontends serve the session: the browser (`web`, with a link for
+/// a phone on the LAN when `phone`), or the terminal — not both.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Frontend {
     pub web: bool,
-    /// Served on the LAN, with a phone link.
     pub phone: bool,
     pub terminal: bool,
 }
 
 /// What is wrong with a manifest, and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ManifestError {
     pub path: PathBuf,
-    /// 1-based line and column, when the error has a place.
+    /// 1-based line and column (in characters), when the error has a place.
     pub at: Option<(usize, usize)>,
     pub message: String,
 }
@@ -293,36 +466,39 @@ struct Raw {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawAgent {
-    name: String,
+    name: Spanned<String>,
     model: Spanned<String>,
     prompt: Option<String>,
-    base_url: Option<String>,
-    api_key_env: Option<String>,
+    base_url: Option<Spanned<String>>,
+    api_key_env: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawLimits {
-    max_turns: Option<usize>,
-    max_tokens: Option<u64>,
-    max_minutes: Option<u64>,
+    max_turns: Option<Spanned<usize>>,
+    max_tokens: Option<Spanned<u64>>,
+    max_minutes: Option<Spanned<u64>>,
     budget_usd: Option<Spanned<f64>>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPlugin {
+    name: Option<Spanned<String>>,
     pi: Option<Spanned<String>>,
     dsh: Option<Spanned<String>>,
     rutis: Option<Spanned<String>>,
     runtime: Option<Runtime>,
-    config: Option<toml::Value>,
+    config: Option<Spanned<toml::Value>>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawMcp {
+    name: Option<Spanned<String>>,
     npm: Option<Spanned<String>>,
+    bin: Option<Spanned<String>>,
     url: Option<Spanned<String>>,
     #[serde(default)]
     args: Vec<String>,
@@ -357,75 +533,73 @@ struct RawDsh {
 struct RawFrontend {
     #[serde(default)]
     web: bool,
-    #[serde(default)]
-    phone: bool,
-    #[serde(default)]
-    terminal: bool,
+    phone: Option<Spanned<bool>>,
+    terminal: Option<Spanned<bool>>,
 }
 
+/// An error at a byte range of the text.
+type Located = (Range<usize>, String);
+
 impl Manifest {
-    /// Reads and checks the manifest at `path`.
+    /// Reads and checks the manifest at `path`; its folder, made absolute,
+    /// is what its paths are relative to.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ManifestError> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|e| ManifestError {
+        let error = |message: String| ManifestError {
             path: path.to_owned(),
             at: None,
-            message: e.to_string(),
-        })?;
-        let dir = path.parent().map(Path::to_owned).unwrap_or_default();
-        Self::parse(&text, path, &dir)
+            message,
+        };
+        let text = std::fs::read_to_string(path).map_err(|e| error(e.to_string()))?;
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        let dir = std::path::absolute(parent).map_err(|e| error(e.to_string()))?;
+        Self::parse(&text, path, &normal(&dir))
     }
 
     /// Reads and checks manifest `text`; `path` names it in errors, `dir` is
     /// what its paths are relative to.
     pub fn parse(text: &str, path: &Path, dir: &Path) -> Result<Self, ManifestError> {
-        let error = |span: Option<Range<usize>>, message: String| ManifestError {
+        let located = |(span, message): Located| ManifestError {
             path: path.to_owned(),
-            at: span.map(|s| line_col(text, s.start)),
+            at: Some(line_col(text, span.start)),
             message,
         };
-        let raw: Raw = toml::from_str(text).map_err(|e| error(e.span(), e.message().to_owned()))?;
+        let raw: Raw = toml::from_str(text).map_err(|e| ManifestError {
+            path: path.to_owned(),
+            at: e.span().map(|s| line_col(text, s.start)),
+            message: e.message().to_owned(),
+        })?;
 
-        let model = model(&raw.agent).map_err(|m| error(Some(raw.agent.model.span()), m))?;
-        let agent = Agent {
-            name: raw.agent.name,
-            model,
-            prompt: raw.agent.prompt.map(|p| dir.join(p)),
-        };
-
-        if let Some(budget) = &raw.limits.budget_usd {
-            // Priced from yoagent's bundled table, as the run will be.
-            yoagent::provider::prices::enable_bundled();
-            let priced =
-                yoagent::extension::Budget::for_model(*budget.get_ref(), &agent.model.config());
-            if priced.is_none() {
-                let m = format!(
-                    "budget_usd set, but {}/{} has no price",
-                    agent.model.provider, agent.model.id
-                );
-                return Err(error(Some(budget.span()), m));
+        let agent = agent(raw.agent, dir).map_err(located)?;
+        let limits = limits(raw.limits, &agent.model).map_err(located)?;
+        let mut names: Vec<String> = Vec::new();
+        let mut unique = |name: &str, span: Range<usize>| -> Result<(), Located> {
+            if names.iter().any(|n| n == name) {
+                let m = format!("two plugins or MCP servers are named {name:?}: give one a `name`");
+                return Err((span, m));
             }
-        }
-        let limits = Limits {
-            max_turns: raw.limits.max_turns,
-            max_tokens: raw.limits.max_tokens,
-            max_minutes: raw.limits.max_minutes,
-            budget_usd: raw.limits.budget_usd.map(|b| b.into_inner()),
+            names.push(name.to_owned());
+            Ok(())
         };
-
-        let plugins = raw
-            .plugins
-            .into_iter()
-            .map(|p| plugin(p, dir))
-            .collect::<Result<_, _>>()
-            .map_err(|(span, m)| error(span, m))?;
-        let mcp = raw
-            .mcp
-            .into_iter()
-            .map(|m| mcp(m, dir))
-            .collect::<Result<_, _>>()
-            .map_err(|(span, m)| error(span, m))?;
-        let parts = parts(raw.parts).map_err(|(span, m)| error(Some(span), m))?;
+        let mut plugins = Vec::new();
+        for raw in raw.plugins {
+            let span = raw.span();
+            let (plugin, name_span) = plugin(raw.into_inner(), span, dir).map_err(located)?;
+            unique(&plugin.name, name_span).map_err(located)?;
+            plugins.push(plugin);
+        }
+        let mut mcp = Vec::new();
+        for raw in raw.mcp {
+            let span = raw.span();
+            let (server, name_span) = server(raw.into_inner(), span, dir).map_err(located)?;
+            unique(&server.name, name_span).map_err(located)?;
+            mcp.push(server);
+        }
+        let parts = parts(raw.parts).map_err(located)?;
+        let frontend = frontend(raw.frontend).map_err(located)?;
 
         Ok(Manifest {
             dir: dir.to_owned(),
@@ -437,16 +611,12 @@ impl Manifest {
             dsh: Dsh {
                 host_services: raw.dsh.host_services,
             },
-            frontend: Frontend {
-                web: raw.frontend.web,
-                phone: raw.frontend.phone,
-                terminal: raw.frontend.terminal,
-            },
+            frontend,
         })
     }
 }
 
-/// 1-based line and column of byte `offset` in `text`.
+/// 1-based line and column (in characters) of byte `offset` in `text`.
 fn line_col(text: &str, offset: usize) -> (usize, usize) {
     let before = &text[..offset.min(text.len())];
     let line = before.matches('\n').count() + 1;
@@ -454,78 +624,281 @@ fn line_col(text: &str, offset: usize) -> (usize, usize) {
     (line, col)
 }
 
-fn model(raw: &RawAgent) -> Result<Model, String> {
+/// `path` without `.` components.
+fn normal(path: &Path) -> PathBuf {
+    path.components()
+        .filter(|c| !matches!(c, Component::CurDir))
+        .collect()
+}
+
+fn agent(raw: RawAgent, dir: &Path) -> Result<Agent, Located> {
+    let name = raw.name.get_ref();
+    let plain = matches!(
+        Path::new(name).components().collect::<Vec<_>>().as_slice(),
+        [Component::Normal(_)]
+    );
+    if !plain || name.contains(['/', '\\']) {
+        let m = format!("agent name {name:?}: one plain name (it names a folder)");
+        return Err((raw.name.span(), m));
+    }
+    let model = model(&raw)?;
+    Ok(Agent {
+        name: raw.name.into_inner(),
+        model,
+        prompt: raw.prompt.map(|p| normal(&dir.join(p))),
+    })
+}
+
+fn model(raw: &RawAgent) -> Result<Model, Located> {
     let spec = raw.model.get_ref();
+    let at = raw.model.span();
     let Some((provider, id)) = spec
         .split_once('/')
         .filter(|(p, i)| !p.is_empty() && !i.is_empty())
     else {
-        return Err(format!("model {spec:?} is not `provider/id`"));
+        return Err((at, format!("model {spec:?} is not `provider/id`")));
     };
     let known = PROVIDERS.iter().find(|(p, _)| *p == provider);
-    let key_env = match (known, &raw.api_key_env, &raw.base_url) {
-        (Some((_, env)), None, None) => env.to_string(),
-        (Some(_), _, _) => {
-            return Err(format!(
-                "base_url and api_key_env are for providers yoagent does not know; {provider} is one it does"
-            ))
+    let key_env = match (known, &raw.base_url, &raw.api_key_env) {
+        (Some((_, envs)), None, None) => envs.iter().map(|e| e.to_string()).collect(),
+        (Some(_), Some(url), _) => {
+            let m = format!(
+                "base_url is for a provider yoagent does not know; {provider} is one it does"
+            );
+            return Err((url.span(), m));
         }
-        (None, Some(env), Some(_)) => env.clone(),
-        (None, _, _) => {
+        (Some(_), None, Some(env)) => {
+            let m = format!(
+                "api_key_env is for a provider yoagent does not know; {provider} is one it does"
+            );
+            return Err((env.span(), m));
+        }
+        (None, None, _) => {
             let names: Vec<&str> = PROVIDERS.iter().map(|(p, _)| *p).collect();
-            return Err(format!(
-                "unknown provider {provider:?}: one of {}, or set base_url and api_key_env under [agent] for an OpenAI-compatible endpoint",
+            let m = format!(
+                "provider {provider:?} is not one yoagent knows ({}): for an OpenAI-compatible endpoint, set base_url and api_key_env under [agent]",
                 names.join(", ")
-            ));
+            );
+            return Err((at, m));
+        }
+        (None, Some(url), None) => {
+            let m =
+                format!("{provider} needs api_key_env: the environment variable holding its key");
+            return Err((url.span(), m));
+        }
+        (None, Some(url), Some(env)) => {
+            endpoint(url.get_ref()).map_err(|m| (url.span(), format!("base_url {m}")))?;
+            if !identifier(env.get_ref()) {
+                let m = format!(
+                    "api_key_env {:?} is not an environment variable's name",
+                    env.get_ref()
+                );
+                return Err((env.span(), m));
+            }
+            vec![env.get_ref().clone()]
         }
     };
     Ok(Model {
         provider: provider.to_owned(),
         id: id.to_owned(),
-        base_url: raw.base_url.clone(),
+        base_url: raw.base_url.as_ref().map(|u| u.get_ref().clone()),
         key_env,
     })
 }
 
-/// `name@1.2.3` (`@scope/name@1.2.3`) at an exact version, or a path
-/// (`./x`, `../x`, `/x`) relative to `dir`.
-fn source(spec: &str, dir: &Path) -> Result<Source, String> {
-    if spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/') {
-        return Ok(Source::Path(dir.join(spec)));
-    }
-    let at = spec.rfind('@').filter(|at| *at > 0);
-    let (name, version) = match at {
-        Some(at) => (&spec[..at], &spec[at + 1..]),
-        None => (spec, ""),
-    };
-    let exact = {
-        let core = version.split(['-', '+']).next().unwrap_or("");
-        let parts: Vec<&str> = core.split('.').collect();
-        parts.len() == 3
-            && parts
-                .iter()
-                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-    };
-    if name.is_empty() || !exact {
+/// An endpoint the agent sends its key or headers to: https, or http on
+/// this machine (`localhost`, `127.0.0.1`, `[::1]`), with no user in it.
+fn endpoint(text: &str) -> Result<url::Url, String> {
+    let url = url::Url::parse(text).map_err(|e| format!("{text:?} is not a URL: {e}"))?;
+    if !url.username().is_empty() || url.password().is_some() {
         return Err(format!(
-            "{spec:?} is not pinned: give an exact version (`{}@1.2.3`), or a path (`./…`)",
-            if name.is_empty() { spec } else { name }
+            "{text:?} has a user in it: give credentials as a header"
         ));
     }
-    Ok(Source::Package {
-        name: name.to_owned(),
-        version: version.to_owned(),
+    let local = match url.host() {
+        Some(url::Host::Domain(d)) => d == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    match url.scheme() {
+        "https" if url.host().is_some() => Ok(url),
+        "http" if local => Ok(url),
+        _ => Err(format!(
+            "{text:?}: https, or http on this machine (localhost)"
+        )),
+    }
+}
+
+fn limits(raw: RawLimits, model: &Model) -> Result<Limits, Located> {
+    let positive = |v: &Option<Spanned<u64>>, key: &str| match v {
+        Some(v) if *v.get_ref() == 0 => Err((v.span(), format!("{key} must be more than 0"))),
+        _ => Ok(()),
+    };
+    positive(&raw.max_tokens, "max_tokens")?;
+    positive(&raw.max_minutes, "max_minutes")?;
+    if let Some(turns) = raw.max_turns.as_ref().filter(|t| *t.get_ref() == 0) {
+        return Err((turns.span(), "max_turns must be more than 0".into()));
+    }
+    if let Some(budget) = &raw.budget_usd {
+        let usd = *budget.get_ref();
+        if !(usd.is_finite() && usd > 0.0) {
+            let m = format!("budget_usd {usd}: a number of dollars more than 0");
+            return Err((budget.span(), m));
+        }
+        // The table `yobuild run` enables; read here without enabling it.
+        let priced = model
+            .config()
+            .with_prices(&PriceTable::builtin())
+            .cost
+            .is_some();
+        if !priced {
+            let m = format!(
+                "budget_usd set, but {}/{} has no price",
+                model.provider, model.id
+            );
+            return Err((budget.span(), m));
+        }
+    }
+    Ok(Limits {
+        max_turns: raw.max_turns.map(Spanned::into_inner),
+        max_tokens: raw.max_tokens.map(Spanned::into_inner),
+        max_minutes: raw.max_minutes.map(Spanned::into_inner),
+        budget_usd: raw.budget_usd.map(Spanned::into_inner),
     })
 }
 
-type Located = (Option<Range<usize>>, String);
+/// A registry package at an exact version, or a path (`./`, `../`, `/`)
+/// relative to `dir`.
+fn source(spec: &str, dir: &Path) -> Result<Source, String> {
+    if spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/') {
+        return Ok(Source::Path(normal(&dir.join(spec))));
+    }
+    let remote = [
+        "git+", "git:", "github:", "gitlab:", "bitbucket:", "file:", "npm:", "http:", "https:",
+    ];
+    if spec.contains("://") || remote.iter().any(|r| spec.starts_with(r)) {
+        return Err(format!(
+            "{spec:?} is not a registry package: give `name@1.2.3`, or a path (`./…`)"
+        ));
+    }
+    let Some(at) = spec.rfind('@').filter(|at| *at > 0) else {
+        return Err(format!(
+            "{spec:?} is not pinned: give an exact version (`{spec}@1.2.3`)"
+        ));
+    };
+    let (name, version) = (&spec[..at], &spec[at + 1..]);
+    if !npm_name(name) {
+        return Err(format!(
+            "{name:?} is not an npm package name (lowercase letters, digits, `-._~`, an optional `@scope/`)"
+        ));
+    }
+    if !semver(version) {
+        return Err(format!(
+            "{spec:?} is not pinned: give an exact version (`{name}@1.2.3`)"
+        ));
+    }
+    Ok(Source::Package(Package {
+        name: name.to_owned(),
+        version: version.to_owned(),
+    }))
+}
 
-fn plugin(raw: Spanned<RawPlugin>, dir: &Path) -> Result<Plugin, Located> {
-    let table = raw.span();
-    let raw = raw.into_inner();
-    let config = raw
-        .config
-        .map(|c| serde_json::to_value(c).expect("TOML is JSON"));
+/// npm's rule for a package name: `name` or `@scope/name`, each part
+/// lowercase letters, digits and `-._~`, not starting with `.` or `_`; at
+/// most 214 characters.
+fn npm_name(name: &str) -> bool {
+    let part = |p: &str| {
+        !p.is_empty()
+            && !p.starts_with(['.', '_'])
+            && p.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-._~".contains(c))
+    };
+    let parts_ok = match name.strip_prefix('@') {
+        Some(scoped) => {
+            matches!(scoped.split_once('/'), Some((scope, n)) if part(scope) && part(n))
+        }
+        None => part(name),
+    };
+    name.len() <= 214 && parts_ok
+}
+
+/// An exact semver version: `x.y.z`, an optional `-pre` and `+build`, no
+/// empty identifiers, no leading zeros in numbers.
+fn semver(version: &str) -> bool {
+    let (rest, build) = match version.split_once('+') {
+        Some((r, b)) => (r, Some(b)),
+        None => (version, None),
+    };
+    let (core, pre) = match rest.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (rest, None),
+    };
+    let number = |p: &str| {
+        !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) && (p == "0" || !p.starts_with('0'))
+    };
+    let ident = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    let numbers: Vec<&str> = core.split('.').collect();
+    numbers.len() == 3
+        && numbers.iter().all(|n| number(n))
+        && pre.is_none_or(|p| {
+            p.split('.')
+                .all(|i| ident(i) && (!i.chars().all(|c| c.is_ascii_digit()) || number(i)))
+        })
+        && build.is_none_or(|b| b.split('.').all(ident))
+}
+
+/// The name a source goes by: a package's without its scope, a file's stem.
+fn default_name(source: &Source) -> String {
+    match source {
+        Source::Package(p) => p.name.rsplit('/').next().unwrap_or(&p.name).to_owned(),
+        Source::Path(path) => stem(path),
+    }
+}
+
+fn stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// An explicit name: letters, digits, `-`, `_`, `.`.
+fn explicit_name(name: &Spanned<String>) -> Result<(String, Range<usize>), Located> {
+    let n = name.get_ref();
+    let fine = n.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+    if !fine {
+        let m = format!("name {n:?}: letters, digits, `-`, `_`, `.`");
+        return Err((name.span(), m));
+    }
+    Ok((n.clone(), name.span()))
+}
+
+/// A TOML value as JSON: a datetime as its text.
+fn json(value: toml::Value) -> serde_json::Value {
+    match value {
+        toml::Value::String(s) => s.into(),
+        toml::Value::Integer(i) => i.into(),
+        toml::Value::Float(f) => {
+            serde_json::Number::from_f64(f).map_or(serde_json::Value::Null, Into::into)
+        }
+        toml::Value::Boolean(b) => b.into(),
+        toml::Value::Datetime(d) => d.to_string().into(),
+        toml::Value::Array(a) => a.into_iter().map(json).collect(),
+        toml::Value::Table(t) => t
+            .into_iter()
+            .map(|(k, v)| (k, json(v)))
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+    }
+}
+
+fn plugin(
+    raw: RawPlugin,
+    table: Range<usize>,
+    dir: &Path,
+) -> Result<(Plugin, Range<usize>), Located> {
     let given: Vec<&Spanned<String>> = [&raw.pi, &raw.dsh, &raw.rutis]
         .into_iter()
         .flatten()
@@ -533,148 +906,177 @@ fn plugin(raw: Spanned<RawPlugin>, dir: &Path) -> Result<Plugin, Located> {
     let [spec] = given.as_slice() else {
         let span = given.get(1).map_or(table, |s| s.span());
         return Err((
-            Some(span),
+            span,
             "a [[plugin]] names exactly one of pi, dsh or rutis".into(),
         ));
     };
-    let span = Some(spec.span());
+    let span = spec.span();
     if raw.runtime.is_some() && raw.rutis.is_none() {
         return Err((span, "runtime is for a rutis plugin".into()));
     }
-    if let Some(rutis) = &raw.rutis {
-        let Source::Path(path) = source(rutis.get_ref(), dir).map_err(|m| (span.clone(), m))?
-        else {
-            return Err((span, "a rutis plugin is a local file (`./…`)".into()));
+    let config = match raw.config {
+        None => None,
+        Some(config) => match json(config.get_ref().clone()) {
+            serde_json::Value::Object(map) => Some(map),
+            _ => {
+                let m = "config is a table: the plugin's own settings";
+                return Err((config.span(), m.into()));
+            }
+        },
+    };
+    let kind = if let Some(rutis) = &raw.rutis {
+        let text = rutis.get_ref();
+        if text.contains('@') && !text.contains('/') {
+            let m = format!("{text:?}: a rutis plugin is a local file (`./plugin.ts`)");
+            return Err((span, m));
+        }
+        let path = normal(&dir.join(text));
+        let Some(runtime) = raw.runtime else {
+            let m = "a rutis plugin needs a runtime: node, bun, python or go";
+            return Err((span, m.into()));
         };
-        let runtime = raw.runtime.ok_or((
-            span,
-            "a rutis plugin needs a runtime: node, bun, python or go".into(),
-        ))?;
-        return Ok(Plugin::Rutis {
-            path,
-            runtime,
-            config,
-        });
-    }
-    let source = source(spec.get_ref(), dir).map_err(|m| (span, m))?;
-    Ok(match raw.pi {
-        Some(_) => Plugin::Pi { source, config },
-        None => Plugin::Dsh { source, config },
-    })
+        PluginKind::Rutis { path, runtime }
+    } else {
+        let source = source(spec.get_ref(), dir).map_err(|m| (span.clone(), m))?;
+        match raw.pi {
+            Some(_) => PluginKind::Pi(source),
+            None => PluginKind::Dsh(source),
+        }
+    };
+    let (name, name_span) = match &raw.name {
+        Some(name) => explicit_name(name)?,
+        None => {
+            let name = match &kind {
+                PluginKind::Pi(s) | PluginKind::Dsh(s) => default_name(s),
+                PluginKind::Rutis { path, .. } => stem(path),
+            };
+            (name, span)
+        }
+    };
+    Ok((Plugin { name, kind, config }, name_span))
 }
 
-/// A header or variable that carries a secret: its value must come from the
-/// environment (`${NAME}`), never be written into the manifest.
+/// A header or variable that carries a secret, by the words of its name
+/// (split at `_`, `-` and lower-to-upper case changes).
 fn secret(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    [
-        "authorization", "token", "key", "secret", "password", "cookie",
-    ]
-    .iter()
-    .any(|s| name.contains(s))
+    const WORDS: [&str; 12] = [
+        "key", "apikey", "token", "secret", "password", "passwd", "pwd", "auth", "authorization",
+        "cookie", "credential", "credentials",
+    ];
+    let mut words: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut previous_lower = false;
+    for c in name.chars() {
+        let separator = c == '_' || c == '-';
+        if (separator || (c.is_ascii_uppercase() && previous_lower)) && !word.is_empty() {
+            words.push(std::mem::take(&mut word));
+        }
+        if !separator {
+            word.push(c.to_ascii_lowercase());
+        }
+        previous_lower = c.is_ascii_lowercase();
+    }
+    words.push(word);
+    words.iter().any(|w| WORDS.contains(&w.as_str()))
 }
 
 fn values(raw: BTreeMap<String, Spanned<String>>) -> Result<BTreeMap<String, Value>, Located> {
     raw.into_iter()
         .map(|(name, value)| {
-            let span = Some(value.span());
-            let value = Value(value.into_inner());
-            if secret(&name) && !value.references() {
-                return Err((span, format!("{name} looks like a secret: take it from the environment (`\"${{NAME}}\"`), never write it here")));
+            let span = value.span();
+            let value = Value::new(value.into_inner()).map_err(|m| (span.clone(), m))?;
+            if secret(&name) {
+                let literal = value.literal().to_ascii_lowercase();
+                let scheme = ["", "bearer", "basic", "token"].contains(&literal.as_str());
+                if value.references().is_empty() || !scheme {
+                    let m = format!(
+                        "{name} looks like a secret: take it from the environment (`\"${{NAME}}\"`, or `\"Bearer ${{NAME}}\"`), never write it here"
+                    );
+                    return Err((span, m));
+                }
             }
             Ok((name, value))
         })
         .collect()
 }
 
-fn mcp(raw: Spanned<RawMcp>, dir: &Path) -> Result<Mcp, Located> {
-    let table = raw.span();
-    let raw = raw.into_inner();
-    match (raw.npm, raw.url) {
+fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<usize>), Located> {
+    let (transport, span, default) = match (raw.npm, raw.url) {
         (Some(npm), None) => {
+            let span = npm.span();
             if !raw.headers.is_empty() {
-                return Err((
-                    Some(npm.span()),
-                    "headers are for an HTTP server (url)".into(),
-                ));
+                return Err((span, "headers are for an HTTP server (url)".into()));
             }
-            let span = Some(npm.span());
-            let package = source(npm.get_ref(), dir).map_err(|m| (span, m))?;
-            Ok(Mcp::Stdio {
-                package,
+            let source = source(npm.get_ref(), dir).map_err(|m| (span.clone(), m))?;
+            let default = default_name(&source);
+            let transport = Transport::Stdio {
+                source,
+                bin: raw.bin.map(Spanned::into_inner),
                 args: raw.args,
                 env: values(raw.env)?,
-            })
+            };
+            (transport, span, default)
         }
         (None, Some(url)) => {
-            let span = Some(url.span());
-            if !raw.args.is_empty() || !raw.env.is_empty() {
-                return Err((span, "args and env are for a stdio server (npm)".into()));
+            let span = url.span();
+            if !raw.args.is_empty() || !raw.env.is_empty() || raw.bin.is_some() {
+                let m = "args, env and bin are for a stdio server (npm)";
+                return Err((span, m.into()));
             }
-            let url = url.into_inner();
-            if !(url.starts_with("https://")
-                || url.starts_with("http://localhost")
-                || url.starts_with("http://127.0.0.1"))
-            {
-                return Err((
-                    span,
-                    format!("{url:?}: an MCP server over https (or http on this machine)"),
-                ));
-            }
-            Ok(Mcp::Http {
-                url,
+            let parsed = endpoint(url.get_ref()).map_err(|m| (span.clone(), format!("url {m}")))?;
+            let default = parsed.host_str().unwrap_or_default().to_owned();
+            let transport = Transport::Http {
+                url: url.into_inner(),
                 headers: values(raw.headers)?,
-            })
+            };
+            (transport, span, default)
         }
         (_, url) => {
             let span = url.map_or(table, |u| u.span());
-            Err((
-                Some(span),
-                "an [[mcp]] names exactly one of npm (stdio) or url (HTTP)".into(),
-            ))
+            let m = "an [[mcp]] names exactly one of npm (stdio) or url (HTTP)";
+            return Err((span, m.into()));
         }
-    }
+    };
+    let (name, name_span) = match &raw.name {
+        Some(name) => explicit_name(name)?,
+        None => (default, span),
+    };
+    Ok((Mcp { name, transport }, name_span))
 }
 
-fn parts(raw: RawParts) -> Result<Parts, (Range<usize>, String)> {
+fn parts(raw: RawParts) -> Result<Parts, Located> {
     let report = match raw.report {
         None => None,
         Some(report) => {
             let span = report.span();
-            let sections = match report.into_inner() {
-                toml::Value::String(name) if name == "handoff" => {
-                    Report::handoff().sections().to_vec()
+            let made = match report.into_inner() {
+                toml::Value::String(name) if name == "handoff" => Ok(Report::handoff()),
+                toml::Value::Array(items) => {
+                    let names: Option<Vec<String>> = items
+                        .into_iter()
+                        .map(|i| match i {
+                            toml::Value::String(s) => Some(s),
+                            _ => None,
+                        })
+                        .collect();
+                    match names {
+                        Some(names) => Report::new(names),
+                        None => Err("report sections are names (strings)".into()),
+                    }
                 }
-                toml::Value::Array(items) => items
-                    .into_iter()
-                    .map(|i| match i {
-                        toml::Value::String(s) if !s.trim().is_empty() => Ok(s),
-                        _ => Err((
-                            span.clone(),
-                            "report sections are non-empty strings".to_owned(),
-                        )),
-                    })
-                    .collect::<Result<_, _>>()?,
-                _ => {
-                    return Err((
-                        span,
-                        "report is \"handoff\" or a list of section names".into(),
-                    ))
-                }
+                _ => Err("report is \"handoff\" or a list of section names".into()),
             };
-            Some(sections)
+            Some(made.map_err(|m| (span, m))?)
         }
     };
     let gate = match raw.gate {
-        None => true,
+        None => Gate::AllowList,
         Some(gate) => match gate.get_ref().as_str() {
-            "allow-list" => true,
-            "off" => false,
+            "allow-list" => Gate::AllowList,
+            "off" => Gate::Off,
             other => {
-                return Err((
-                    gate.span(),
-                    format!("gate {other:?}: \"allow-list\" or \"off\""),
-                ))
+                let m = format!("gate {other:?}: \"allow-list\" or \"off\"");
+                return Err((gate.span(), m));
             }
         },
     };
@@ -684,6 +1086,24 @@ fn parts(raw: RawParts) -> Result<Parts, (Range<usize>, String)> {
         facts: raw.facts,
         gate,
         scratch: raw.scratch,
+    })
+}
+
+fn frontend(raw: RawFrontend) -> Result<Frontend, Located> {
+    let phone = raw.phone.as_ref().is_some_and(|p| *p.get_ref());
+    let terminal = raw.terminal.as_ref().is_some_and(|t| *t.get_ref());
+    if let Some(p) = raw.phone.as_ref().filter(|_| phone && !raw.web) {
+        let m = "phone serves the web frontend: set web = true";
+        return Err((p.span(), m.into()));
+    }
+    if let Some(t) = raw.terminal.as_ref().filter(|_| terminal && raw.web) {
+        let m = "the terminal or the web frontend, not both";
+        return Err((t.span(), m.into()));
+    }
+    Ok(Frontend {
+        web: raw.web,
+        phone,
+        terminal,
     })
 }
 

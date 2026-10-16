@@ -20,7 +20,7 @@ use yoagent::{Content, Message};
 ///
 /// Put [`Report::instruction`] in the system prompt so the agent knows the
 /// sections before it is sent back.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     sections: Arc<[String]>,
 }
