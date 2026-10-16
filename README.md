@@ -6,10 +6,11 @@ Harness plugins, MCP servers, rutis plugins in Rust, TypeScript, Python or
 Go — plus a few small parts of its own, on top of the
 [yoagent](https://github.com/yologdev/yoagent) loop.
 
-> Status: **M1 (parts).** The frontend moved here from yoagent as
-> `yobuild::frontend` ([`frontend/`](frontend/README.md), with its
-> [examples](examples/README.md)); the manifest and runner are not built
-> yet. Numbers quoted are measured in the yoagent
+> Status: **M2a (manifest and runner).** The parts and the frontend
+> (`yobuild::parts`, `yobuild::frontend`, [`frontend/`](frontend/README.md),
+> with its [examples](examples/README.md)), the manifest
+> (`yobuild::manifest`) and `yobuild run` (plugins already installed;
+> installing them is M2b). Numbers quoted are measured in the yoagent
 > repository.
 >
 > ```sh

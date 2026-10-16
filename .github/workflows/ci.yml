@@ -73,6 +73,11 @@ jobs:
           cargo build --locked --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" --example coding_agent
           python3 "$GITHUB_WORKSPACE/tests/terminal_pty.py" \
             "$GITHUB_WORKSPACE/target/debug/examples/coding_agent"
+      - name: yobuild run (a manifest with an MCP server, scripted, once)
+        run: |
+          cargo run --locked -- run tests/fixtures/echo/agent.toml \
+            --scripted tests/fixtures/echo/script.json --once "echo hi" | tee run-out.txt
+          grep -qx Completed run-out.txt
       - name: Handoff example (scripted; asks without waiting, the answer starts the next run)
         shell: bash
         timeout-minutes: 5

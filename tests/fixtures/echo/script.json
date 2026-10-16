@@ -1,0 +1,4 @@
+[
+  { "tools": [{ "name": "echo", "arguments": { "text": "hi" } }] },
+  { "text": "done" }
+]

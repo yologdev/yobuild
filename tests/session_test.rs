@@ -855,3 +855,34 @@ async fn a_reset_withdraws_the_questions_held_for_the_owner() {
     session.send(ClientMessage::Quit);
     finished(run).await;
 }
+
+#[tokio::test]
+async fn an_observer_is_not_a_frontend_a_question_waits_for() {
+    let (session, _driver) = Session::new(true);
+    let mut watching = session.observe();
+    assert_eq!(session.frontends(), 0);
+    // Answered at once with the default, as with nobody there.
+    let answer = tokio::time::timeout(
+        Duration::from_secs(5),
+        session.ask(
+            UiRequest::Confirm {
+                title: "go?".into(),
+                message: String::new(),
+            },
+            Duration::from_secs(300),
+        ),
+    )
+    .await
+    .expect("not waited for");
+    assert_eq!(answer, serde_json::json!(false));
+    // It still sees what a frontend sees.
+    assert!(matches!(
+        watching.messages.recv().await,
+        Some(ServerMessage::Hello { .. })
+    ));
+    let frontend = session.connect();
+    assert_eq!(session.frontends(), 1);
+    session.disconnect(frontend.id);
+    session.disconnect(watching.id);
+    assert_eq!(session.frontends(), 0);
+}

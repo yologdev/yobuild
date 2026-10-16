@@ -52,6 +52,9 @@ struct UiState {
 
 struct Inner {
     clients: Mutex<HashMap<u64, mpsc::UnboundedSender<ServerMessage>>>,
+    /// Connections that only watch ([`Session::observe`]): not frontends
+    /// a question can be put to.
+    observers: Mutex<std::collections::HashSet<u64>>,
     next_client: AtomicU64,
     ui: Mutex<UiState>,
     /// Offered browser components, with their module source.
@@ -98,6 +101,7 @@ impl Session {
         let session = Session {
             inner: Arc::new(Inner {
                 clients: Mutex::default(),
+                observers: Mutex::default(),
                 next_client: AtomicU64::new(1),
                 ui: Mutex::default(),
                 ui_plugins: Mutex::default(),
@@ -159,11 +163,24 @@ impl Session {
     /// Detach a frontend.
     pub fn disconnect(&self, id: u64) {
         self.inner.clients.lock().unwrap().remove(&id);
+        self.inner.observers.lock().unwrap().remove(&id);
     }
 
-    /// Number of attached frontends.
+    /// Watch the session as a frontend would — the same messages — without
+    /// being one: a question asked while only observers are attached gets
+    /// its default answer at once, as with nobody there (a host waiting for
+    /// a run to end, a log).
+    pub fn observe(&self) -> Connection {
+        let connection = self.connect();
+        self.inner.observers.lock().unwrap().insert(connection.id);
+        connection
+    }
+
+    /// Number of attached frontends (observers not counted).
     pub fn frontends(&self) -> usize {
-        self.inner.clients.lock().unwrap().len()
+        let clients = self.inner.clients.lock().unwrap();
+        let observers = self.inner.observers.lock().unwrap();
+        clients.keys().filter(|id| !observers.contains(id)).count()
     }
 
     /// Whether the session ended: the driver stopped, nothing sent is heard.

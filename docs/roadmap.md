@@ -58,7 +58,7 @@ paths).
 push). The yoagent-rutis PR above continues alongside M2a (decided
 2026-10-16): M2a does not need it; M2b's `yobuild check` does.
 
-## M2a — Manifest and runner
+## M2a — Manifest and runner (in progress: the manifest #9, `yobuild run` #11)
 
 - Manifest schema (§2 of the design), in TOML (decided 2026-10-16),
   strict parsing, good errors.
