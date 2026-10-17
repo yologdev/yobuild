@@ -41,9 +41,11 @@ max_turns   = 80
 max_tokens  = 4_000_000
 max_minutes = 30
 budget_usd  = 2.5
+session_budget_usd = 10.0
 
 [[plugin]]
 pi = "@juicesharp/rpiv-todo@2.12.0"
+policy = true
 
 [[plugin]]
 dsh    = "dsh-free-search@0.8.1"
@@ -70,6 +72,7 @@ report    = ["Summary", "Next"]
 facts     = true
 gate      = "off"
 scratch   = false
+tools     = "read-only"
 
 [dsh]
 host_services = true
@@ -96,6 +99,7 @@ phone = true
             max_tokens: Some(4_000_000),
             max_minutes: Some(30),
             budget_usd: Some(2.5),
+            session_budget_usd: Some(10.0),
         }
     );
     assert_eq!(
@@ -106,6 +110,7 @@ phone = true
                 kind: PluginKind::Pi(package("@juicesharp/rpiv-todo", "2.12.0")),
                 config: None,
                 allow: Vec::new(),
+                policy: true,
             },
             Plugin {
                 name: "dsh-free-search".into(),
@@ -114,6 +119,7 @@ phone = true
                     .as_object()
                     .cloned(),
                 allow: Vec::new(),
+                policy: false,
             },
             Plugin {
                 name: "words".into(),
@@ -123,6 +129,7 @@ phone = true
                 },
                 config: None,
                 allow: Vec::new(),
+                policy: false,
             },
         ]
     );
@@ -164,6 +171,7 @@ phone = true
             facts: true,
             gate: Gate::Off,
             scratch: false,
+            tools: Tools::ReadOnly,
         }
     );
     assert_eq!(
@@ -197,7 +205,7 @@ fn an_error_is_shown_with_its_file_line_and_column() {
     let e = read(&with("[builtins]\ngat = \"off\"\n")).unwrap_err();
     assert_eq!(
         e.to_string(),
-        "agent.toml:5:1: unknown field `gat`, expected one of `ask_owner`, `report`, `facts`, `gate`, `scratch`"
+        "agent.toml:5:1: unknown field `gat`, expected one of `ask_owner`, `report`, `facts`, `gate`, `scratch`, `tools`"
     );
     let e = Manifest::load("/no/such/agent.toml").unwrap_err();
     assert_eq!(e.at, None);
@@ -330,6 +338,7 @@ fn a_plugin_names_one_ecosystem_and_a_rutis_one_its_runtime() {
             },
             config: serde_json::json!({ "a": 1 }).as_object().cloned(),
             allow: Vec::new(),
+            policy: false,
         }
     );
 }
@@ -936,4 +945,30 @@ fn allow_names_an_entrys_tools_and_refuses_what_cannot_hold() {
         "[[plugin]]\npi = \"./t.ts\"\nallow = []\n[builtins]\ngate = \"off\"\n"
     ))
     .is_ok());
+}
+
+#[test]
+fn tools_a_session_budget_and_a_policy_plugin_are_read() {
+    let m = read(&with(
+        "[limits]\nsession_budget_usd = 2.0\n[[plugin]]\npi = \"./gate.ts\"\npolicy = true\n[builtins]\ntools = \"read-only\"\n",
+    ))
+    .unwrap();
+    assert_eq!(m.limits.session_budget_usd, Some(2.0));
+    assert!(m.plugins[0].policy);
+    assert_eq!(m.builtins.tools, Tools::ReadOnly);
+    assert_eq!(read(MINIMAL).unwrap().builtins.tools, Tools::Coding);
+    assert_eq!(
+        error(&with("[builtins]\ntools = \"all\"\n")),
+        "5:9: tools \"all\": \"coding\" or \"read-only\""
+    );
+    assert_eq!(
+        error(&with("[limits]\nsession_budget_usd = -1.0\n")),
+        "5:22: session_budget_usd -1: a number of dollars more than 0"
+    );
+    assert_eq!(
+        error(
+            "[agent]\nname = \"a\"\nmodel = \"ollama/llama3\"\n[limits]\nsession_budget_usd = 1.0\n"
+        ),
+        "5:22: session_budget_usd set, but ollama/llama3 has no price"
+    );
 }

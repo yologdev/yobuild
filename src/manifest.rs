@@ -170,8 +170,10 @@ pub struct Limits {
     /// Per run.
     pub max_tokens: Option<u64>,
     pub max_minutes: Option<u64>,
-    /// Checked when read: positive, and the model has a price.
+    /// Checked when read: positive, and the model has a price. Per run.
     pub budget_usd: Option<f64>,
+    /// The same, for all the session's runs together.
+    pub session_budget_usd: Option<f64>,
 }
 
 /// Where a plugin or an MCP server comes from.
@@ -231,6 +233,9 @@ pub struct Plugin {
     /// Its tools the gate lets run without asking (`allow`), as the plugin
     /// names them.
     pub allow: Vec<String>,
+    /// It is the agent's approval policy: no run goes on without a policy
+    /// plugin up (yoagent-rutis's `require_policy`).
+    pub policy: bool,
 }
 
 impl Plugin {
@@ -429,6 +434,19 @@ pub struct Builtins {
     pub gate: Gate,
     /// A scratch folder the gate leaves to the agent.
     pub scratch: bool,
+    /// Which of yoagent's tools the agent has.
+    pub tools: Tools,
+}
+
+/// Which of yoagent's tools an agent has (`[builtins] tools`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Tools {
+    /// All six: bash, read, write, edit, list, search (the default).
+    Coding,
+    /// Read, list and search only, their paths confined to the agent's
+    /// folder.
+    ReadOnly,
 }
 
 /// The approval gate (`yobuild::builtins::Gate`).
@@ -449,6 +467,7 @@ impl Default for Builtins {
             facts: false,
             gate: Gate::AllowList,
             scratch: false,
+            tools: Tools::Coding,
         }
     }
 }
@@ -530,6 +549,7 @@ struct RawLimits {
     max_tokens: Option<Spanned<u64>>,
     max_minutes: Option<Spanned<u64>>,
     budget_usd: Option<Spanned<f64>>,
+    session_budget_usd: Option<Spanned<f64>>,
 }
 
 #[derive(Deserialize)]
@@ -542,6 +562,8 @@ struct RawPlugin {
     runtime: Option<Runtime>,
     config: Option<Spanned<toml::Value>>,
     allow: Option<Spanned<Vec<Spanned<String>>>>,
+    #[serde(default)]
+    policy: bool,
 }
 
 #[derive(Deserialize)]
@@ -571,6 +593,7 @@ struct RawBuiltins {
     gate: Option<Spanned<String>>,
     #[serde(default)]
     scratch: bool,
+    tools: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -841,10 +864,14 @@ fn limits(raw: RawLimits, model: &Model) -> Result<Limits, Located> {
     if let Some(turns) = raw.max_turns.as_ref().filter(|t| *t.get_ref() == 0) {
         return Err((turns.span(), "max_turns must be more than 0".into()));
     }
-    if let Some(budget) = &raw.budget_usd {
+    // A dollar budget: positive, and the model has a price.
+    let budget = |budget: &Option<Spanned<f64>>, key: &str| -> Result<(), Located> {
+        let Some(budget) = budget else {
+            return Ok(());
+        };
         let usd = *budget.get_ref();
         if !(usd.is_finite() && usd > 0.0) {
-            let m = format!("budget_usd {usd}: a number of dollars more than 0");
+            let m = format!("{key} {usd}: a number of dollars more than 0");
             return Err((budget.span(), m));
         }
         // The table `yobuild run` enables; read here without enabling it.
@@ -855,17 +882,21 @@ fn limits(raw: RawLimits, model: &Model) -> Result<Limits, Located> {
             .is_some();
         if !priced {
             let m = format!(
-                "budget_usd set, but {}/{} has no price",
+                "{key} set, but {}/{} has no price",
                 model.provider, model.id
             );
             return Err((budget.span(), m));
         }
-    }
+        Ok(())
+    };
+    budget(&raw.budget_usd, "budget_usd")?;
+    budget(&raw.session_budget_usd, "session_budget_usd")?;
     Ok(Limits {
         max_turns: raw.max_turns.map(Spanned::into_inner),
         max_tokens: raw.max_tokens.map(Spanned::into_inner),
         max_minutes: raw.max_minutes.map(Spanned::into_inner),
         budget_usd: raw.budget_usd.map(Spanned::into_inner),
+        session_budget_usd: raw.session_budget_usd.map(Spanned::into_inner),
     })
 }
 
@@ -1065,6 +1096,7 @@ fn plugin(
             kind,
             config,
             allow,
+            policy: raw.policy,
         },
         name_span,
     ))
@@ -1382,12 +1414,24 @@ fn builtins(raw: RawBuiltins) -> Result<Builtins, Located> {
             }
         },
     };
+    let tools = match raw.tools {
+        None => Tools::Coding,
+        Some(tools) => match tools.get_ref().as_str() {
+            "coding" => Tools::Coding,
+            "read-only" => Tools::ReadOnly,
+            other => {
+                let m = format!("tools {other:?}: \"coding\" or \"read-only\"");
+                return Err((tools.span(), m));
+            }
+        },
+    };
     Ok(Builtins {
         ask_owner: raw.ask_owner,
         report,
         facts: raw.facts,
         gate,
         scratch: raw.scratch,
+        tools,
     })
 }
 
