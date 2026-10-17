@@ -51,11 +51,13 @@ budget_usd = 2.0                     # dollars per run; refused if the model has
 
 # Plugins, by ecosystem. Versions pinned, or a local path.
 [[plugin]]
-pi = "@juicesharp/rpiv-todo@2.12.0"
+pi   = "@juicesharp/rpiv-todo@2.12.0"
+free = ["todo"]                      # tools the gate lets run without asking (see "Free tools")
 
 [[plugin]]
 dsh    = "dsh-free-search@0.8.1"
 config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }
+free   = ["multi_search", "web_search"]
 
 [[plugin]]
 rutis = "plugins/word_count.ts"      # a local TS/Bun/Python/Go plugin
@@ -66,6 +68,7 @@ name  = "words"                      # optional: the default is the package's na
 [[mcp]]                              # stdio: the pinned package is installed (no scripts), its bin run
 npm  = "@modelcontextprotocol/server-filesystem@1.2.3"   # version illustrative
 args = ["."]                         # also `env`, and `bin` when the package has several
+free = ["read_text_file", "list_directory"]   # the server's own names; the agent sees `<server>__<tool>`
 
 [[mcp]]                              # HTTP: the URL is the pin
 url     = "https://mcp.example.com/mcp"
@@ -86,6 +89,63 @@ web      = true
 phone    = false                     # serve on the LAN, print a phone link
 terminal = false
 ```
+
+### Free tools (proposed)
+
+The gate (`gate = "allow-list"`) asks before every tool it does not know
+to be harmless: yoagent's `bash` and file tools are judged call by call,
+its read-only tools and `ask_owner` run freely, and **every plugin and MCP
+tool asks**. An agent that plans and searches as it works (the handoff
+agent: rpiv-todo's `todo`, dsh-free-search's searches) would ask the owner
+before each of those calls. `free` names the tools of one entry that
+run without asking:
+
+```toml
+[[plugin]]
+pi   = "@juicesharp/rpiv-todo@2.12.0"
+free = ["todo"]
+
+[[mcp]]
+name = "files"
+npm  = "@modelcontextprotocol/server-filesystem@1.2.3"
+free = ["read_text_file"]            # offered to the model as `files__read_text_file`
+```
+
+- **On the entry that offers the tools**, named as that plugin or server
+  names them: the trust sits next to what it trusts, an MCP tool needs no
+  `<server>__` prefix spelled out, and a name can be checked against what
+  that entry offers.
+- **Free means: it only reads or looks things up.** Freeing is the
+  manifest author vouching for the tool; the gate does not look inside a
+  plugin or server. A tool that writes, deletes, sends or runs code stays
+  asking.
+- **Refused when the manifest is read** (an error with its place, like the
+  others):
+  - a name a tool cannot have (1 to 64 letters, digits, `_`, `-`), or
+    repeated;
+  - `free` with `gate = "off"` (it would mean nothing);
+  - `bash`, `write_file`, `write`, `edit_file`, `edit`: the gate judges
+    these call by call and never frees them by name;
+  - `ask_owner`: yobuild's part frees its own tool, and a plugin's tool of
+    that name must ask.
+- **Checked when the agent starts:** an MCP server's `free` names must be
+  among the tools it lists (a typo, or a server whose tools changed, is
+  refused, naming what it does list). A plugin's tools come with each run,
+  so its `free` names are checked at the first turn (yoagent's
+  `before_model` sees the tools offered): one no tool of that name was
+  offered for is a Warning notice ("plugin rpiv-todo offered no tool
+  `todos`"), once. A warning, not a refusal: a plugin may offer a tool
+  only in some runs.
+- **What the gate gets:** the names as the model sees them — a plugin's
+  as they are, an MCP server's as `<server>__<tool>` — through
+  `Gate::with_free_tools`.
+
+Considered and not taken: one list under `[parts]`
+(`free_tools = ["todo", "files__read_text_file"]`) — shorter, but it
+separates the trust from the entry, makes MCP tools spelled with their
+prefix, and cannot say which entry a name was meant for, so a typo is
+only ever a warning. Patterns (`files__*`) — a server's write tools would
+come free with its read tools.
 
 Rules:
 
@@ -175,7 +235,7 @@ without the manifest.
 | `ask_owner` | a tool; returns at once, the answer comes back as steering (mid-run, or starting the next run) | `yobuild::parts::AskOwner` (M1) |
 | `report` | an `Extension`: `on_stop` sends the agent back until the required sections are there | `yobuild::parts::Report` (M1) |
 | `facts` | an `Extension`: `on_event` counts tokens and tool calls, `finish` adds changes since the start (git snapshot), new files, open questions | `yobuild::parts::Facts` (M1) |
-| `gate` | a `before_tool` policy: an allow-list of programs and their options; everything else (deleting, overwriting above all) asks; refused with nobody there | `yobuild::parts::Gate` (M1; `confirm-dangerous.ts` stays as the pi example) |
+| `gate` | a `before_tool` policy: an allow-list of programs and their options; everything else (deleting, overwriting above all) asks; refused with nobody there; plugin and MCP tools ask unless their entry frees them (`free`) | `yobuild::parts::Gate` (M1; `confirm-dangerous.ts` stays as the pi example) |
 | `scratch` | a private working folder named to the agent and the gate | `yobuild::parts::Scratch` (M1) |
 | `limits` / `budget` | yoagent's `ExecutionLimits` and `Budget` | yoagent |
 
