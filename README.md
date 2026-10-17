@@ -90,6 +90,8 @@ versions; installing them is M2b.
 - [Design](docs/design.md) — architecture, the manifest, the built-ins, what
   moves from yoagent, the safety model.
 - [Roadmap](docs/roadmap.md) — milestones, and the open questions for review.
+- [Devices](docs/devices.md) — what an agent may learn about the machine's
+  hardware, how it is listed and reported, and how using a device is approved.
 
 ## Relationship to yoagent
 
