@@ -352,7 +352,7 @@ Moved from yoagent in M0 (`integrations/yoagent-frontend/`, its examples,
 | In yobuild now | Becomes |
 |---|---|
 | `src/frontend/` (`yobuild::frontend`), `frontend/web/`, `frontend/plugins/`, `tests/` | stays (M1: one crate) |
-| `examples/handoff_agent.rs`, `coding_agent.rs`, `minimal_browser.rs` | manifests `examples/handoff.toml`, `coding.toml`, `minimal.toml` (plus the parts they used; M2a) |
+| `examples/handoff_agent.rs`, `coding_agent.rs`, `minimal_browser.rs` | manifests `examples/handoff.toml`, `coding.toml`, `minimal.toml` (M2a; see "The examples as manifests" above for what a manifest gains) |
 | `frontend/plugins/pi-extensions/confirm-dangerous.ts` and its tests | `yobuild::builtins::gate` (M1; the TypeScript version stays as an example) |
 | `scripts/try-handoff.sh`, `try-coding-agent.sh` | `yobuild run` (M2a) |
 | CI: `check` (pty check, handoff demo) | grows with the built-ins and manifests |
@@ -360,6 +360,46 @@ Moved from yoagent in M0 (`integrations/yoagent-frontend/`, its examples,
 Stays in yoagent: the loop, providers, tools, `Extension`; yoagent-rutis
 (bridge, pi and DSH adapters, the compatibility matrix and its probe);
 yoagent-workers.
+
+### The examples as manifests (proposed)
+
+`handoff_agent.rs`, `coding_agent.rs` and `minimal_browser.rs` become
+`examples/handoff.toml`, `coding.toml` and `minimal.toml`, each with its
+prompt file. Each `.rs` example is removed once its manifest does what it
+did, checked in CI. Four things the examples do that a manifest cannot
+say yet:
+
+- **Which of yoagent's tools** (`minimal_browser`: reading only, in the
+  agent's folder). `[builtins] tools = "coding"` (the default: yoagent's
+  six — bash, read, write, edit, list, search) or `"read-only"` (read,
+  list, search; paths confined to the agent's folder).
+- **A budget for the whole session** (`handoff_agent`: $2 across runs).
+  `[limits] session_budget_usd = 2.0`, beside `budget_usd` (per run);
+  either, both, or neither; refused for an unpriced model, like
+  `budget_usd`.
+- **A plugin that is the agent's approval policy** (`coding_agent`: the pi
+  extension `confirm-dangerous.ts`). `policy = true` on its `[[plugin]]`:
+  no run starts while no policy plugin is up — a run that would start
+  without one denies every call instead of running unguarded
+  (yoagent-rutis's `require_policy`, for all plugins at once). Usually
+  with `gate = "off"`: the plugin is the gate.
+- **The UI plugins** (`todo-plan.ts`, `search-links.ts`: browser drawing,
+  offered through the `frontend` service). Nothing new: they are rutis
+  plugins (`rutis = "./plugins/todo-plan.ts"`, `runtime = "node"`). They
+  move to `examples/plugins/`, and `examples/` gets a `package.json`
+  (`@arcships/rutis-runtime`, and the pi packages the manifests pin, e.g.
+  `@juicesharp/rpiv-todo`) installed by
+  `scripts/try-coding-agent.sh --setup-only` — "installed beside the
+  manifest", as for any agent until M2b installs it.
+
+**The demos.** `--scripted` replaces the model; the owner is a test. The
+handoff demo (asks without waiting; the owner answers #1 after run 1, so
+run 2 starts; it writes `notes.md`; two reports) runs as a CI test that
+starts `yobuild run examples/handoff.toml --scripted … --web 127.0.0.1:0`
+and answers over the page's WebSocket, as the web tests do — no flag
+only a test would use. The coding demo's question for `rm -rf build`
+(the pi policy) is answered Block the same way; the terminal check
+(`run_terminal_pty.py`) moves to `coding.toml`.
 
 ## 8. Testing
 
