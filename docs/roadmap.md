@@ -87,7 +87,8 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
   manifest agent that plans and searches does not ask before each call.
 - `handoff.toml`, `coding.toml`, `minimal.toml` replace the three examples.
 - `ask_owner` as a host service (design §3, proposed), so plugins can ask
-  the owner too — Node plugins now; Python and Go once it is checked that
+  the owner too — rutis plugins (Node) now; pi extensions and DSH plugins
+  once their adapters forward it; Python and Go once it is checked that
   they can call host services.
 
 **Done when** `yobuild run handoff.toml --scripted` reproduces today's
