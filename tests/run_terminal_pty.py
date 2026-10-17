@@ -24,7 +24,7 @@ with open(os.path.join(project, "agent.toml"), "w") as f:
     f.write(
         '[agent]\nname = "echoer"\nmodel = "deepseek/deepseek-flash"\n\n'
         f'[[mcp]]\nnpm = "{fixture}/server.sh"\nargs = ["first"]\n\n'
-        '[parts]\ngate = "off"\n\n[frontend]\nterminal = true\n'
+        '[builtins]\ngate = "off"\n\n[frontend]\nterminal = true\n'
     )
 
 

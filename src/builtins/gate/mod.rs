@@ -35,11 +35,11 @@ use self::paths::{identity, locate, protected, real, single, Here, Identity};
 use super::Scratch;
 use crate::frontend::{session::UI_TIMEOUT, Session, UiRequest};
 
-/// Tools that only read, free by default: yoagent's `read_file`,
+/// Tools that only read, allowed by default: yoagent's `read_file`,
 /// `list_files` and `search`. Not [`AskOwner`](super::AskOwner)'s
-/// `ask_owner`: whoever adds that tool frees it
-/// (`with_free_tools([AskOwner::TOOL])`), so a plugin's tool of that name
-/// is not freed by its name alone.
+/// `ask_owner`: whoever adds that tool allows it
+/// (`with_allowed_tools([AskOwner::TOOL])`), so a plugin's tool of that name
+/// is not allowed by its name alone.
 pub const READ_ONLY_TOOLS: [&str; 3] = ["read_file", "list_files", "search"];
 
 /// An extension that asks the owner before a tool call does anything it
@@ -92,7 +92,7 @@ pub const READ_ONLY_TOOLS: [&str; 3] = ["read_file", "list_files", "search"];
 /// either tool on a file outside the project that is not the agent's (a
 /// new one too), either of `.env*` or `.git`, or of a path it cannot read (not a
 /// string, `~`, `@`), ask. Other tools: free when named in
-/// [`with_free_tools`](Self::with_free_tools) (by default
+/// [`with_allowed_tools`](Self::with_allowed_tools) (by default
 /// [`READ_ONLY_TOOLS`]), else they ask.
 ///
 /// The agent's own files are those created by calls the gate let through
@@ -158,7 +158,7 @@ impl Gate {
     /// look things up (a plan, a web search). Never one that writes, deletes
     /// or runs code. It cannot free `bash` or the file tools: those are
     /// always judged.
-    pub fn with_free_tools<S: Into<String>>(self, tools: impl IntoIterator<Item = S>) -> Self {
+    pub fn with_allowed_tools<S: Into<String>>(self, tools: impl IntoIterator<Item = S>) -> Self {
         self.change(|rules| rules.free_tools.extend(tools.into_iter().map(Into::into)))
     }
 

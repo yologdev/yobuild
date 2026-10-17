@@ -10,7 +10,7 @@
 //!   at once, so the agent carries on with what does not depend on it. The
 //!   answer, whenever it comes, is sent in as a steer message: picked up by
 //!   the run in progress, or starting a new run when the agent had stopped.
-//! - Guardrails, not a sandbox: the gate (`yobuild::parts::Gate`, in Rust)
+//! - Guardrails, not a sandbox: the gate (`yobuild::builtins::Gate`, in Rust)
 //!   is an allow-list — reading, building, testing, committing and writing
 //!   new files run; anything else, above all deleting, discarding or
 //!   overwriting what the owner has, waits for their yes, and is refused
@@ -52,16 +52,16 @@ use yoagent::provider::{prices, MockProvider, ModelConfig};
 use yoagent::tools::default_tools;
 use yoagent::{Agent, AgentEvent, AgentMessage, Content, Message};
 use yoagent_rutis::RutisBridge;
+use yobuild::builtins::{AskOwner, Facts, Gate, Report, Scratch};
 use yobuild::frontend::host::{rows_from_file, DshHome, PluginHost, Row};
 use yobuild::frontend::{services, web, ClientMessage, ServerMessage, Session};
-use yobuild::parts::{AskOwner, Facts, Gate, Report, Scratch};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// The plugin tools that only plan or search: rpiv-todo's plan and
 /// dsh-free-search's searches (not its `npm` or test tools), and
 /// `ask_owner` (yoagent's read-only tools are free by default).
-const FREE_TOOLS: [&str; 15] = [
+const ALLOWED_TOOLS: [&str; 15] = [
     AskOwner::TOOL,
     "todo",
     "multi_search",
@@ -337,7 +337,7 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         Gate::new(session.clone(), &cwd)
             .with_scratch(&scratch)
             // Tools that only plan or look things up; any other plugin tool asks.
-            .with_free_tools(FREE_TOOLS),
+            .with_allowed_tools(ALLOWED_TOOLS),
     )
     .with_extension(report)
     .with_extension(facts);

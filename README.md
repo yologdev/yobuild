@@ -3,11 +3,11 @@
 **Build an agent by choosing its parts.** yobuild assembles working agents
 from plugins other ecosystems already publish — pi extensions, DeepSeek
 Harness plugins, MCP servers, rutis plugins in Rust, TypeScript, Python or
-Go — plus a few small parts of its own, on top of the
+Go — plus a few small built-ins of its own, on top of the
 [yoagent](https://github.com/yologdev/yoagent) loop.
 
-> Status: **M2a (manifest and runner).** The parts and the frontend
-> (`yobuild::parts`, `yobuild::frontend`, [`frontend/`](frontend/README.md),
+> Status: **M2a (manifest and runner).** The built-ins and the frontend
+> (`yobuild::builtins`, `yobuild::frontend`, [`frontend/`](frontend/README.md),
 > with its [examples](examples/README.md)), the manifest
 > (`yobuild::manifest`) and `yobuild run` (plugins already installed;
 > installing them is M2b). Numbers quoted are measured in the yoagent
@@ -29,7 +29,7 @@ and facts the model cannot make up. Of what it does:
 - the **plan** is a pi extension (`@juicesharp/rpiv-todo`), unchanged from npm;
 - the **web search** is a DeepSeek Harness plugin (`dsh-free-search`), unchanged;
 - the **loop** is yoagent;
-- what makes it *a handoff agent* is three small parts — ask the owner
+- what makes it *a handoff agent* is three small built-ins — ask the owner
   without blocking, check the report, add the facts — and a frontend
   (browser, phone).
 
@@ -86,7 +86,7 @@ versions; installing them is M2b.
 ## Documents
 
 - [Vision](docs/vision.md) — why, for whom, what it is not.
-- [Design](docs/design.md) — architecture, the manifest, the parts, what
+- [Design](docs/design.md) — architecture, the manifest, the built-ins, what
   moves from yoagent, the safety model.
 - [Roadmap](docs/roadmap.md) — milestones, and the open questions for review.
 

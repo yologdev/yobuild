@@ -69,7 +69,7 @@ yobuild makes that the normal way to build:
 - **Not a new loop.** The loop is yoagent's; when a capability belongs in
   every agent, it goes there.
 - **Not a plugin ecosystem of its own.** It hosts others' plugins; its own
-  parts are few and generic.
+  built-ins are few and generic.
 - **Not a sandbox.** Plugins run with their process's rights. The approval
   gate is a guardrail for selected operations.
 - **Not an agent app.** No accounts, no hosted service, no marketplace —

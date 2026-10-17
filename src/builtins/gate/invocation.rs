@@ -225,7 +225,7 @@ pub(super) fn invocation(words: &[Word]) -> Result<Option<Invocation<'_>>, Unrea
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parts::gate::parse::{parse, Item};
+    use crate::builtins::gate::parse::{parse, Item};
 
     fn read(line: &str) -> Result<Option<(String, usize, bool)>, Unread> {
         let Some(Item::Command(c)) = parse(line).unwrap().into_iter().next() else {

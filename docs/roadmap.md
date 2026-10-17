@@ -78,7 +78,7 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
   (design §9), so the decision to promote a part to Rust rests on
   measurements. Needs yoagent-rutis to report each handler's hook time and
   each runtime's process (asked for, 2026-10-17).
-- The built-ins renamed: `[parts]` → `[builtins]` in the manifest,
+- The built-ins renamed (#14): `[parts]` → `[builtins]` in the manifest,
   `yobuild::parts` → `yobuild::builtins`, the gate's `with_free_tools` →
   `with_allowed_tools` (decided 2026-10-17: "parts" read as plugins moved
   into Rust; "free" as cost).

@@ -12,7 +12,7 @@
 //! [[plugin]]
 //! pi = "@juicesharp/rpiv-todo@2.12.0"
 //!
-//! [parts]
+//! [builtins]
 //! report = "handoff"
 //! ```
 //!
@@ -30,7 +30,7 @@ use toml::Spanned;
 use yoagent::provider::model::OpenAiCompat;
 use yoagent::provider::{ModelConfig, PriceTable};
 
-use crate::parts::Report;
+use crate::builtins::Report;
 
 /// A manifest, read and checked.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,7 +43,7 @@ pub struct Manifest {
     pub limits: Limits,
     pub plugins: Vec<Plugin>,
     pub mcp: Vec<Mcp>,
-    pub parts: Parts,
+    pub builtins: Builtins,
     pub dsh: Dsh,
     pub frontend: Frontend,
 }
@@ -413,7 +413,7 @@ fn identifier(name: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct Parts {
+pub struct Builtins {
     /// The `ask_owner` tool: questions that do not wait for the answer.
     pub ask_owner: bool,
     /// The report every run must end with.
@@ -425,7 +425,7 @@ pub struct Parts {
     pub scratch: bool,
 }
 
-/// The approval gate (`yobuild::parts::Gate`).
+/// The approval gate (`yobuild::builtins::Gate`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Gate {
@@ -435,7 +435,7 @@ pub enum Gate {
     Off,
 }
 
-impl Default for Parts {
+impl Default for Builtins {
     fn default() -> Self {
         Self {
             ask_owner: false,
@@ -500,7 +500,7 @@ struct Raw {
     #[serde(default)]
     mcp: Vec<Spanned<RawMcp>>,
     #[serde(default)]
-    parts: RawParts,
+    builtins: RawBuiltins,
     #[serde(default)]
     dsh: RawDsh,
     #[serde(default)]
@@ -554,7 +554,7 @@ struct RawMcp {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-struct RawParts {
+struct RawBuiltins {
     #[serde(default)]
     ask_owner: bool,
     report: Option<Spanned<toml::Value>>,
@@ -642,7 +642,7 @@ impl Manifest {
             unique(&server.name, name_span).map_err(located)?;
             mcp.push(server);
         }
-        let parts = parts(raw.parts).map_err(located)?;
+        let builtins = builtins(raw.builtins).map_err(located)?;
         let frontend = frontend(raw.frontend).map_err(located)?;
 
         Ok(Manifest {
@@ -651,7 +651,7 @@ impl Manifest {
             limits,
             plugins,
             mcp,
-            parts,
+            builtins,
             dsh: Dsh {
                 host_services: raw.dsh.host_services,
             },
@@ -1247,7 +1247,7 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
     Ok((Mcp { name, transport }, name_span))
 }
 
-fn parts(raw: RawParts) -> Result<Parts, Located> {
+fn builtins(raw: RawBuiltins) -> Result<Builtins, Located> {
     let report = match raw.report {
         None => None,
         Some(report) => {
@@ -1283,7 +1283,7 @@ fn parts(raw: RawParts) -> Result<Parts, Located> {
             }
         },
     };
-    Ok(Parts {
+    Ok(Builtins {
         ask_owner: raw.ask_owner,
         report,
         facts: raw.facts,

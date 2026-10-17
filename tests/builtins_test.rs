@@ -1,4 +1,4 @@
-//! The parts, each through a real session and a scripted model.
+//! The built-ins, each through a real session and a scripted model.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,11 +12,11 @@ use yoagent::provider::{MockProvider, ModelConfig};
 use yoagent::{
     Agent, AgentMessage, AgentTool, Content, Message, ToolContext, ToolError, ToolResult, Usage,
 };
+use yobuild::builtins::{AskOwner, Facts, OpenQuestions, Report};
 use yobuild::frontend::{
     ClientMessage, Connection, NoticeLevel, ResolveReason, RunOutcome, ServerMessage, Session,
     UiRequest,
 };
-use yobuild::parts::{AskOwner, Facts, OpenQuestions, Report};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -1013,7 +1013,7 @@ fn gated(session: &Session, dir: &Path) -> (Agent, Arc<std::sync::Mutex<Vec<Stri
         MockResponse::Text("done".into()),
     ])
     .with_tools(vec![Box::new(FakeBash(ran.clone()))])
-    .with_extension(yobuild::parts::Gate::new(session.clone(), dir));
+    .with_extension(yobuild::builtins::Gate::new(session.clone(), dir));
     (agent, ran)
 }
 
@@ -1166,7 +1166,7 @@ async fn the_gate_judges_a_call_another_extension_rewrote() {
             MockResponse::Text("done".into()),
         ])
         .with_tools(vec![Box::new(FakeBash(r))])
-        .with_extension(yobuild::parts::Gate::new(session.clone(), &path))
+        .with_extension(yobuild::builtins::Gate::new(session.clone(), &path))
         .with_extension(Rewrite)
     })
     .await;
@@ -1222,13 +1222,17 @@ impl AgentTool for Shell {
 
 /// Runs `command` through `bash` behind a gate in `dir`, with nobody to
 /// ask; returns a clone of the gate made before the run.
-async fn gate_after(dir: &Path, bash: Box<dyn AgentTool>, command: &str) -> yobuild::parts::Gate {
+async fn gate_after(
+    dir: &Path,
+    bash: Box<dyn AgentTool>,
+    command: &str,
+) -> yobuild::builtins::Gate {
     let path = dir.to_owned();
     let command = command.to_owned();
     let gate = Arc::new(std::sync::Mutex::new(None));
     let g = gate.clone();
     run_alone(move |session| {
-        let built = yobuild::parts::Gate::new(session.clone(), &path);
+        let built = yobuild::builtins::Gate::new(session.clone(), &path);
         *g.lock().unwrap() = Some(built.clone());
         agent(vec![
             MockResponse::ToolCalls(vec![call("bash", json!({ "command": command }))]),
@@ -1281,7 +1285,7 @@ async fn a_failed_call_does_not_make_its_files_the_agents() {
 }
 
 #[tokio::test]
-async fn free_tools_run_and_others_ask_through_a_real_agent() {
+async fn allowed_tools_run_and_others_ask_through_a_real_agent() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_owned();
     let worked = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1297,7 +1301,9 @@ async fn free_tools_run_and_others_ask_through_a_real_agent() {
             }))),
             Box::new(Named("noop")),
         ])
-        .with_extension(yobuild::parts::Gate::new(session.clone(), &path).with_free_tools(["work"]))
+        .with_extension(
+            yobuild::builtins::Gate::new(session.clone(), &path).with_allowed_tools(["work"]),
+        )
     })
     .await;
     // `work` is free and ran; `noop` has no rule and nobody answered.
@@ -1312,7 +1318,7 @@ fn a_question_shows_a_long_command_as_written() {
     let (session, _driver) = Session::new(false);
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("owner.txt"), "theirs").unwrap();
-    let gate = yobuild::parts::Gate::new(session, dir.path());
+    let gate = yobuild::builtins::Gate::new(session, dir.path());
     let command = "ls\nrm owner.txt";
     let check = gate.check("bash", &json!({ "command": command }));
     assert_eq!(check.question(), Some("Run this command?"));

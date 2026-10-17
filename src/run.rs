@@ -1,5 +1,5 @@
 //! `yobuild run`: an agent from its manifest — the model, its limits, the
-//! parts, the plugins (by ecosystem), MCP servers, and a frontend.
+//! built-ins, the plugins (by ecosystem), MCP servers, and a frontend.
 //!
 //! In three steps: every check first, before anything starts (a missing key
 //! or package, a prompt that cannot be filled, a plugin yobuild cannot load
@@ -35,12 +35,12 @@ use yoagent::tools::{
 use yoagent::{Agent, AgentEvent, AgentTool, Content};
 use yoagent_rutis::RutisBridge;
 
+use crate::builtins::{AskOwner, Facts, Gate, Scratch};
 use crate::frontend::host::{DshHome, PluginHost, Row};
 use crate::frontend::{
     services, web, ClientMessage, NoticeLevel, RunOutcome, ServerMessage, Session,
 };
 use crate::manifest::{Gate as GateMode, Manifest, Mcp, Source, Transport};
-use crate::parts::{AskOwner, Facts, Gate, Scratch};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -138,7 +138,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     }
     let bridge = RutisBridge::install(root)?;
     services::provide(root, &session)?;
-    let scratch = match manifest.parts.scratch {
+    let scratch = match manifest.builtins.scratch {
         true => Some(Scratch::create(name)?),
         false => None,
     };
@@ -187,7 +187,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // two of one name. (A plugin's tools come with each run; yoagent keeps
     // one of these over a plugin's of the same name, and says so.)
     let ask_owner = manifest
-        .parts
+        .builtins
         .ask_owner
         .then(|| AskOwner::new(session.clone()));
     let mut tools = Tools::default();
@@ -215,10 +215,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     if let Some(gate) = gate(&manifest, &session, &cwd, scratch.as_ref()) {
         agent = agent.with_extension(gate);
     }
-    if let Some(report) = &manifest.parts.report {
+    if let Some(report) = &manifest.builtins.report {
         agent = agent.with_extension(report.clone());
     }
-    if manifest.parts.facts {
+    if manifest.builtins.facts {
         let mut facts = Facts::new(session.clone(), &cwd);
         if let Some(ask) = &ask_owner {
             facts = facts.with_open_questions(ask.open_questions());
@@ -372,7 +372,7 @@ enum End {
 }
 
 /// The gate the manifest asks for: free in the scratch folder, and for
-/// `ask_owner` only when the part adds yobuild's (a plugin's tool of that
+/// `ask_owner` only when the built-in adds yobuild's (a plugin's tool of that
 /// name asks).
 fn gate(
     manifest: &Manifest,
@@ -380,15 +380,15 @@ fn gate(
     cwd: &Path,
     scratch: Option<&Scratch>,
 ) -> Option<Gate> {
-    if manifest.parts.gate != GateMode::AllowList {
+    if manifest.builtins.gate != GateMode::AllowList {
         return None;
     }
     let mut gate = Gate::new(session.clone(), cwd);
     if let Some(scratch) = scratch {
         gate = gate.with_scratch(scratch);
     }
-    if manifest.parts.ask_owner {
-        gate = gate.with_free_tools([AskOwner::TOOL]);
+    if manifest.builtins.ask_owner {
+        gate = gate.with_allowed_tools([AskOwner::TOOL]);
     }
     Some(gate)
 }
@@ -481,9 +481,9 @@ impl Prompt {
             Some(path) => {
                 let text = std::fs::read_to_string(path)
                     .map_err(|e| format!("prompt {}: {e}", path.display()))?;
-                if text.contains("{scratch}") && !manifest.parts.scratch {
+                if text.contains("{scratch}") && !manifest.builtins.scratch {
                     return Err(format!(
-                        "prompt {}: {{scratch}}, but [parts] scratch is off",
+                        "prompt {}: {{scratch}}, but [builtins] scratch is off",
                         path.display()
                     )
                     .into());
@@ -495,7 +495,7 @@ impl Prompt {
                 plain: Some(manifest.agent.name.clone()),
             },
         };
-        if let Some(report) = &manifest.parts.report {
+        if let Some(report) = &manifest.builtins.report {
             prompt.text.push_str("\n\n");
             prompt.text.push_str(&report.instruction());
         }
@@ -544,13 +544,13 @@ impl Tools {
     }
 
     /// No two tools of one name, and none named `ask_owner` but yobuild's
-    /// (a server's would be freed by the gate when the part is on).
+    /// (a server's would be allowed by the gate when the built-in is on).
     fn check(&self) -> Result<(), BoxError> {
         let mut seen: HashMap<&str, &str> = HashMap::new();
         for (name, source) in &self.from {
             if name == AskOwner::TOOL && source != AskOwner::TOOL {
                 return Err(format!(
-                    "tool ask_owner from {source}: the name is yobuild's ([parts] ask_owner)"
+                    "tool ask_owner from {source}: the name is yobuild's ([builtins] ask_owner)"
                 )
                 .into());
             }
@@ -1051,7 +1051,7 @@ mod tests {
         std::fs::write(dir.path().join("p.md"), "in {cwd}, scratch {scratch}").unwrap();
         let with = manifest(
             dir.path(),
-            "prompt = \"./p.md\"\n[parts]\nscratch = true\nreport = [\"Done\"]\n",
+            "prompt = \"./p.md\"\n[builtins]\nscratch = true\nreport = [\"Done\"]\n",
         );
         let scratch = Scratch::at(dir.path().join("s")).unwrap();
         let text = Prompt::read(&with)
@@ -1068,7 +1068,7 @@ mod tests {
         };
         assert!(e
             .to_string()
-            .ends_with("{scratch}, but [parts] scratch is off"));
+            .ends_with("{scratch}, but [builtins] scratch is off"));
         let plain = Prompt::read(&manifest(dir.path(), ""))
             .unwrap()
             .fill(Path::new("/w"), None);
@@ -1126,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_is_free_in_the_scratch_and_for_ask_owner_only_with_the_part() {
+    fn the_gate_allows_the_scratch_and_ask_owner_only_with_the_built_in() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("p");
         std::fs::create_dir(&project).unwrap();
@@ -1145,7 +1145,7 @@ mod tests {
                 .question()
                 .is_none()
         };
-        let both = manifest(dir.path(), "[parts]\nscratch = true\nask_owner = true\n");
+        let both = manifest(dir.path(), "[builtins]\nscratch = true\nask_owner = true\n");
         let judge = gate(&both, &session, &project, Some(&scratch)).unwrap();
         let elsewhere = dir.path().join("elsewhere.md");
         assert!(
@@ -1153,15 +1153,18 @@ mod tests {
             "free in the scratch"
         );
         assert!(!write(&judge, &elsewhere), "outside both asks");
-        assert!(ask(&judge), "ask_owner is free with the part");
+        assert!(ask(&judge), "ask_owner is allowed with the built-in");
         let neither = manifest(dir.path(), "");
         let judge = gate(&neither, &session, &project, None).unwrap();
         assert!(
             !write(&judge, &scratch.path().join("notes.md")),
             "no scratch: it asks"
         );
-        assert!(!ask(&judge), "a tool named ask_owner asks without the part");
-        let off = manifest(dir.path(), "[parts]\ngate = \"off\"\n");
+        assert!(
+            !ask(&judge),
+            "a tool named ask_owner asks without the built-in"
+        );
+        let off = manifest(dir.path(), "[builtins]\ngate = \"off\"\n");
         assert!(gate(&off, &session, &project, None).is_none());
     }
 

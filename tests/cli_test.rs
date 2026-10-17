@@ -138,7 +138,7 @@ fn project(manifest: &str, script: &str) -> tempfile::TempDir {
 #[test]
 fn the_agent_works_in_the_current_folder_and_facts_say_what_it_made() {
     let dir = project(
-        "[parts]\ngate = \"off\"\nfacts = true\n",
+        "[builtins]\ngate = \"off\"\nfacts = true\n",
         r#"[{ "tools": [{ "name": "write_file", "arguments": { "path": "notes.md", "content": "hi\n" } }] }, { "text": "done" }]"#,
     );
     let out = yobuild(
@@ -196,7 +196,7 @@ fn a_run_that_did_not_complete_exits_non_zero() {
     let echo =
         r#"{ "tools": [{ "name": "write_file", "arguments": { "path": "a", "content": "a" } }] }"#;
     let dir = project(
-        "[limits]\nmax_turns = 1\n[parts]\ngate = \"off\"\n",
+        "[limits]\nmax_turns = 1\n[builtins]\ngate = \"off\"\n",
         &format!("[{echo}, {echo}, {{ \"text\": \"done\" }}]"),
     );
     let out = yobuild(
@@ -238,7 +238,7 @@ fn a_pi_extension_file_from_the_manifest_gives_its_tool() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/pi/fixture-extension.ts");
     let dir = project(
         &format!(
-            "[[plugin]]\npi = \"{}\"\n[parts]\ngate = \"off\"\n",
+            "[[plugin]]\npi = \"{}\"\n[builtins]\ngate = \"off\"\n",
             fixture.display()
         ),
         r#"[{ "tools": [{ "name": "pi_echo", "arguments": { "text": "hi" } }] }, { "text": "done" }]"#,
@@ -282,7 +282,7 @@ fn a_pinned_pi_package_is_found_beside_the_manifest() {
     let manifest = |spec: &str| {
         std::fs::write(
             dir.path().join("agent.toml"),
-            format!("[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\npi = \"{spec}\"\n[parts]\ngate = \"off\"\n"),
+            format!("[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\npi = \"{spec}\"\n[builtins]\ngate = \"off\"\n"),
         )
         .unwrap()
     };
@@ -418,7 +418,7 @@ mod web {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_web_page_exits_by_how_the_last_run_ended() {
     // The last run completed: 0.
-    let dir = project("[parts]\ngate = \"off\"\n", r#"[{ "text": "done" }]"#);
+    let dir = project("[builtins]\ngate = \"off\"\n", r#"[{ "text": "done" }]"#);
     let mut page = web::Page::open(dir.path(), "go").await;
     assert_eq!(page.until("runEnd").await["outcome"], "completed");
     let (code, stderr) = page.interrupt();
@@ -428,7 +428,7 @@ async fn the_web_page_exits_by_how_the_last_run_ended() {
     let echo =
         r#"{ "tools": [{ "name": "write_file", "arguments": { "path": "a", "content": "a" } }] }"#;
     let dir = project(
-        "[limits]\nmax_turns = 1\n[parts]\ngate = \"off\"\n",
+        "[limits]\nmax_turns = 1\n[builtins]\ngate = \"off\"\n",
         &format!("[{echo}, {echo}, {{ \"text\": \"done\" }}]"),
     );
     let mut page = web::Page::open(dir.path(), "go").await;
@@ -442,7 +442,7 @@ async fn the_web_page_exits_by_how_the_last_run_ended() {
 
     // Ctrl+C during a run: aborted, 1.
     let dir = project(
-        "[parts]\ngate = \"off\"\n",
+        "[builtins]\ngate = \"off\"\n",
         r#"[{ "tools": [{ "name": "bash", "arguments": { "command": "sleep 30" } }] }, { "text": "done" }]"#,
     );
     let mut page = web::Page::open(dir.path(), "go").await;
@@ -460,7 +460,7 @@ fn a_plugin_tool_named_ask_owner_is_not_free() {
     if !pi_installed() {
         return;
     }
-    // With the part off, a plugin's `ask_owner` is any other tool: the gate
+    // With the built-in off, a plugin's `ask_owner` is any other tool: the gate
     // asks, and with nobody there it does not run.
     let fixture = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/pi/fixture-extension.ts"),
@@ -498,7 +498,7 @@ fn a_plugin_tool_named_ask_owner_is_not_free() {
 #[test]
 fn ctrl_c_stops_a_once_run_as_aborted() {
     let dir = project(
-        "[parts]\ngate = \"off\"\n",
+        "[builtins]\ngate = \"off\"\n",
         r#"[{ "tools": [{ "name": "bash", "arguments": { "command": "sleep 30" } }] }, { "text": "done" }]"#,
     );
     let child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
@@ -529,7 +529,7 @@ fn ctrl_c_stops_a_once_run_as_aborted() {
 #[test]
 fn facts_count_the_questions_left_open() {
     let dir = project(
-        "[parts]\nask_owner = true\nfacts = true\n",
+        "[builtins]\nask_owner = true\nfacts = true\n",
         r#"[{ "tools": [{ "name": "ask_owner", "arguments": { "question": "Which?" } }] }, { "text": "done" }]"#,
     );
     let out = yobuild(

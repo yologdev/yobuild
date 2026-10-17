@@ -206,7 +206,7 @@ path/to/yobuild/scripts/try-handoff.sh --demo               # headless, scripted
   "skipped", and the agent decides itself and says so. A reset withdraws
   open questions: they belong to the conversation it forgot.
 - **Guardrails:**
-  - The gate (`yobuild::parts::Gate`, in Rust) is an allow-list: it lets
+  - The gate (`yobuild::builtins::Gate`, in Rust) is an allow-list: it lets
     through the programs it knows, with the options it knows — reading,
     building and testing, git that does not discard, writing new files in the project —
     and asks before everything else, above all deleting, discarding or
@@ -224,7 +224,7 @@ path/to/yobuild/scripts/try-handoff.sh --demo               # headless, scripted
     deny-list, kept as the example of a gate written as a plugin.)
   - The gate is a required extension in the Rust process: no plugin
     runtime has to be up for it to hold. It also asks before any plugin
-    tool it has no rule for (the plan and search tools are declared free).
+    tool it has no rule for (the plan and search tools are allowed by name).
   - Runs are capped in turns and minutes (`--max-minutes`), and in dollars
     (`--budget-usd`) when the model has a price. DeepSeek has none in the
     bundled table.

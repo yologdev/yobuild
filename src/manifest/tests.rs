@@ -64,7 +64,7 @@ env  = { MODE = "fast" }
 url     = "https://mcp.example.com/mcp"
 headers = { Authorization = "Bearer ${EXAMPLE_MCP_TOKEN}", Accept = "application/json" }
 
-[parts]
+[builtins]
 ask_owner = true
 report    = ["Summary", "Next"]
 facts     = true
@@ -152,8 +152,8 @@ phone = true
         ]
     );
     assert_eq!(
-        m.parts,
-        Parts {
+        m.builtins,
+        Builtins {
             ask_owner: true,
             report: Some(Report::new(["Summary", "Next"]).unwrap()),
             facts: true,
@@ -180,8 +180,8 @@ phone = true
 #[test]
 fn the_smallest_manifest_has_the_gate_on() {
     let m = read(MINIMAL).unwrap();
-    assert_eq!(m.parts, Parts::default());
-    assert_eq!(m.parts.gate, Gate::AllowList);
+    assert_eq!(m.builtins, Builtins::default());
+    assert_eq!(m.builtins.gate, Gate::AllowList);
     assert!(m.plugins.is_empty() && m.mcp.is_empty());
     assert_eq!(m.limits, Limits::default());
     assert_eq!(m.frontend, Frontend::default());
@@ -189,7 +189,7 @@ fn the_smallest_manifest_has_the_gate_on() {
 
 #[test]
 fn an_error_is_shown_with_its_file_line_and_column() {
-    let e = read(&with("[parts]\ngat = \"off\"\n")).unwrap_err();
+    let e = read(&with("[builtins]\ngat = \"off\"\n")).unwrap_err();
     assert_eq!(
         e.to_string(),
         "agent.toml:5:1: unknown field `gat`, expected one of `ask_owner`, `report`, `facts`, `gate`, `scratch`"
@@ -626,19 +626,22 @@ fn http_servers_are_https_or_on_this_machine() {
 }
 
 #[test]
-fn parts_are_read_strictly() {
+fn builtins_are_read_strictly() {
     assert_eq!(
-        error(&with("[parts]\ngate = \"destructive\"\n")),
+        error(&with("[builtins]\ngate = \"destructive\"\n")),
         "5:8: gate \"destructive\": \"allow-list\" or \"off\""
     );
     assert_eq!(
-        read(&with("[parts]\ngate = \"off\"\n")).unwrap().parts.gate,
+        read(&with("[builtins]\ngate = \"off\"\n"))
+            .unwrap()
+            .builtins
+            .gate,
         Gate::Off
     );
     assert_eq!(
-        read(&with("[parts]\nreport = \"handoff\"\n"))
+        read(&with("[builtins]\nreport = \"handoff\"\n"))
             .unwrap()
-            .parts
+            .builtins
             .report,
         Some(Report::handoff())
     );
@@ -656,7 +659,7 @@ fn parts_are_read_strictly() {
         ("[1]", "report sections are names (strings)"),
     ] {
         assert_eq!(
-            error(&with(&format!("[parts]\nreport = {report}\n"))),
+            error(&with(&format!("[builtins]\nreport = {report}\n"))),
             format!("5:10: {message}")
         );
     }
