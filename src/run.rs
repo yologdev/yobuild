@@ -14,6 +14,7 @@
 //! The agent works in the process's working folder: yoagent's file tools
 //! read relative paths from there, so the gate, facts and bash do too.
 
+pub(crate) mod allowed;
 pub(crate) mod plugins;
 pub(crate) mod script;
 
@@ -214,6 +215,15 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     .with_extension(bridge.extension());
     if let Some(gate) = gate(&manifest, &session, &cwd, scratch.as_ref()) {
         agent = agent.with_extension(gate);
+        // A plugin's allowed tools, checked once its tools are offered.
+        let names: Vec<(String, String)> = manifest
+            .plugins
+            .iter()
+            .flat_map(|p| p.allow.iter().map(|t| (p.name.clone(), t.clone())))
+            .collect();
+        if !names.is_empty() {
+            agent = agent.with_extension(allowed::AllowedCheck::new(session.clone(), names));
+        }
     }
     if let Some(report) = &manifest.builtins.report {
         agent = agent.with_extension(report.clone());
@@ -383,7 +393,7 @@ fn gate(
     if manifest.builtins.gate != GateMode::AllowList {
         return None;
     }
-    let mut gate = Gate::new(session.clone(), cwd);
+    let mut gate = Gate::new(session.clone(), cwd).with_allowed_tools(allowed(manifest));
     if let Some(scratch) = scratch {
         gate = gate.with_scratch(scratch);
     }
@@ -391,6 +401,20 @@ fn gate(
         gate = gate.with_allowed_tools([AskOwner::TOOL]);
     }
     Some(gate)
+}
+
+/// The tools the entries allow, as the model sees them: a plugin's as they
+/// are, an MCP server's as `<server>__<tool>`.
+fn allowed(manifest: &Manifest) -> Vec<String> {
+    let plugins = manifest
+        .plugins
+        .iter()
+        .flat_map(|p| p.allow.iter().cloned());
+    let servers = manifest
+        .mcp
+        .iter()
+        .flat_map(|m| m.allow.iter().map(move |t| format!("{}__{t}", m.name)));
+    plugins.chain(servers).collect()
 }
 
 /// What `run` needs that can be checked before anything starts.
@@ -931,7 +955,7 @@ fn launch(
 }
 
 /// An MCP server's tools, each `<server>__<tool>` (the server is called with
-/// its own names).
+/// its own names); those its `allow` names must be among them.
 async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, BoxError> {
     let failed = |e: &dyn std::fmt::Display| format!("mcp {}: {e}", server.name);
     let client = match launch {
@@ -976,6 +1000,19 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
             ),
         };
         return Err(failed(&why).into());
+    }
+    // What it allows must be among what it offers (a typo, or a server
+    // whose tools changed, is refused here, not left asking).
+    let offered: Vec<&str> = tools
+        .iter()
+        .map(|t| &t.name()[server.name.len() + 2..])
+        .collect();
+    if let Some(gone) = server.allow.iter().find(|a| !offered.contains(&a.as_str())) {
+        return Err(failed(&format!(
+            "its `allow` names {gone:?}, which it does not offer (it offers: {})",
+            offered.join(", ")
+        ))
+        .into());
     }
     Ok(tools
         .into_iter()
@@ -1173,6 +1210,27 @@ mod tests {
         assert!(tool_name("server__echo") && tool_name("a-b_c9"));
         assert!(!tool_name("tools.example.com__x") && !tool_name("a b") && !tool_name(""));
         assert!(tool_name(&"x".repeat(64)) && !tool_name(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn the_gate_allows_what_the_entries_allow_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manifest(
+            dir.path(),
+            "[[plugin]]\npi = \"./t.ts\"\nallow = [\"todo\"]\n\
+             [[mcp]]\nname = \"files\"\nnpm = \"./fs.sh\"\nallow = [\"read_text_file\"]\n",
+        );
+        assert_eq!(allowed(&m), ["todo", "files__read_text_file"]);
+        let (session, _driver) = Session::new(false);
+        let judge = gate(&m, &session, dir.path(), None).unwrap();
+        let runs = |tool: &str| {
+            judge
+                .check(tool, &serde_json::json!({}))
+                .question()
+                .is_none()
+        };
+        assert!(runs("todo") && runs("files__read_text_file"));
+        assert!(!runs("files__write_file") && !runs("read_text_file") && !runs("todos"));
     }
 
     #[test]

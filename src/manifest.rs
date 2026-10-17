@@ -228,6 +228,9 @@ pub struct Plugin {
     /// strings' `${NAME}` references filled in at start
     /// ([`config_with`](Self::config_with)).
     pub config: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Its tools the gate lets run without asking (`allow`), as the plugin
+    /// names them.
+    pub allow: Vec<String>,
 }
 
 impl Plugin {
@@ -277,6 +280,9 @@ pub struct Mcp {
     /// the file's stem, or the URL's host.
     pub name: String,
     pub transport: Transport,
+    /// Its tools the gate lets run without asking (`allow`), as the server
+    /// names them (the agent sees each as `<name>__<tool>`).
+    pub allow: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,6 +541,7 @@ struct RawPlugin {
     rutis: Option<Spanned<String>>,
     runtime: Option<Runtime>,
     config: Option<Spanned<toml::Value>>,
+    allow: Option<Spanned<Vec<Spanned<String>>>>,
 }
 
 #[derive(Deserialize)]
@@ -550,6 +557,7 @@ struct RawMcp {
     env: BTreeMap<String, Spanned<String>>,
     #[serde(default)]
     headers: BTreeMap<String, Spanned<String>>,
+    allow: Option<Spanned<Vec<Spanned<String>>>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -628,9 +636,19 @@ impl Manifest {
             names.push(name.to_owned());
             Ok(())
         };
+        // Where an entry allows tools: with the gate off, that means nothing.
+        let mut allowing: Option<Range<usize>> = None;
         let mut plugins = Vec::new();
         for raw in raw.plugins {
             let span = raw.span();
+            if let Some(a) = raw
+                .get_ref()
+                .allow
+                .as_ref()
+                .filter(|a| !a.get_ref().is_empty())
+            {
+                allowing.get_or_insert(a.span());
+            }
             let (plugin, name_span) = plugin(raw.into_inner(), span, dir).map_err(located)?;
             unique(&plugin.name, name_span).map_err(located)?;
             plugins.push(plugin);
@@ -638,11 +656,23 @@ impl Manifest {
         let mut mcp = Vec::new();
         for raw in raw.mcp {
             let span = raw.span();
+            if let Some(a) = raw
+                .get_ref()
+                .allow
+                .as_ref()
+                .filter(|a| !a.get_ref().is_empty())
+            {
+                allowing.get_or_insert(a.span());
+            }
             let (server, name_span) = server(raw.into_inner(), span, dir).map_err(located)?;
             unique(&server.name, name_span).map_err(located)?;
             mcp.push(server);
         }
         let builtins = builtins(raw.builtins).map_err(located)?;
+        if let (Gate::Off, Some(span)) = (builtins.gate, allowing) {
+            let m = "allow with gate = \"off\": nothing asks, so there is nothing to allow";
+            return Err(located((span, m.into())));
+        }
         let frontend = frontend(raw.frontend).map_err(located)?;
 
         Ok(Manifest {
@@ -1028,7 +1058,16 @@ fn plugin(
             (name, span)
         }
     };
-    Ok((Plugin { name, kind, config }, name_span))
+    let allow = allow(raw.allow.as_ref())?;
+    Ok((
+        Plugin {
+            name,
+            kind,
+            config,
+            allow,
+        },
+        name_span,
+    ))
 }
 
 /// A header or variable that carries a secret, by the words of its name
@@ -1244,7 +1283,51 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
         Some(name) => explicit_name(name)?,
         None => (default, span),
     };
-    Ok((Mcp { name, transport }, name_span))
+    let allow = allow(raw.allow.as_ref())?;
+    Ok((
+        Mcp {
+            name,
+            transport,
+            allow,
+        },
+        name_span,
+    ))
+}
+
+/// The tools the gate judges itself, call by call: never allowed by name.
+const JUDGED_TOOLS: [&str; 5] = ["bash", "write_file", "write", "edit_file", "edit"];
+
+/// An entry's `allow`: names a tool can have, each once; not the tools the
+/// gate judges itself, nor `ask_owner` (the built-in allows its own).
+fn allow(raw: Option<&Spanned<Vec<Spanned<String>>>>) -> Result<Vec<String>, Located> {
+    let mut names: Vec<String> = Vec::new();
+    for name in raw.map(|a| a.get_ref().as_slice()).unwrap_or_default() {
+        let (text, span) = (name.get_ref(), name.span());
+        let fits = (1..=64).contains(&text.len())
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        let refusal = if !fits {
+            Some(format!(
+                "allow {text:?}: a tool name is 1 to 64 letters, digits, _ and -"
+            ))
+        } else if names.contains(text) {
+            Some(format!("allow {text:?}: named twice"))
+        } else if JUDGED_TOOLS.contains(&text.as_str()) {
+            Some(format!(
+                "allow {text:?}: the gate judges `{text}` call by call; it is never allowed by name"
+            ))
+        } else if text == "ask_owner" {
+            Some("allow \"ask_owner\": the built-in allows its own (`ask_owner = true`); a plugin's tool of that name asks".into())
+        } else {
+            None
+        };
+        if let Some(m) = refusal {
+            return Err((span, m));
+        }
+        names.push(text.clone());
+    }
+    Ok(names)
 }
 
 fn builtins(raw: RawBuiltins) -> Result<Builtins, Located> {

@@ -90,7 +90,7 @@ phone    = false                     # serve on the LAN, print a phone link
 terminal = false
 ```
 
-### Allowed tools (proposed)
+### Allowed tools
 
 The gate (`gate = "allow-list"`) asks before every tool it does not know
 to be harmless: yoagent's `bash` and file tools are judged call by call,
