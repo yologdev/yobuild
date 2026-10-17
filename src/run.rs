@@ -18,6 +18,7 @@ pub(crate) mod plugins;
 pub(crate) mod script;
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -252,9 +253,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             }
             _ => web.url(),
         };
-        println!("{name}: {url}  (Ctrl+C to stop)");
+        // The URL on stdout (what a launcher reads); a reader gone does not
+        // end the agent (`println!` would panic on a closed pipe).
+        let _ = writeln!(std::io::stdout(), "{name}: {url}  (Ctrl+C to stop)");
         if task.is_some() {
-            println!("{name}: the task starts when the page is open");
+            eprintln!("{name}: the task starts when the page is open");
         }
         served = Some(web);
     }
