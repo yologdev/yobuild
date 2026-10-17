@@ -139,8 +139,7 @@ allow = ["read_text_file"]           # offered to the model as `files__read_text
   only in some runs.
 - **What the gate gets:** the names as the model sees them — a plugin's
   as they are, an MCP server's as `<server>__<tool>` — through
-  `Gate::with_allowed_tools` (today `with_free_tools`; renamed with the
-  built-ins).
+  `Gate::with_allowed_tools`.
 
 Considered and not taken: one list under `[builtins]`
 (`allowed_tools = ["todo", "files__read_text_file"]`) — shorter, but it
@@ -234,8 +233,7 @@ switch on in `[builtins]`, whatever ecosystem its tools come from. Most plug
 into the loop as hooks (yoagent extensions: `report`, `facts`, the
 `gate`); `ask_owner` is a tool; `scratch` is a folder. Not plugins moved
 into Rust: a capability an ecosystem already has stays a plugin (§9).
-The library is `yobuild::builtins` (named `yobuild::parts` until the
-rename, M2a).
+The library is `yobuild::builtins`.
 
 Small, generic, and each tested on its own. They come from the handoff
 example and move into yobuild as a library (`yobuild::builtins`), usable

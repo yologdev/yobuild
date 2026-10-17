@@ -35,11 +35,11 @@ use self::paths::{identity, locate, protected, real, single, Here, Identity};
 use super::Scratch;
 use crate::frontend::{session::UI_TIMEOUT, Session, UiRequest};
 
-/// Tools that only read, free by default: yoagent's `read_file`,
+/// Tools that only read, allowed by default: yoagent's `read_file`,
 /// `list_files` and `search`. Not [`AskOwner`](super::AskOwner)'s
-/// `ask_owner`: whoever adds that tool frees it
+/// `ask_owner`: whoever adds that tool allows it
 /// (`with_allowed_tools([AskOwner::TOOL])`), so a plugin's tool of that name
-/// is not freed by its name alone.
+/// is not allowed by its name alone.
 pub const READ_ONLY_TOOLS: [&str; 3] = ["read_file", "list_files", "search"];
 
 /// An extension that asks the owner before a tool call does anything it

@@ -21,7 +21,7 @@ Most agents assume you are watching them. A handoff agent assumes you are not:
   - Dismissing a question means "decide yourself"; the agent does, and says so.
 - **Approval guardrails: an allow-list.** The gate (`yobuild::builtins::Gate`) lets through what it knows to be harmless — reading, building and testing, `git status`/`add`/`commit`/`push`, writing new files in the project — and asks first about everything else; with nobody there it is refused:
   - anything that deletes, discards or overwrites what you already have (`rm`, `git reset --hard`, `mv` or `cp` over a file, `>` onto one, …);
-  - any program, git subcommand or option it does not know (each program it knows has its own list of options), a program run from a path that is not a system folder (`./cat`), an environment variable that changes what runs (`PATH=…`), an interpreter running code that is not your script, a plugin tool not declared free (the plan and search tools are).
+  - any program, git subcommand or option it does not know (each program it knows has its own list of options), a program run from a path that is not a system folder (`./cat`), an environment variable that changes what runs (`PATH=…`), an interpreter running code that is not your script, a plugin tool not allowed by name (the plan and search tools are).
 
   Files it created itself (by calls that ran without asking), and its own scratch folder, stay free, so it can keep its deliverable up to date. These are guardrails, not a sandbox:
   - targeted edits of your existing files (the edit tool) go through;

@@ -61,7 +61,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// The plugin tools that only plan or search: rpiv-todo's plan and
 /// dsh-free-search's searches (not its `npm` or test tools), and
 /// `ask_owner` (yoagent's read-only tools are free by default).
-const FREE_TOOLS: [&str; 15] = [
+const ALLOWED_TOOLS: [&str; 15] = [
     AskOwner::TOOL,
     "todo",
     "multi_search",
@@ -337,7 +337,7 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         Gate::new(session.clone(), &cwd)
             .with_scratch(&scratch)
             // Tools that only plan or look things up; any other plugin tool asks.
-            .with_allowed_tools(FREE_TOOLS),
+            .with_allowed_tools(ALLOWED_TOOLS),
     )
     .with_extension(report)
     .with_extension(facts);

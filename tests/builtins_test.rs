@@ -1285,7 +1285,7 @@ async fn a_failed_call_does_not_make_its_files_the_agents() {
 }
 
 #[tokio::test]
-async fn free_tools_run_and_others_ask_through_a_real_agent() {
+async fn allowed_tools_run_and_others_ask_through_a_real_agent() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_owned();
     let worked = Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -626,7 +626,7 @@ fn http_servers_are_https_or_on_this_machine() {
 }
 
 #[test]
-fn parts_are_read_strictly() {
+fn builtins_are_read_strictly() {
     assert_eq!(
         error(&with("[builtins]\ngate = \"destructive\"\n")),
         "5:8: gate \"destructive\": \"allow-list\" or \"off\""

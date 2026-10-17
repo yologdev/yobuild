@@ -1126,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_is_free_in_the_scratch_and_for_ask_owner_only_with_the_part() {
+    fn the_gate_allows_the_scratch_and_ask_owner_only_with_the_built_in() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("p");
         std::fs::create_dir(&project).unwrap();

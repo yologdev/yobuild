@@ -224,7 +224,7 @@ path/to/yobuild/scripts/try-handoff.sh --demo               # headless, scripted
     deny-list, kept as the example of a gate written as a plugin.)
   - The gate is a required extension in the Rust process: no plugin
     runtime has to be up for it to hold. It also asks before any plugin
-    tool it has no rule for (the plan and search tools are declared free).
+    tool it has no rule for (the plan and search tools are allowed by name).
   - Runs are capped in turns and minutes (`--max-minutes`), and in dollars
     (`--budget-usd`) when the model has a price. DeepSeek has none in the
     bundled table.
