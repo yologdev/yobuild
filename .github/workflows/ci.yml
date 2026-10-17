@@ -64,7 +64,7 @@ jobs:
           grep -q "bash ✗" screen.txt
       # The real terminal mode, on a pseudo-terminal: the headless demo never
       # reads the keyboard, so it cannot see a UI runtime the OS stops for
-      # touching the terminal from a process group of its own (rutis 0.9).
+      # touching the terminal from a process group of its own (since rutis 0.9).
       - name: Example (scripted, on a pseudo-terminal; the keyboard reaches the UI)
         shell: bash
         timeout-minutes: 5

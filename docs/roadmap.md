@@ -76,8 +76,9 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
   test server (a bash script, `tests/fixtures/echo/`). (#11)
 - `yobuild run` prints per-plugin hook time and per-runtime memory
   (design §9), so the decision to promote a part to Rust rests on
-  measurements. Needs yoagent-rutis to report each handler's hook time and
-  each runtime's process (asked for, 2026-10-17).
+  measurements. yoagent-rutis 0.5 reports each handler's hook time
+  (`take_timings`); a runtime's memory is read from the OS (rutis gives no
+  pid). yobuild moved to yoagent-rutis 0.5 and rutis 0.11 (#16).
 - The built-ins renamed (#14): `[parts]` → `[builtins]` in the manifest,
   `yobuild::parts` → `yobuild::builtins`, the gate's `with_free_tools` →
   `with_allowed_tools` (decided 2026-10-17: "parts" read as plugins moved
@@ -168,7 +169,7 @@ never loading, and a denied approval leaves the agent without the plugin.
    rule for what belongs in Rust: are the five reasons in design §9 (safety, hot
    path, footprint, target, ownership) the right ones, and is "over 5 % of
    a turn" the right threshold?
-7. **Windows.** rutis 0.9 supports it; the frontend's terminal UI and the
+7. **Windows.** rutis supports it; the frontend's terminal UI and the
    tests are Unix-only today. In scope for 0.1?
 8. **Models.** DeepSeek and Claude first? (Any provider in design §2's
    table runs.) DeepSeek pricing: done (yoagent 0.25.6).

@@ -1398,9 +1398,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rutis"
-version = "0.9.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f855cb6a7b01ca36398754942d51fc333da2c65141d26ae7c69c54ee3776fa7c"
+checksum = "42d35b9e26be771938c3a6013f89cd1120c57a00b67be053ee6f544c0ebe409e"
 dependencies = [
  "thiserror 2.0.21",
  "tokio",
@@ -1409,9 +1409,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-bridge"
-version = "0.9.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3f8fdf669b5685d58d8fa83bf8b096a871b86aeb1586f509b7e35b0c3bf5c8f"
+checksum = "5b2ffcb0d7a34b694d41bd55a0a61b5f2387f054e62c2f525be5505e6968d9be"
 dependencies = [
  "getrandom 0.2.17",
  "libc",
@@ -1427,9 +1427,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-loader"
-version = "0.9.1"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6bc445fe9a73c8f6925f5f37624dc2643491b5d872298eb9458ddfdbedb8ba2"
+checksum = "809aa83b80d892348e823549fa657a746ead40857758039e84ec40ef296a4d07"
 dependencies = [
  "rutis",
  "rutis-bridge",
@@ -2476,9 +2476,9 @@ dependencies = [
 
 [[package]]
 name = "yoagent-rutis"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0c68c71e1f7c97cd4d8c31fc0bb5bc9ed6d7bce7e2a9c307c2a9dd7d251ae64"
+checksum = "1cad21949d9c45b02effffeda6aeb3e844f50fd913fd103f23956e104a428787"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

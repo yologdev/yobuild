@@ -41,7 +41,7 @@ esac
 command -v cargo >/dev/null || fail "cargo not found: install Rust from https://rustup.rs"
 command -v node >/dev/null || fail "node not found: install Node 22.19 or newer"
 command -v npm >/dev/null || fail "npm not found (it comes with Node)"
-# pi needs 22.19 (rutis 0.9: 22).
+# pi needs 22.19 (rutis 0.11: 22).
 node_ok=$(node -p 'const [a, b] = process.versions.node.split(".").map(Number); a > 22 || (a === 22 && b >= 19)')
 [ "$node_ok" = true ] || fail "Node 22.19 or newer is needed (found $(node --version))"
 if $live && [ -z "${DEEPSEEK_API_KEY:-}" ]; then

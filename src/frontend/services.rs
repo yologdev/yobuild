@@ -156,7 +156,7 @@ impl FrontendService {
                     },
                 };
                 let data = match serde_json::to_value(&message) {
-                    Ok(data) => data,
+                    Ok(data) => fit(data),
                     Err(e) => {
                         tracing::warn!("frontend message not serializable: {e}");
                         continue;
@@ -257,10 +257,69 @@ impl HostDispatch for UiService {
     }
 }
 
+/// `message` as a plugin frontend can take it: rutis refuses a value nested
+/// deeper than [`session::MAX_DEPTH`] (64 in 0.11; a call's argument list is
+/// not a level), and a refused `receive` would disconnect the frontend for
+/// the rest of the session. So only what is nested too deep is cut — each
+/// such part becomes a note — and the rest of the message is kept (its
+/// `type`, a tool call's id and outcome, …).
+fn fit(message: Json) -> Json {
+    fn cut(value: Json, room: usize, cuts: &mut usize) -> Json {
+        let nested = matches!(value, Json::Array(_) | Json::Object(_));
+        if nested && room == 0 {
+            *cuts += 1;
+            return Json::String("(nested too deep to show)".into());
+        }
+        match value {
+            Json::Array(items) => {
+                Json::Array(items.into_iter().map(|v| cut(v, room - 1, cuts)).collect())
+            }
+            Json::Object(fields) => Json::Object(
+                fields
+                    .into_iter()
+                    .map(|(k, v)| (k, cut(v, room - 1, cuts)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+    let mut cuts = 0;
+    let fitted = cut(message, session::MAX_DEPTH, &mut cuts);
+    if cuts > 0 {
+        let what = fitted["type"].as_str().unwrap_or("message");
+        tracing::warn!(
+            "a {what} message nests deeper than {} levels: {cuts} part(s) cut for a plugin frontend",
+            session::MAX_DEPTH
+        );
+    }
+    fitted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::frontend::protocol::ServerMessage;
+    use crate::frontend::ServerMessage;
+
+    #[test]
+    fn only_what_nests_too_deep_to_cross_is_cut() {
+        let mut deep = json!("leaf");
+        for _ in 0..session::MAX_DEPTH {
+            deep = json!([deep]);
+        }
+        // An object holding MAX_DEPTH - 1 arrays: MAX_DEPTH levels, it crosses.
+        let fits = json!({ "type": "event", "event": deep[0].clone() });
+        assert_eq!(fit(fits.clone()), fits);
+        // One more level: only the innermost part is cut; the rest is kept.
+        let too_deep = json!({ "type": "event", "toolCallId": "c1", "event": deep });
+        let fitted = fit(too_deep);
+        assert_eq!(fitted["type"], "event");
+        assert_eq!(fitted["toolCallId"], "c1");
+        let mut inner = &fitted["event"];
+        for _ in 0..session::MAX_DEPTH - 1 {
+            inner = &inner[0];
+        }
+        assert_eq!(inner, &json!("(nested too deep to show)"));
+    }
 
     fn list(values: Vec<Json>) -> Value {
         Value::List(values.into_iter().map(Value::Data).collect())
