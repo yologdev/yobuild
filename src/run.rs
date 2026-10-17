@@ -19,7 +19,7 @@ pub(crate) mod measure;
 pub(crate) mod plugins;
 pub(crate) mod script;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -37,12 +37,12 @@ use yoagent::tools::{
 use yoagent::{Agent, AgentEvent, AgentTool, Content};
 use yoagent_rutis::RutisBridge;
 
-use crate::builtins::{AskOwner, Facts, Gate, Scratch};
+use crate::builtins::{AskOwner, Facts, Gate, OfferedCheck, Scratch};
 use crate::frontend::host::{DshHome, PluginHost, Row};
 use crate::frontend::{
     services, web, ClientMessage, NoticeLevel, RunOutcome, ServerMessage, Session,
 };
-use crate::manifest::{Gate as GateMode, Manifest, Mcp, Source, Transport};
+use crate::manifest::{Gate as GateMode, Manifest, Mcp, PluginKind, Source, Transport};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -214,6 +214,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tools.add(&format!("mcp {}", server.name), found);
     }
     tools.check()?;
+    // The agent's own tools: never freed through a plugin's offer.
+    let own: HashSet<String> = tools.from.iter().map(|(name, _)| name.clone()).collect();
 
     let prompt = checked.prompt.fill(&cwd, scratch.as_ref());
     let mut agent = match checked.provider {
@@ -226,7 +228,17 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     .with_tools(tools.list)
     .with_execution_limits(limits(&manifest))
     .with_extension(bridge.extension());
-    if let Some(gate) = gate(&manifest, &session, &cwd, scratch.as_ref()) {
+    let adapters = Adapters {
+        pi: plan.pi_handler.clone(),
+        dsh: plan.dsh_handler.clone(),
+    };
+    let offered = offered_check(
+        bridge.registry().clone(),
+        offerers(&manifest, plan),
+        adapters,
+        own,
+    );
+    if let Some(gate) = gate(&manifest, &session, &cwd, scratch.as_ref(), Some(offered)) {
         agent = agent.with_extension(gate);
         // A plugin's allowed tools, checked once its tools are offered.
         let names: Vec<(String, String)> = manifest
@@ -255,7 +267,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     if !runtimes.is_empty() {
         let registry = bridge.registry().clone();
         let say = (options_measure || once).then(|| session.clone());
-        agent = agent.with_extension(measure::Measure::new(say, registry, runtimes));
+        let names = vec![
+            (plan.pi_handler.clone(), "pi-extensions".to_owned()),
+            (plan.dsh_handler.clone(), "dsh-tools".to_owned()),
+        ];
+        agent = agent.with_extension(measure::Measure::new(say, registry, runtimes, names));
     }
     eprintln!("{name}: ready in {:.1}s", started.elapsed().as_secs_f64());
 
@@ -400,19 +416,25 @@ enum End {
     UiGone,
 }
 
-/// The gate the manifest asks for: free in the scratch folder, and for
-/// `ask_owner` only when the built-in adds yobuild's (a plugin's tool of that
-/// name asks).
+/// The gate the manifest asks for: free in the scratch folder; for
+/// `ask_owner` only when the built-in adds yobuild's; for an MCP server's
+/// allowed tools (`<server>__<tool>`); and for a plugin's allowed tools only
+/// when `offered` says that plugin offered the tool that would run.
 fn gate(
     manifest: &Manifest,
     session: &Session,
     cwd: &Path,
     scratch: Option<&Scratch>,
+    offered: Option<OfferedCheck>,
 ) -> Option<Gate> {
     if manifest.builtins.gate != GateMode::AllowList {
         return None;
     }
-    let mut gate = Gate::new(session.clone(), cwd).with_allowed_tools(allowed(manifest));
+    let (servers, plugins) = allowed(manifest);
+    let mut gate = Gate::new(session.clone(), cwd).with_allowed_tools(servers);
+    if let Some(offered) = offered {
+        gate = gate.with_tools_allowed_if(plugins, offered);
+    }
     if let Some(scratch) = scratch {
         gate = gate.with_scratch(scratch);
     }
@@ -422,18 +444,102 @@ fn gate(
     Some(gate)
 }
 
-/// The tools the entries allow, as the model sees them: a plugin's as they
-/// are, an MCP server's as `<server>__<tool>`.
-fn allowed(manifest: &Manifest) -> Vec<String> {
-    let plugins = manifest
-        .plugins
-        .iter()
-        .flat_map(|p| p.allow.iter().cloned());
+/// The tools the entries allow, as the model sees them: the MCP servers'
+/// (`<server>__<tool>`; a server's tools are the agent's own, so the name
+/// is enough), and the plugins' (as they are; a plugin's must also come from
+/// that plugin).
+fn allowed(manifest: &Manifest) -> (Vec<String>, Vec<String>) {
     let servers = manifest
         .mcp
         .iter()
-        .flat_map(|m| m.allow.iter().map(move |t| format!("{}__{t}", m.name)));
-    plugins.chain(servers).collect()
+        .flat_map(|m| m.allow.iter().map(move |t| format!("{}__{t}", m.name)))
+        .collect();
+    let plugins = manifest
+        .plugins
+        .iter()
+        .flat_map(|p| p.allow.iter().cloned())
+        .collect();
+    (servers, plugins)
+}
+
+/// Who may offer a plugin's allowed tool: a pi plugin through one of its
+/// own extension files (the pi adapter's handler; the file that registered
+/// the tool); a DSH plugin, any DSH plugin (the DSH adapter's handler: DSH
+/// does not say which plugin); a rutis plugin, a handler that is neither
+/// adapter's (handler names are a plugin's own choice, not tied to a
+/// manifest entry: any language plugin's).
+#[derive(Debug, Clone, PartialEq)]
+enum Offerer {
+    Pi(Vec<PathBuf>),
+    Dsh,
+    Rutis,
+}
+
+/// The adapters' handler names this process gave them (`Plan`).
+struct Adapters {
+    pi: String,
+    dsh: String,
+}
+
+impl Offerer {
+    fn offers(&self, owner: &yoagent_rutis::ToolOwner, adapters: &Adapters) -> bool {
+        match self {
+            Offerer::Pi(files) => {
+                owner.handler() == adapters.pi
+                    && owner.source().is_some_and(|source| {
+                        let source =
+                            std::fs::canonicalize(source).unwrap_or_else(|_| PathBuf::from(source));
+                        files.contains(&source)
+                    })
+            }
+            Offerer::Dsh => owner.handler() == adapters.dsh,
+            Offerer::Rutis => owner.handler() != adapters.pi && owner.handler() != adapters.dsh,
+        }
+    }
+}
+
+/// For each tool a plugin allows, who may offer it.
+fn offerers(manifest: &Manifest, plan: &plugins::Plan) -> HashMap<String, Vec<Offerer>> {
+    let mut map: HashMap<String, Vec<Offerer>> = HashMap::new();
+    for plugin in &manifest.plugins {
+        let offerer = match &plugin.kind {
+            PluginKind::Pi(_) => Offerer::Pi(
+                plan.pi_files
+                    .iter()
+                    .find(|(name, _)| *name == plugin.name)
+                    .map(|(_, files)| files.clone())
+                    .unwrap_or_default(),
+            ),
+            PluginKind::Dsh(_) => Offerer::Dsh,
+            PluginKind::Rutis { .. } => Offerer::Rutis,
+        };
+        for tool in &plugin.allow {
+            map.entry(tool.clone()).or_default().push(offerer.clone());
+        }
+    }
+    map
+}
+
+/// The gate's check for plugins' allowed tools: the plugin that offered
+/// the tool in the run (`offered_by`) must be one that allows it — and the
+/// name must not be one of the agent's own tools (yoagent runs its own on a
+/// clash while `offered_by` still names the plugin).
+fn offered_check(
+    registry: Arc<yoagent_rutis::registry::Registry>,
+    offerers: HashMap<String, Vec<Offerer>>,
+    adapters: Adapters,
+    own: HashSet<String>,
+) -> OfferedCheck {
+    Arc::new(move |run: &str, tool: &str| {
+        if own.contains(tool) {
+            return false;
+        }
+        let (Some(owner), Some(allowed)) = (registry.offered_by(run, tool), offerers.get(tool))
+        else {
+            return false;
+        };
+        allowed.iter().any(|o| o.offers(&owner, &adapters))
+    })
 }
 
 /// What `run` needs that can be checked before anything starts.
@@ -855,7 +961,7 @@ async fn probe_services(
 /// meanwhile fails it at once.
 async fn wait_for(
     bridge: &RutisBridge,
-    handlers: &[&str],
+    handlers: &[String],
     host: &PluginHost,
 ) -> Result<(), BoxError> {
     let registry = bridge.registry().clone();
@@ -863,7 +969,7 @@ async fn wait_for(
         let have = registry.handlers();
         handlers
             .iter()
-            .copied()
+            .map(String::as_str)
             .filter(|name| !have.iter().any(|h| h.name() == *name))
             .collect()
     };
@@ -1202,7 +1308,7 @@ mod tests {
                 .is_none()
         };
         let both = manifest(dir.path(), "[builtins]\nscratch = true\nask_owner = true\n");
-        let judge = gate(&both, &session, &project, Some(&scratch)).unwrap();
+        let judge = gate(&both, &session, &project, Some(&scratch), None).unwrap();
         let elsewhere = dir.path().join("elsewhere.md");
         assert!(
             write(&judge, &scratch.path().join("notes.md")),
@@ -1211,7 +1317,7 @@ mod tests {
         assert!(!write(&judge, &elsewhere), "outside both asks");
         assert!(ask(&judge), "ask_owner is allowed with the built-in");
         let neither = manifest(dir.path(), "");
-        let judge = gate(&neither, &session, &project, None).unwrap();
+        let judge = gate(&neither, &session, &project, None, None).unwrap();
         assert!(
             !write(&judge, &scratch.path().join("notes.md")),
             "no scratch: it asks"
@@ -1221,7 +1327,7 @@ mod tests {
             "a tool named ask_owner asks without the built-in"
         );
         let off = manifest(dir.path(), "[builtins]\ngate = \"off\"\n");
-        assert!(gate(&off, &session, &project, None).is_none());
+        assert!(gate(&off, &session, &project, None, None).is_none());
     }
 
     #[test]
@@ -1239,17 +1345,99 @@ mod tests {
             "[[plugin]]\npi = \"./t.ts\"\nallow = [\"todo\"]\n\
              [[mcp]]\nname = \"files\"\nnpm = \"./fs.sh\"\nallow = [\"read_text_file\"]\n",
         );
-        assert_eq!(allowed(&m), ["todo", "files__read_text_file"]);
+        let (servers, plugins) = allowed(&m);
+        assert_eq!(
+            (servers.as_slice(), plugins.as_slice()),
+            (
+                &["files__read_text_file".to_owned()][..],
+                &["todo".to_owned()][..]
+            )
+        );
         let (session, _driver) = Session::new(false);
-        let judge = gate(&m, &session, dir.path(), None).unwrap();
+        let check: OfferedCheck = Arc::new(|_run: &str, tool: &str| tool == "todo");
+        let judge = gate(&m, &session, dir.path(), None, Some(check)).unwrap();
         let runs = |tool: &str| {
             judge
                 .check(tool, &serde_json::json!({}))
                 .question()
                 .is_none()
         };
-        assert!(runs("todo") && runs("files__read_text_file"));
+        // An MCP server's allowed tool runs by name; a plugin's only in a run
+        // where its plugin offered it (outside a run, it asks).
+        assert!(runs("files__read_text_file") && !runs("todo"));
         assert!(!runs("files__write_file") && !runs("read_text_file") && !runs("todos"));
+    }
+
+    #[test]
+    fn a_plugin_s_allowed_tool_comes_only_from_that_plugin() {
+        use yoagent_rutis::ToolOwner;
+        let dir = tempfile::tempdir().unwrap();
+        let ext = dir.path().join("a.ts");
+        std::fs::write(&ext, "").unwrap();
+        let ext = std::fs::canonicalize(&ext).unwrap();
+        let adapters = Adapters {
+            pi: "pi-extensions-x1".into(),
+            dsh: "dsh-tools-x1".into(),
+        };
+        let pi = Offerer::Pi(vec![ext.clone()]);
+        let from_a = ToolOwner::new("pi-extensions-x1", "p").with_source(ext.display().to_string());
+        let from_b = ToolOwner::new("pi-extensions-x1", "p").with_source("/elsewhere/b.ts");
+        let no_source = ToolOwner::new("pi-extensions-x1", "p");
+        let dsh = ToolOwner::new("dsh-tools-x1", "d");
+        let rutis = ToolOwner::new("words", "language plugin (session 1)");
+        // A plugin that took the adapters' usual names passes for neither.
+        let impostor = ToolOwner::new("pi-extensions", "language plugin (session 1)")
+            .with_source(ext.display().to_string());
+        let offers = |o: &Offerer, owner: &ToolOwner| o.offers(owner, &adapters);
+        // The same file by another path (a symlink, `..`): still that file.
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+            let via_link = ToolOwner::new("pi-extensions-x1", "p")
+                .with_source(link.join("sub/../a.ts").display().to_string());
+            std::fs::create_dir(dir.path().join("sub")).unwrap();
+            assert!(offers(&pi, &via_link));
+        }
+        // Another handler claiming the same file is not the pi plugin.
+        let claims = ToolOwner::new("words", "x").with_source(ext.display().to_string());
+        assert!(!offers(&pi, &claims));
+        assert!(offers(&pi, &from_a));
+        assert!(!offers(&pi, &from_b) && !offers(&pi, &no_source) && !offers(&pi, &dsh));
+        assert!(
+            !offers(&pi, &impostor) && !offers(&Offerer::Dsh, &ToolOwner::new("dsh-tools", "x"))
+        );
+        assert!(
+            offers(&Offerer::Dsh, &dsh)
+                && !offers(&Offerer::Dsh, &from_a)
+                && !offers(&Offerer::Dsh, &rutis)
+        );
+        assert!(
+            offers(&Offerer::Rutis, &rutis)
+                && !offers(&Offerer::Rutis, &dsh)
+                && !offers(&Offerer::Rutis, &from_a)
+        );
+    }
+
+    #[test]
+    fn the_agents_own_tool_is_never_freed_by_a_plugins_offer() {
+        let (session, _driver) = Session::new(false);
+        drop(session);
+        let registry = Arc::new(yoagent_rutis::registry::Registry::default());
+        let offerers: HashMap<String, Vec<Offerer>> =
+            [("web_fetch".to_owned(), vec![Offerer::Rutis])].into();
+        let adapters = Adapters {
+            pi: "pi-extensions-x1".into(),
+            dsh: "dsh-tools-x1".into(),
+        };
+        let check = offered_check(
+            registry,
+            offerers,
+            adapters,
+            ["web_fetch".to_owned()].into(),
+        );
+        assert!(!check("run-1", "web_fetch"), "the agent's own name");
+        assert!(!check("run-1", "other"), "offered by nobody");
     }
 
     #[test]

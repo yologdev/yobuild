@@ -143,17 +143,36 @@ allow = ["read_text_file"]           # offered to the model as `files__read_text
   tool of that name was offered for is a Warning notice ("plugin rpiv-todo
   offered no tool `todos`"), once a session. A warning, not a refusal: a
   plugin may offer a tool only in some runs.
-- **Known limit:** the gate allows by name, and a run's tools do not say
-  which plugin offered them (yoagent-rutis does not tell yet). So a
-  plugin's allowed name also allows another plugin's tool of that name —
-  one that plugin offers when the allowing one does not (a typo, or a tool
-  it offers only sometimes), or the one yoagent keeps when both do. An MCP
-  server's names are scoped: each is checked against that server's own
-  list, so it names a tool the server offers; a server's tools are the
+- **Scoped to the entry:** a plugin's allowed tool runs without asking
+  only when that plugin offered it in the run (yoagent-rutis's
+  `offered_by`, from 0.5), and never when the name is one of the agent's
+  own tools (yoagent runs its own on a clash). For pi, the extension file
+  that registered the tool must be one of that plugin's; DSH does not say
+  which plugin registered a tool, so all DSH plugins count as one; a
+  rutis plugin's handler name is its own choice, so any handler other
+  than the two adapters' counts as the rutis owner (a manifest key naming
+  its handler could narrow that). The adapters' handler names are made
+  per process and unguessable, so no plugin can take one first and pass
+  for pi or DSH.
+- **Limits for pi** (pi's extensions share one adapter and one Node
+  process):
+  - Until yoagent-rutis's pi adapter runs exactly the tools it offered
+    (yoagent PR #333, coming in 0.5.1), an extension that registers the
+    same name after the run's tools were taken could run in the allowing
+    one's place.
+  - A pi tool can call other pi tools itself (`ctx.executeTool`); those
+    calls never reach the gate (only pi's own handlers judge them). So
+    allowing a pi tool also allows what it calls — a code runner, all of
+    it. A host option restricting such calls to the calling extension's
+    own tools (or turning them off) is asked of yoagent-rutis; yobuild
+    will use "own extension".
+  - Per-extension trust guards against honest name clashes, not against a
+    hostile extension loaded in the same runtime: it shares the process.
+- **MCP:** an MCP server's names are scoped by their prefix: each is
+  checked against that server's own list; a server's tools are the
   agent's own (fixed at start), and yoagent keeps those over a plugin's
   tool of the same name; two tools of one name among them are refused; and
   no server name holds `__`.
-  Closing it needs the tool's plugin from the bridge (asked for).
 - **What the gate gets:** the names as the model sees them — a plugin's
   as they are, an MCP server's as `<server>__<tool>` — through
   `Gate::with_allowed_tools`.
