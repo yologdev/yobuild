@@ -4,7 +4,7 @@
 // frontend attached through yobuild's frontend, the question reaches the
 // terminal or browser.
 //
-// The pi example of an approval gate. The Rust gate (`yobuild::parts::Gate`)
+// The pi example of an approval gate. The Rust gate (`yobuild::builtins::Gate`)
 // started as a port of it and is now an allow-list: it asks before anything
 // it does not know to be harmless. This one is a deny-list — it asks before
 // what its rules name — kept as the example of a pi policy, not as the

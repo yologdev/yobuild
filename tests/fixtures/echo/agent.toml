@@ -16,5 +16,5 @@ npm  = "./server.sh"
 args = ["first"]
 env  = { MODE = "loud" }
 
-[parts]
+[builtins]
 gate = "off"

@@ -132,7 +132,7 @@ fn results(ended: &Ended) -> Vec<(String, bool)> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_manifest_runs_an_mcp_servers_tool() {
-    let dir = project("[parts]\ngate = \"off\"\n");
+    let dir = project("[builtins]\ngate = \"off\"\n");
     let ended = run_once(dir.path()).await;
     assert_eq!(
         ended.outcome,
@@ -189,7 +189,7 @@ async fn run_plugin(plugin: &str, tool: &str) -> Ended {
     std::fs::write(
         dir.path().join("agent.toml"),
         format!(
-            "[agent]\nname = \"plugged\"\nmodel = \"deepseek/deepseek-flash\"\n\n[[plugin]]\n{plugin}\n\n[parts]\ngate = \"off\"\n"
+            "[agent]\nname = \"plugged\"\nmodel = \"deepseek/deepseek-flash\"\n\n[[plugin]]\n{plugin}\n\n[builtins]\ngate = \"off\"\n"
         ),
     )
     .unwrap();
@@ -221,7 +221,7 @@ async fn a_dsh_plugin_from_the_manifest_gives_its_tool() {
 async fn a_run_a_limit_stops_is_stopped_not_completed() {
     let echo = r#"{ "tools": [{ "name": "server__echo", "arguments": { "text": "hi" } }] }"#;
     let dir = project_with(
-        "[limits]\nmax_turns = 1\n[parts]\ngate = \"off\"\n",
+        "[limits]\nmax_turns = 1\n[builtins]\ngate = \"off\"\n",
         &format!("[{echo}, {echo}, {{ \"text\": \"done\" }}]"),
     );
     let ended = run_once(dir.path()).await;
@@ -239,7 +239,7 @@ async fn a_run_a_limit_stops_is_stopped_not_completed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_report_sends_the_agent_back_until_it_is_there() {
     let dir = project_with(
-        "[parts]\ngate = \"off\"\nreport = [\"Done\"]\n",
+        "[builtins]\ngate = \"off\"\nreport = [\"Done\"]\n",
         r###"[{ "text": "finished" }, { "text": "## Done\nall of it" }]"###,
     );
     let ended = run_once(dir.path()).await;
@@ -255,7 +255,7 @@ async fn the_report_sends_the_agent_back_until_it_is_there() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_report_never_given_fails_the_run() {
     let dir = project_with(
-        "[parts]\ngate = \"off\"\nreport = [\"Done\"]\n",
+        "[builtins]\ngate = \"off\"\nreport = [\"Done\"]\n",
         r#"[{ "text": "finished" }]"#,
     );
     let ended = run_once(dir.path()).await;
@@ -270,7 +270,7 @@ async fn ask_owner_is_offered_when_the_manifest_asks_for_it_and_the_gate_lets_it
       { "tools": [{ "name": "ask_owner", "arguments": { "question": "Which?", "options": ["a", "b"] } }] },
       { "text": "done" }
     ]"#;
-    let on = project_with("[parts]\nask_owner = true\n", script);
+    let on = project_with("[builtins]\nask_owner = true\n", script);
     let ended = run_once(on.path()).await;
     let asked = results(&ended);
     assert!(
@@ -279,13 +279,13 @@ async fn ask_owner_is_offered_when_the_manifest_asks_for_it_and_the_gate_lets_it
     );
     let off = project_with("", script);
     let ended = run_once(off.path()).await;
-    assert!(results(&ended)[0].1, "no ask_owner without the part");
+    assert!(results(&ended)[0].1, "no ask_owner without the built-in");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_servers_tools_of_one_name_both_run_under_their_servers_names() {
     let both = project_with(
-        "[[mcp]]\nname = \"other\"\nnpm = \"./server.sh\"\nargs = [\"second\"]\n[parts]\ngate = \"off\"\n",
+        "[[mcp]]\nname = \"other\"\nnpm = \"./server.sh\"\nargs = [\"second\"]\n[builtins]\ngate = \"off\"\n",
         r#"[{ "tools": [
               { "name": "server__echo", "arguments": { "text": "a" } },
               { "name": "other__echo", "arguments": { "text": "b" } }
@@ -387,7 +387,7 @@ async fn an_http_server_gets_its_headers_with_their_values_filled_in() {
             "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
              [[mcp]]\nname = \"web\"\nurl = \"http://{addr}/mcp\"\n\
              headers = {{ Authorization = \"Bearer ${{YOBUILD_RUN_TEST_TOKEN}}\" }}\n\
-             [parts]\ngate = \"off\"\n"
+             [builtins]\ngate = \"off\"\n"
         ),
     )
     .unwrap();
@@ -427,7 +427,7 @@ async fn a_pinned_dsh_package_is_found_in_the_dsh_runtime() {
         };
         std::fs::write(
             dir.path().join("agent.toml"),
-            format!("[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\ndsh = \"{name}@{version}\"\n{peer}[parts]\ngate = \"off\"\n"),
+            format!("[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\ndsh = \"{name}@{version}\"\n{peer}[builtins]\ngate = \"off\"\n"),
         )
         .unwrap()
     };
@@ -480,7 +480,7 @@ async fn a_dsh_plugin_waiting_for_services_nobody_provides_is_refused() {
         std::fs::write(
             dir.path().join("agent.toml"),
             format!(
-                "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\ndsh = \"{}\"\n[parts]\ngate = \"off\"\n{extra}",
+                "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\ndsh = \"{}\"\n[builtins]\ngate = \"off\"\n{extra}",
                 fixture.display()
             ),
         )
@@ -505,7 +505,7 @@ async fn a_dsh_plugin_waiting_for_services_nobody_provides_is_refused() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn what_loads_only_in_part_is_a_warning_every_frontend_gets() {
-    let dir = project("[parts]\ngate = \"off\"\n[dsh]\nhost_services = true\n");
+    let dir = project("[builtins]\ngate = \"off\"\n[dsh]\nhost_services = true\n");
     let ended = run_once(dir.path()).await;
     assert!(
         ended.notices.iter().any(|(level, message)| {
@@ -532,7 +532,7 @@ async fn a_pinned_mcp_server_runs_its_installed_bin() {
         std::fs::write(
             dir.path().join("agent.toml"),
             format!(
-                "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[mcp]]\nnpm = \"{spec}\"\nargs = [\"first\"]\nenv = {{ MODE = \"loud\" }}\n[parts]\ngate = \"off\"\n"
+                "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[mcp]]\nnpm = \"{spec}\"\nargs = [\"first\"]\nenv = {{ MODE = \"loud\" }}\n[builtins]\ngate = \"off\"\n"
             ),
         )
         .unwrap()
@@ -584,7 +584,7 @@ async fn a_plugin_that_stops_during_the_session_is_said() {
     std::fs::write(
         dir.path().join("agent.toml"),
         format!(
-            "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\ndsh = \"{}\"\nconfig = {{ file = \"{}\" }}\n[parts]\ngate = \"off\"\n",
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\ndsh = \"{}\"\nconfig = {{ file = \"{}\" }}\n[builtins]\ngate = \"off\"\n",
             dir.path().join("fails-later.ts").display(),
             signal.display()
         ),

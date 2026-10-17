@@ -19,7 +19,7 @@ Most agents assume you are watching them. A handoff agent assumes you are not:
   - The question stays open while nobody is connected, and a page opened later shows it.
   - The answer, whenever it comes, goes in as a steer message. It is picked up mid-run, or it starts the next run if the agent had stopped.
   - Dismissing a question means "decide yourself"; the agent does, and says so.
-- **Approval guardrails: an allow-list.** The gate (`yobuild::parts::Gate`) lets through what it knows to be harmless — reading, building and testing, `git status`/`add`/`commit`/`push`, writing new files in the project — and asks first about everything else; with nobody there it is refused:
+- **Approval guardrails: an allow-list.** The gate (`yobuild::builtins::Gate`) lets through what it knows to be harmless — reading, building and testing, `git status`/`add`/`commit`/`push`, writing new files in the project — and asks first about everything else; with nobody there it is refused:
   - anything that deletes, discards or overwrites what you already have (`rm`, `git reset --hard`, `mv` or `cp` over a file, `>` onto one, …);
   - any program, git subcommand or option it does not know (each program it knows has its own list of options), a program run from a path that is not a system folder (`./cat`), an environment variable that changes what runs (`PATH=…`), an interpreter running code that is not your script, a plugin tool not declared free (the plan and search tools are).
 
@@ -42,7 +42,7 @@ One Rust process holds the agent. Three Node processes host the plugins, each a 
 Rust process (21 MB)
 ├─ yoagent ──────────── the loop: model streaming, tool calls, limits, extensions
 │    ├─ tools ───────── yoagent's built-ins (bash, files, search) + ask_owner (this example)
-│    └─ extensions ──── Gate, Report, Facts (yobuild::parts), Budget (when the model is priced),
+│    └─ extensions ──── Gate, Report, Facts (yobuild::builtins), Budget (when the model is priced),
 │                       the rutis bridge (every plugin below, as one extension)
 ├─ yoagent-rutis ────── the bridge: plugins' tools, policies, prompt notes → yoagent hooks
 ├─ yobuild::frontend ── Session (one agent, many frontends), protocol, web server (axum + WebSocket)
@@ -66,7 +66,7 @@ The browser page is plain HTML and JavaScript, served by the Rust process. Any n
 | `@deepseek-ai/dsh-web`, `dsh-system-prompt`, `dsh-tools` | DSH core | 0.2.0-rc.2 | unchanged | the services DSH plugins expect |
 | `frontend/plugins/todo-plan.ts` | rutis (a UI plugin of the frontend) | — | ours | the plan drawn as a checklist in the page |
 | pi adapter, `host-ui.ts`, DSH adapter, `host-dialogs.ts` | rutis (yoagent-rutis) | — | ours | pi and DSH plugins as yoagent tools, policies and dialogs |
-| `AskOwner`, `Gate`, `Report`, `Facts`, `Scratch` | `yobuild::parts` (Rust) | — | ours | asking without waiting; the approval gate; the report check; the facts; a scratch folder |
+| `AskOwner`, `Gate`, `Report`, `Facts`, `Scratch` | `yobuild::builtins` (Rust) | — | ours | asking without waiting; the approval gate; the report check; the facts; a scratch folder |
 
 Those from pi and DSH are installed from npm and loaded as published. The adapters translate:
 - pi's `tool_call` handlers become yoagent's `before_tool`;
@@ -79,7 +79,7 @@ What does not map (pi's `/todos` command, a keyboard shortcut) is reported at in
 
 1. The model asks for `write_file` on `notes.md`.
 2. yoagent's loop calls `before_tool` on every extension. The rutis bridge forwards it to the pi adapter in its Node runtime, which runs pi's `tool_call` handlers.
-3. The gate (`yobuild::parts::Gate`, in Rust) sees a new file, which it allows; for an existing file it would ask you first. `ToolExecutionStart` is sent only after this step.
+3. The gate (`yobuild::builtins::Gate`, in Rust) sees a new file, which it allows; for an existing file it would ask you first. `ToolExecutionStart` is sent only after this step.
 4. The loop runs the tool in Rust. The result goes back through `after_tool`, then to the page, then to the next model request.
 
 A pi tool such as `todo` makes the same trip, and then runs in the pi runtime.

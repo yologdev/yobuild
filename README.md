@@ -7,7 +7,7 @@ Go — plus a few small parts of its own, on top of the
 [yoagent](https://github.com/yologdev/yoagent) loop.
 
 > Status: **M2a (manifest and runner).** The parts and the frontend
-> (`yobuild::parts`, `yobuild::frontend`, [`frontend/`](frontend/README.md),
+> (`yobuild::builtins`, `yobuild::frontend`, [`frontend/`](frontend/README.md),
 > with its [examples](examples/README.md)), the manifest
 > (`yobuild::manifest`) and `yobuild run` (plugins already installed;
 > installing them is M2b). Numbers quoted are measured in the yoagent

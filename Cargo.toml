@@ -3,7 +3,7 @@ name = "yobuild"
 version = "0.0.1"
 edition = "2021"
 resolver = "3"
-description = "Build an agent by choosing its parts: plugins from other ecosystems on the yoagent loop, a few parts of its own, and a frontend"
+description = "Build an agent by choosing its parts: plugins from other ecosystems on the yoagent loop, a few built-ins of its own, and a frontend"
 license = "MIT"
 repository = "https://github.com/yologdev/yobuild"
 rust-version = "1.88"
@@ -12,7 +12,7 @@ publish = false
 
 
 [dependencies]
-# The parts implement yoagent's `AgentTool` and `Extension` (async traits).
+# The built-ins implement yoagent's `AgentTool` and `Extension` (async traits).
 async-trait = "0.1"
 # DshHome: a private, per-process home for DSH's own services.
 tempfile = "3"

@@ -129,7 +129,7 @@ pub struct AskOwner {
 
 impl AskOwner {
     /// The tool's name. The gate does not free it by default: free it where
-    /// this tool is added (`Gate::with_free_tools([AskOwner::TOOL])`).
+    /// this tool is added (`Gate::with_allowed_tools([AskOwner::TOOL])`).
     pub const TOOL: &'static str = "ask_owner";
 
     pub fn new(session: Session) -> Self {

@@ -1,5 +1,7 @@
-//! Parts: small, generic pieces that more than one kind of agent wants,
-//! with no opinion about the task (design §3). Each plugs into yoagent's
+//! The built-ins: yobuild's own behaviours (`[builtins]` in a manifest), small
+//! and generic — what more than one kind of agent wants, with no opinion
+//! about the task (design §3). Not plugins moved into Rust: a capability an
+//! ecosystem already has stays a plugin. Each plugs into yoagent's
 //! loop on its own — a tool or an [`Extension`](yoagent::extension::Extension)
 //! — so it applies to every tool the agent has, whichever ecosystem the
 //! plugin behind it comes from.

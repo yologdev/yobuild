@@ -206,7 +206,7 @@ path/to/yobuild/scripts/try-handoff.sh --demo               # headless, scripted
   "skipped", and the agent decides itself and says so. A reset withdraws
   open questions: they belong to the conversation it forgot.
 - **Guardrails:**
-  - The gate (`yobuild::parts::Gate`, in Rust) is an allow-list: it lets
+  - The gate (`yobuild::builtins::Gate`, in Rust) is an allow-list: it lets
     through the programs it knows, with the options it knows — reading,
     building and testing, git that does not discard, writing new files in the project —
     and asks before everything else, above all deleting, discarding or
