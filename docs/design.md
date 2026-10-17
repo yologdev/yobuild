@@ -277,15 +277,50 @@ without the manifest.
 
 | Part | Plugs in as | Where |
 |---|---|---|
-| `ask_owner` | a tool; returns at once, the answer comes back as steering (mid-run, or starting the next run) | `yobuild::builtins::AskOwner` (M1) |
+| `ask_owner` | a tool, and for plugins a host service (proposed, below); returns at once, the answer comes back as steering (mid-run, or starting the next run) | `yobuild::builtins::AskOwner` (M1) |
 | `report` | an `Extension`: `on_stop` sends the agent back until the required sections are there | `yobuild::builtins::Report` (M1) |
 | `facts` | an `Extension`: `on_event` counts tokens and tool calls, `finish` adds changes since the start (git snapshot), new files, open questions | `yobuild::builtins::Facts` (M1) |
 | `gate` | a `before_tool` policy: an allow-list of programs and their options; everything else (deleting, overwriting above all) asks; refused with nobody there; plugin and MCP tools ask unless their entry allows them (`allow`) | `yobuild::builtins::Gate` (M1; `confirm-dangerous.ts` stays as the pi example) |
 | `scratch` | a private working folder named to the agent and the gate | `yobuild::builtins::Scratch` (M1) |
 | `limits` / `budget` | yoagent's `ExecutionLimits` and `Budget` | yoagent |
 
-What makes a part a part: more than one kind of agent wants it, it is
-small, and it has no opinion about the task.
+What makes a built-in a built-in: more than one kind of agent wants it,
+it is small, and it has no opinion about the task.
+
+### `ask_owner` for plugins (proposed)
+
+The agent asks the owner with the `ask_owner` tool. A plugin may need to
+ask too — a pi extension that wants the owner to choose between plans, a
+DSH plugin missing a setting — and today it can only ask through the
+dialogs (`ui.request`), which block the plugin until the owner answers or
+the question times out. `ask_owner` as a host service asks the way the
+tool does: without waiting.
+
+- **The service:** `ask_owner`, offered to every plugin runtime when the
+  manifest has `[builtins] ask_owner = true` (like `ui` and `frontend`,
+  shared by yobuild's plugin host). Without the built-in it is not there:
+  a plugin that injects it as required does not start (rutis), so a
+  plugin should look it up and go without when it is missing.
+- **One method:** `ask({ question, why?, options? })` → the question's
+  number, at once. The same shape as the tool's arguments, checked by the
+  same `Question::from_json` (a blank question, unknown keys or a
+  non-string option are refused with an error the plugin sees). Two or
+  more options make it a choice; otherwise a free answer.
+- **The answer reaches the agent, not the plugin:** as with the tool, it
+  arrives as steering — `[Owner's answer to #N] <question>\n<answer>`, or
+  `[Owner skipped #N]` — in the run under way, or as the next run's
+  prompt. A plugin that needs the answer itself uses the dialogs instead.
+  The question is shown as the plugin's (its title names it), so the
+  owner knows who asks.
+- **One numbering:** the service and the tool share the session's
+  `AskOwner` (its clones share the count), so #N is unique, and facts'
+  "N question(s) waiting on you" counts both.
+- **Not judged by the gate:** asking does nothing the owner has not
+  seen; like the tool, it is always allowed. A reset withdraws the open
+  questions, as for the tool.
+- **Node only, for now:** `yobuild run` starts Node runtimes only (§4).
+  Whether Python and Go plugins can call host services is checked before
+  they are supported (roadmap).
 
 ## 4. Plugins: resolve, install, vet
 
