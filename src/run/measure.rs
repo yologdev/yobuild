@@ -3,8 +3,8 @@
 //! bridge (for a language plugin, the round trip to its runtime), and each
 //! plugin runtime's memory, read from the OS (rutis gives no pid: the
 //! runtimes are this process's children, each named by its folder's
-//! `package.json` on its command line). Said after each run as an Info
-//! notice.
+//! `package.json` as its last argument). After each run: an Info notice
+//! when asked for (`--measure`, and with `--once`), else the log (info).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,15 +18,17 @@ use crate::frontend::{NoticeLevel, Session};
 /// Says each run's plugin time and the runtimes' memory.
 #[derive(Clone)]
 pub(crate) struct Measure {
-    session: Session,
+    /// Where to say it: a notice to every frontend, or the log only.
+    session: Option<Session>,
     registry: Arc<Registry>,
     /// Each runtime's name and folder.
     runtimes: Arc<Vec<(String, PathBuf)>>,
 }
 
 impl Measure {
+    /// `session`: say it there (a notice); `None`: in the log.
     pub(crate) fn new(
-        session: Session,
+        session: Option<Session>,
         registry: Arc<Registry>,
         runtimes: Vec<(String, PathBuf)>,
     ) -> Self {
@@ -54,16 +56,23 @@ impl Extension for Measure {
 #[async_trait::async_trait]
 impl RunHooks for Measure {
     async fn finish(&mut self, _outcome: &RunOutcome) {
-        // A hook still to come in this run's `finish` counts in the next.
+        // Every plugin's `finish` is counted (the bridge's runs before this,
+        // the last extension); the plugins' handling of this run's end event
+        // (`on_event`, sent after the extensions' `finish`) counts in the
+        // next run's.
         let spent: Vec<Spent> = self
             .registry
             .take_timings()
             .iter()
             .map(Spent::from)
             .collect();
-        let memory = memory(&self.runtimes);
-        if let Some(text) = report(&spent, &memory) {
-            self.session.notice(NoticeLevel::Info, text);
+        let memory = memory(&self.runtimes).await;
+        let Some(text) = report(&spent, &memory) else {
+            return;
+        };
+        match &self.session {
+            Some(session) => session.notice(NoticeLevel::Info, text),
+            None => tracing::info!("{text}"),
         }
     }
 }
@@ -100,7 +109,8 @@ impl From<&HookTiming> for Spent {
 
 fn ms(d: Duration) -> String {
     let ms = d.as_secs_f64() * 1000.0;
-    match ms < 10.0 {
+    // Below 10 ms as written (9.96 is "10 ms", not "10.0 ms").
+    match (ms * 10.0).round() < 100.0 {
         true => format!("{ms:.1} ms"),
         false => format!("{ms:.0} ms"),
     }
@@ -159,16 +169,27 @@ fn report(spent: &[Spent], memory: &[(String, u64)]) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" "))
 }
 
-/// Each runtime's resident memory in KB: the process this one started for
-/// it (its command line names its folder's `package.json`) and what that
-/// one started in turn. A runtime not found is left out.
+/// How long `ps` may take (it can block on a process stuck in the kernel).
 #[cfg(unix)]
-fn memory(runtimes: &[(String, PathBuf)]) -> Vec<(String, u64)> {
-    let Ok(out) = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,rss=,command="])
-        .output()
-    else {
-        return Vec::new();
+const PS_TIME: Duration = Duration::from_secs(2);
+
+/// Each runtime's resident memory in KB: the process this one started for
+/// it (its last argument is its folder's `package.json`) and what that one
+/// started in turn. A runtime not found — or `ps` failing or slow — is left
+/// out.
+#[cfg(unix)]
+async fn memory(runtimes: &[(String, PathBuf)]) -> Vec<(String, u64)> {
+    let ps = tokio::process::Command::new("ps")
+        // `-ww`: never cut the command line (an exported COLUMNS would).
+        .args(["-ww", "-A", "-o", "pid=,ppid=,rss=,command="])
+        .kill_on_drop(true)
+        .output();
+    let out = match tokio::time::timeout(PS_TIME, ps).await {
+        Ok(Ok(out)) if out.status.success() => out,
+        other => {
+            tracing::debug!("runtime memory not read: ps {other:?}");
+            return Vec::new();
+        }
     };
     let rows: Vec<(u32, u32, u64, String)> = String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -196,13 +217,15 @@ fn memory(runtimes: &[(String, PathBuf)]) -> Vec<(String, u64)> {
         }
         total
     };
+    let mut taken = Vec::new();
     runtimes
         .iter()
         .filter_map(|(name, dir)| {
-            let manifest = dir.join("package.json").display().to_string();
-            let (pid, ..) = rows
-                .iter()
-                .find(|(_, parent, _, command)| *parent == me && command.contains(&manifest))?;
+            let anchor = format!(" {}", dir.join("package.json").display());
+            let (pid, ..) = rows.iter().find(|(pid, parent, _, command)| {
+                *parent == me && command.ends_with(&anchor) && !taken.contains(pid)
+            })?;
+            taken.push(*pid);
             Some((name.clone(), tree(*pid)))
         })
         .collect()
@@ -210,7 +233,7 @@ fn memory(runtimes: &[(String, PathBuf)]) -> Vec<(String, u64)> {
 
 /// Elsewhere not read.
 #[cfg(not(unix))]
-fn memory(_runtimes: &[(String, PathBuf)]) -> Vec<(String, u64)> {
+async fn memory(_runtimes: &[(String, PathBuf)]) -> Vec<(String, u64)> {
     Vec::new()
 }
 
@@ -254,8 +277,17 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn a_runtime_not_running_is_left_out() {
+        assert!(memory(&[("pi".into(), PathBuf::from("/nowhere"))])
+            .await
+            .is_empty());
+    }
+
     #[test]
-    fn a_runtime_not_running_is_left_out() {
-        assert!(memory(&[("pi".into(), PathBuf::from("/nowhere"))]).is_empty());
+    fn times_below_ten_ms_keep_a_decimal() {
+        assert_eq!(ms(Duration::from_micros(9_940)), "9.9 ms");
+        assert_eq!(ms(Duration::from_micros(9_960)), "10 ms");
+        assert_eq!(ms(Duration::from_micros(270)), "0.3 ms");
     }
 }

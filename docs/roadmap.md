@@ -74,11 +74,10 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
   frontend. (#11)
 - A scripted CI run of a manifest with an `[[mcp]]` entry, against a stdio
   test server (a bash script, `tests/fixtures/echo/`). (#11)
-- `yobuild run` prints per-plugin hook time and per-runtime memory
-  (design §9), so the decision to promote a part to Rust rests on
-  measurements. (#17: an Info notice after each run.) yoagent-rutis 0.5 reports each handler's hook time
-  (`take_timings`); a runtime's memory is read from the OS (rutis gives no
-  pid). yobuild moved to yoagent-rutis 0.5 and rutis 0.11 (#16).
+- `yobuild run --measure` says per-plugin hook time and per-runtime memory
+  after each run (design §9; #17), so the decision to promote a part to
+  Rust rests on measurements: hook time from yoagent-rutis 0.5's
+  `take_timings`, a runtime's memory from the OS (rutis gives no pid).
 - The built-ins renamed (#14): `[parts]` → `[builtins]` in the manifest,
   `yobuild::parts` → `yobuild::builtins`, the gate's `with_free_tools` →
   `with_allowed_tools` (decided 2026-10-17: "parts" read as plugins moved

@@ -386,7 +386,7 @@ compiled binary with no Node or Python — smaller and faster to start than a
 JavaScript runtime, still out of process. A fit for a policy or tool that
 should not need Node but is not worth a Rust part.
 
-**How to decide:** measure first. `yobuild run` says, after each run,
+**How to decide:** measure first. `yobuild run --measure` (and `--once`) says, after each run,
 each plugin handler's time per hook and per tool (measured at the bridge:
 for a language plugin, the round trip to its runtime) and each plugin
 runtime's memory, so the table above is applied to numbers, not guesses.

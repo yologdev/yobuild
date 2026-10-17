@@ -81,6 +81,9 @@ pub struct Options {
     /// Run `task` (required) alone, with no frontend, and return when it
     /// ends; each tool call and notice is written to stderr meanwhile.
     pub once: bool,
+    /// Say each run's plugin time and the runtimes' memory to every
+    /// frontend (a notice); with `once` too. Else they go to the log (info).
+    pub measure: bool,
     /// Where the web frontend listens, when the frontend is the web page
     /// (default `127.0.0.1:8787`; with `phone`, `0.0.0.0:8787`).
     pub addr: Option<SocketAddr>,
@@ -94,6 +97,7 @@ impl Options {
             scripted: None,
             task: None,
             once: false,
+            measure: false,
             addr: None,
             layout: Layout::default(),
         }
@@ -123,6 +127,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         manifest,
         task,
         once,
+        measure: options_measure,
         addr,
         layout,
         ..
@@ -249,7 +254,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // Last: each run's plugin time and the runtimes' memory (design §9).
     if !runtimes.is_empty() {
         let registry = bridge.registry().clone();
-        agent = agent.with_extension(measure::Measure::new(session.clone(), registry, runtimes));
+        let say = (options_measure || once).then(|| session.clone());
+        agent = agent.with_extension(measure::Measure::new(say, registry, runtimes));
     }
     eprintln!("{name}: ready in {:.1}s", started.elapsed().as_secs_f64());
 

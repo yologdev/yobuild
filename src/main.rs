@@ -1,7 +1,7 @@
 //! `yobuild`: run an agent from its manifest.
 //!
 //! ```text
-//! yobuild run <agent.toml> [--scripted FILE] [--once] [--web ADDR] [--] [TASK…]
+//! yobuild run <agent.toml> [--scripted FILE] [--once] [--measure] [--web ADDR] [--] [TASK…]
 //! ```
 //!
 //! - `--scripted FILE`: the model's replies from a file (no provider, no key).
@@ -9,6 +9,9 @@
 //!   goes to stderr, then the agent's last answer and how the run ended
 //!   (`Completed`, `Stopped: …`, `Error: …`) to stdout; the exit code is
 //!   non-zero unless it completed.
+//! - `--measure`: after each run, say each plugin's hook time and each
+//!   plugin runtime's memory to every frontend (with `--once` always; else
+//!   in the log, at info).
 //! - `--web ADDR`: where the web frontend listens, for a manifest whose
 //!   frontend is the web page (default 127.0.0.1:8787; 0.0.0.0:8787 with
 //!   `phone`).
@@ -35,7 +38,7 @@ use yobuild::run::{run, Options};
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const USAGE: &str =
-    "usage: yobuild run <agent.toml> [--scripted FILE] [--once] [--web ADDR] [--] [TASK…]";
+    "usage: yobuild run <agent.toml> [--scripted FILE] [--once] [--measure] [--web ADDR] [--] [TASK…]";
 
 fn main() -> ExitCode {
     match start() {
@@ -73,6 +76,7 @@ fn start() -> Result<ExitCode, BoxError> {
         match arg.as_str() {
             "--scripted" => options.scripted = Some(args.next().ok_or(USAGE)?.into()),
             "--once" => options.once = true,
+            "--measure" => options.measure = true,
             "--web" => {
                 let addr = args.next().ok_or(USAGE)?;
                 options.addr = Some(addr.parse().map_err(|e| format!("--web {addr}: {e}"))?);
