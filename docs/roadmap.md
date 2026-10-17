@@ -58,7 +58,7 @@ paths).
 push). The yoagent-rutis PR above continues alongside M2a (decided
 2026-10-16): M2a does not need it; M2b's `yobuild check` does.
 
-## M2a — Manifest and runner (in progress: the manifest #9, `yobuild run` #11)
+## M2a — Manifest and runner (in progress: the manifest #9, `yobuild run` #11 and #12 done)
 
 - Manifest schema (§2 of the design), in TOML (decided 2026-10-16),
   strict parsing, good errors.
@@ -76,7 +76,15 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
   test server (a bash script, `tests/fixtures/echo/`). (#11)
 - `yobuild run` prints per-plugin hook time and per-runtime memory
   (design §9), so the decision to promote a part to Rust rests on
-  measurements.
+  measurements. Needs yoagent-rutis to report each handler's hook time and
+  each runtime's process (asked for, 2026-10-17).
+- The built-ins renamed: `[parts]` → `[builtins]` in the manifest,
+  `yobuild::parts` → `yobuild::builtins`, the gate's `with_free_tools` →
+  `with_allowed_tools` (decided 2026-10-17: "parts" read as plugins moved
+  into Rust; "free" as cost).
+- `allow = [...]` on `[[plugin]]` and `[[mcp]]` entries (design §2,
+  Allowed tools): the tools the gate lets run without asking — so a
+  manifest agent that plans and searches does not ask before each call.
 - `handoff.toml`, `coding.toml`, `minimal.toml` replace the three examples.
 - `ask_owner` as a host service, so plugins can ask the owner too — after
   checking that Python and Go plugins can call host services.

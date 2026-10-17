@@ -5,12 +5,12 @@ Draft for review. Names, fields and file layouts are proposals.
 ## 1. Shape
 
 ```text
-            agent.toml  (the manifest: model, prompt, plugins, parts, frontend)
+            agent.toml  (the manifest: model, prompt, plugins, built-ins, frontend)
                  │
                  ▼
    ┌──────────── yobuild ───────────────────────────────────────────┐
    │ runner      resolve + install plugins, vet them, start the host │
-   │ parts       ask_owner · report + facts · approval gate · limits │
+   │ built-ins   ask_owner · report + facts · approval gate · limits │
    │ frontend    session · browser/phone · terminal · plugin host    │
    └──────────────────────────┬─────────────────────────────────────┘
                               │ crates.io
@@ -51,11 +51,13 @@ budget_usd = 2.0                     # dollars per run; refused if the model has
 
 # Plugins, by ecosystem. Versions pinned, or a local path.
 [[plugin]]
-pi = "@juicesharp/rpiv-todo@2.12.0"
+pi   = "@juicesharp/rpiv-todo@2.12.0"
+allow = ["todo"]                     # tools the gate lets run without asking (see "Allowed tools")
 
 [[plugin]]
 dsh    = "dsh-free-search@0.8.1"
 config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }
+allow  = ["multi_search", "web_search"]
 
 [[plugin]]
 rutis = "plugins/word_count.ts"      # a local TS/Bun/Python/Go plugin
@@ -66,12 +68,13 @@ name  = "words"                      # optional: the default is the package's na
 [[mcp]]                              # stdio: the pinned package is installed (no scripts), its bin run
 npm  = "@modelcontextprotocol/server-filesystem@1.2.3"   # version illustrative
 args = ["."]                         # also `env`, and `bin` when the package has several
+allow = ["read_text_file", "list_directory"]  # the server's own names; the agent sees `<server>__<tool>`
 
 [[mcp]]                              # HTTP: the URL is the pin
 url     = "https://mcp.example.com/mcp"
 headers = { Authorization = "Bearer ${EXAMPLE_MCP_TOKEN}" }  # ${…} from the environment, never written here
 
-[parts]
+[builtins]
 ask_owner = true                     # non-blocking questions; answers arrive as steering
 report    = "handoff"                # or a list of required sections
 facts     = true                     # host-counted facts after each report
@@ -86,6 +89,66 @@ web      = true
 phone    = false                     # serve on the LAN, print a phone link
 terminal = false
 ```
+
+### Allowed tools (proposed)
+
+The gate (`gate = "allow-list"`) asks before every tool it does not know
+to be harmless: yoagent's `bash` and file tools are judged call by call,
+its read-only tools and `ask_owner` run without asking, and **every plugin
+and MCP tool asks**. An agent that plans and searches as it works (the
+handoff agent: rpiv-todo's `todo`, dsh-free-search's searches) would ask
+the owner before each of those calls. `allow` names the tools of one entry
+that run without asking — entries of the gate's allow-list:
+
+```toml
+[[plugin]]
+pi    = "@juicesharp/rpiv-todo@2.12.0"
+allow = ["todo"]
+
+[[mcp]]
+name  = "files"
+npm   = "@modelcontextprotocol/server-filesystem@1.2.3"
+allow = ["read_text_file"]           # offered to the model as `files__read_text_file`
+```
+
+- **On the entry that offers the tools**, named as that plugin or server
+  names them: the trust sits next to what it trusts, an MCP tool needs no
+  `<server>__` prefix spelled out, and a name can be checked against what
+  that entry offers.
+- **Allowed means: run without asking**, not "the others are refused" —
+  a tool not listed still runs when the owner answers Allow. List only
+  tools that read or look things up: allowing is the manifest author
+  vouching for the tool; the gate does not look inside a plugin or server.
+  A tool that writes, deletes, sends or runs code stays asking.
+- **Refused when the manifest is read** (an error with its place, like the
+  others):
+  - a name a tool cannot have (1 to 64 letters, digits, `_`, `-`), or
+    repeated;
+  - `allow` with `gate = "off"` (it would mean nothing);
+  - `bash`, `write_file`, `write`, `edit_file`, `edit`: the gate judges
+    these call by call and never allows them by name;
+  - `ask_owner`: yobuild's built-in allows its own tool, and a plugin's
+    tool of that name must ask.
+- **Checked when the agent starts:** an MCP server's `allow` names must be
+  among the tools it lists (a typo, or a server whose tools changed, is
+  refused, naming what it does list). A plugin's tools come with each run,
+  so its `allow` names are checked at the first turn (yoagent's
+  `before_model` sees the tools offered): one no tool of that name was
+  offered for is a Warning notice ("plugin rpiv-todo offered no tool
+  `todos`"), once. A warning, not a refusal: a plugin may offer a tool
+  only in some runs.
+- **What the gate gets:** the names as the model sees them — a plugin's
+  as they are, an MCP server's as `<server>__<tool>` — through
+  `Gate::with_allowed_tools` (today `with_free_tools`; renamed with the
+  built-ins).
+
+Considered and not taken: one list under `[builtins]`
+(`allowed_tools = ["todo", "files__read_text_file"]`) — shorter, but it
+separates the trust from the entry, makes MCP tools spelled with their
+prefix, and cannot say which entry a name was meant for, so a typo is
+only ever a warning. Patterns (`files__*`) — a server's write tools would
+be allowed with its read tools. The name `whitelist` — the gate is already
+an allow-list. `free` — the gate's internal word, read as cost or licence.
 
 Rules:
 
@@ -164,19 +227,27 @@ takes no key; `yobuild run` passes an empty one, so yoagent's fallback key
 never reaches it). A `base_url` is https, or http on this machine. Prices come from the bundled table; a provider missing from it
 runs, but without `budget_usd` or cost facts.
 
-## 3. The parts
+## 3. The built-ins
+
+yobuild's own behaviours, not a plugin's: what every agent it builds can
+switch on in `[builtins]`, whatever ecosystem its tools come from. Most plug
+into the loop as hooks (yoagent extensions: `report`, `facts`, the
+`gate`); `ask_owner` is a tool; `scratch` is a folder. Not plugins moved
+into Rust: a capability an ecosystem already has stays a plugin (§9).
+The library is `yobuild::builtins` (named `yobuild::parts` until the
+rename, M2a).
 
 Small, generic, and each tested on its own. They come from the handoff
-example and move into yobuild as a library (`yobuild::parts`), usable
+example and move into yobuild as a library (`yobuild::builtins`), usable
 without the manifest.
 
 | Part | Plugs in as | Where |
 |---|---|---|
-| `ask_owner` | a tool; returns at once, the answer comes back as steering (mid-run, or starting the next run) | `yobuild::parts::AskOwner` (M1) |
-| `report` | an `Extension`: `on_stop` sends the agent back until the required sections are there | `yobuild::parts::Report` (M1) |
-| `facts` | an `Extension`: `on_event` counts tokens and tool calls, `finish` adds changes since the start (git snapshot), new files, open questions | `yobuild::parts::Facts` (M1) |
-| `gate` | a `before_tool` policy: an allow-list of programs and their options; everything else (deleting, overwriting above all) asks; refused with nobody there | `yobuild::parts::Gate` (M1; `confirm-dangerous.ts` stays as the pi example) |
-| `scratch` | a private working folder named to the agent and the gate | `yobuild::parts::Scratch` (M1) |
+| `ask_owner` | a tool; returns at once, the answer comes back as steering (mid-run, or starting the next run) | `yobuild::builtins::AskOwner` (M1) |
+| `report` | an `Extension`: `on_stop` sends the agent back until the required sections are there | `yobuild::builtins::Report` (M1) |
+| `facts` | an `Extension`: `on_event` counts tokens and tool calls, `finish` adds changes since the start (git snapshot), new files, open questions | `yobuild::builtins::Facts` (M1) |
+| `gate` | a `before_tool` policy: an allow-list of programs and their options; everything else (deleting, overwriting above all) asks; refused with nobody there; plugin and MCP tools ask unless their entry allows them (`allow`) | `yobuild::builtins::Gate` (M1; `confirm-dangerous.ts` stays as the pi example) |
+| `scratch` | a private working folder named to the agent and the gate | `yobuild::builtins::Scratch` (M1) |
 | `limits` / `budget` | yoagent's `ExecutionLimits` and `Budget` | yoagent |
 
 What makes a part a part: more than one kind of agent wants it, it is
@@ -219,7 +290,7 @@ Inherited from yoagent and the handoff work, and kept on by default:
 - **Fail closed** at every plugin boundary (yoagent-rutis): a policy that
   times out, crashes or is unloaded denies; a redaction that fails
   withholds; a plugin hooking what the loop cannot enforce is refused.
-- **The gate holds without a plugin runtime**: `yobuild::parts::Gate` is a
+- **The gate holds without a plugin runtime**: `yobuild::builtins::Gate` is a
   required extension in the Rust process, an allow-list: each program it
   lets run has a list of options, and what it writes, deletes or runs is
   judged; anything it does not know asks. A gate written as a plugin (the pi
@@ -248,9 +319,9 @@ Moved from yoagent in M0 (`integrations/yoagent-frontend/`, its examples,
 |---|---|
 | `src/frontend/` (`yobuild::frontend`), `frontend/web/`, `frontend/plugins/`, `tests/` | stays (M1: one crate) |
 | `examples/handoff_agent.rs`, `coding_agent.rs`, `minimal_browser.rs` | manifests `examples/handoff.toml`, `coding.toml`, `minimal.toml` (plus the parts they used; M2a) |
-| `frontend/plugins/pi-extensions/confirm-dangerous.ts` and its tests | `yobuild::parts::gate` (M1; the TypeScript version stays as an example) |
+| `frontend/plugins/pi-extensions/confirm-dangerous.ts` and its tests | `yobuild::builtins::gate` (M1; the TypeScript version stays as an example) |
 | `scripts/try-handoff.sh`, `try-coding-agent.sh` | `yobuild run` (M2a) |
-| CI: `check` (pty check, handoff demo) | grows with the parts and manifests |
+| CI: `check` (pty check, handoff demo) | grows with the built-ins and manifests |
 
 Stays in yoagent: the loop, providers, tools, `Extension`; yoagent-rutis
 (bridge, pi and DSH adapters, the compatibility matrix and its probe);

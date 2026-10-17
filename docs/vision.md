@@ -29,7 +29,7 @@ off-the-shelf search, and three small parts.
 yobuild makes that the normal way to build:
 
 1. **Pick parts by capability** from plugins that are measured to work.
-2. **Declare the agent** in a manifest: model, prompt, plugins, parts,
+2. **Declare the agent** in a manifest: model, prompt, plugins, built-ins,
    frontend.
 3. **Run it** — scripted first, then live — and change parts, not code.
 
