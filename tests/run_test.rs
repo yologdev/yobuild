@@ -215,6 +215,27 @@ async fn a_dsh_plugin_from_the_manifest_gives_its_tool() {
         !results[0].1 && results[0].0.contains("echo: hi"),
         "{results:?}"
     );
+    // After the run: the plugins' time and the runtime's memory.
+    let measured: Vec<&String> = ended
+        .notices
+        .iter()
+        .filter(|(l, m)| {
+            *l == yobuild::frontend::NoticeLevel::Info && m.starts_with("Plugin time this run: ")
+        })
+        .map(|(_, m)| m)
+        .collect();
+    assert_eq!(measured.len(), 1, "{:?}", ended.notices);
+    assert!(
+        measured[0].contains("dsh-tools ") && measured[0].contains("tool fixture_echo 1× "),
+        "{}",
+        measured[0]
+    );
+    #[cfg(unix)]
+    assert!(
+        measured[0].contains("Runtime memory: dsh "),
+        "{}",
+        measured[0]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
