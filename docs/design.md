@@ -145,15 +145,26 @@ allow = ["read_text_file"]           # offered to the model as `files__read_text
   plugin may offer a tool only in some runs.
 - **Scoped to the entry:** a plugin's allowed tool runs without asking
   only when that plugin offered it in the run (yoagent-rutis's
-  `offered_by`, from 0.5): for pi, the extension file that registered the
-  tool must be one of that plugin's; DSH does not say which plugin
-  registered a tool, so all DSH plugins count as one; a rutis plugin's
-  handler name is its own choice, so all rutis plugins count as one (a
-  manifest key naming its handler could narrow that). An MCP server's
-  names are scoped by their prefix: each is checked against that server's
-  own list; a server's tools are the agent's own (fixed at start), and
-  yoagent keeps those over a plugin's tool of the same name; two tools of
-  one name among them are refused; and no server name holds `__`.
+  `offered_by`, from 0.5), and never when the name is one of the agent's
+  own tools (yoagent runs its own on a clash). For pi, the extension file
+  that registered the tool must be one of that plugin's; DSH does not say
+  which plugin registered a tool, so all DSH plugins count as one; a
+  rutis plugin's handler name is its own choice, so any handler other
+  than the two adapters' counts as the rutis owner (a manifest key naming
+  its handler could narrow that). The adapters' handler names are made
+  per process and unguessable, so no plugin can take one first and pass
+  for pi or DSH.
+- **Known limit (upstream):** pi's adapter looks a tool up again by name
+  when it is called, so an extension that registers the same name after
+  the run's tools were taken can run in the allowing one's place. Until
+  yoagent-rutis's adapter runs the tool it offered (asked for), pi's
+  per-extension scoping holds against mistakes, not against an extension
+  that means to take a name over.
+- **MCP:** an MCP server's names are scoped by their prefix: each is
+  checked against that server's own list; a server's tools are the
+  agent's own (fixed at start), and yoagent keeps those over a plugin's
+  tool of the same name; two tools of one name among them are refused; and
+  no server name holds `__`.
 - **What the gate gets:** the names as the model sees them — a plugin's
   as they are, an MCP server's as `<server>__<tool>` — through
   `Gate::with_allowed_tools`.

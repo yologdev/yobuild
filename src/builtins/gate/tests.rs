@@ -2120,4 +2120,22 @@ fn a_tool_allowed_by_its_offerer_runs_only_when_that_one_offers_it() {
     );
     assert!(!free("todo", None), "outside a run it asks");
     assert!(!free("other", Some("run-1")));
+    // Only the listed names: a check that says yes to anything frees
+    // nothing else.
+    let yes: OfferedCheck = Arc::new(|_: &str, _: &str| true);
+    let rules = Rules {
+        start: p.rules.start.clone(),
+        scratch: None,
+        free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
+        allowed_if: Some((["todo".to_owned()].into(), yes)),
+        created: Arc::default(),
+    };
+    assert!(rules
+        .check_in("todo", &json!({}), Some("r"))
+        .question()
+        .is_none());
+    assert!(rules
+        .check_in("delete_all", &json!({}), Some("r"))
+        .question()
+        .is_some());
 }

@@ -23,6 +23,9 @@ pub(crate) struct Measure {
     registry: Arc<Registry>,
     /// Each runtime's name and folder.
     runtimes: Arc<Vec<(String, PathBuf)>>,
+    /// Handler names to say otherwise: the adapters' per-process names as
+    /// their usual ones (`pi-extensions-<uuid>` → `pi-extensions`).
+    names: Arc<Vec<(String, String)>>,
 }
 
 impl Measure {
@@ -31,6 +34,7 @@ impl Measure {
         session: Option<Session>,
         registry: Arc<Registry>,
         runtimes: Vec<(String, PathBuf)>,
+        names: Vec<(String, String)>,
     ) -> Self {
         // What came before the first run (loading) is not a run's.
         registry.take_timings();
@@ -38,6 +42,7 @@ impl Measure {
             session,
             registry,
             runtimes: Arc::new(runtimes),
+            names: Arc::new(names),
         }
     }
 }
@@ -65,6 +70,12 @@ impl RunHooks for Measure {
             .take_timings()
             .iter()
             .map(Spent::from)
+            .map(|mut s| {
+                if let Some((_, said)) = self.names.iter().find(|(name, _)| *name == s.handler) {
+                    s.handler = said.clone();
+                }
+                s
+            })
             .collect();
         let memory = memory(&self.runtimes).await;
         let Some(text) = report(&spent, &memory) else {

@@ -32,7 +32,12 @@ pub(crate) struct Plan {
     pub rutis: bool,
     /// Handlers the agent depends on (a TypeScript row runs before its
     /// async start-up is done).
-    pub handlers: Vec<&'static str>,
+    pub handlers: Vec<String>,
+    /// The pi and DSH adapters' handler names: per process, unguessable, so
+    /// no plugin can register one first and pass for that adapter (handler
+    /// names are unique registry-wide; the first to register wins).
+    pub pi_handler: String,
+    pub dsh_handler: String,
     /// What loads only in part, or is set and has no effect: said before the
     /// agent starts.
     pub notes: Vec<String>,
@@ -189,7 +194,12 @@ pub(crate) fn plan(
     cwd: &Path,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Plan, BoxError> {
-    let mut plan = Plan::default();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let mut plan = Plan {
+        pi_handler: format!("pi-extensions-{suffix}"),
+        dsh_handler: format!("dsh-tools-{suffix}"),
+        ..Plan::default()
+    };
     let mut extensions: Vec<Json> = Vec::new();
     let mut dsh_rows: Vec<Row> = Vec::new();
     for plugin in &manifest.plugins {
@@ -242,11 +252,11 @@ pub(crate) fn plan(
     if !extensions.is_empty() {
         let pi = layout.adapters.join("pi");
         plan.pi = true;
-        plan.handlers.push("pi-extensions");
+        plan.handlers.push(plan.pi_handler.clone());
         plan.rows.push(
             Row::new("pi", pi.join("pi-extensions-adapter.ts").display())
                 .runtime("pi")
-                .config(json!({ "extensions": extensions, "cwd": cwd })),
+                .config(json!({ "extensions": extensions, "cwd": cwd, "name": plan.pi_handler })),
         );
         plan.rows
             .push(Row::new("pi-host-ui", pi.join("host-ui.ts").display()).runtime("pi"));
@@ -259,7 +269,7 @@ pub(crate) fn plan(
     } else {
         let dsh = layout.adapters.join("dsh");
         plan.dsh = true;
-        plan.handlers.push("dsh-tools");
+        plan.handlers.push(plan.dsh_handler.clone());
         if manifest.dsh.host_services {
             plan.rows
                 .extend(rows_from_file(&dsh.join("host-services.json"), "dsh")?);
@@ -272,7 +282,9 @@ pub(crate) fn plan(
         ]);
         plan.rows.extend(dsh_rows);
         plan.rows.extend([
-            Row::new("dsh", dsh.join("dsh-tools-adapter.ts").display()).runtime("dsh"),
+            Row::new("dsh", dsh.join("dsh-tools-adapter.ts").display())
+                .runtime("dsh")
+                .config(json!({ "name": plan.dsh_handler })),
             Row::new("dsh-host-dialogs", dsh.join("host-dialogs.ts").display()).runtime("dsh"),
         ]);
     }
@@ -594,7 +606,17 @@ mod tests {
         )
         .unwrap();
         assert!(plan.pi && plan.dsh && !plan.rutis);
-        assert_eq!(plan.handlers, ["pi-extensions", "dsh-tools"]);
+        // The adapters' handler names: their usual ones, made unguessable.
+        assert_eq!(
+            plan.handlers,
+            [plan.pi_handler.clone(), plan.dsh_handler.clone()]
+        );
+        assert!(
+            plan.pi_handler.starts_with("pi-extensions-")
+                && plan.dsh_handler.starts_with("dsh-tools-")
+        );
+        let again = plan_of(dir.path(), "").unwrap();
+        assert_ne!(again.pi_handler, plan.pi_handler);
         let ids: Vec<&str> = plan.rows.iter().map(Row::id).collect();
         assert!(ids.contains(&"plugin:dsh") && ids.contains(&"dsh") && ids.contains(&"pi"));
         let own = plan.rows.iter().find(|r| r.id() == "plugin:dsh").unwrap();
@@ -727,5 +749,20 @@ mod tests {
         assert_eq!(plan.rows.len(), 1);
         assert_eq!(plan.rows[0].id(), "plugin:p");
         assert_eq!(plan.rows[0].config_json(), &json!({ "a": 1 }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pi_plugins_files_are_recorded_canonical() {
+        // A manifest reached through a symlink: its pi file recorded as the
+        // file itself (pi reports the path it resolved).
+        let real = tempfile::tempdir().unwrap();
+        std::fs::write(real.path().join("p.ts"), "").unwrap();
+        let outer = tempfile::tempdir().unwrap();
+        let link = outer.path().join("agent");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        let plan = plan_of(&link, "[[plugin]]\npi = \"./p.ts\"\n").unwrap();
+        let canonical = std::fs::canonicalize(real.path().join("p.ts")).unwrap();
+        assert_eq!(plan.pi_files, [("p".to_owned(), vec![canonical])]);
     }
 }
