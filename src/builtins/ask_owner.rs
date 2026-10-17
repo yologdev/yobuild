@@ -141,6 +141,11 @@ pub struct AskOwner {
 }
 
 impl AskOwner {
+    /// The session it asks in.
+    pub(crate) fn session(&self) -> &Session {
+        &self.session
+    }
+
     /// The tool's name. The gate does not allow it by default: allow it where
     /// this tool is added (`Gate::with_allowed_tools([AskOwner::TOOL])`).
     pub const TOOL: &'static str = "ask_owner";
@@ -254,6 +259,20 @@ impl AgentTool for AskOwner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asked_by_names_the_plugin_on_one_line_of_up_to_64_characters() {
+        let q = || Question::new("Which?", "", Vec::new()).unwrap();
+        assert_eq!(
+            q().asked_by(" planner ").unwrap().question(),
+            "Which? (asked by plugin planner)"
+        );
+        // Counted in characters, not bytes.
+        assert!(q().asked_by(&"é".repeat(64)).is_ok());
+        for refused in ["", "  ", "a\rb", "a\nb", &"x".repeat(65)] {
+            assert!(q().asked_by(refused).is_err(), "{refused:?}");
+        }
+    }
 
     #[test]
     fn a_question_is_trimmed_and_its_options_cleaned() {

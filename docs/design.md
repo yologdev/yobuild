@@ -290,38 +290,52 @@ it is small, and it has no opinion about the task.
 ### `ask_owner` for plugins
 
 The agent asks the owner with the `ask_owner` tool. A plugin may need to
-ask too — a pi extension that wants the owner to choose between plans, a
-DSH plugin missing a setting — and today it can only ask through the
+ask too — a planner that wants the owner to choose between plans, a
+plugin missing a setting — and today it can only ask through the
 dialogs (`ui.request`), which block the plugin until the owner answers or
 the question times out. `ask_owner` as a host service asks the way the
 tool does: without waiting.
 
-- **The service:** `ask_owner`, offered to every plugin runtime when the
-  manifest has `[builtins] ask_owner = true` (like `ui` and `frontend`,
-  shared by yobuild's plugin host). Without the built-in it is not there:
-  a plugin that injects it as required does not start (rutis), so a
-  plugin should look it up and go without when it is missing.
+- **The service:** `ask_owner`, offered to every plugin runtime (like `ui`
+  and `frontend`, shared by yobuild's plugin host). A plugin injects it
+  (`inject: ['ask_owner']`). It is there whatever the manifest says —
+  rutis shows a host service only to a plugin that injects it, and has no
+  optional inject: a plugin injecting a missing service would never start,
+  and nobody would be told. Without `[builtins] ask_owner = true` every
+  `ask` is refused, saying so (the plugin goes without); so is one after
+  the session ended.
 - **One method:** `ask({ question, why?, options? }, from?)` → the
-  question's number, at once. The same shape as the tool's arguments, checked by the
-  same `Question::from_json` (a blank question, unknown keys or a
-  non-string option are refused with an error the plugin sees). Two or
-  more options make it a choice; otherwise a free answer.
+  question's number, at once. The same shape as the tool's arguments,
+  checked by the same `Question::from_json` (a blank question, unknown keys
+  or a non-string option are refused with an error the plugin sees); a
+  plugin's question is one line (`why` may have more), and a third
+  argument is refused. Two or more options make it a choice; otherwise a
+  free answer.
 - **The answer reaches the agent, not the plugin:** as with the tool, it
   arrives as steering — `[Owner's answer to #N] <question>\n<answer>`, or
-  `[Owner skipped #N]` — in the run under way, or as the next run's
-  prompt. A plugin that needs the answer itself uses the dialogs instead.
-  With `from` (the plugin's name, as it gives it: a host service does not
-  know its caller, so it is not checked), the question reads "… (asked by
-  plugin <from>)" to the owner and in the agent's steer.
+  `[Owner skipped #N]` — in the run under way, or, when the agent is idle,
+  as the prompt of a new run (which costs what a run costs). A plugin that
+  needs the answer itself uses the dialogs instead.
+- **Who asks:** a host service does not know its caller. `from` is the
+  plugin's name as it gives it — one line, up to 64 characters, not
+  verified — and the question reads "… (asked by plugin <from>)" to the
+  owner and in the agent's steer. Without it, a plugin's question looks
+  like the agent's own. Plugins are trusted code (§6): `from` tells the
+  owner who asks, it is not a security boundary, and nothing limits how
+  many questions a plugin asks. (The one-line rule keeps a question from
+  adding lines that read as the owner's answer.)
 - **One numbering:** the service and the tool share the session's
   `AskOwner` (its clones share the count), so #N is unique, and facts'
   "N question(s) waiting on you" counts both.
 - **Not judged by the gate:** asking does nothing the owner has not
   seen; like the tool, it is always allowed. A reset withdraws the open
   questions, as for the tool.
-- **Node only, for now:** `yobuild run` starts Node runtimes only (§4).
-  Whether Python and Go plugins can call host services is checked before
-  they are supported (roadmap).
+- **rutis plugins, for now:** a `[[plugin]] rutis = …` plugin calls it
+  directly. pi extensions and DSH plugins use their own ecosystems' APIs;
+  reaching it from them needs adapter support, as the dialogs have (later).
+  `yobuild run` starts Node runtimes only (§2); whether Python and Go
+  plugins can call host services is checked before they are supported
+  (roadmap).
 
 ## 4. Plugins: resolve, install, vet
 

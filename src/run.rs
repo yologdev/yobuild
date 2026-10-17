@@ -146,14 +146,15 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     let bridge = RutisBridge::install(root)?;
     services::provide(root, &session)?;
     // `ask_owner`, the tool and (for plugins) the host service: one
-    // numbering. Before the plugins start: one may look it up as it loads.
+    // numbering. Before the plugins start: one may use it as it loads. The
+    // service is there either way (rutis has no optional inject: a plugin
+    // injecting a missing service would never start), refusing without the
+    // built-in.
     let ask_owner = manifest
         .builtins
         .ask_owner
         .then(|| AskOwner::new(session.clone()));
-    if let Some(ask) = &ask_owner {
-        services::provide_ask_owner(root, ask.clone())?;
-    }
+    services::provide_ask_owner(root, ask_owner.clone())?;
     let scratch = match manifest.builtins.scratch {
         true => Some(Scratch::create(name)?),
         false => None,
@@ -195,10 +196,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     builder = builder
         .share("yoagent")
         .share(services::FRONTEND)
-        .share(services::UI);
-    if ask_owner.is_some() {
-        builder = builder.share(services::ASK_OWNER);
-    }
+        .share(services::UI)
+        .share(services::ASK_OWNER);
     let mut host = builder.start(root).await?;
     if !plan.rows.is_empty() {
         host.load(plan.rows.clone()).await?;
