@@ -58,6 +58,13 @@ export class Questions {
   }
 }
 
+// A value as JSON text, for a line on screen. A big integer (beyond
+// ±(2^53−1)) reaches a rutis 0.11 runtime as a BigInt, which JSON.stringify
+// refuses: written as its digits.
+export function jsonText(value) {
+  return JSON.stringify(value, (_key, v) => (typeof v === 'bigint' ? v.toString() : v))
+}
+
 // The line for a finished run.
 export function runEndLine({ run, outcome, error, totalCostUsd }) {
   const cost = totalCostUsd != null ? ` · $${Number(totalCostUsd).toFixed(4)}` : ''

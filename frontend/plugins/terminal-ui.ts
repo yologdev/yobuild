@@ -14,7 +14,7 @@ import * as fs from 'node:fs'
 import * as tty from 'node:tty'
 import { definePlugin } from '@arcships/rutis'
 // The answer parsing the page's tests cover (`node --test web/`).
-import { parseAnswer } from '../web/lib.js'
+import { jsonText, parseAnswer } from '../web/lib.js'
 import {
   Container,
   Editor,
@@ -73,7 +73,7 @@ const viewTitle = (details: any): string | undefined => {
 }
 
 const short = (value: unknown, max = 70) => {
-  const text = typeof value === 'string' ? value : JSON.stringify(value)
+  const text = typeof value === 'string' ? value : jsonText(value)
   return text.length > max ? `${text.slice(0, max)}…` : text
 }
 
@@ -175,7 +175,7 @@ export default definePlugin<{ demo?: string }>({
         return true
       }
       const { value } = parsed
-      say(dim(`  answered: ${JSON.stringify(value)}`))
+      say(dim(`  answered: ${jsonText(value)}`))
       prefilled = undefined
       questions.shift()
       send({ type: 'uiResponse', id, value })
