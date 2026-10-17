@@ -1058,7 +1058,7 @@ fn plugin(
             (name, span)
         }
     };
-    let allow = allow(raw.allow.as_ref())?;
+    let allow = allow(raw.allow.as_ref(), true)?;
     Ok((
         Plugin {
             name,
@@ -1283,7 +1283,7 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
         Some(name) => explicit_name(name)?,
         None => (default, span),
     };
-    let allow = allow(raw.allow.as_ref())?;
+    let allow = allow(raw.allow.as_ref(), false)?;
     Ok((
         Mcp {
             name,
@@ -1298,8 +1298,13 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
 const JUDGED_TOOLS: [&str; 5] = ["bash", "write_file", "write", "edit_file", "edit"];
 
 /// An entry's `allow`: names a tool can have, each once; not the tools the
-/// gate judges itself, nor `ask_owner` (the built-in allows its own).
-fn allow(raw: Option<&Spanned<Vec<Spanned<String>>>>) -> Result<Vec<String>, Located> {
+/// gate judges itself, nor `ask_owner` (the built-in allows its own); and on
+/// a plugin, no `__` — it marks an MCP server's tool (`<server>__<tool>`),
+/// which only that server's entry may allow.
+fn allow(
+    raw: Option<&Spanned<Vec<Spanned<String>>>>,
+    plugin: bool,
+) -> Result<Vec<String>, Located> {
     let mut names: Vec<String> = Vec::new();
     for name in raw.map(|a| a.get_ref().as_slice()).unwrap_or_default() {
         let (text, span) = (name.get_ref(), name.span());
@@ -1316,6 +1321,10 @@ fn allow(raw: Option<&Spanned<Vec<Spanned<String>>>>) -> Result<Vec<String>, Loc
         } else if JUDGED_TOOLS.contains(&text.as_str()) {
             Some(format!(
                 "allow {text:?}: the gate judges `{text}` call by call; it is never allowed by name"
+            ))
+        } else if plugin && text.contains("__") {
+            Some(format!(
+                "allow {text:?}: `__` marks an MCP server's tool (`<server>__<tool>`); allow it on that [[mcp]] entry, by its own name"
             ))
         } else if text == "ask_owner" {
             Some("allow \"ask_owner\": the built-in allows its own (`ask_owner = true`); a plugin's tool of that name asks".into())

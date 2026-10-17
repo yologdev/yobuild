@@ -128,15 +128,25 @@ allow = ["read_text_file"]           # offered to the model as `files__read_text
   - `bash`, `write_file`, `write`, `edit_file`, `edit`: the gate judges
     these call by call and never allows them by name;
   - `ask_owner`: yobuild's built-in allows its own tool, and a plugin's
-    tool of that name must ask.
+    tool of that name must ask;
+  - on a plugin, a name with `__`: it marks an MCP server's tool
+    (`<server>__<tool>`), which only that server's entry may allow.
 - **Checked when the agent starts:** an MCP server's `allow` names must be
   among the tools it lists (a typo, or a server whose tools changed, is
   refused, naming what it does list). A plugin's tools come with each run,
-  so its `allow` names are checked at the first turn (yoagent's
-  `before_model` sees the tools offered): one no tool of that name was
-  offered for is a Warning notice ("plugin rpiv-todo offered no tool
-  `todos`"), once. A warning, not a refusal: a plugin may offer a tool
-  only in some runs.
+  so its `allow` names are checked after the first run (yoagent's
+  `before_model` sees the tools offered each turn; across the whole run, so
+  a plugin still starting is not mistaken for one without the tool): one no
+  tool of that name was offered for is a Warning notice ("plugin rpiv-todo
+  offered no tool `todos`"), once a session. A warning, not a refusal: a
+  plugin may offer a tool only in some runs.
+- **Known limit:** the gate allows by name, and a run's tools do not say
+  which plugin offered them (yoagent-rutis does not tell yet). So a
+  plugin's allowed name also allows another plugin's tool of that name —
+  one that plugin offers when the allowing one does not (a typo, or a tool
+  it offers only sometimes), or the one yoagent keeps when both do. An MCP
+  server's names are scoped (its prefix; checked against its own list).
+  Closing it needs the tool's plugin from the bridge (asked for).
 - **What the gate gets:** the names as the model sees them — a plugin's
   as they are, an MCP server's as `<server>__<tool>` — through
   `Gate::with_allowed_tools`.

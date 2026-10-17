@@ -876,13 +876,30 @@ fn allow_names_an_entrys_tools_and_refuses_what_cannot_hold() {
     );
     assert_eq!(refused("[\"a\", \"a\"]"), "6:15: allow \"a\": named twice");
     assert_eq!(
+        refused("[\"\"]"),
+        "6:10: allow \"\": a tool name is 1 to 64 letters, digits, _ and -"
+    );
+    assert!(read(&with(&format!(
+        "[[plugin]]\npi = \"./t.ts\"\nallow = [\"{}\"]\n",
+        "x".repeat(64)
+    )))
+    .is_ok());
+    // A plugin cannot allow an MCP server's tool; that server's entry can.
+    assert_eq!(
+        refused("[\"files__write_file\"]"),
+        "6:10: allow \"files__write_file\": `__` marks an MCP server's tool (`<server>__<tool>`); allow it on that [[mcp]] entry, by its own name"
+    );
+    assert!(read(&with("[[mcp]]\nnpm = \"./fs.sh\"\nallow = [\"a__b\"]\n")).is_ok());
+    assert_eq!(
         refused("[\"bash\"]"),
         "6:10: allow \"bash\": the gate judges `bash` call by call; it is never allowed by name"
     );
-    assert_eq!(
-        refused("[\"edit_file\"]"),
-        "6:10: allow \"edit_file\": the gate judges `edit_file` call by call; it is never allowed by name"
-    );
+    for judged in ["bash", "write_file", "write", "edit_file", "edit"] {
+        assert_eq!(
+            refused(&format!("[\"{judged}\"]")),
+            format!("6:10: allow \"{judged}\": the gate judges `{judged}` call by call; it is never allowed by name")
+        );
+    }
     assert_eq!(
         refused("[\"ask_owner\"]"),
         "6:10: allow \"ask_owner\": the built-in allows its own (`ask_owner = true`); a plugin's tool of that name asks"
@@ -890,6 +907,12 @@ fn allow_names_an_entrys_tools_and_refuses_what_cannot_hold() {
     assert_eq!(
         error(&with(
             "[[mcp]]\nnpm = \"./fs.sh\"\nallow = [\"read\"]\n[builtins]\ngate = \"off\"\n"
+        )),
+        "6:9: allow with gate = \"off\": nothing asks, so there is nothing to allow"
+    );
+    assert_eq!(
+        error(&with(
+            "[[plugin]]\npi = \"./t.ts\"\nallow = [\"todo\"]\n[builtins]\ngate = \"off\"\n"
         )),
         "6:9: allow with gate = \"off\": nothing asks, so there is nothing to allow"
     );
