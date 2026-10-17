@@ -1,0 +1,15 @@
+[
+  {
+    "tools": [
+      {
+        "name": "list_files",
+        "arguments": {
+          "path": "."
+        }
+      }
+    ]
+  },
+  {
+    "text": "**Scripted** model: give it a key for a real one."
+  }
+]

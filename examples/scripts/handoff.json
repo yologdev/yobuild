@@ -1,0 +1,59 @@
+[
+  {
+    "tools": [
+      {
+        "name": "todo",
+        "arguments": {
+          "action": "create",
+          "subject": "List the folder and write notes.md"
+        }
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "ask_owner",
+        "arguments": {
+          "question": "Should notes.md be a bullet list or a short paragraph?",
+          "why": "Only the format of the notes depends on it.",
+          "options": [
+            "Bullet list",
+            "Short paragraph"
+          ]
+        }
+      },
+      {
+        "name": "list_files",
+        "arguments": {
+          "path": "."
+        }
+      }
+    ]
+  },
+  {
+    "text": "(scripted) ## Done\n- Listed the folder.\n## Waiting on you\n- #1 Should notes.md be a bullet list or a short paragraph?\n## Decisions\n- None yet.\n## Next\n- Write notes.md once #1 is answered."
+  },
+  {
+    "tools": [
+      {
+        "name": "write_file",
+        "arguments": {
+          "path": "notes.md",
+          "content": "# Notes\n\n- Written by the handoff agent's scripted demo.\n- A bullet list, as the owner chose.\n"
+        }
+      },
+      {
+        "name": "todo",
+        "arguments": {
+          "action": "update",
+          "id": 1,
+          "status": "completed"
+        }
+      }
+    ]
+  },
+  {
+    "text": "(scripted) ## Done\n- Wrote notes.md as a bullet list.\n## Waiting on you\n- Nothing.\n## Decisions\n- A bullet list, as you answered #1.\n## Next\n- Nothing."
+  }
+]

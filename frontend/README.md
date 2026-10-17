@@ -141,13 +141,13 @@ DSH answers as on its own (an `ask` is denied, the tool finds no answerer).
 ## Examples
 
 The smallest start: one agent and the browser page, no plugins and no Node
-([`examples/minimal_browser.rs`](../examples/minimal_browser.rs), about 40
-lines; read-only file tools sandboxed to the directory it runs in, since
-whoever has the page's URL drives the agent).
+([`examples/minimal.toml`](../examples/minimal.toml); read-only file tools
+confined to the directory it runs in, since whoever has the page's URL
+drives the agent).
 
 ```bash
-cargo run --example minimal_browser                     # scripted model
-DEEPSEEK_API_KEY=… cargo run --example minimal_browser -- --live
+cargo run -- run examples/minimal.toml --scripted examples/scripts/minimal.json   # scripted model
+DEEPSEEK_API_KEY=… cargo run -- run examples/minimal.toml
 ```
 
 The full one, `coding_agent`: plugins in three Node runtimes, both
@@ -178,7 +178,7 @@ results rendered as links by the UI plugin, pi's question answered in the page.
 Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
 `$TMPDIR/yoagent-coding-agent.log`, since the terminal UI owns the screen.
 
-### `handoff_agent`: hand it a task and walk away
+### The handoff agent (`examples/handoff.toml`): hand it a task and walk away
 
 The stack, the plugins by ecosystem, and measured performance are in
 [`examples/README.md`](../examples/README.md).
@@ -190,7 +190,7 @@ It works in the directory you start it from, and puts what it makes there:
 mkdir research && cd research && git init
 path/to/yobuild/scripts/try-handoff.sh --live "Research the best noise-cancelling headphones right now; write headphones.md with sources. Ask me my budget, but don't wait."
 path/to/yobuild/scripts/try-handoff.sh --phone --live "…"   # serve on the LAN, for a phone
-path/to/yobuild/scripts/try-handoff.sh --demo               # headless, scripted (CI): asks, gets an answer, writes notes.md
+path/to/yobuild/scripts/try-handoff.sh --demo               # the scripted model: answer its question in the page, and it writes notes.md
 ```
 
 - **It plans** with a pi extension used unchanged, `@juicesharp/rpiv-todo`.

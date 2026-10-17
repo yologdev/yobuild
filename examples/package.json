@@ -1,0 +1,13 @@
+{
+  "name": "yobuild-examples",
+  "private": true,
+  "description": "What the example agents need beside them until yobuild installs packages (M2b): the pi packages they pin.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "dependencies": {
+    "@juicesharp/rpiv-i18n": "2.12.0",
+    "@juicesharp/rpiv-todo": "2.12.0"
+  }
+}

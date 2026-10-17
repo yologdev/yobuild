@@ -1,0 +1,21 @@
+[
+  {
+    "tools": [
+      {
+        "name": "list_files",
+        "arguments": {
+          "path": "."
+        }
+      },
+      {
+        "name": "bash",
+        "arguments": {
+          "command": "rm -rf build"
+        }
+      }
+    ]
+  },
+  {
+    "text": "**Scripted** model: give it a key for a real one."
+  }
+]

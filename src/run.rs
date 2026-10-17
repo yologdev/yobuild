@@ -39,10 +39,13 @@ use yoagent_rutis::RutisBridge;
 
 use crate::builtins::{AskOwner, Facts, Gate, OfferedCheck, Scratch};
 use crate::frontend::host::{DshHome, PluginHost, Row};
+use crate::frontend::session::UI_TIMEOUT;
 use crate::frontend::{
     services, web, ClientMessage, NoticeLevel, RunOutcome, ServerMessage, Session,
 };
-use crate::manifest::{Gate as GateMode, Manifest, Mcp, PluginKind, Source, Transport};
+use crate::manifest::{
+    Gate as GateMode, Manifest, Mcp, PluginKind, Source, Tools as ToolSet, Transport,
+};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -179,9 +182,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             builder = builder.env("dsh", name, value);
         }
     }
-    if plan.rutis {
-        builder = builder.node("rutis", &manifest.dir);
-        runtimes.push(("rutis".into(), manifest.dir.clone()));
+    // Each rutis plugin's package, a runtime of its own.
+    for (at, dir) in plan.rutis.iter().enumerate() {
+        let name = plugins::rutis_runtime_name(at);
+        builder = builder.node(&name, dir);
+        runtimes.push((name, dir.clone()));
     }
     let mut host = builder
         .share("yoagent")
@@ -205,7 +210,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         .ask_owner
         .then(|| AskOwner::new(session.clone()));
     let mut tools = Tools::default();
-    tools.add("yoagent", tools_in(&cwd));
+    tools.add("yoagent", tools_for(manifest.builtins.tools, &cwd));
     if let Some(ask) = &ask_owner {
         tools.add(AskOwner::TOOL, vec![Box::new(ask.clone())]);
     }
@@ -227,7 +232,17 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     .with_system_prompt(prompt)
     .with_tools(tools.list)
     .with_execution_limits(limits(&manifest))
-    .with_extension(bridge.extension());
+    .with_extension({
+        // A plugin that is the approval policy: no run goes on unguarded —
+        // without a policy plugin up, every call is denied.
+        let extension = bridge.extension();
+        match manifest.plugins.iter().any(|p| p.policy) {
+            true => extension
+                .require_policy()
+                .with_policy_timeout(Some(UI_TIMEOUT + Duration::from_secs(30))),
+            false => extension,
+        }
+    });
     let adapters = Adapters {
         pi: plan.pi_handler.clone(),
         dsh: plan.dsh_handler.clone(),
@@ -259,6 +274,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             facts = facts.with_open_questions(ask.open_questions());
         }
         agent = agent.with_extension(facts);
+    }
+    if let Some(budget) = checked.session_budget {
+        agent = agent.with_extension(budget);
     }
     if let Some(budget) = checked.budget {
         agent = agent.with_extension(budget);
@@ -549,6 +567,8 @@ struct Checked {
     /// `--scripted`'s replies.
     provider: Option<MockProvider>,
     budget: Option<Budget>,
+    /// The same across the session's runs.
+    session_budget: Option<Budget>,
     prompt: Prompt,
     plan: plugins::Plan,
     servers: HashMap<String, Launch>,
@@ -592,8 +612,15 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
         .limits
         .budget_usd
         .and_then(|usd| Budget::for_model(usd, &config));
-    if manifest.limits.budget_usd.is_some() && budget.is_none() {
-        notes.push("budget_usd is not kept: a scripted model has no price".into());
+    let session_budget = manifest
+        .limits
+        .session_budget_usd
+        .and_then(|usd| Budget::for_model(usd, &config))
+        .map(Budget::across_runs);
+    let unpriced = (manifest.limits.budget_usd.is_some() && budget.is_none())
+        || (manifest.limits.session_budget_usd.is_some() && session_budget.is_none());
+    if unpriced {
+        notes.push("the budget is not kept: a scripted model has no price".into());
     }
 
     let prompt = Prompt::read(manifest)?;
@@ -609,6 +636,7 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
         config,
         provider,
         budget,
+        session_budget,
         prompt,
         plan,
         servers,
@@ -711,18 +739,31 @@ impl Tools {
     }
 }
 
-/// yoagent's coding tools; bash and search start in `cwd` (the file tools
-/// read relative paths from the process's working folder, which is `cwd`).
-fn tools_in(cwd: &Path) -> Vec<Box<dyn AgentTool>> {
-    let cwd = cwd.display().to_string();
-    vec![
-        Box::new(BashTool::default().with_cwd(cwd.clone())),
-        Box::new(ReadFileTool::default()),
-        Box::new(WriteFileTool::new()),
-        Box::new(EditFileTool::new()),
-        Box::new(ListFilesTool::default()),
-        Box::new(SearchTool::default().with_root(cwd)),
-    ]
+/// yoagent's tools the manifest asks for (`[builtins] tools`): all six —
+/// bash and search start in `cwd` (the file tools read relative paths from
+/// the process's working folder, which is `cwd`) — or reading only, its
+/// paths confined to `cwd`.
+fn tools_for(set: ToolSet, cwd: &Path) -> Vec<Box<dyn AgentTool>> {
+    let here = cwd.display().to_string();
+    match set {
+        ToolSet::ReadOnly => vec![
+            Box::new(ReadFileTool::default().with_allowed_paths(vec![here.clone()])),
+            Box::new(ListFilesTool::default().with_allowed_paths(vec![here.clone()])),
+            Box::new(
+                SearchTool::default()
+                    .with_root(here.clone())
+                    .with_allowed_paths(vec![here]),
+            ),
+        ],
+        ToolSet::Coding => vec![
+            Box::new(BashTool::default().with_cwd(here.clone())),
+            Box::new(ReadFileTool::default()),
+            Box::new(WriteFileTool::new()),
+            Box::new(EditFileTool::new()),
+            Box::new(ListFilesTool::default()),
+            Box::new(SearchTool::default().with_root(here)),
+        ],
+    }
 }
 
 /// What the frontends saw, as an observer sees it (a question asked with
@@ -1269,7 +1310,7 @@ mod tests {
     fn two_tools_of_one_name_are_refused() {
         let dir = tempfile::tempdir().unwrap();
         let mut tools = Tools::default();
-        tools.add("yoagent", tools_in(dir.path()));
+        tools.add("yoagent", tools_for(ToolSet::Coding, dir.path()));
         assert!(tools.check().is_ok());
         let (session, _driver) = Session::new(false);
         let mut ours = Tools::default();
@@ -1282,7 +1323,7 @@ mod tests {
         theirs.add("mcp x", vec![Box::new(AskOwner::new(session))]);
         let e = theirs.check().unwrap_err().to_string();
         assert!(e.starts_with("tool ask_owner from mcp x"), "{e}");
-        tools.add("mcp files", tools_in(dir.path()));
+        tools.add("mcp files", tools_for(ToolSet::Coding, dir.path()));
         let e = tools.check().unwrap_err().to_string();
         assert_eq!(e, "two tools named bash: from yoagent and mcp files");
     }
