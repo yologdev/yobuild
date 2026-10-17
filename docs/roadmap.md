@@ -88,8 +88,8 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
 - `handoff.toml`, `coding.toml`, `minimal.toml` replace the three examples (#23;
   `coding_agent.rs` stays for its `--watch`)
   (design §7, "The examples as manifests": `[builtins] tools`,
-  `[limits] session_budget_usd`, `policy = true` on a plugin; demos as
-  CI tests answering over the page's WebSocket).
+  `[limits] session_budget_usd`, `policy = true` on a plugin; the demos
+  as CI tests — the handoff one answering over the page's WebSocket).
 - `ask_owner` as a host service, so plugins can ask the owner too — after
   checking that Python and Go plugins can call host services.
 

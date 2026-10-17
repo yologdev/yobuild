@@ -233,8 +233,11 @@ pub struct Plugin {
     /// Its tools the gate lets run without asking (`allow`), as the plugin
     /// names them.
     pub allow: Vec<String>,
-    /// It is the agent's approval policy: no run goes on without a policy
-    /// plugin up (yoagent-rutis's `require_policy`).
+    /// It is the agent's approval policy: while no plugin judging calls
+    /// (`before_tool`) is up, a run's tool calls are denied rather than run
+    /// unjudged (yoagent-rutis's `require_policy`, for all plugins at
+    /// once). A pi or rutis plugin; refused on a DSH plugin (DSH's adapter
+    /// judges no calls).
     pub policy: bool,
 }
 
@@ -1076,6 +1079,10 @@ fn plugin(
         let source = source(spec.get_ref(), dir).map_err(|m| (span.clone(), m))?;
         match raw.pi {
             Some(_) => PluginKind::Pi(source),
+            None if raw.policy => {
+                let m = "a DSH plugin cannot be the approval policy (`policy`): DSH's adapter judges no calls";
+                return Err((span, m.into()));
+            }
             None => PluginKind::Dsh(source),
         }
     };

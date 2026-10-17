@@ -958,6 +958,10 @@ fn tools_a_session_budget_and_a_policy_plugin_are_read() {
     assert_eq!(m.builtins.tools, Tools::ReadOnly);
     assert_eq!(read(MINIMAL).unwrap().builtins.tools, Tools::Coding);
     assert_eq!(
+        error(&with("[[plugin]]\ndsh = \"./d.ts\"\npolicy = true\n")),
+        "5:7: a DSH plugin cannot be the approval policy (`policy`): DSH's adapter judges no calls"
+    );
+    assert_eq!(
         error(&with("[builtins]\ntools = \"all\"\n")),
         "5:9: tools \"all\": \"coding\" or \"read-only\""
     );

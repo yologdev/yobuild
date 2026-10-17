@@ -747,6 +747,7 @@ async fn the_handoff_example_asks_without_waiting_and_the_answer_starts_the_next
         ex.join("handoff.toml").display().to_string(),
         "--scripted".to_owned(),
         ex.join("scripts/handoff.json").display().to_string(),
+        "--measure".to_owned(),
     ];
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let task = "Look at this folder and write notes.md about it.";
@@ -785,6 +786,16 @@ async fn the_handoff_example_asks_without_waiting_and_the_answer_starts_the_next
     let second = second_prompt.unwrap_or_default();
     assert!(second.starts_with("[Owner's answer to #1]"), "{second}");
     assert!(dir.path().join("notes.md").exists(), "run 2 wrote notes.md");
+    // Each run's plugin time and runtime memory (`--measure`).
+    let measured = facts
+        .iter()
+        .filter(|f| f.starts_with("Plugin time this run: "))
+        .count();
+    assert_eq!(measured, 2, "{facts:?}");
+    assert!(
+        facts.iter().any(|f| f.contains("Runtime memory: pi ")),
+        "{facts:?}"
+    );
     let facts: Vec<&String> = facts.iter().filter(|f| f.starts_with("Facts:")).collect();
     assert_eq!(facts.len(), 2, "{facts:?}");
     assert!(facts[1].contains("new: notes.md"), "{facts:?}");

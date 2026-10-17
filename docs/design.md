@@ -47,7 +47,8 @@ prompt = "prompts/handoff.md"        # system prompt; yobuild run fills in {cwd}
 max_turns  = 80
 max_tokens = 4_000_000               # per run
 max_minutes = 30
-budget_usd = 2.0                     # dollars per run; refused if the model has no price
+budget_usd = 1.0                     # dollars per run; refused if the model has no price
+session_budget_usd = 2.0             # dollars for the whole session, across runs
 
 # Plugins, by ecosystem. Versions pinned, or a local path.
 [[plugin]]
@@ -80,6 +81,7 @@ report    = "handoff"                # or a list of required sections
 facts     = true                     # host-counted facts after each report
 gate      = "allow-list"             # the approval gate (the default); "off" to disable
 scratch   = true                     # a scratch dir the gate leaves alone
+tools     = "coding"                 # yoagent's six tools (the default), or "read-only"
 
 [dsh]
 host_services = false                # DSH's own fs/attachments/credentials/… for plugins that need them
@@ -223,10 +225,12 @@ Rules:
   names its scratch folder); `config` is a table (dates become text).
 - **Frontends**: `phone` needs `web`; the terminal or the web, not both.
 - **Plugins**: each `[[plugin]]` names exactly one of `pi`, `dsh`, `rutis`
-  (a local file, with its `runtime`: node, bun, python, go), and its own
-  `config`. Each `[[mcp]]` names exactly one of `npm` (stdio, with `args`
+  (a local file, with its `runtime`: node, bun, python, go), its own
+  `config`, and `policy = true` when it is the agent's approval policy (a
+  pi or rutis plugin; §7). Each `[[mcp]]` names exactly one of `npm` (stdio, with `args`
   and `env`) or `url` (HTTP, with `headers`).
-- **A budget needs a price.** `budget_usd` (dollars, more than zero) uses
+- **A budget needs a price.** `budget_usd` (dollars per run, more than
+  zero) and `session_budget_usd` (across the session's runs) use
   yoagent's `Budget::for_model` with the bundled price table, which
   `yobuild run` enables once at start (`prices::enable_bundled()`); reading
   the manifest looks the price up without enabling anything. A manifest
@@ -329,8 +333,8 @@ Inherited from yoagent and the handoff work, and kept on by default:
   required extension in the Rust process, an allow-list: each program it
   lets run has a list of options, and what it writes, deletes or runs is
   judged; anything it does not know asks. A gate written as a plugin (the pi
-  example) needs `require_policy`, so a run starting while that plugin is
-  down denies every tool call.
+  example) needs `require_policy` — `policy = true` on its `[[plugin]]`
+  (§7) — so a call made while that plugin is down is denied.
 - **Questions are never answered for the owner**; with no frontend, the
   safe default (deny, skip).
 - **Private homes**: DSH's services get a home of their own (`DshHome`);
@@ -353,10 +357,10 @@ Moved from yoagent in M0 (`integrations/yoagent-frontend/`, its examples,
 | In yobuild now | Becomes |
 |---|---|
 | `src/frontend/` (`yobuild::frontend`), `frontend/web/`, `frontend/plugins/`, `tests/` | stays (M1: one crate) |
-| `examples/handoff_agent.rs`, `coding_agent.rs`, `minimal_browser.rs` | manifests `examples/handoff.toml`, `coding.toml`, `minimal.toml` (M2a; see "The examples as manifests" above for what a manifest gains) |
+| `examples/handoff_agent.rs`, `coding_agent.rs`, `minimal_browser.rs` | manifests `examples/handoff.toml`, `coding.toml`, `minimal.toml` (M2a; `coding_agent.rs` stays for `--watch`; see "The examples as manifests" below for what a manifest gains) |
 | `frontend/plugins/pi-extensions/confirm-dangerous.ts` and its tests | `yobuild::builtins::gate` (M1; the TypeScript version stays as an example) |
-| `scripts/try-handoff.sh`, `try-coding-agent.sh` | `yobuild run` (M2a) |
-| CI: `check` (pty check, handoff demo) | grows with the built-ins and manifests |
+| `scripts/try-handoff.sh`, `try-coding-agent.sh` | `try-handoff.sh` runs `yobuild run examples/handoff.toml` (M2a); `try-coding-agent.sh` still runs `coding_agent` |
+| CI: `check` (pty checks, the examples' demos in `cli_test`) | grows with the built-ins and manifests |
 
 Stays in yoagent: the loop, providers, tools, `Extension`; yoagent-rutis
 (bridge, pi and DSH adapters, the compatibility matrix and its probe);
@@ -374,17 +378,27 @@ manifest nor `yobuild run` has yet. What a manifest gained for them:
 - **Which of yoagent's tools** (`minimal_browser`: reading only, in the
   agent's folder). `[builtins] tools = "coding"` (the default: yoagent's
   six — bash, read, write, edit, list, search) or `"read-only"` (read,
-  list, search; paths confined to the agent's folder).
+  list, search; paths confined to the agent's folder). Only yoagent's own
+  tools: plugin and MCP tools, and `ask_owner`, are what their entries
+  give, so an agent with plugins is not read-only.
 - **A budget for the whole session** (`handoff_agent`: $2 across runs).
   `[limits] session_budget_usd = 2.0`, beside `budget_usd` (per run);
   either, both, or neither; refused for an unpriced model, like
   `budget_usd`.
 - **A plugin that is the agent's approval policy** (`coding_agent`: the pi
-  extension `confirm-dangerous.ts`). `policy = true` on its `[[plugin]]`:
-  no run starts while no policy plugin is up — a run that would start
-  without one denies every call instead of running unguarded
-  (yoagent-rutis's `require_policy`, for all plugins at once). Usually
-  with `gate = "off"`: the plugin is the gate.
+  extension `confirm-dangerous.ts`). `policy = true` on its `[[plugin]]`
+  turns on yoagent-rutis's `require_policy`: runs start, but while no
+  plugin handler judging calls (`before_tool`) is up, every tool call is
+  denied rather than run unjudged — fail closed (§6). It is for all
+  plugins at once, not the flagged one: the pi adapter judges calls
+  whenever any pi extension is loaded, so with pi the guarantee is "the
+  pi runtime is up", not "this extension judged". A policy that fails or
+  does not answer denies the call; its wait is the dialogs' (`UI_TIMEOUT`)
+  plus 30 s, so the owner can answer the question it asks. Refused on a
+  DSH plugin: DSH's adapter judges no calls, so every call would be
+  denied. Usually with `gate = "off"` — the plugin is the gate; with both,
+  a call may be asked about twice. `gate = "off"` with no policy plugin
+  leaves nothing judging calls: allowed, for an agent in a sandbox.
 - **The UI plugins** (`todo-plan.ts`, `search-links.ts`: browser drawing,
   offered through the `frontend` service) are rutis plugins
   (`rutis = "../frontend/plugins/todo-plan.ts"`, `runtime = "node"`),
@@ -402,7 +416,11 @@ run 2 starts; it writes `notes.md`; two reports) runs as a CI test that
 starts `yobuild run examples/handoff.toml --scripted … --web 127.0.0.1:0`
 and answers over the page's WebSocket, as the web tests do — no flag
 only a test would use. The coding demo runs `--once`: its pi policy,
-with nobody there, blocks `rm -rf build`. The minimal one reads.
+with nobody there, blocks `rm -rf build`. The minimal one reads. The
+terminal UI on a pty stays checked through `coding_agent.rs`
+(`terminal_pty.py`: pi's question answered from the keyboard) and
+`yobuild run` on the echo fixture (`run_terminal_pty.py`); `coding.toml`
+in a pty is not yet.
 
 ## 8. Testing
 
