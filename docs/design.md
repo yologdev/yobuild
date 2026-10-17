@@ -57,7 +57,7 @@ allow = ["todo"]                     # tools the gate lets run without asking (s
 [[plugin]]
 dsh    = "dsh-free-search@0.8.1"
 config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }
-allow  = ["multi_search", "web_search"]
+allow  = ["multi_search", "research"]
 
 [[plugin]]
 rutis = "plugins/word_count.ts"      # a local TS/Bun/Python/Go plugin
@@ -290,8 +290,9 @@ small, and it has no opinion about the task.
 ## 4. Plugins: resolve, install, vet
 
 - **Until M2b**, `yobuild run` installs nothing: a pinned package must
-  already be installed at exactly its version — pi packages, stdio MCP
-  servers and the rutis runtime in `node_modules/` beside the manifest, DSH
+  already be installed at exactly its version — pi packages and stdio MCP
+  servers in `node_modules/` beside the manifest, a rutis plugin's runtime
+  in its own package, DSH
   plugins in `adapters/dsh` (`--no-save`) — or the run is refused, naming
   the `npm install` to do. It checks what it can before starting: a DSH
   package's bundle patch and imports, its peers installed, and once the DSH
@@ -361,13 +362,14 @@ Stays in yoagent: the loop, providers, tools, `Extension`; yoagent-rutis
 (bridge, pi and DSH adapters, the compatibility matrix and its probe);
 yoagent-workers.
 
-### The examples as manifests (proposed)
+### The examples as manifests
 
-`handoff_agent.rs`, `coding_agent.rs` and `minimal_browser.rs` become
+`handoff_agent.rs`, `coding_agent.rs` and `minimal_browser.rs` became
 `examples/handoff.toml`, `coding.toml` and `minimal.toml`, each with its
-prompt file. Each `.rs` example is removed once its manifest does what it
-did, checked in CI. Four things the examples do that a manifest cannot
-say yet:
+prompt file and its scripted replies (`examples/scripts/`). The handoff
+and minimal `.rs` examples are gone; `coding_agent.rs` stays for its
+`--watch` (plugins reloaded as their files change), which neither a
+manifest nor `yobuild run` has yet. What a manifest gained for them:
 
 - **Which of yoagent's tools** (`minimal_browser`: reading only, in the
   agent's folder). `[builtins] tools = "coding"` (the default: yoagent's
@@ -384,22 +386,23 @@ say yet:
   (yoagent-rutis's `require_policy`, for all plugins at once). Usually
   with `gate = "off"`: the plugin is the gate.
 - **The UI plugins** (`todo-plan.ts`, `search-links.ts`: browser drawing,
-  offered through the `frontend` service). Nothing new: they are rutis
-  plugins (`rutis = "./plugins/todo-plan.ts"`, `runtime = "node"`). They
-  move to `examples/plugins/`, and `examples/` gets a `package.json`
-  (`@arcships/rutis-runtime`, and the pi packages the manifests pin, e.g.
-  `@juicesharp/rpiv-todo`) installed by
-  `scripts/try-coding-agent.sh --setup-only` — "installed beside the
-  manifest", as for any agent until M2b installs it.
+  offered through the `frontend` service) are rutis plugins
+  (`rutis = "../frontend/plugins/todo-plan.ts"`, `runtime = "node"`),
+  where they were. A rutis plugin runs in the Node runtime of its own
+  package — the nearest folder above it with a `package.json`, where its
+  imports resolve (rutis refuses a plugin whose Cordis is not its
+  runtime's) — one runtime per package. `examples/` has a `package.json`
+  of its own for the pi package a manifest pins (`@juicesharp/rpiv-todo`),
+  installed by `scripts/try-coding-agent.sh --setup-only`: "installed
+  beside the manifest", until M2b installs it.
 
 **The demos.** `--scripted` replaces the model; the owner is a test. The
 handoff demo (asks without waiting; the owner answers #1 after run 1, so
 run 2 starts; it writes `notes.md`; two reports) runs as a CI test that
 starts `yobuild run examples/handoff.toml --scripted … --web 127.0.0.1:0`
 and answers over the page's WebSocket, as the web tests do — no flag
-only a test would use. The coding demo's question for `rm -rf build`
-(the pi policy) is answered Block the same way; the terminal check
-(`run_terminal_pty.py`) moves to `coding.toml`.
+only a test would use. The coding demo runs `--once`: its pi policy,
+with nobody there, blocks `rm -rf build`. The minimal one reads.
 
 ## 8. Testing
 

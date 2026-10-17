@@ -182,9 +182,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             builder = builder.env("dsh", name, value);
         }
     }
-    if plan.rutis {
-        builder = builder.node("rutis", &manifest.dir);
-        runtimes.push(("rutis".into(), manifest.dir.clone()));
+    // Each rutis plugin's package, a runtime of its own.
+    for (at, dir) in plan.rutis.iter().enumerate() {
+        let name = plugins::rutis_runtime_name(at);
+        builder = builder.node(&name, dir);
+        runtimes.push((name, dir.clone()));
     }
     let mut host = builder
         .share("yoagent")

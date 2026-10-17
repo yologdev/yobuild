@@ -61,6 +61,7 @@ install() {
 }
 "$repo/scripts/copy-adapters.sh"
 install "$frontend/plugins"
+install "$repo/examples"
 install "$rutis_plugins/pi"
 install "$rutis_plugins/dsh"
 

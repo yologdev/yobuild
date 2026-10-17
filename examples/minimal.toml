@@ -1,0 +1,16 @@
+# The smallest agent (what examples/minimal_browser.rs was): reading tools
+# only, confined to the folder it runs in, in the browser. No plugins, no
+# Node.
+#
+#   DEEPSEEK_API_KEY=… yobuild run path/to/examples/minimal.toml
+
+[agent]
+name   = "minimal"
+model  = "deepseek/deepseek-flash"
+prompt = "./prompts/minimal.md"
+
+[builtins]
+tools = "read-only"
+
+[frontend]
+web = true

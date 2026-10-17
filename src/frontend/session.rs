@@ -274,7 +274,7 @@ impl Session {
     /// Ask, and keep the question open until it is answered — however long
     /// that takes, and with no frontend attached: one that connects later
     /// gets it in its `Hello`. For an agent working while its owner is away
-    /// (see the `handoff_agent` example). `Some(answer)` when a frontend
+    /// (see the handoff agent, `examples/handoff.toml`). `Some(answer)` when a frontend
     /// answered (`null` when the user dismissed it); `None` when nobody
     /// will: the question was withdrawn — a reset withdraws these, since
     /// they belong to the forgotten conversation — or the session ended. A

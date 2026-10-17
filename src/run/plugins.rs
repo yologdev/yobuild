@@ -28,8 +28,11 @@ pub(crate) struct Plan {
     pub pi: bool,
     /// Start the `dsh` runtime (`adapters/dsh`).
     pub dsh: bool,
-    /// Start the `rutis` runtime: Node, in the manifest's folder.
-    pub rutis: bool,
+    /// The rutis plugins' packages, each a Node runtime of its own
+    /// (`rutis-<index>`): a plugin runs in its package's, where its imports
+    /// resolve (and its Cordis: rutis refuses a plugin that resolves
+    /// another than its runtime's).
+    pub rutis: Vec<PathBuf>,
     /// Handlers the agent depends on (a TypeScript row runs before its
     /// async start-up is done).
     pub handlers: Vec<String>,
@@ -236,15 +239,20 @@ pub(crate) fn plan(
                     ));
                 }
                 exists(path).map_err(failed)?;
-                let mut row =
-                    Row::new(format!("plugin:{}", plugin.name), path.display()).runtime("rutis");
+                let package = package_of(path).map_err(failed)?;
+                let at = match plan.rutis.iter().position(|p| *p == package) {
+                    Some(at) => at,
+                    None => {
+                        rutis_runtime(&package, layout).map_err(failed)?;
+                        plan.rutis.push(package);
+                        plan.rutis.len() - 1
+                    }
+                };
+                let mut row = Row::new(format!("plugin:{}", plugin.name), path.display())
+                    .runtime(rutis_runtime_name(at));
                 if let Some(config) = config {
                     row = row.config(Json::Object(config));
                 }
-                if !plan.rutis {
-                    rutis_runtime(manifest, layout)?;
-                }
-                plan.rutis = true;
                 plan.rows.push(row);
             }
         }
@@ -400,12 +408,28 @@ fn dsh_rows_of(
         base.display(),
         p.spec()
     );
-    installed(p, &modules, &install)?;
+    let dir = installed(p, &modules, &install)?;
     let inspected = node_json(
         &layout.adapters.join("dsh/inspect-package.mjs"),
         &[&base, Path::new(p.name())],
     )?;
-    rows_of_bundle(&id, &inspected, config, &modules)
+    rows_of_bundle(&id, &inspected, config, &modules, &optional_peers(&dir)?)
+}
+
+/// The peers a package marks optional (`peerDependenciesMeta`): it works
+/// without them (a DSH package's browser-client peers, say).
+fn optional_peers(dir: &Path) -> Result<HashSet<String>, BoxError> {
+    let path = dir.join("package.json");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let manifest: Json =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(manifest["peerDependenciesMeta"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, meta)| meta["optional"] == Json::Bool(true))
+        .map(|(name, _)| name.clone())
+        .collect())
 }
 
 /// The rows of what DSH would install (`inspected`, from
@@ -416,6 +440,7 @@ fn rows_of_bundle(
     inspected: &Helper,
     config: Option<serde_json::Map<String, Json>>,
     modules: &Path,
+    optional: &HashSet<String>,
 ) -> Result<(Vec<Row>, Vec<String>), BoxError> {
     let errors = inspected.map("importErrors")?;
     if !errors.is_empty() {
@@ -434,7 +459,7 @@ fn rows_of_bundle(
         .into());
     }
     let peers = inspected.texts("peers")?;
-    for peer in &peers {
+    for peer in peers.iter().filter(|peer| !optional.contains(*peer)) {
         if !modules.join(peer).join("package.json").is_file() {
             return Err(format!("it needs {peer}, not installed in {}", modules.display()).into());
         }
@@ -473,9 +498,32 @@ fn rows_of_bundle(
     Ok((out, peers))
 }
 
-/// A rutis plugin's Node runtime: `@arcships/rutis-runtime` installed in the
-/// manifest's folder, at the version yobuild's own runtimes use.
-fn rutis_runtime(manifest: &Manifest, layout: &Layout) -> Result<(), BoxError> {
+/// The name of the runtime for the rutis plugins of package `at`
+/// (`Plan::rutis`).
+pub(crate) fn rutis_runtime_name(at: usize) -> String {
+    format!("rutis-{at}")
+}
+
+/// The package a rutis plugin belongs to: the nearest folder above it with
+/// a `package.json` (where Node resolves its imports).
+fn package_of(path: &Path) -> Result<PathBuf, BoxError> {
+    path.parent()
+        .into_iter()
+        .flat_map(Path::ancestors)
+        .find(|dir| dir.join("package.json").is_file())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            format!(
+                "a rutis plugin runs in the Node runtime of its package: no package.json above {}",
+                path.display()
+            )
+            .into()
+        })
+}
+
+/// A rutis plugin's Node runtime: `@arcships/rutis-runtime` installed in its
+/// package (`dir`), at the version yobuild's own runtimes use.
+fn rutis_runtime(dir: &Path, layout: &Layout) -> Result<(), BoxError> {
     let pins = layout.frontend.join("plugins/package.json");
     let text = std::fs::read_to_string(&pins).map_err(|e| format!("{}: {e}", pins.display()))?;
     let version = serde_json::from_str::<Json>(&text)
@@ -485,11 +533,11 @@ fn rutis_runtime(manifest: &Manifest, layout: &Layout) -> Result<(), BoxError> {
         .ok_or_else(|| format!("{}: no {RUTIS_RUNTIME}", pins.display()))?;
     let package = Package::new(RUTIS_RUNTIME, &version)?;
     let install = format!(
-        "a rutis plugin runs in a Node runtime in the manifest's folder: npm install {} in {}",
+        "a rutis plugin runs in a Node runtime in its package: npm install {} in {}",
         package.spec(),
-        manifest.dir.display()
+        dir.display()
     );
-    installed(&package, &manifest.dir.join("node_modules"), &install)?;
+    installed(&package, &dir.join("node_modules"), &install)?;
     Ok(())
 }
 
@@ -562,6 +610,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("p.ts");
         std::fs::write(&file, "").unwrap();
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
         let cases = [
             (
                 String::from("[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"bun\"\n"),
@@ -577,7 +626,7 @@ mod tests {
             ),
             (
                 "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\n".into(),
-                "a rutis plugin runs in a Node runtime in the manifest's folder: npm install @arcships/rutis-runtime@",
+                "a rutis plugin runs in a Node runtime in its package: npm install @arcships/rutis-runtime@",
             ),
         ];
         for (text, expected) in cases {
@@ -597,7 +646,7 @@ mod tests {
         std::fs::write(dir.path().join("pi.ts"), "").unwrap();
         std::fs::write(dir.path().join("dsh.ts"), "").unwrap();
         let none = plan_of(dir.path(), "").unwrap();
-        assert!(!none.pi && !none.dsh && !none.rutis && none.rows.is_empty());
+        assert!(!none.pi && !none.dsh && none.rutis.is_empty() && none.rows.is_empty());
         assert!(none.handlers.is_empty() && none.notes.is_empty());
         // A plugin named like yobuild's own rows does not replace them.
         let plan = plan_of(
@@ -605,7 +654,7 @@ mod tests {
             "[[plugin]]\nname = \"dsh\"\ndsh = \"./dsh.ts\"\nconfig = { a = 1 }\n[[plugin]]\nname = \"pi\"\npi = \"./pi.ts\"\n",
         )
         .unwrap();
-        assert!(plan.pi && plan.dsh && !plan.rutis);
+        assert!(plan.pi && plan.dsh && plan.rutis.is_empty());
         // The adapters' handler names: their usual ones, made unguessable.
         assert_eq!(
             plan.handlers,
@@ -652,15 +701,28 @@ mod tests {
             { "name": "@d/b", "config": { "own": 2 } },
         ]);
         let config = json!({ "mine": true }).as_object().cloned();
-        let (built, peers) =
-            rows_of_bundle("plugin:p", &bundle(rows.clone()), config, modules.path()).unwrap();
+        let (built, peers) = rows_of_bundle(
+            "plugin:p",
+            &bundle(rows.clone()),
+            config,
+            modules.path(),
+            &HashSet::new(),
+        )
+        .unwrap();
         assert_eq!(peers, ["@d/peer"]);
         let ids: Vec<&str> = built.iter().map(Row::id).collect();
         assert_eq!(ids, ["plugin:p:a", "plugin:p:1"]);
         assert_eq!(built[0].config_json(), &json!({ "mine": true }));
         assert_eq!(built[1].config_json(), &json!({ "own": 2 }));
         // Without the plugin's config, each row keeps its own.
-        let (built, _) = rows_of_bundle("plugin:p", &bundle(rows), None, modules.path()).unwrap();
+        let (built, _) = rows_of_bundle(
+            "plugin:p",
+            &bundle(rows),
+            None,
+            modules.path(),
+            &HashSet::new(),
+        )
+        .unwrap();
         assert_eq!(built[0].config_json(), &json!({ "own": 1 }));
     }
 
@@ -701,18 +763,61 @@ mod tests {
             for (key, v) in change.as_object().unwrap() {
                 value[key] = v.clone();
             }
-            let e = rows_of_bundle("plugin:p", &inspected(value), None, modules.path())
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_default();
+            let e = rows_of_bundle(
+                "plugin:p",
+                &inspected(value),
+                None,
+                modules.path(),
+                &HashSet::new(),
+            )
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
             assert!(e.contains(expected), "{change}: {e}");
         }
         let missing = inspected(json!({ "otherPatchOps": [], "peers": [], "rows": [] }));
-        let e = rows_of_bundle("plugin:p", &missing, None, modules.path())
+        let e = rows_of_bundle("plugin:p", &missing, None, modules.path(), &HashSet::new())
             .err()
             .unwrap()
             .to_string();
         assert_eq!(e, "node inspect: no \"importErrors\" in its answer");
+    }
+
+    #[test]
+    fn an_optional_peer_need_not_be_installed() {
+        let modules = tempfile::tempdir().unwrap();
+        let value = json!({
+            "importErrors": {}, "otherPatchOps": [], "peers": ["@d/ui"],
+            "rows": [{ "id": "a", "name": "@d/a" }],
+        });
+        assert!(rows_of_bundle(
+            "plugin:p",
+            &inspected(value.clone()),
+            None,
+            modules.path(),
+            &HashSet::new()
+        )
+        .is_err());
+        let optional: HashSet<String> = ["@d/ui".to_owned()].into();
+        let (_, peers) = rows_of_bundle(
+            "plugin:p",
+            &inspected(value),
+            None,
+            modules.path(),
+            &optional,
+        )
+        .unwrap();
+        assert_eq!(peers, ["@d/ui"]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{ "peerDependenciesMeta": { "@d/ui": { "optional": true }, "@d/core": {} } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            optional_peers(dir.path()).unwrap(),
+            ["@d/ui".to_owned()].into()
+        );
     }
 
     #[test]
@@ -730,6 +835,15 @@ mod tests {
     fn a_rutis_plugin_runs_beside_the_manifest_with_the_rutis_runtime() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("p.ts"), "").unwrap();
+        // No package above it: refused.
+        let e = plan_of(
+            dir.path(),
+            "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\n",
+        )
+        .err()
+        .unwrap();
+        assert!(e.contains("no package.json above"), "{e}");
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
         let pins = Layout::default().frontend.join("plugins/package.json");
         let pins: Json = serde_json::from_str(&std::fs::read_to_string(pins).unwrap()).unwrap();
         let version = pins["dependencies"][RUTIS_RUNTIME].as_str().unwrap();
@@ -745,7 +859,8 @@ mod tests {
             "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\nconfig = { a = 1 }\n",
         )
         .unwrap();
-        assert!(plan.rutis && !plan.pi && !plan.dsh);
+        assert_eq!(plan.rutis, [dir.path().to_path_buf()]);
+        assert!(!plan.pi && !plan.dsh);
         assert_eq!(plan.rows.len(), 1);
         assert_eq!(plan.rows[0].id(), "plugin:p");
         assert_eq!(plan.rows[0].config_json(), &json!({ "a": 1 }));
