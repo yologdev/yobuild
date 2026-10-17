@@ -6,6 +6,7 @@ import { jsonText, markdownParts, Questions, runEndLine } from './lib.js'
 test('a value with a big integer still reads as JSON text', () => {
   assert.equal(jsonText({ id: 2n ** 64n, n: 1 }), '{"id":"18446744073709551616","n":1}')
   assert.equal(jsonText('x'), '"x"')
+  assert.equal(jsonText(1n), '"1"')
 })
 
 test('markdown keeps everything but bold, code and https links as text', () => {
