@@ -386,10 +386,13 @@ compiled binary with no Node or Python — smaller and faster to start than a
 JavaScript runtime, still out of process. A fit for a policy or tool that
 should not need Node but is not worth a Rust part.
 
-**How to decide:** measure first. `yobuild run` should print per-plugin
-hook time and per-runtime memory (as the handoff demo prints loop + policy
-and tool time today), so the table above is applied to numbers, not
-guesses.
+**How to decide:** measure first. `yobuild run` says, after each run,
+each plugin handler's time per hook and per tool (measured at the bridge:
+for a language plugin, the round trip to its runtime) and each plugin
+runtime's memory, so the table above is applied to numbers, not guesses.
+For example, a scripted run with a pi and a DSH fixture: "Plugin time this
+run: pi-extensions 23 ms (before_tool 2× 11 ms …); dsh-tools 11 ms (…).
+Runtime memory: pi 335 MB, dsh 157 MB."
 
 ## 10. Later: agents that extend themselves
 

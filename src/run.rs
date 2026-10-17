@@ -15,6 +15,7 @@
 //! read relative paths from there, so the gate, facts and bash do too.
 
 pub(crate) mod allowed;
+pub(crate) mod measure;
 pub(crate) mod plugins;
 pub(crate) mod script;
 
@@ -147,14 +148,18 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // The runtimes and their plugins.
     let plan = &checked.plan;
     let mut builder = PluginHost::builder();
+    // Each runtime and its folder: whose memory is said after each run.
+    let mut runtimes: Vec<(String, PathBuf)> = Vec::new();
     if terminal {
         // The terminal UI reads the keyboard: its runtime keeps the terminal.
-        builder = builder
-            .node("ui", layout.frontend.join("plugins"))
-            .terminal("ui");
+        let dir = layout.frontend.join("plugins");
+        builder = builder.node("ui", &dir).terminal("ui");
+        runtimes.push(("ui".into(), dir));
     }
     if plan.pi {
-        builder = builder.node("pi", layout.adapters.join("pi"));
+        let dir = layout.adapters.join("pi");
+        builder = builder.node("pi", &dir);
+        runtimes.push(("pi".into(), dir));
     }
     // DSH's own host services, on request: in a home of their own.
     let dsh_home = match plan.dsh && manifest.dsh.host_services {
@@ -162,13 +167,16 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         false => None,
     };
     if plan.dsh {
-        builder = builder.node("dsh", layout.adapters.join("dsh"));
+        let dir = layout.adapters.join("dsh");
+        builder = builder.node("dsh", &dir);
+        runtimes.push(("dsh".into(), dir));
         for (name, value) in dsh_home.iter().flat_map(DshHome::env) {
             builder = builder.env("dsh", name, value);
         }
     }
     if plan.rutis {
         builder = builder.node("rutis", &manifest.dir);
+        runtimes.push(("rutis".into(), manifest.dir.clone()));
     }
     let mut host = builder
         .share("yoagent")
@@ -237,6 +245,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     }
     if let Some(budget) = checked.budget {
         agent = agent.with_extension(budget);
+    }
+    // Last: each run's plugin time and the runtimes' memory (design §9).
+    if !runtimes.is_empty() {
+        let registry = bridge.registry().clone();
+        agent = agent.with_extension(measure::Measure::new(session.clone(), registry, runtimes));
     }
     eprintln!("{name}: ready in {:.1}s", started.elapsed().as_secs_f64());
 
