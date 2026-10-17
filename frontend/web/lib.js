@@ -68,6 +68,8 @@ export function runEndLine({ run, outcome, error, totalCostUsd }) {
       return `run ${run} stopped${cost}`
     case 'rejected':
       return `run ${run} refused: ${error ?? 'input rejected'}`
+    case 'stopped':
+      return `run ${run} stopped early: ${error ?? 'a limit'}${cost}`
     default:
       return `run ${run} failed: ${error ?? 'unknown error'}${cost}`
   }

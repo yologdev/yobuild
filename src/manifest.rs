@@ -193,6 +193,14 @@ pub struct Package {
 }
 
 impl Package {
+    /// A package at an exact version, checked as a manifest's are.
+    pub fn new(name: &str, version: &str) -> Result<Package, String> {
+        match source(&format!("{name}@{version}"), Path::new("/"))? {
+            Source::Package(package) if package.name == name => Ok(package),
+            _ => Err(format!("{name:?} is not an npm package name")),
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

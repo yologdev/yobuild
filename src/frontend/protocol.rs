@@ -103,6 +103,9 @@ pub enum RunOutcome {
     Aborted,
     /// Its input was rejected (an input check).
     Rejected,
+    /// Stopped before it finished, by a limit (turns, tokens, time,
+    /// budget), loop detection or an extension; `error` is the reason.
+    Stopped,
     /// The model or the agent failed.
     Error,
 }

@@ -1254,7 +1254,11 @@ async fn a_call_that_ran_makes_its_new_files_the_agents() {
     // The clone made before the run shares what its hooks recorded.
     let check = gate.check("bash", &json!({ "command": "rm new.txt" }));
     assert!(check.question().is_none(), "{check:?}");
-    // The owner replaces it: no longer the file the agent made.
+    // The owner replaces it: no longer the file the agent made. (After a
+    // filesystem clock tick: Linux may give the new file the old one's
+    // inode, and only its birth time, kept at that clock's grain, tells
+    // them apart — a replacement within one tick is the gate's known limit.)
+    std::thread::sleep(std::time::Duration::from_millis(20));
     std::fs::remove_file(dir.path().join("new.txt")).unwrap();
     std::fs::write(dir.path().join("other"), "the owner's").unwrap();
     std::fs::write(dir.path().join("new.txt"), "the owner's").unwrap();

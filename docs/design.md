@@ -59,7 +59,7 @@ config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }
 
 [[plugin]]
 rutis = "plugins/word_count.ts"      # a local TS/Bun/Python/Go plugin
-runtime = "bun"
+runtime = "node"                     # yobuild run: node only, for now
 name  = "words"                      # optional: the default is the package's name or the file's stem
 
 # MCP servers, through yoagent's own MCP client. Same rules as plugins.
@@ -184,6 +184,14 @@ small, and it has no opinion about the task.
 
 ## 4. Plugins: resolve, install, vet
 
+- **Until M2b**, `yobuild run` installs nothing: a pinned package must
+  already be installed at exactly its version — pi packages, stdio MCP
+  servers and the rutis runtime in `node_modules/` beside the manifest, DSH
+  plugins in `adapters/dsh` (`--no-save`) — or the run is refused, naming
+  the `npm install` to do. It checks what it can before starting: a DSH
+  package's bundle patch and imports, its peers installed, and once the DSH
+  runtime runs, the services its rows inject (a missing one is refused,
+  not left waiting).
 - **Install** per ecosystem into a cache (`~/.yobuild/plugins/<ecosystem>/<lock-hash>/`),
   from a lockfile yobuild writes next to the manifest (`agent.lock`), so a
   checked agent runs the same bytes later. Installs never run package

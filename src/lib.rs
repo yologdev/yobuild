@@ -10,10 +10,11 @@
 //!   folder.
 //!
 //! - [`manifest`]: an agent in one TOML file, read strictly.
+//! - [`run`]: an agent from its manifest (the `yobuild run` command).
 //!
-//! `yobuild run` and MCP servers are coming (see `docs/roadmap.md`). Not
-//! published yet and without an API promise.
+//! Not published yet and without an API promise.
 
 pub mod frontend;
 pub mod manifest;
 pub mod parts;
+pub mod run;

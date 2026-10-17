@@ -48,6 +48,19 @@ pub struct Row {
 }
 
 impl Row {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[cfg(test)]
+    pub(crate) fn config_json(&self) -> &Json {
+        &self.config
+    }
+
     pub fn new(id: impl Into<String>, name: impl ToString) -> Self {
         Row {
             id: id.into(),
@@ -479,43 +492,75 @@ impl PluginHost {
         self.wait_running(started).await
     }
 
+    /// What of the loaded plugins does not run now, each with why: a row
+    /// that failed or stopped itself; and, per runtime, the rows waiting —
+    /// a runtime that died leaves its rows `Pending`, and nothing restarts
+    /// it — said once for the runtime, without their passing states.
+    /// `except` rows are left out (one the caller watches itself).
+    pub fn stopped(&self, except: &[&str]) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut waiting: Vec<(String, Vec<&str>)> = Vec::new();
+        for row in self
+            .rows
+            .iter()
+            .filter(|r| !except.contains(&r.id.as_str()))
+        {
+            match self.state(&row.id) {
+                Started::Running => {}
+                Started::Failed(why) => out.push(why),
+                Started::Waiting(_) => {
+                    let runtime = row.runtime.clone().unwrap_or_else(|| "?".into());
+                    match waiting.iter_mut().find(|(r, _)| *r == runtime) {
+                        Some((_, rows)) => rows.push(&row.id),
+                        None => waiting.push((runtime, vec![&row.id])),
+                    }
+                }
+            }
+        }
+        for (runtime, rows) in waiting {
+            out.push(format!(
+                "the `{runtime}` runtime is not running (its plugins wait: {})",
+                rows.join(", ")
+            ));
+        }
+        out
+    }
+
+    /// Whether the row `id` runs, waits, or failed (and why).
+    fn state(&self, id: &str) -> Started {
+        let stopped = || Started::Failed(format!("plugin `{id}` stopped itself"));
+        match self.loader.get(id).map(|info| info.status) {
+            Some(EntryStatus::Running(s)) if s.state == FiberState::Active => Started::Running,
+            Some(EntryStatus::Running(s)) if s.state == FiberState::Failed => {
+                Started::Failed(format!("plugin `{id}` failed: {:?}", s.error))
+            }
+            Some(EntryStatus::Running(s)) if s.state == FiberState::Disposed => stopped(),
+            Some(EntryStatus::Unresolved(e)) => {
+                Started::Failed(format!("plugin `{id}` cannot load: {e}"))
+            }
+            // Copies inside instanced groups only, which `PluginHost`
+            // does not create.
+            Some(EntryStatus::Stopped) => stopped(),
+            Some(EntryStatus::Disabled) => Started::Failed(format!("plugin `{id}` is disabled")),
+            Some(EntryStatus::Running(s)) => Started::Waiting(format!("{id} ({:?})", s.state)),
+            // `EntryStatus` is non-exhaustive.
+            Some(other) => Started::Waiting(format!("{id} ({other:?})")),
+            None => Started::Waiting(format!("{id} (not loaded)")),
+        }
+    }
+
     /// Wait until these rows run; fail naming those that failed or did not.
     async fn wait_running(&self, ids: &[String]) -> Result<(), BoxError> {
         let deadline = tokio::time::Instant::now() + LOAD_TIMEOUT;
         loop {
             let mut waiting = Vec::new();
             for id in ids {
-                let stopped = || -> BoxError { format!("plugin `{id}` stopped itself").into() };
-                match self.loader.get(id).map(|info| info.status) {
-                    Some(EntryStatus::Running(s)) if s.state == FiberState::Active => {}
-                    Some(EntryStatus::Running(s)) if s.state == FiberState::Failed => {
-                        return Err(format!("plugin `{id}` failed: {:?}", s.error).into());
-                    }
+                match self.state(id) {
+                    Started::Running => {}
                     // States that do not come back on their own: say so now
                     // rather than at the timeout.
-                    Some(EntryStatus::Running(s)) if s.state == FiberState::Disposed => {
-                        return Err(stopped());
-                    }
-                    Some(EntryStatus::Unresolved(e)) => {
-                        return Err(format!("plugin `{id}` cannot load: {e}").into());
-                    }
-                    // Copies inside instanced groups only, which `PluginHost`
-                    // does not create.
-                    Some(EntryStatus::Stopped) => return Err(stopped()),
-                    Some(EntryStatus::Disabled) => {
-                        return Err(format!("plugin `{id}` is disabled").into());
-                    }
-                    status => {
-                        waiting.push(format!(
-                            "{id} ({})",
-                            match status {
-                                Some(EntryStatus::Running(s)) => format!("{:?}", s.state),
-                                // `EntryStatus` is non-exhaustive.
-                                Some(other) => format!("{other:?}"),
-                                None => "not loaded".into(),
-                            }
-                        ));
-                    }
+                    Started::Failed(why) => return Err(why.into()),
+                    Started::Waiting(what) => waiting.push(what),
                 }
             }
             if waiting.is_empty() {
@@ -559,6 +604,13 @@ impl Resolver for Routed {
             })
         })
     }
+}
+
+/// How far a row got.
+enum Started {
+    Running,
+    Waiting(String),
+    Failed(String),
 }
 
 #[cfg(test)]

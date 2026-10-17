@@ -58,7 +58,7 @@ paths).
 push). The yoagent-rutis PR above continues alongside M2a (decided
 2026-10-16): M2a does not need it; M2b's `yobuild check` does.
 
-## M2a — Manifest and runner
+## M2a — Manifest and runner (in progress: the manifest #9, `yobuild run` #11)
 
 - Manifest schema (§2 of the design), in TOML (decided 2026-10-16),
   strict parsing, good errors.
@@ -66,13 +66,14 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
 - `model = "provider/id"` → `ModelConfig` (design §2, Models); an unknown
   provider is an error listing the known ones.
 - `yobuild run` with plugins that are local paths or already installed —
-  the plugin folders with their `node_modules` that the examples here use
-  today (`frontend/plugins/`, `adapters/`), installed by
-  hand — so M2a does not need M2b's cache: start
-  runtimes, load rows, connect `[[mcp]]` servers (yoagent's MCP client,
-  stdio and HTTP with headers), wire parts and frontend.
+  pi packages, stdio MCP servers and the rutis runtime in `node_modules/`
+  beside the manifest,
+  DSH plugins in `adapters/dsh`, installed by hand — so M2a does not need
+  M2b's cache: start runtimes, load rows, connect `[[mcp]]` servers
+  (yoagent's MCP client, stdio and HTTP with headers), wire parts and
+  frontend. (#11)
 - A scripted CI run of a manifest with an `[[mcp]]` entry, against a stdio
-  test server copied from yoagent's `tests/mcp_stdio_test.rs`.
+  test server (a bash script, `tests/fixtures/echo/`). (#11)
 - `yobuild run` prints per-plugin hook time and per-runtime memory
   (design §9), so the decision to promote a part to Rust rests on
   measurements.

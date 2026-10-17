@@ -128,6 +128,10 @@ pub struct AskOwner {
 }
 
 impl AskOwner {
+    /// The tool's name. The gate does not free it by default: free it where
+    /// this tool is added (`Gate::with_free_tools([AskOwner::TOOL])`).
+    pub const TOOL: &'static str = "ask_owner";
+
     pub fn new(session: Session) -> Self {
         Self {
             session,
@@ -197,7 +201,7 @@ impl AskOwner {
 #[async_trait::async_trait]
 impl AgentTool for AskOwner {
     fn name(&self) -> &str {
-        "ask_owner"
+        Self::TOOL
     }
     fn label(&self) -> &str {
         "Ask the owner"

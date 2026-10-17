@@ -40,6 +40,10 @@ test('a run line says how the run ended', () => {
   assert.equal(runEndLine({ run: 2, outcome: 'aborted', error: 'aborted' }), 'run 2 stopped')
   assert.equal(runEndLine({ run: 3, outcome: 'rejected', error: 'input rejected: no' }), 'run 3 refused: input rejected: no')
   assert.equal(runEndLine({ run: 4, outcome: 'error', error: 'overloaded' }), 'run 4 failed: overloaded')
+  assert.equal(
+    runEndLine({ run: 5, outcome: 'stopped', error: '[Agent stopped: max turns (1) reached]' }),
+    'run 5 stopped early: [Agent stopped: max turns (1) reached]',
+  )
 })
 
 import { diffRows, safeUrl, toolView, viewTitle } from './lib.js'

@@ -131,19 +131,48 @@ pub(super) fn system_binary(path: &str) -> bool {
     Path::new(path).is_absolute() && SYSTEM.iter().any(|dir| resolved.starts_with(dir))
 }
 
-/// A file's device and inode (not following a symlink at the end).
+/// Which file a path names: device and inode, and when that file was made.
+/// A filesystem reuses a deleted file's inode (Linux's do at once), so the
+/// inode alone could make a file the owner wrote in place of the agent's
+/// pass for the agent's. Its birth time tells them apart; where the
+/// filesystem keeps none (or reports 0), its change time does: the gate
+/// records a file again after each free call that changes it, so an edit
+/// keeps it the agent's. Either time is only as fine as the filesystem's
+/// clock (a millisecond or so; a second on some): a file replaced within
+/// that, at the same inode, still reads as the same file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Identity {
+    dev: u64,
+    ino: u64,
+    made: (i64, i64),
+}
+
+/// A file's identity (not following a symlink at the end).
 #[cfg(unix)]
-pub(super) fn identity(path: &Path) -> Option<(u64, u64)> {
+pub(super) fn identity(path: &Path) -> Option<Identity> {
     use std::os::unix::fs::MetadataExt;
-    std::fs::symlink_metadata(path)
-        .ok()
-        .map(|m| (m.dev(), m.ino()))
+    let m = std::fs::symlink_metadata(path).ok()?;
+    // A birth time of 0 is a filesystem that keeps none (some report it).
+    let born = m.created().ok().filter(|t| *t != std::time::UNIX_EPOCH);
+    let made = match born.map(|t| t.duration_since(std::time::UNIX_EPOCH)) {
+        Some(Ok(after)) => (after.as_secs() as i64, i64::from(after.subsec_nanos())),
+        Some(Err(before)) => {
+            let d = before.duration();
+            (-(d.as_secs() as i64), -i64::from(d.subsec_nanos()))
+        }
+        None => (m.ctime(), m.ctime_nsec()),
+    };
+    Some(Identity {
+        dev: m.dev(),
+        ino: m.ino(),
+        made,
+    })
 }
 
 /// Elsewhere no identity is known: nothing is ever the agent's own, so the
 /// gate asks more, never less.
 #[cfg(not(unix))]
-pub(super) fn identity(_path: &Path) -> Option<(u64, u64)> {
+pub(super) fn identity(_path: &Path) -> Option<Identity> {
     None
 }
 

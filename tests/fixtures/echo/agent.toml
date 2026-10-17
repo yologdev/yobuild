@@ -1,0 +1,20 @@
+# A small agent for `yobuild run`'s CI check: one MCP tool (a bash
+# server: a path, which `npm` takes as well as a pinned package), the
+# model's replies from script.json:
+#
+#   cargo run -- run tests/fixtures/echo/agent.toml --scripted tests/fixtures/echo/script.json --once "echo hi"
+#
+# The gate is off: with `--once` nobody is there to allow the MCP tool, so
+# the gate would refuse it (tests/run_test.rs checks that it does).
+
+[agent]
+name  = "echoer"
+model = "deepseek/deepseek-flash"
+
+[[mcp]]
+npm  = "./server.sh"
+args = ["first"]
+env  = { MODE = "loud" }
+
+[parts]
+gate = "off"

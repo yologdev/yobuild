@@ -31,13 +31,16 @@ use yoagent::extension::{
 };
 use yoagent::{ToolCallRequest, ToolDecision};
 
-use self::paths::{identity, locate, protected, real, single, Here};
+use self::paths::{identity, locate, protected, real, single, Here, Identity};
 use super::Scratch;
 use crate::frontend::{session::UI_TIMEOUT, Session, UiRequest};
 
 /// Tools that only read, free by default: yoagent's `read_file`,
-/// `list_files` and `search`, and this crate's `ask_owner`.
-pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "ask_owner"];
+/// `list_files` and `search`. Not [`AskOwner`](super::AskOwner)'s
+/// `ask_owner`: whoever adds that tool frees it
+/// (`with_free_tools([AskOwner::TOOL])`), so a plugin's tool of that name
+/// is not freed by its name alone.
+pub const READ_ONLY_TOOLS: [&str; 3] = ["read_file", "list_files", "search"];
 
 /// An extension that asks the owner before a tool call does anything it
 /// does not know to be harmless, and refuses it when nobody answers "Allow"
@@ -94,9 +97,12 @@ pub const READ_ONLY_TOOLS: [&str; 4] = ["read_file", "list_files", "search", "as
 ///
 /// The agent's own files are those created by calls the gate let through
 /// without asking (a call the owner allowed makes nothing the agent's):
-/// recorded after the call, only if they exist, as that very file (device and inode;
-/// a hard link to the owner's file under that name is the owner's). Where
-/// file identity is not known (not Unix), nothing is the agent's own.
+/// recorded after the call, only if they exist, as that very file
+/// (device, inode and when it was made — a hard link
+/// to the owner's file under that name is the owner's, and so is a file
+/// the owner wrote in its place), and recorded again after each free call
+/// that changes them. Where file identity is not known (not Unix), nothing
+/// is the agent's own.
 ///
 /// **Its folder must be the shell's:** relative paths are judged against
 /// the `cwd` given to [`Gate::new`], so the agent's `bash` tool and file
@@ -291,10 +297,10 @@ struct Rules {
     start: Here,
     scratch: Option<PathBuf>,
     free_tools: HashSet<String>,
-    /// Files the agent made this session, as the files they were (device
-    /// and inode): it may overwrite or delete them while they still are.
+    /// Files the agent made this session, as the files they were
+    /// ([`Identity`]): it may overwrite or delete them while they still are.
     /// Shared by every clone of the gate.
-    created: Arc<Mutex<HashMap<PathBuf, (u64, u64)>>>,
+    created: Arc<Mutex<HashMap<PathBuf, Identity>>>,
 }
 
 impl Rules {
@@ -337,7 +343,9 @@ impl Rules {
                     // A new file elsewhere too: one a program reads and runs
                     // (`~/.config/git/config`, a login item).
                     ask(format!("Change {file}, outside the project?"))
-                } else if writes && !path.exists() {
+                } else if !path.exists() || self.free(&path) {
+                    // Made, or the agent's own changed: recorded again (an
+                    // edit may alter its identity).
                     free(vec![path])
                 } else {
                     free(Vec::new())

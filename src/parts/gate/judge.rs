@@ -66,8 +66,13 @@ impl Ctx<'_> {
         path.starts_with(self.rules.start.physical()) || self.rules.free(path)
     }
 
-    fn created(&mut self, path: PathBuf) {
-        if !path.exists() {
+    /// Recorded as the agent's after the call: a path it makes, or one of
+    /// its own it changes — whose identity the change may alter (a new
+    /// file in its place; a new change time where the filesystem keeps no
+    /// birth time). Never one of the owner's: what is recorded was already
+    /// the agent's or is new.
+    fn record(&mut self, path: PathBuf) {
+        if !path.exists() || self.own(&path) {
             self.creates.push(path);
         }
     }
@@ -97,7 +102,7 @@ impl Ctx<'_> {
             false => self.plain(&path) && self.in_reach(&path),
         };
         ok_if(fine)?;
-        self.created(path);
+        self.record(path);
         Ok(())
     }
 
@@ -109,7 +114,7 @@ impl Ctx<'_> {
         }
         let path = self.path(w)?;
         ok_if(self.plain(&path) && self.in_reach(&path))?;
-        self.created(path);
+        self.record(path);
         Ok(())
     }
 
@@ -120,14 +125,21 @@ impl Ctx<'_> {
     pub fn touch(&mut self, w: &Word) -> Verdict {
         let path = self.path(w)?;
         match path.exists() {
-            true => ok_if(self.own(&path)),
+            true => {
+                ok_if(self.own(&path))?;
+                self.record(path);
+                Ok(())
+            }
             false => self.add_to(w),
         }
     }
 
     /// Changing `w`'s mode or owner: only the agent's own.
-    pub fn change(&self, w: &Word) -> Verdict {
-        ok_if(self.own(&self.path(w)?))
+    pub fn change(&mut self, w: &Word) -> Verdict {
+        let path = self.path(w)?;
+        ok_if(self.own(&path))?;
+        self.record(path);
+        Ok(())
     }
 
     /// Deleting `w` (or moving it away): only the agent's own.
@@ -140,7 +152,7 @@ impl Ctx<'_> {
     pub fn new_or_own(&mut self, w: &Word) -> Verdict {
         let path = self.path(w)?;
         ok_if(self.plain(&path) && (!path.exists() || self.rules.free(&path)))?;
-        self.created(path);
+        self.record(path);
         Ok(())
     }
 
