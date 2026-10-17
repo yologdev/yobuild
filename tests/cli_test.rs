@@ -353,15 +353,29 @@ mod web {
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
+            let mut out = BufReader::new(child.stdout.take().unwrap());
             let mut line = String::new();
-            BufReader::new(child.stdout.take().unwrap())
-                .read_line(&mut line)
-                .unwrap();
+            out.read_line(&mut line).unwrap();
+            // Keep reading whatever else it prints to stdout.
+            std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
             // "a: http://127.0.0.1:PORT/?t=TOKEN  (Ctrl+C to stop)"
             let url = line.split_whitespace().nth(1).expect("the URL");
             let ws = url.replace("http://", "ws://").replace("/?t=", "/ws?t=");
             tokio::time::sleep(late).await;
-            let (socket, _) = tokio_tungstenite::connect_async(ws).await.unwrap();
+            let socket = match tokio_tungstenite::connect_async(ws).await {
+                Ok((socket, _)) => socket,
+                // Why it is not there: what it said before it went.
+                Err(e) => {
+                    use std::io::Read;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let mut said = String::new();
+                    if let Some(mut err) = child.stderr.take() {
+                        let _ = err.read_to_string(&mut said);
+                    }
+                    panic!("cannot connect to the page ({e}); yobuild said:\n{said}");
+                }
+            };
             Page { child, socket }
         }
 
