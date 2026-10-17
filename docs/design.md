@@ -154,12 +154,20 @@ allow = ["read_text_file"]           # offered to the model as `files__read_text
   its handler could narrow that). The adapters' handler names are made
   per process and unguessable, so no plugin can take one first and pass
   for pi or DSH.
-- **Known limit (upstream):** pi's adapter looks a tool up again by name
-  when it is called, so an extension that registers the same name after
-  the run's tools were taken can run in the allowing one's place. Until
-  yoagent-rutis's adapter runs the tool it offered (asked for), pi's
-  per-extension scoping holds against mistakes, not against an extension
-  that means to take a name over.
+- **Limits for pi** (pi's extensions share one adapter and one Node
+  process):
+  - Until yoagent-rutis's pi adapter runs exactly the tools it offered
+    (yoagent PR #333, coming in 0.5.1), an extension that registers the
+    same name after the run's tools were taken could run in the allowing
+    one's place.
+  - A pi tool can call other pi tools itself (`ctx.executeTool`); those
+    calls never reach the gate (only pi's own handlers judge them). So
+    allowing a pi tool also allows what it calls — a code runner, all of
+    it. A host option restricting such calls to the calling extension's
+    own tools (or turning them off) is asked of yoagent-rutis; yobuild
+    will use "own extension".
+  - Per-extension trust guards against honest name clashes, not against a
+    hostile extension loaded in the same runtime: it shares the process.
 - **MCP:** an MCP server's names are scoped by their prefix: each is
   checked against that server's own list; a server's tools are the
   agent's own (fixed at start), and yoagent keeps those over a plugin's
