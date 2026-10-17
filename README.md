@@ -38,7 +38,7 @@ mostly wiring (a third is its scripted demo). yobuild turns the wiring into a ma
 (this one comes as `handoff.toml` in a later step of M2a: until then its prompt file
 is not there, its plugins must be installed by hand at these versions — the pi
 package with `--legacy-peer-deps`, as `frontend/plugins/.npmrc` does — and, with no
-`free_tools` key yet, the gate asks before each `todo` and search call):
+`allow` key yet, the gate asks before each `todo` and search call):
 
 ```toml
 [agent]
@@ -53,7 +53,7 @@ pi = "@juicesharp/rpiv-todo@2.12.0"
 dsh    = "dsh-free-search@0.8.1"
 config = { provider = "bing", bingMarket = "en-US" }
 
-[parts]
+[builtins]
 ask_owner = true          # questions that do not block the run
 report    = "handoff"     # Done / Waiting on you / Decisions / Next, then facts
 gate      = "allow-list"  # ask before anything not known to be harmless
