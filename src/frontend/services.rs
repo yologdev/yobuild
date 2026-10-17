@@ -30,12 +30,14 @@ use rutis_bridge::session::{self, host_key, Error, HostDispatch, Reply, Value};
 use serde_json::{json, Value as Json};
 use tokio_util::sync::CancellationToken;
 
+use crate::builtins::{AskOwner, Question};
 use crate::frontend::protocol::{ClientMessage, UiPlugin, UiRequest};
 use crate::frontend::session::{Session, UI_TIMEOUT};
 
 /// The service names, for the loader's catalog (`register_shared`).
 pub const FRONTEND: &str = "frontend";
 pub const UI: &str = "ui";
+pub const ASK_OWNER: &str = "ask_owner";
 
 /// Provide `frontend` and `ui` on `ctx` (the rutis root).
 pub fn provide(ctx: &Ctx, session: &Session) -> Result<(), CordisError> {
@@ -54,6 +56,58 @@ pub fn provide(ctx: &Ctx, session: &Session) -> Result<(), CordisError> {
         }),
     )?;
     Ok(())
+}
+
+/// Provide `ask_owner` on `ctx`: plugins ask the owner the way the tool
+/// does, without waiting (design §3). `ask(question, from?)` → `#N` at once;
+/// the answer reaches the agent as steering. Shares `ask`'s numbering.
+pub fn provide_ask_owner(ctx: &Ctx, ask: AskOwner) -> Result<(), CordisError> {
+    ctx.provide_as::<dyn HostDispatch>(
+        host_key(ASK_OWNER),
+        Arc::new(AskOwnerService {
+            ask,
+            runtime: ctx.handle().clone(),
+        }),
+    )?;
+    Ok(())
+}
+
+struct AskOwnerService {
+    ask: AskOwner,
+    runtime: tokio::runtime::Handle,
+}
+
+impl HostDispatch for AskOwnerService {
+    fn invoke(&self, method: &str, value: Value) -> Reply {
+        if method != "ask" {
+            return Err(invalid(format!(
+                "the ask_owner service has no method `{method}`"
+            )));
+        }
+        let mut args = args(value)?.into_iter();
+        let question = args
+            .next()
+            .ok_or_else(|| invalid("ask(question, from?): missing the question"))?
+            .json()?;
+        let mut question = Question::from_json(&question)
+            .map_err(|e| invalid(format!("ask(question, from?): {e}")))?;
+        match args.next().map(Value::json).transpose()? {
+            None | Some(Json::Null) => {}
+            Some(Json::String(from)) => {
+                question = question
+                    .asked_by(&from)
+                    .map_err(|e| invalid(format!("ask(question, from?): {e}")))?
+            }
+            Some(_) => return Err(invalid("ask(question, from?): from is a string")),
+        }
+        // Its wait for the answer runs on the host's runtime.
+        let _on = self.runtime.enter();
+        Ok(Value::Data(json!(self.ask.ask(question))))
+    }
+
+    fn methods(&self) -> Option<Json> {
+        Some(json!({ "ask": "sync" }))
+    }
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -350,6 +404,69 @@ mod tests {
             "too long for a Duration"
         );
         assert!(timeout(Some(json!("60s"))).is_err());
+    }
+
+    #[tokio::test]
+    async fn ask_owner_asks_without_waiting_and_numbers_with_the_tool() {
+        let (session, _driver) = Session::new(true);
+        let mut watching = session.connect();
+        let ask = AskOwner::new(session.clone());
+        // The tool's own question first: the service's is #2.
+        assert_eq!(
+            ask.ask(Question::new("Tool's?", "", Vec::new()).unwrap()),
+            1
+        );
+        let service = AskOwnerService {
+            ask: ask.clone(),
+            runtime: tokio::runtime::Handle::current(),
+        };
+        let asked = service
+            .invoke(
+                "ask",
+                list(vec![
+                    json!({ "question": "Which plan?", "options": ["A", "B"] }),
+                    json!("planner"),
+                ]),
+            )
+            .unwrap();
+        let Value::Data(n) = asked else {
+            panic!("a number")
+        };
+        assert_eq!(n, json!(2));
+        assert_eq!(ask.open_questions().count(), 2);
+        // It reached the frontend as the plugin's question.
+        let title = loop {
+            match watching.messages.recv().await.unwrap() {
+                ServerMessage::UiRequest { request, .. }
+                    if format!("{request:?}").contains("#2") =>
+                {
+                    break format!("{request:?}");
+                }
+                _ => {}
+            }
+        };
+        assert!(
+            title.contains("#2 Which plan? (asked by plugin planner)"),
+            "{title}"
+        );
+        // Wrong shapes are the plugin's error.
+        assert!(
+            error(service.invoke("ask", list(vec![json!({ "question": " " })])))
+                .contains("`question` is required")
+        );
+        assert!(error(
+            service.invoke("ask", list(vec![json!({ "question": "q", "choices": [] })]))
+        )
+        .contains("unknown key `choices`"));
+        assert!(
+            error(service.invoke("ask", list(vec![json!({ "question": "q" }), json!(3)])))
+                .contains("from is a string")
+        );
+        assert!(error(
+            service.invoke("ask", list(vec![json!({ "question": "q" }), json!("a\nb")]))
+        )
+        .contains("one line"));
+        assert!(error(service.invoke("withdraw", list(vec![]))).contains("no method `withdraw`"));
     }
 
     #[tokio::test]

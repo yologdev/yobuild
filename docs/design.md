@@ -277,7 +277,7 @@ without the manifest.
 
 | Part | Plugs in as | Where |
 |---|---|---|
-| `ask_owner` | a tool, and for plugins a host service (proposed, below); returns at once, the answer comes back as steering (mid-run, or starting the next run) | `yobuild::builtins::AskOwner` (M1) |
+| `ask_owner` | a tool, and for plugins a host service (below); returns at once, the answer comes back as steering (mid-run, or starting the next run) | `yobuild::builtins::AskOwner` (M1) |
 | `report` | an `Extension`: `on_stop` sends the agent back until the required sections are there | `yobuild::builtins::Report` (M1) |
 | `facts` | an `Extension`: `on_event` counts tokens and tool calls, `finish` adds changes since the start (git snapshot), new files, open questions | `yobuild::builtins::Facts` (M1) |
 | `gate` | a `before_tool` policy: an allow-list of programs and their options; everything else (deleting, overwriting above all) asks; refused with nobody there; plugin and MCP tools ask unless their entry allows them (`allow`) | `yobuild::builtins::Gate` (M1; `confirm-dangerous.ts` stays as the pi example) |
@@ -287,7 +287,7 @@ without the manifest.
 What makes a built-in a built-in: more than one kind of agent wants it,
 it is small, and it has no opinion about the task.
 
-### `ask_owner` for plugins (proposed)
+### `ask_owner` for plugins
 
 The agent asks the owner with the `ask_owner` tool. A plugin may need to
 ask too — a pi extension that wants the owner to choose between plans, a
@@ -301,8 +301,8 @@ tool does: without waiting.
   shared by yobuild's plugin host). Without the built-in it is not there:
   a plugin that injects it as required does not start (rutis), so a
   plugin should look it up and go without when it is missing.
-- **One method:** `ask({ question, why?, options? })` → the question's
-  number, at once. The same shape as the tool's arguments, checked by the
+- **One method:** `ask({ question, why?, options? }, from?)` → the
+  question's number, at once. The same shape as the tool's arguments, checked by the
   same `Question::from_json` (a blank question, unknown keys or a
   non-string option are refused with an error the plugin sees). Two or
   more options make it a choice; otherwise a free answer.
@@ -310,8 +310,9 @@ tool does: without waiting.
   arrives as steering — `[Owner's answer to #N] <question>\n<answer>`, or
   `[Owner skipped #N]` — in the run under way, or as the next run's
   prompt. A plugin that needs the answer itself uses the dialogs instead.
-  The question is shown as the plugin's (its title names it), so the
-  owner knows who asks.
+  With `from` (the plugin's name, as it gives it: a host service does not
+  know its caller, so it is not checked), the question reads "… (asked by
+  plugin <from>)" to the owner and in the agent's steer.
 - **One numbering:** the service and the tool share the session's
   `AskOwner` (its clones share the count), so #N is unique, and facts'
   "N question(s) waiting on you" counts both.

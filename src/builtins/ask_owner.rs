@@ -44,6 +44,19 @@ impl Question {
         })
     }
 
+    /// The question as a plugin's, by the name it gives (not checked: a
+    /// host service does not know its caller): `<question> (asked by plugin
+    /// <name>)` in the owner's question and in the agent's steer. A name
+    /// blank, over 64 characters, or with a line break is refused.
+    pub fn asked_by(mut self, plugin: &str) -> Result<Self, String> {
+        let plugin = plugin.trim();
+        if plugin.is_empty() || plugin.chars().count() > 64 || plugin.contains(['\n', '\r']) {
+            return Err("`from` is the plugin's name: one line, up to 64 characters".into());
+        }
+        self.question = format!("{} (asked by plugin {plugin})", self.question);
+        Ok(self)
+    }
+
     /// From JSON `{question, why?, options?}`; any other shape, or another
     /// key (`choices` for `options`, say), is an error.
     pub fn from_json(value: &Json) -> Result<Self, String> {
