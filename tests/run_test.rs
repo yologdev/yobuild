@@ -604,3 +604,67 @@ async fn a_plugin_that_stops_during_the_session_is_said() {
         && said[0].contains("plugin:fails-later");
     assert!(said, "{:?}", ended.notices);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_mcp_tool_the_entry_allows_runs_with_the_gate_on_and_a_typo_is_refused() {
+    let allowed = project("[[mcp]]\nname = \"other\"\nnpm = \"./server.sh\"\n");
+    // The first server allows `echo`; the gate is on (the default).
+    std::fs::write(
+        allowed.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
+         [[mcp]]\nnpm = \"./server.sh\"\nargs = [\"first\"]\nenv = { MODE = \"loud\" }\nallow = [\"echo\"]\n",
+    )
+    .unwrap();
+    let ended = run_once(allowed.path()).await;
+    assert_eq!(
+        results(&ended),
+        [("echoed hi (loud, first)".to_string(), false)]
+    );
+    std::fs::write(
+        allowed.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[mcp]]\nnpm = \"./server.sh\"\nallow = [\"ech\"]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        try_once(allowed.path()).await.err().unwrap(),
+        "mcp server: its `allow` names \"ech\", which it does not offer (it offers: echo)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_tool_the_entry_allows_runs_and_one_it_does_not_offer_is_a_warning() {
+    if !installed("dsh") {
+        return;
+    }
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/dsh/fixture-tools.ts");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        r#"[{ "tools": [{ "name": "fixture_echo", "arguments": { "text": "hi" } }] }, { "text": "done" }]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        format!(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\ndsh = \"{}\"\nallow = [\"fixture_echo\", \"fixture_ech\"]\n",
+            fixture.display()
+        ),
+    )
+    .unwrap();
+    let ended = run_once(dir.path()).await;
+    let ran = results(&ended);
+    assert!(
+        ran.len() == 1 && !ran[0].1 && ran[0].0.contains("echo: hi"),
+        "{ran:?}"
+    );
+    let warned: Vec<&String> = ended
+        .notices
+        .iter()
+        .filter(|(l, _)| *l == yobuild::frontend::NoticeLevel::Warning)
+        .map(|(_, m)| m)
+        .collect();
+    assert_eq!(
+        warned,
+        ["plugin fixture-tools offered no tool `fixture_ech`, which its `allow` names (a typo, or a tool it offers only in some runs)"]
+    );
+}

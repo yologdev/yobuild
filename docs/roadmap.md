@@ -82,7 +82,7 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
   `yobuild::parts` → `yobuild::builtins`, the gate's `with_free_tools` →
   `with_allowed_tools` (decided 2026-10-17: "parts" read as plugins moved
   into Rust; "free" as cost).
-- `allow = [...]` on `[[plugin]]` and `[[mcp]]` entries (design §2,
+- `allow = [...]` (#15) on `[[plugin]]` and `[[mcp]]` entries (design §2,
   Allowed tools): the tools the gate lets run without asking — so a
   manifest agent that plans and searches does not ask before each call.
 - `handoff.toml`, `coding.toml`, `minimal.toml` replace the three examples.

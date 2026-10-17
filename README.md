@@ -36,9 +36,8 @@ and facts the model cannot make up. Of what it does:
 The agent is mostly a *selection*. That example is about 600 lines of Rust,
 mostly wiring (a third is its scripted demo). yobuild turns the wiring into a manifest
 (this one comes as `handoff.toml` in a later step of M2a: until then its prompt file
-is not there, its plugins must be installed by hand at these versions — the pi
-package with `--legacy-peer-deps`, as `frontend/plugins/.npmrc` does — and, with no
-`allow` key yet, the gate asks before each `todo` and search call):
+is not there, and its plugins must be installed by hand at these versions — the pi
+package with `--legacy-peer-deps`, as `frontend/plugins/.npmrc` does):
 
 ```toml
 [agent]
@@ -47,11 +46,13 @@ model  = "deepseek/deepseek-flash"
 prompt = "prompts/handoff.md"
 
 [[plugin]]
-pi = "@juicesharp/rpiv-todo@2.12.0"
+pi    = "@juicesharp/rpiv-todo@2.12.0"
+allow = ["todo"]                       # runs without asking the owner
 
 [[plugin]]
 dsh    = "dsh-free-search@0.8.1"
 config = { provider = "bing", bingMarket = "en-US" }
+allow  = ["multi_search", "web_search"]
 
 [builtins]
 ask_owner = true          # questions that do not block the run

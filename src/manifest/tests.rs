@@ -105,6 +105,7 @@ phone = true
                 name: "rpiv-todo".into(),
                 kind: PluginKind::Pi(package("@juicesharp/rpiv-todo", "2.12.0")),
                 config: None,
+                allow: Vec::new(),
             },
             Plugin {
                 name: "dsh-free-search".into(),
@@ -112,6 +113,7 @@ phone = true
                 config: serde_json::json!({ "provider": "bing", "since": "1979-05-27" })
                     .as_object()
                     .cloned(),
+                allow: Vec::new(),
             },
             Plugin {
                 name: "words".into(),
@@ -120,6 +122,7 @@ phone = true
                     runtime: Runtime::Bun,
                 },
                 config: None,
+                allow: Vec::new(),
             },
         ]
     );
@@ -134,6 +137,7 @@ phone = true
                     args: vec![Value::new(".").unwrap()],
                     env: [("MODE".into(), Value::new("fast").unwrap())].into(),
                 },
+                allow: Vec::new(),
             },
             Mcp {
                 name: "mcp.example.com".into(),
@@ -148,6 +152,7 @@ phone = true
                     ]
                     .into(),
                 },
+                allow: Vec::new(),
             },
         ]
     );
@@ -324,6 +329,7 @@ fn a_plugin_names_one_ecosystem_and_a_rutis_one_its_runtime() {
                 runtime: Runtime::Go
             },
             config: serde_json::json!({ "a": 1 }).as_object().cloned(),
+            allow: Vec::new(),
         }
     );
 }
@@ -841,4 +847,93 @@ fn deepseek_takes_a_budget() {
     )
     .unwrap();
     assert_eq!(m.limits.budget_usd, Some(2.0));
+}
+
+#[test]
+fn allow_names_an_entrys_tools_and_refuses_what_cannot_hold() {
+    let m = read(&with(
+        "[[plugin]]\npi = \"./todo.ts\"\nallow = [\"todo\", \"todo-list\"]\n\
+         [[mcp]]\nname = \"files\"\nnpm = \"./fs.sh\"\nallow = [\"read_text_file\"]\n",
+    ))
+    .unwrap();
+    assert_eq!(m.plugins[0].allow, ["todo", "todo-list"]);
+    assert_eq!(m.mcp[0].allow, ["read_text_file"]);
+    let refused = |allow: &str| {
+        error(&with(&format!(
+            "[[plugin]]\npi = \"./t.ts\"\nallow = {allow}\n"
+        )))
+    };
+    assert_eq!(
+        refused("[\"a.b\"]"),
+        "6:10: allow \"a.b\": a tool name is 1 to 64 letters, digits, _ and -"
+    );
+    assert_eq!(
+        refused(&format!("[\"{}\"]", "x".repeat(65))),
+        format!(
+            "6:10: allow \"{}\": a tool name is 1 to 64 letters, digits, _ and -",
+            "x".repeat(65)
+        )
+    );
+    assert_eq!(refused("[\"a\", \"a\"]"), "6:15: allow \"a\": named twice");
+    assert_eq!(
+        refused("[\"\"]"),
+        "6:10: allow \"\": a tool name is 1 to 64 letters, digits, _ and -"
+    );
+    assert!(read(&with(&format!(
+        "[[plugin]]\npi = \"./t.ts\"\nallow = [\"{}\"]\n",
+        "x".repeat(64)
+    )))
+    .is_ok());
+    // A plugin cannot allow an MCP server's tool; that server's entry can.
+    assert_eq!(
+        refused("[\"files__write_file\"]"),
+        "6:10: allow \"files__write_file\": `__` marks an MCP server's tool (`<server>__<tool>`); allow it on that [[mcp]] entry, by its own name"
+    );
+    assert!(read(&with("[[mcp]]\nnpm = \"./fs.sh\"\nallow = [\"a__b\"]\n")).is_ok());
+    // A server's names are its own (`fs__bash` is not yoagent's `bash`).
+    assert_eq!(
+        read(&with(
+            "[[mcp]]\nnpm = \"./fs.sh\"\nallow = [\"bash\", \"ask_owner\"]\n"
+        ))
+        .unwrap()
+        .mcp[0]
+            .allow,
+        ["bash", "ask_owner"]
+    );
+    // Its name prefixes its tools: no `__` in it.
+    assert_eq!(
+        error(&with("[[mcp]]\nname = \"a__b\"\nnpm = \"./fs.sh\"\n")),
+        "5:8: mcp \"a__b\": `__` separates a server's name from its tools': give the server a `name` without it"
+    );
+    assert_eq!(
+        refused("[\"bash\"]"),
+        "6:10: allow \"bash\": the gate judges `bash` call by call; it is never allowed by name"
+    );
+    for judged in ["bash", "write_file", "write", "edit_file", "edit"] {
+        assert_eq!(
+            refused(&format!("[\"{judged}\"]")),
+            format!("6:10: allow \"{judged}\": the gate judges `{judged}` call by call; it is never allowed by name")
+        );
+    }
+    assert_eq!(
+        refused("[\"ask_owner\"]"),
+        "6:10: allow \"ask_owner\": the built-in allows its own (`ask_owner = true`); a plugin's tool of that name asks"
+    );
+    assert_eq!(
+        error(&with(
+            "[[mcp]]\nnpm = \"./fs.sh\"\nallow = [\"read\"]\n[builtins]\ngate = \"off\"\n"
+        )),
+        "6:9: allow with gate = \"off\": nothing asks, so there is nothing to allow"
+    );
+    assert_eq!(
+        error(&with(
+            "[[plugin]]\npi = \"./t.ts\"\nallow = [\"todo\"]\n[builtins]\ngate = \"off\"\n"
+        )),
+        "6:9: allow with gate = \"off\": nothing asks, so there is nothing to allow"
+    );
+    // An empty list says nothing: no refusal with the gate off.
+    assert!(read(&with(
+        "[[plugin]]\npi = \"./t.ts\"\nallow = []\n[builtins]\ngate = \"off\"\n"
+    ))
+    .is_ok());
 }
