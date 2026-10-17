@@ -505,9 +505,12 @@ pub(crate) fn rutis_runtime_name(at: usize) -> String {
 }
 
 /// The package a rutis plugin belongs to: the nearest folder above it with
-/// a `package.json` (where Node resolves its imports).
+/// a `package.json` (where Node resolves its imports) — above the file
+/// itself, so `..` and symlinks resolved first, as Node does; one spelling
+/// per package, so one runtime.
 fn package_of(path: &Path) -> Result<PathBuf, BoxError> {
-    path.parent()
+    let real = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    real.parent()
         .into_iter()
         .flat_map(Path::ancestors)
         .find(|dir| dir.join("package.json").is_file())
@@ -859,7 +862,26 @@ mod tests {
             "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\nconfig = { a = 1 }\n",
         )
         .unwrap();
-        assert_eq!(plan.rutis, [dir.path().to_path_buf()]);
+        assert_eq!(plan.rutis, [dir.path().canonicalize().unwrap()]);
+        // `..` is resolved before looking up: a folder the path names on
+        // its way is not the plugin's package.
+        // (The runtime taken away, so the refusal names the folder.)
+        let outer = dir.path().join("outer");
+        std::fs::remove_dir_all(dir.path().join("node_modules")).unwrap();
+        std::fs::create_dir_all(outer.join("in")).unwrap();
+        std::fs::write(outer.join("in/package.json"), "{}").unwrap();
+        let moved = plan_of(
+            &outer.join("in"),
+            "[[plugin]]\nrutis = \"../../p.ts\"\nruntime = \"node\"\n",
+        );
+        let e = moved.err().unwrap();
+        assert!(
+            e.contains(&format!(
+                "in {}",
+                dir.path().canonicalize().unwrap().display()
+            )),
+            "{e}"
+        );
         assert!(!plan.pi && !plan.dsh);
         assert_eq!(plan.rows.len(), 1);
         assert_eq!(plan.rows[0].id(), "plugin:p");
