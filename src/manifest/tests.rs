@@ -890,6 +890,21 @@ fn allow_names_an_entrys_tools_and_refuses_what_cannot_hold() {
         "6:10: allow \"files__write_file\": `__` marks an MCP server's tool (`<server>__<tool>`); allow it on that [[mcp]] entry, by its own name"
     );
     assert!(read(&with("[[mcp]]\nnpm = \"./fs.sh\"\nallow = [\"a__b\"]\n")).is_ok());
+    // A server's names are its own (`fs__bash` is not yoagent's `bash`).
+    assert_eq!(
+        read(&with(
+            "[[mcp]]\nnpm = \"./fs.sh\"\nallow = [\"bash\", \"ask_owner\"]\n"
+        ))
+        .unwrap()
+        .mcp[0]
+            .allow,
+        ["bash", "ask_owner"]
+    );
+    // Its name prefixes its tools: no `__` in it.
+    assert_eq!(
+        error(&with("[[mcp]]\nname = \"a__b\"\nnpm = \"./fs.sh\"\n")),
+        "5:8: mcp \"a__b\": `__` separates a server's name from its tools': give the server a `name` without it"
+    );
     assert_eq!(
         refused("[\"bash\"]"),
         "6:10: allow \"bash\": the gate judges `bash` call by call; it is never allowed by name"

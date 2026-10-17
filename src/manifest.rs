@@ -1283,6 +1283,12 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
         Some(name) => explicit_name(name)?,
         None => (default, span),
     };
+    // Its name prefixes its tools (`<name>__<tool>`): with `__` in it, two
+    // servers' tools could read alike.
+    if name.contains("__") {
+        let m = format!("mcp {name:?}: `__` separates a server's name from its tools': give the server a `name` without it");
+        return Err((name_span, m));
+    }
     let allow = allow(raw.allow.as_ref(), false)?;
     Ok((
         Mcp {
@@ -1297,10 +1303,11 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
 /// The tools the gate judges itself, call by call: never allowed by name.
 const JUDGED_TOOLS: [&str; 5] = ["bash", "write_file", "write", "edit_file", "edit"];
 
-/// An entry's `allow`: names a tool can have, each once; not the tools the
-/// gate judges itself, nor `ask_owner` (the built-in allows its own); and on
-/// a plugin, no `__` — it marks an MCP server's tool (`<server>__<tool>`),
-/// which only that server's entry may allow.
+/// An entry's `allow`: names a tool can have, each once; and on a plugin,
+/// not the tools the gate judges itself, nor `ask_owner` (the built-in
+/// allows its own), nor a name with `__` — it marks an MCP server's tool
+/// (`<server>__<tool>`), which only that server's entry may allow. (A
+/// server's names are its own: `srv__bash` is not yoagent's `bash`.)
 fn allow(
     raw: Option<&Spanned<Vec<Spanned<String>>>>,
     plugin: bool,
@@ -1318,7 +1325,7 @@ fn allow(
             ))
         } else if names.contains(text) {
             Some(format!("allow {text:?}: named twice"))
-        } else if JUDGED_TOOLS.contains(&text.as_str()) {
+        } else if plugin && JUDGED_TOOLS.contains(&text.as_str()) {
             Some(format!(
                 "allow {text:?}: the gate judges `{text}` call by call; it is never allowed by name"
             ))
@@ -1326,7 +1333,7 @@ fn allow(
             Some(format!(
                 "allow {text:?}: `__` marks an MCP server's tool (`<server>__<tool>`); allow it on that [[mcp]] entry, by its own name"
             ))
-        } else if text == "ask_owner" {
+        } else if plugin && text == "ask_owner" {
             Some("allow \"ask_owner\": the built-in allows its own (`ask_owner = true`); a plugin's tool of that name asks".into())
         } else {
             None
