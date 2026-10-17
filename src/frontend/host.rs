@@ -217,7 +217,7 @@ impl PluginHostBuilder {
 
     /// The runtime `name` reads the terminal (a terminal UI): it gets this
     /// process's stdin, and so stays in the terminal's process group. Every
-    /// other runtime runs in a group of its own (rutis 0.9), where Ctrl-C does
+    /// other runtime runs in a group of its own (since rutis 0.9), where Ctrl-C does
     /// not reach it — and where reading or setting up the terminal would
     /// stop it (SIGTTIN / SIGTTOU).
     pub fn terminal(mut self, name: impl Into<String>) -> Self {
