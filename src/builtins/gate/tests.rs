@@ -49,6 +49,7 @@ impl Project {
             start: Here::start(&root, None),
             scratch: Some(scratch.clone()),
             free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
+            allowed_if: None,
             created: Arc::default(),
         };
         Self {
@@ -959,6 +960,7 @@ fn cd_follows_the_logical_path_as_bash_does() {
         start: Here::start(&linked, Some(&linked)),
         scratch: None,
         free_tools: HashSet::new(),
+        allowed_if: None,
         created: Arc::default(),
     };
     let asks = |c: &str| {
@@ -2087,4 +2089,35 @@ fn a_change_to_the_agents_own_file_records_it_again() {
         Check::Free { creates } => assert!(creates.is_empty(), "{creates:?}"),
         asked => panic!("{asked:?}"),
     }
+}
+
+// -- tools allowed only from the one that offers them -----------------------
+
+/// A tool allowed through `with_tools_allowed_if` runs without asking only
+/// when the check, for the run, says the one that would run is allowed;
+/// outside a run it asks.
+#[test]
+fn a_tool_allowed_by_its_offerer_runs_only_when_that_one_offers_it() {
+    let p = Project::new();
+    let offered: OfferedCheck = Arc::new(|run: &str, tool: &str| run == "run-1" && tool == "todo");
+    let rules = Rules {
+        start: p.rules.start.clone(),
+        scratch: None,
+        free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
+        allowed_if: Some((["todo".to_owned(), "plan".to_owned()].into(), offered)),
+        created: Arc::default(),
+    };
+    let free =
+        |tool: &str, run: Option<&str>| rules.check_in(tool, &json!({}), run).question().is_none();
+    assert!(free("todo", Some("run-1")));
+    assert!(
+        !free("todo", Some("run-2")),
+        "another run: not offered by the allowed one"
+    );
+    assert!(
+        !free("plan", Some("run-1")),
+        "allowed by name, offered by another"
+    );
+    assert!(!free("todo", None), "outside a run it asks");
+    assert!(!free("other", Some("run-1")));
 }

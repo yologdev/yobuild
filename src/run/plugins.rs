@@ -42,6 +42,9 @@ pub(crate) struct Plan {
     /// DSH packages the plugins list as peers and no row loads: what a
     /// missing service may need.
     pub dsh_peers: Vec<String>,
+    /// Each pi plugin's extension files, canonical: a tool it allows runs
+    /// without asking only when one of them registered it.
+    pub pi_files: Vec<(String, Vec<PathBuf>)>,
 }
 
 /// The folder of an installed package, at exactly `package`'s version;
@@ -198,6 +201,13 @@ pub(crate) fn plan(
                     return Err(failed("a pi extension takes no config".into()));
                 }
                 let found = pi_extensions(manifest, layout, plugin, source).map_err(failed)?;
+                let files = found
+                    .extensions
+                    .iter()
+                    .filter_map(|e| e.as_str())
+                    .map(|e| std::fs::canonicalize(e).unwrap_or_else(|_| PathBuf::from(e)))
+                    .collect();
+                plan.pi_files.push((plugin.name.clone(), files));
                 extensions.extend(found.extensions);
                 plan.notes.extend(found.notes);
             }

@@ -143,17 +143,17 @@ allow = ["read_text_file"]           # offered to the model as `files__read_text
   tool of that name was offered for is a Warning notice ("plugin rpiv-todo
   offered no tool `todos`"), once a session. A warning, not a refusal: a
   plugin may offer a tool only in some runs.
-- **Known limit:** the gate allows by name, and a run's tools do not say
-  which plugin offered them (yoagent-rutis does not tell yet). So a
-  plugin's allowed name also allows another plugin's tool of that name —
-  one that plugin offers when the allowing one does not (a typo, or a tool
-  it offers only sometimes), or the one yoagent keeps when both do. An MCP
-  server's names are scoped: each is checked against that server's own
-  list, so it names a tool the server offers; a server's tools are the
-  agent's own (fixed at start), and yoagent keeps those over a plugin's
-  tool of the same name; two tools of one name among them are refused; and
-  no server name holds `__`.
-  Closing it needs the tool's plugin from the bridge (asked for).
+- **Scoped to the entry:** a plugin's allowed tool runs without asking
+  only when that plugin offered it in the run (yoagent-rutis's
+  `offered_by`, from 0.5): for pi, the extension file that registered the
+  tool must be one of that plugin's; DSH does not say which plugin
+  registered a tool, so all DSH plugins count as one; a rutis plugin's
+  handler name is its own choice, so all rutis plugins count as one (a
+  manifest key naming its handler could narrow that). An MCP server's
+  names are scoped by their prefix: each is checked against that server's
+  own list; a server's tools are the agent's own (fixed at start), and
+  yoagent keeps those over a plugin's tool of the same name; two tools of
+  one name among them are refused; and no server name holds `__`.
 - **What the gate gets:** the names as the model sees them — a plugin's
   as they are, an MCP server's as `<server>__<tool>` — through
   `Gate::with_allowed_tools`.

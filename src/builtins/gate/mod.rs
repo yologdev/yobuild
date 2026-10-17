@@ -128,7 +128,14 @@ pub struct Gate {
     rules: Arc<Rules>,
     /// Files each allowed call would create, until it has run.
     pending: Arc<Mutex<HashMap<String, Vec<PathBuf>>>>,
+    /// The run these hooks judge (set at its start): what
+    /// [`with_tools_allowed_if`](Self::with_tools_allowed_if) asks about.
+    run_id: Option<Arc<str>>,
 }
+
+/// Who may offer a tool for it to run without asking: `(run id, tool name)`
+/// → whether the tool that would run is one the caller allows.
+pub type OfferedCheck = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
 impl Gate {
     /// Asks through `session`; relative paths are against `cwd` (made
@@ -143,9 +150,11 @@ impl Gate {
                 start: Here::start(&cwd, std::env::var_os("PWD").map(PathBuf::from).as_deref()),
                 scratch: None,
                 free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
+                allowed_if: None,
                 created: Arc::default(),
             }),
             pending: Arc::default(),
+            run_id: None,
         }
     }
 
@@ -162,11 +171,25 @@ impl Gate {
         self.change(|rules| rules.free_tools.extend(tools.into_iter().map(Into::into)))
     }
 
+    /// Also lets these tools run without asking — when `offered` says, for
+    /// the run and the tool, that the tool that would run is one the caller
+    /// allows (a plugin's tool allowed only when that plugin offered it).
+    /// Outside a run ([`check`](Self::check)) they ask.
+    pub fn with_tools_allowed_if<S: Into<String>>(
+        self,
+        tools: impl IntoIterator<Item = S>,
+        offered: OfferedCheck,
+    ) -> Self {
+        let names: HashSet<String> = tools.into_iter().map(Into::into).collect();
+        self.change(|rules| rules.allowed_if = Some((names, offered)))
+    }
+
     fn change(self, edit: impl FnOnce(&mut Rules)) -> Self {
         let mut rules = Rules {
             start: self.rules.start.clone(),
             scratch: self.rules.scratch.clone(),
             free_tools: self.rules.free_tools.clone(),
+            allowed_if: self.rules.allowed_if.clone(),
             created: self.rules.created.clone(),
         };
         edit(&mut rules);
@@ -179,7 +202,7 @@ impl Gate {
     /// What the gate makes of a call: the question to ask (`None`: free),
     /// and the files it would create.
     pub fn check(&self, tool: &str, args: &Json) -> Check {
-        self.rules.check(tool, args)
+        self.rules.check_in(tool, args, None)
     }
 }
 
@@ -231,8 +254,11 @@ impl Extension for Gate {
     fn rechecks_modified_calls(&self) -> bool {
         true
     }
-    async fn start_run(&self, _run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
-        Ok(Box::new(self.clone()))
+    async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+        Ok(Box::new(Gate {
+            run_id: Some(Arc::from(run.run_id)),
+            ..self.clone()
+        }))
     }
 }
 
@@ -242,7 +268,10 @@ impl RunHooks for Gate {
         // Each look replaces what an earlier one found (a recheck), and a
         // denied call leaves nothing behind.
         self.pending.lock().unwrap().remove(call.tool_call_id);
-        let creates = match self.rules.check(call.tool_name, call.args) {
+        let creates = match self
+            .rules
+            .check_in(call.tool_name, call.args, self.run_id.as_deref())
+        {
             Check::Free { creates } => creates,
             Check::Ask { question, details } => {
                 let request = UiRequest::Select {
@@ -297,6 +326,9 @@ struct Rules {
     start: Here,
     scratch: Option<PathBuf>,
     free_tools: HashSet<String>,
+    /// Tools free only when the check says the one that would run is
+    /// allowed (`with_tools_allowed_if`).
+    allowed_if: Option<(HashSet<String>, OfferedCheck)>,
     /// Files the agent made this session, as the files they were
     /// ([`Identity`]): it may overwrite or delete them while they still are.
     /// Shared by every clone of the gate.
@@ -304,7 +336,14 @@ struct Rules {
 }
 
 impl Rules {
+    /// Outside a run: a tool allowed only by its offerer asks.
+    #[cfg(test)]
     fn check(&self, tool: &str, args: &Json) -> Check {
+        self.check_in(tool, args, None)
+    }
+
+    /// The verdict on a call in run `run`.
+    fn check_in(&self, tool: &str, args: &Json, run: Option<&str>) -> Check {
         let ask = |question: String| Check::Ask {
             question,
             details: pretty(args),
@@ -352,6 +391,12 @@ impl Rules {
                 }
             }
             tool if self.free_tools.contains(tool) => free(Vec::new()),
+            tool if self.allowed_if.as_ref().is_some_and(|(names, offered)| {
+                names.contains(tool) && run.is_some_and(|run| offered(run, tool))
+            }) =>
+            {
+                free(Vec::new())
+            }
             tool => ask(format!("Run `{tool}`?")),
         }
     }

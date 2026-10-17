@@ -37,12 +37,12 @@ use yoagent::tools::{
 use yoagent::{Agent, AgentEvent, AgentTool, Content};
 use yoagent_rutis::RutisBridge;
 
-use crate::builtins::{AskOwner, Facts, Gate, Scratch};
+use crate::builtins::{AskOwner, Facts, Gate, OfferedCheck, Scratch};
 use crate::frontend::host::{DshHome, PluginHost, Row};
 use crate::frontend::{
     services, web, ClientMessage, NoticeLevel, RunOutcome, ServerMessage, Session,
 };
-use crate::manifest::{Gate as GateMode, Manifest, Mcp, Source, Transport};
+use crate::manifest::{Gate as GateMode, Manifest, Mcp, PluginKind, Source, Transport};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -226,7 +226,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     .with_tools(tools.list)
     .with_execution_limits(limits(&manifest))
     .with_extension(bridge.extension());
-    if let Some(gate) = gate(&manifest, &session, &cwd, scratch.as_ref()) {
+    let offered = offered_check(bridge.registry().clone(), offerers(&manifest, plan));
+    if let Some(gate) = gate(&manifest, &session, &cwd, scratch.as_ref(), Some(offered)) {
         agent = agent.with_extension(gate);
         // A plugin's allowed tools, checked once its tools are offered.
         let names: Vec<(String, String)> = manifest
@@ -400,19 +401,25 @@ enum End {
     UiGone,
 }
 
-/// The gate the manifest asks for: free in the scratch folder, and for
-/// `ask_owner` only when the built-in adds yobuild's (a plugin's tool of that
-/// name asks).
+/// The gate the manifest asks for: free in the scratch folder; for
+/// `ask_owner` only when the built-in adds yobuild's; for an MCP server's
+/// allowed tools (`<server>__<tool>`); and for a plugin's allowed tools only
+/// when `offered` says that plugin offered the tool that would run.
 fn gate(
     manifest: &Manifest,
     session: &Session,
     cwd: &Path,
     scratch: Option<&Scratch>,
+    offered: Option<OfferedCheck>,
 ) -> Option<Gate> {
     if manifest.builtins.gate != GateMode::AllowList {
         return None;
     }
-    let mut gate = Gate::new(session.clone(), cwd).with_allowed_tools(allowed(manifest));
+    let (servers, plugins) = allowed(manifest);
+    let mut gate = Gate::new(session.clone(), cwd).with_allowed_tools(servers);
+    if let Some(offered) = offered {
+        gate = gate.with_tools_allowed_if(plugins, offered);
+    }
     if let Some(scratch) = scratch {
         gate = gate.with_scratch(scratch);
     }
@@ -422,18 +429,93 @@ fn gate(
     Some(gate)
 }
 
-/// The tools the entries allow, as the model sees them: a plugin's as they
-/// are, an MCP server's as `<server>__<tool>`.
-fn allowed(manifest: &Manifest) -> Vec<String> {
-    let plugins = manifest
-        .plugins
-        .iter()
-        .flat_map(|p| p.allow.iter().cloned());
+/// The tools the entries allow, as the model sees them: the MCP servers'
+/// (`<server>__<tool>`; a server's tools are the agent's own, so the name
+/// is enough), and the plugins' (as they are; a plugin's must also come from
+/// that plugin).
+fn allowed(manifest: &Manifest) -> (Vec<String>, Vec<String>) {
     let servers = manifest
         .mcp
         .iter()
-        .flat_map(|m| m.allow.iter().map(move |t| format!("{}__{t}", m.name)));
-    plugins.chain(servers).collect()
+        .flat_map(|m| m.allow.iter().map(move |t| format!("{}__{t}", m.name)))
+        .collect();
+    let plugins = manifest
+        .plugins
+        .iter()
+        .flat_map(|p| p.allow.iter().cloned())
+        .collect();
+    (servers, plugins)
+}
+
+/// The handlers yobuild's adapters register: every pi extension's tools
+/// come through `pi-extensions` (each with the file that registered it),
+/// every DSH plugin's through `dsh-tools` (DSH does not say which plugin).
+const PI_HANDLER: &str = "pi-extensions";
+const DSH_HANDLER: &str = "dsh-tools";
+
+/// Who may offer a plugin's allowed tool: a pi plugin through one of its
+/// own extension files; a DSH plugin, any DSH plugin (one owner); a rutis
+/// plugin, any other language plugin (their handler names are their own
+/// choice, not tied to a manifest entry).
+#[derive(Debug, Clone, PartialEq)]
+enum Offerer {
+    Pi(Vec<PathBuf>),
+    Dsh,
+    Rutis,
+}
+
+impl Offerer {
+    fn offers(&self, owner: &yoagent_rutis::ToolOwner) -> bool {
+        match self {
+            Offerer::Pi(files) => {
+                owner.handler() == PI_HANDLER
+                    && owner.source().is_some_and(|source| {
+                        let source =
+                            std::fs::canonicalize(source).unwrap_or_else(|_| PathBuf::from(source));
+                        files.contains(&source)
+                    })
+            }
+            Offerer::Dsh => owner.handler() == DSH_HANDLER,
+            Offerer::Rutis => ![PI_HANDLER, DSH_HANDLER].contains(&owner.handler()),
+        }
+    }
+}
+
+/// For each tool a plugin allows, who may offer it.
+fn offerers(manifest: &Manifest, plan: &plugins::Plan) -> HashMap<String, Vec<Offerer>> {
+    let mut map: HashMap<String, Vec<Offerer>> = HashMap::new();
+    for plugin in &manifest.plugins {
+        let offerer = match &plugin.kind {
+            PluginKind::Pi(_) => Offerer::Pi(
+                plan.pi_files
+                    .iter()
+                    .find(|(name, _)| *name == plugin.name)
+                    .map(|(_, files)| files.clone())
+                    .unwrap_or_default(),
+            ),
+            PluginKind::Dsh(_) => Offerer::Dsh,
+            PluginKind::Rutis { .. } => Offerer::Rutis,
+        };
+        for tool in &plugin.allow {
+            map.entry(tool.clone()).or_default().push(offerer.clone());
+        }
+    }
+    map
+}
+
+/// The gate's check for plugins' allowed tools: the plugin that offered the
+/// tool in the run (`offered_by`) must be one that allows it.
+fn offered_check(
+    registry: Arc<yoagent_rutis::registry::Registry>,
+    offerers: HashMap<String, Vec<Offerer>>,
+) -> OfferedCheck {
+    Arc::new(move |run: &str, tool: &str| {
+        let (Some(owner), Some(allowed)) = (registry.offered_by(run, tool), offerers.get(tool))
+        else {
+            return false;
+        };
+        allowed.iter().any(|o| o.offers(&owner))
+    })
 }
 
 /// What `run` needs that can be checked before anything starts.
@@ -1202,7 +1284,7 @@ mod tests {
                 .is_none()
         };
         let both = manifest(dir.path(), "[builtins]\nscratch = true\nask_owner = true\n");
-        let judge = gate(&both, &session, &project, Some(&scratch)).unwrap();
+        let judge = gate(&both, &session, &project, Some(&scratch), None).unwrap();
         let elsewhere = dir.path().join("elsewhere.md");
         assert!(
             write(&judge, &scratch.path().join("notes.md")),
@@ -1211,7 +1293,7 @@ mod tests {
         assert!(!write(&judge, &elsewhere), "outside both asks");
         assert!(ask(&judge), "ask_owner is allowed with the built-in");
         let neither = manifest(dir.path(), "");
-        let judge = gate(&neither, &session, &project, None).unwrap();
+        let judge = gate(&neither, &session, &project, None, None).unwrap();
         assert!(
             !write(&judge, &scratch.path().join("notes.md")),
             "no scratch: it asks"
@@ -1221,7 +1303,7 @@ mod tests {
             "a tool named ask_owner asks without the built-in"
         );
         let off = manifest(dir.path(), "[builtins]\ngate = \"off\"\n");
-        assert!(gate(&off, &session, &project, None).is_none());
+        assert!(gate(&off, &session, &project, None, None).is_none());
     }
 
     #[test]
@@ -1239,17 +1321,54 @@ mod tests {
             "[[plugin]]\npi = \"./t.ts\"\nallow = [\"todo\"]\n\
              [[mcp]]\nname = \"files\"\nnpm = \"./fs.sh\"\nallow = [\"read_text_file\"]\n",
         );
-        assert_eq!(allowed(&m), ["todo", "files__read_text_file"]);
+        let (servers, plugins) = allowed(&m);
+        assert_eq!(
+            (servers.as_slice(), plugins.as_slice()),
+            (
+                &["files__read_text_file".to_owned()][..],
+                &["todo".to_owned()][..]
+            )
+        );
         let (session, _driver) = Session::new(false);
-        let judge = gate(&m, &session, dir.path(), None).unwrap();
+        let check: OfferedCheck = Arc::new(|_run: &str, tool: &str| tool == "todo");
+        let judge = gate(&m, &session, dir.path(), None, Some(check)).unwrap();
         let runs = |tool: &str| {
             judge
                 .check(tool, &serde_json::json!({}))
                 .question()
                 .is_none()
         };
-        assert!(runs("todo") && runs("files__read_text_file"));
+        // An MCP server's allowed tool runs by name; a plugin's only in a run
+        // where its plugin offered it (outside a run, it asks).
+        assert!(runs("files__read_text_file") && !runs("todo"));
         assert!(!runs("files__write_file") && !runs("read_text_file") && !runs("todos"));
+    }
+
+    #[test]
+    fn a_plugin_s_allowed_tool_comes_only_from_that_plugin() {
+        use yoagent_rutis::ToolOwner;
+        let dir = tempfile::tempdir().unwrap();
+        let ext = dir.path().join("a.ts");
+        std::fs::write(&ext, "").unwrap();
+        let ext = std::fs::canonicalize(&ext).unwrap();
+        let pi = Offerer::Pi(vec![ext.clone()]);
+        let from_a = ToolOwner::new(PI_HANDLER, "p").with_source(ext.display().to_string());
+        let from_b = ToolOwner::new(PI_HANDLER, "p").with_source("/elsewhere/b.ts");
+        let no_source = ToolOwner::new(PI_HANDLER, "p");
+        let dsh = ToolOwner::new(DSH_HANDLER, "d");
+        let rutis = ToolOwner::new("words", "language plugin (session 1)");
+        assert!(pi.offers(&from_a));
+        assert!(!pi.offers(&from_b) && !pi.offers(&no_source) && !pi.offers(&dsh));
+        assert!(
+            Offerer::Dsh.offers(&dsh)
+                && !Offerer::Dsh.offers(&from_a)
+                && !Offerer::Dsh.offers(&rutis)
+        );
+        assert!(
+            Offerer::Rutis.offers(&rutis)
+                && !Offerer::Rutis.offers(&dsh)
+                && !Offerer::Rutis.offers(&from_a)
+        );
     }
 
     #[test]

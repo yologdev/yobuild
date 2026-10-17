@@ -572,3 +572,71 @@ async fn the_task_waits_for_the_page_so_its_question_reaches_the_owner() {
     let (code, stderr) = page.interrupt();
     assert_eq!(code, Some(1), "{stderr}");
 }
+
+#[test]
+fn a_plugin_allows_only_its_own_tools() {
+    if !pi_installed() {
+        return;
+    }
+    // Two pi extensions, each with one tool. With the gate on, a tool runs
+    // without asking only when the plugin that offers it allows it.
+    let fixture = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/pi/fixture-extension.ts"),
+    )
+    .unwrap();
+    let dir = project(
+        "",
+        r#"[{ "tools": [{ "name": "beta_echo", "arguments": { "text": "hi" } }] }, { "text": "done" }]"#,
+    );
+    let ext = dir.path().join("node_modules/exts");
+    std::fs::create_dir_all(&ext).unwrap();
+    std::fs::write(
+        ext.join("package.json"),
+        r#"{ "name": "exts", "version": "1.0.0", "type": "module" }"#,
+    )
+    .unwrap();
+    for name in ["alpha", "beta"] {
+        std::fs::write(
+            ext.join(format!("{name}.ts")),
+            fixture.replace("'pi_echo'", &format!("'{name}_echo'")),
+        )
+        .unwrap();
+    }
+    let run = |allowing: &str| {
+        std::fs::write(
+            dir.path().join("agent.toml"),
+            format!(
+                "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
+                 [[plugin]]\nname = \"alpha\"\npi = \"./node_modules/exts/alpha.ts\"\n{}\
+                 [[plugin]]\nname = \"beta\"\npi = \"./node_modules/exts/beta.ts\"\n{}",
+                if allowing == "alpha" {
+                    "allow = [\"beta_echo\"]\n"
+                } else {
+                    ""
+                },
+                if allowing == "beta" {
+                    "allow = [\"beta_echo\"]\n"
+                } else {
+                    ""
+                },
+            ),
+        )
+        .unwrap();
+        let out = yobuild(
+            &[
+                "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+            ],
+            dir.path(),
+        );
+        text(&out.stderr)
+    };
+    // Allowed by the plugin that offers it: it runs.
+    let stderr = run("beta");
+    assert!(stderr.contains("  beta_echo ✓"), "{stderr}");
+    // Allowed by another plugin: it asks (and with nobody there, does not run).
+    let stderr = run("alpha");
+    assert!(
+        stderr.contains("  beta_echo ✗ Tool call denied: not allowed"),
+        "{stderr}"
+    );
+}
