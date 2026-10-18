@@ -115,10 +115,14 @@ demo, plus the new per-plugin hook time and per-runtime memory lines.
   `agent.lock`: per set, npm's own lock (versions, URLs, integrity hashes).
   A stale set is resolved again; `--locked` refuses instead. Installs
   never run package scripts. Unpinned entries are refused (as now).
-  `node_modules/` beside the manifest is no longer read.
+  `node_modules/` beside the manifest is no longer read. A pi package's
+  peers that are not pi's own are installed with it; a DSH package the
+  DSH base pins at another version is refused, and so are DSH files
+  beside DSH packages, for now.
 - `yobuild check`: each plugin alone through yoagent-rutis's `probe` (the
   matrix's verdict; rutis plugins loaded as `run` loads them; MCP servers
-  `tools/list`, no call). Then the agent together, through `run`'s own
+  `tools/list`, no call; a pi tool the probe kept only by leaving a
+  built-in out is a problem, since `run` refuses it). Then the agent together, through `run`'s own
   start without a model: host services, a policy's judge, tool-name
   clashes, an `allow` naming a tool that is not offered. A text report, or
   `--json`; exit 1 on a problem.
@@ -155,6 +159,9 @@ a coding agent, not by hand.
 
 - `yobuild new <name>` (a manifest and a prompt to edit), `cargo install
   yobuild` (and a prebuilt binary).
+- Running without the repository: the adapters (today `adapters/`,
+  copied by `scripts/copy-adapters.sh`) and the terminal UI installed
+  into the cache too (design §4).
 - Docs site, the video re-cut for yobuild, posts.
 - Release 0.1. Requires the yoagent-rutis release with the probe from
   crates.io (no git dependencies in a release).
@@ -184,9 +191,9 @@ never loading, and a denied approval leaves the agent without the plugin.
    apart), together with the adapter files' location.
 4. **Manifest format.** Decided (2026-10-16): TOML — read by serde in
    the Rust core, strictly, with no runtime needed to read a manifest.
-5. **Plugin installs.** Decided (2026-10-18, design §4): one cache per
-   ecosystem set and lock hash, shared by agents with the same set, not
-   one per agent folder; the lock is JSON carrying npm's own lock (`npm
+5. **Plugin installs.** Decided (2026-10-18, design §4): one cache folder
+   per set, keyed by the set's hash, shared by agents with the same set,
+   not one per agent folder; the lock is JSON carrying npm's own lock (`npm
    ci` verifies it); a stale set is resolved again by default, said with
    what was added and removed, and `--locked` refuses (CI); the adapters
    stay in `adapters/` until M4; `check` vets each plugin alone (the
