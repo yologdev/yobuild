@@ -144,7 +144,8 @@ allow = ["read_text_file"]           # offered to the model as `files__read_text
   a plugin still starting is not mistaken for one without the tool): one no
   tool of that name was offered for is a Warning notice ("plugin rpiv-todo
   offered no tool `todos`"), once a session. A warning, not a refusal: a
-  plugin may offer a tool only in some runs.
+  plugin may offer a tool only in some runs. `yobuild check` (§4) says
+  the same before any run.
 - **Scoped to the entry:** a plugin's allowed tool runs without asking
   only when that plugin offered it in the run (yoagent-rutis's
   `offered_by`, from 0.5), and never when the name is one of the agent's
@@ -353,26 +354,341 @@ tool does: without waiting.
 
 ## 4. Plugins: resolve, install, vet
 
-- **Until M2b**, `yobuild run` installs nothing: a pinned package must
-  already be installed at exactly its version — pi packages and stdio MCP
-  servers in `node_modules/` beside the manifest, a rutis plugin's runtime
-  in its own package, DSH
-  plugins in `adapters/dsh` (`--no-save`) — or the run is refused, naming
-  the `npm install` to do. It checks what it can before starting: a DSH
-  package's bundle patch and imports, its peers installed, and once the DSH
-  runtime runs, the services its rows inject (a missing one is refused,
-  not left waiting).
-- **Install** per ecosystem into a cache (`~/.yobuild/plugins/<ecosystem>/<lock-hash>/`),
-  from a lockfile yobuild writes next to the manifest (`agent.lock`), so a
-  checked agent runs the same bytes later. Installs never run package
-  scripts.
-- **Vet** with the same probe that produces yoagent's
-  [plugin compatibility](https://github.com/yologdev/yoagent/blob/main/docs/evals/plugin-compatibility.md)
-  report: load, list tools/hooks/prompt additions, list services a DSH
-  plugin waits for, refuse what the adapter refuses. Nothing is called.
-  For an MCP server: connect, list its tools (`tools/list`), call none.
-- **Report** per plugin: what it adds, what is ignored (commands, UI), what
-  it needs that is missing — before the agent runs.
+Until M2b, `yobuild run` installs nothing. A pinned package must already
+be installed at exactly its version, or the run is refused, naming the
+`npm install` to do. pi packages and stdio MCP servers go in
+`node_modules/` beside the manifest, DSH plugins in `adapters/dsh`
+(`--no-save`), and a rutis plugin's runtime in its own package. Before
+starting, `run` checks what it can: a DSH package's bundle patch and
+imports, and its peers installed. Once the DSH runtime runs, it checks the
+services the plugin's rows inject; a missing one is refused, not left
+waiting.
+
+M2b (below) installs pinned packages into a cache, records what was
+installed in `agent.lock`, and adds `yobuild check`. Unix only, as the
+terminal UI and `--measure` are (Windows: open question 7).
+
+### Install: sets, the cache, `agent.lock` (M2b, decided 2026-10-18)
+
+**What is installed:** the npm packages a manifest pins, which are its pi
+plugins, DSH plugins and stdio MCP servers. Some things are not installed:
+
+- **A rutis plugin.** It is the owner's code in the owner's package, and
+  the owner installs its runtime there, as now.
+- **A pi file.** It is loaded by path, as now.
+- **A DSH file.** It runs in `adapters/dsh`, as now, and must resolve that
+  folder's Cordis (as the adapter's fixtures do).
+- **The adapters.** They stay in `adapters/`, as `Layout` says. Running
+  without the repository is M4.
+- **HTTP MCP servers.**
+
+**Sets.** A manifest's pins fall into up to three sets, one per
+ecosystem. Each set is an npm project of its own:
+
+| Set | Holds | Peers |
+|---|---|---|
+| `pi` | the pi packages, plus every peer of theirs that is not pi's own (required or optional; e.g. `@juicesharp/rpiv-i18n`, an optional peer of `rpiv-todo`) | pi's own packages — a fixed pattern, `@earendil-works/pi-*` and `typebox`, not the adapter's whole dependency list — are never installed here: the adapter supplies them (its loader resolves them). So the set resolves with `legacy-peer-deps`, and yobuild adds the other peers as dependencies of the set, at the range the package declares; the lock fixes their versions |
+| `dsh` | the DSH adapter's base (its `package.json` and lock: DSH's packages, Cordis, the rutis runtime) plus the DSH packages | resolved by npm as usual (no `legacy-peer-deps`); DSH's own packages come from the base |
+| `mcp` | the stdio servers | resolved by npm as usual |
+
+The `dsh` set exists because a DSH plugin must resolve the base's Cordis,
+and the runtime refuses one that does not. So when a manifest pins a DSH
+package, the `dsh` runtime starts in the set's folder instead of
+`adapters/dsh`, as the compatibility matrix does. Two rules follow:
+
+- A manifest with both DSH files and DSH packages is refused for now:
+  "DSH files and DSH packages cannot run together yet: the packages run in
+  the cache, the files in `adapters/dsh`". This is one rule on purpose,
+  even when every DSH package is one the base already holds.
+- A DSH package the base already pins (`dsh-free-search`, DSH's
+  `dsh-tool-ask-user` and `dsh-user-questions`) adds nothing to the set at
+  the same version. At another version it is refused: "pinned by the DSH
+  base at 0.8.1".
+
+Two entries of one set pinning one package at different versions are
+refused when the manifest is read, since one npm project holds one
+version at the top. Sets are separate projects: a pi pin and an
+`[[mcp]]` pin of one package do not meet. A pi peer that is also pinned
+in the `pi` set takes the pin. A set with no pins is not made.
+
+**`agent.lock`** sits beside the manifest. yobuild writes it, and it is
+meant to be checked in:
+
+```json
+{
+  "lockVersion": 1,
+  "sets": {
+    "pi": {
+      "requested": { "@juicesharp/rpiv-todo": "2.12.0" },
+      "packages": { "": { … }, "node_modules/@juicesharp/rpiv-todo": { "version": "2.12.0", "resolved": "https://registry.npmjs.org/…", "integrity": "sha512-…" }, … }
+    },
+    "dsh": {
+      "base": "<sha256 of adapters/dsh's package.json and package-lock.json>",
+      "requested": { "dsh-free-search": "0.8.1" },
+      "packages": { … }
+    }
+  }
+}
+```
+
+- **`requested`** holds the manifest's pins in the set; `pi`'s added peers
+  are not listed (they follow from the pins).
+- **`packages`** is npm's own lock, as `package-lock.json` (v3) holds it:
+  each package's version, `resolved` URL and `integrity` hash. yobuild
+  writes it back as a `package-lock.json`, and `npm ci` checks each
+  tarball against its hash, so a checked agent runs the same bytes later,
+  on any machine. The pins fix only the top level; the lock fixes what
+  they pull in. The file is JSON because it carries npm's format, which
+  npm reads; a TOML copy would be a translation.
+- **`base`** is a checksum of the base's packages, not of the
+  yoagent-rutis version: an upgrade that leaves DSH's packages as they
+  were leaves the examples' locks current.
+
+A manifest with no pins gets no `agent.lock`, and `--locked` passes
+without one. A set whose pins are all gone is removed from the file, and
+a file left with no sets is deleted. Under `--locked`, a set the
+manifest no longer needs is stale too: an error.
+
+**Resolving.** A set is current when its `requested` equals the
+manifest's pins for that ecosystem, and, for `dsh`, its `base` equals
+the adapter's. A missing or stale set is resolved again in a temp folder:
+
+1. Write the set's `package.json` and `.npmrc` (below). Its `name` is
+   fixed per set (`yobuild-pi`, `yobuild-mcp`; for `dsh`, the adapter's),
+   so agents with the same pins get the same lock and share a folder.
+   - For `dsh`, it is the adapter's `package.json` with the packages
+     added, and the adapter's lock is the start, so DSH's base stays as
+     the adapter pinned it.
+   - For `pi`, it lists the pins plus their peers. yobuild reads each
+     pin's `peerDependencies` (and `peerDependenciesMeta`) with
+     `npm view <name>@<version> --json` and adds each peer that is not
+     pi's own, at its declared range; a peer that is itself pinned keeps
+     the pin. Two ranges for one peer are intersected: each pair of their
+     `||` alternatives joined by a space (`a1 b || a1 b2 || …`), since a
+     space binds tighter than `||` in a range. Only the pins' own peers are added: with
+     `legacy-peer-deps`, a dependency's peers are not installed, and one
+     that needs them fails when imported (`check` shows it). A peer's
+     version is the newest its range allows at the first resolve (e.g.
+     `@juicesharp/rpiv-i18n`, declared `*`), then fixed by the lock.
+2. Run `npm install --package-lock-only`. Nothing is unpacked; it fetches
+   package metadata, so it needs the network.
+3. Take the lock's `packages`. An install writes the `package.json`
+   again from fixed fields — for `dsh` the adapter's (`"type": "module"`
+   among them: the runtime's own files are ESM `.ts`), for `pi` and
+   `mcp` `name`, `"private": true`, `"type": "module"` — plus the
+   dependencies of the lock's root entry (`packages[""]`), which holds
+   only `name`, `dependencies` and `engines`. So `npm ci` finds the two in
+   step.
+
+Only that set changes. The file is rewritten, and an Info notice says
+what changed, packages added and removed ("agent.lock: `pi` resolved
+again: +@x/y 1.0.0, −@x/z 0.3.1"). The file is written to a temp file and
+renamed into place, so two yobuilds writing it at once leave one whole
+version, not a mix.
+
+With `--locked` (on `run` and `check`; new to `run`'s options), a missing
+or stale set is an error instead. This is for CI and for an agent someone
+checked: it never resolves anew unseen. `--locked` still installs a
+current set whose folder is missing, which needs the network or npm's
+cache.
+
+**npm's settings.** The settings that decide the result are passed on
+the command line, which wins over every npm config file and variable:
+`--ignore-scripts`, `--legacy-peer-deps` for `pi` (`=false` otherwise),
+`--package-lock=true`, `--install-strategy=hoisted`, `--strict-peer-deps=false`,
+`--install-links=false`, `--include=dev --include=optional
+--include=peer` (nothing omitted; `include` wins over an `omit` set
+anywhere, and an empty `--omit=` is warned about as invalid), plus
+`--no-audit --no-fund`. The set's `.npmrc` repeats them, for anyone
+running npm there by hand. The child's environment drops every
+`npm_config_*` variable, matched without regard to case as npm reads
+them, except the registry and its login (`npm_config_registry`,
+`npm_config_//…:_authToken` and the like). Dropped on purpose: the
+variable copies of `before`, `os`, `cpu` and `libc` too, while the
+owner's file keeps them (below).
+
+The owner's `~/.npmrc` still applies to what is not passed: the registry
+and its login (a private registry's token stays there; yobuild neither
+writes nor reads tokens), the proxy and certificates, and a few keys
+that could still change a result, which yobuild does not override:
+`before` (resolve as of a date), and `os`/`cpu`/`libc` (which optional
+platform packages `npm ci` installs; the lock still fixes their
+versions). Resolving uses no `--prefer-offline`, so it reads the
+registry's current metadata; installing does use it, since the lock
+fixes every version and npm checks every hash.
+
+**Installing.** A set lives at `~/.yobuild/plugins/<set>/<hash>/`
+(`YOBUILD_HOME` replaces `~/.yobuild`). Every agent whose lock holds the
+same set shares the folder.
+
+`<hash>` is the first 16 hex digits of a sha256 over:
+
+- the set's entry in the lock, in one canonical form: compact JSON with
+  object keys sorted by code point at every level, written by one
+  function with a fixed test vector (the crate's `serde_json` keeps
+  insertion order, so sorting is explicit);
+- for `dsh`, the checksum of the adapter files the set copies (below), so
+  an adapter edited under the same version gets a folder of its own.
+
+A missing folder is made in `<hash>.partial-<random>` beside it:
+
+1. Write `package.json`, `package-lock.json` and `.npmrc`, as above.
+2. For `dsh`, copy in, at the root, the adapter files the runtime loads
+   from there: `dsh-tools-adapter.ts`, `host-dialogs.ts` and
+   `probe-services.ts`. `run`, `probe_services`, `inspect-package.mjs`
+   (given the set folder as its base) and `probe::dsh` all use the set
+   folder. `probe::dsh` copies its two files into its base only when they
+   are missing, so it never writes into an installed set.
+   `host-services.json` is read in place from `adapters/dsh`; it names
+   packages, which resolve from the set.
+3. Run `npm ci`.
+4. Write a stamp, `.yobuild-installed`, holding the folder's hash, then
+   rename the folder into place.
+
+If another yobuild made the same folder first, the rename fails and this
+copy is dropped: the same lock gives the same content. On use, the
+stamp must be there and hold the folder's name; the files themselves are
+not checked again (that would read the whole tree on every run). The
+stamp is written before the rename, so a folder in place without it, or
+with another hash, was changed by hand: it is not used, and is removed
+and made again. An edit to the files inside goes unseen. A `.partial-*`
+folder older than an hour is removed, since a crashed install leaves one.
+A folder in place is never changed. Deleting `~/.yobuild/plugins` is
+always safe while no agent runs, since every lock can make it again.
+Cleaning old folders is not in M2b.
+
+**No package scripts, ever.** Every npm call has `--ignore-scripts`, and
+so does the folder's `.npmrc`. `check` names each installed package
+that has install scripts (npm's `hasInstallScript`): "has install
+scripts, which were not run". It is said under each entry it belongs to:
+the entry's pin, the pin's dependencies in the lock, and, in the `pi`
+set, the peers yobuild added for that pin (and their dependencies). One
+package can belong to several entries. The `dsh` base's own packages are
+said once for the agent, not under each plugin. The adapters' own dependencies with
+scripts (esbuild, fsevents, koffi, protobufjs, `@google/genai`) work
+without them. This was checked on 2026-10-18: the whole suite passed with
+`adapters/pi`, `adapters/dsh`, `frontend/plugins` and `examples`
+installed `--ignore-scripts`.
+
+**What a run uses:**
+
+- a pi package from `<pi set>/node_modules/<name>`, then
+  `resolve-package.mjs` as now;
+- the `dsh` runtime, started in the `dsh` set's folder;
+- a server's `bin` from the `mcp` set.
+
+`node_modules/` beside the manifest is no longer read, and
+`examples/package.json` goes. So do its install in CI (`npm ci --prefix
+examples`), in `scripts/try-coding-agent.sh --setup-only` and in the
+tests.
+
+**Tests.** A test cannot fetch a package that is not on npm (the
+fixtures `fake-pi`, and `srv`, the MCP server for the `bin` test). Such
+tests seed a cache instead: a helper writes a set's folder with its stamp
+(the fixture copied into `node_modules/`) and a matching `agent.lock`,
+through the same hash function, in a temp `YOBUILD_HOME`; these tests
+run with a current lock, so nothing is resolved. The "wrong version
+refused" tests become two, on a real package from npm
+(`@juicesharp/rpiv-todo`, which the handoff example pins), whose lock is
+seeded at another version:
+
+- `--locked` with that stale set is refused, naming the set;
+- without it, the set is resolved again and the notice says what
+  changed.
+
+Tests that install real packages — the handoff and coding demos, the DSH
+package tests in `run_test` (their `dsh` set holds the whole DSH base) —
+share one `YOBUILD_HOME` per test binary, made once, so each set is
+installed from npm once per run of the suite; CI has the network.
+
+### Vet: `yobuild check agent.toml` (M2b, decided 2026-10-18)
+
+`yobuild check <agent.toml> [--locked] [--json]` needs no model, no key
+and no task:
+
+1. **Read and install.** Read the manifest (its errors as `run` gives
+   them), lock and install as above, then `plan` as `run` does. Of `run`'s
+   first step, the key, the budgets' prices and the prompt are skipped;
+   the rest (the plugins' plan, each MCP server's launch) is the same.
+2. **Each plugin alone, through yoagent-rutis's `probe`.** This is the
+   compatibility matrix's probe, so the verdict is the matrix's
+   ([plugin compatibility](https://github.com/yologdev/yoagent/blob/main/docs/evals/plugin-compatibility.md)),
+   with one difference noted under pi:
+   - **pi** (a package or a file): `probe::pi` gives its tools. yobuild
+     passes no skills, since `run` loads none, and `check` names a
+     package's skills, prompts and themes as ignored, as `run`'s note
+     does. The probe retries a tool refused for sharing a built-in's name
+     with that built-in left out (`without`), and calls that a clean
+     load. `run` does not retry (the adapter refuses such a tool), so for
+     yobuild a non-empty `without` is a problem: "its tool `read_file` is
+     named like yoagent's built-in: `run` refuses it".
+   - **DSH:** `probe::dsh` over the `dsh` set gives its rows, tools,
+     prompt guidance, the services its rows inject (present or missing)
+     and import errors. For a DSH file, the base is `adapters/dsh`.
+   - **rutis** has no probe. The plugin is loaded alone in its runtime, as
+     `run` loads it, and `check` lists the handlers its row registers and
+     the tools a run is offered.
+   - **An MCP server** is launched as `run` launches it and asked for
+     `tools/list`. No tool is called.
+3. **The agent together, through `run`'s own start.** This is `run`'s
+   step 2, with no frontend. It shows what only appears with everything
+   loaded under the manifest's settings, which the probe does not use.
+   The probe always gives DSH plugins DSH's host services and shares only
+   registered service names; `run` gives host services only with
+   `[dsh] host_services`, and shares every name. What `run` refuses at
+   start (a missing service, a policy's judge that never registers) is a
+   problem, and ends this step: what comes later needs the agent
+   started. What `run` only warns about is a note. It catches:
+   - a DSH plugin that needs `[dsh] host_services` (a problem);
+   - a `policy = true` plugin whose judge never registers (a problem);
+   - two entries offering one tool name (a note: yoagent keeps one, and
+     says which);
+   - an `allow` naming a tool its entry does not offer (a note, as in
+     `run`, since a plugin may offer a tool only in some runs). Today
+     that is a Warning only after the first run; `check` says it before
+     any.
+
+   Step 2 reports every plugin, whatever the others do; step 3 runs only
+   when step 2 found no problem, since a plugin that fails alone fails
+   together too.
+
+   **The one run.** The agent's extensions are not run. `check` calls the
+   bridge's hooks directly, as the probe's `offered` does: `start_run`,
+   `tools`, one `before_model`, then `finish`. That gives the plugins'
+   tools, each with its owner (`offered_by`). Their names are checked
+   against the agent's own tools (the built-ins, `ask_owner`, each
+   server's prefixed tools), which are known without running anything.
+   No model is asked, and facts, report, budget and measure take no part.
+
+Loading runs the plugins' code, as `run` would. `check` is not a sandbox.
+
+**The report** has one block per entry, then the agent. This is
+`handoff.toml`'s, sketched (lists shortened, the guidance length made
+up):
+
+```text
+plugin rpiv-todo  pi @juicesharp/rpiv-todo@2.12.0           ok
+  tools: todo (allowed)
+plugin todo-plan  rutis ../frontend/plugins/todo-plan.ts     ok
+  handlers: none (a UI plugin: it draws, offers no tool)
+plugin dsh-free-search  dsh dsh-free-search@0.8.1           ok
+  tools: multi_search (allowed), research (allowed), … (7 allowed); its npm and test tools ask
+  prompt guidance: 1,204 characters
+agent handoff: ok
+  tools: 6 yoagent (read_file, list_files, search free; bash, write_file, edit_file judged per call), ask_owner (allowed), 8 allowed by entries, the rest ask
+  install scripts not run (the DSH base): esbuild, fsevents, koffi
+```
+
+A tool is one of four kinds: **free** (read-only, never asks),
+**judged** per call by the gate, **allowed** by an entry's `allow` (or
+the built-in's), or it **asks**. With `gate = "off"`, every tool runs as
+the agent asks, and the line says so. A block can also show what is
+ignored (skills, prompts, themes), what is missing and why, and the
+install scripts not run that belong to it. `--json` gives the same as one
+object, for the skill (M3). The exit code is 1 when any entry has a
+problem; notes are not problems.
+
+CI runs `yobuild check --locked` on every example manifest (§8).
 
 ### Who a plugin is: the row the host sees
 
@@ -567,7 +883,8 @@ manifest nor `yobuild run` has yet. What a manifest gained for them:
   runtime's) — one runtime per package. `examples/` has a `package.json`
   of its own for the pi package a manifest pins (`@juicesharp/rpiv-todo`),
   installed by `scripts/try-coding-agent.sh --setup-only`: "installed
-  beside the manifest", until M2b installs it.
+  beside the manifest", until M2b installs it into the cache (§4) and
+  the folder goes; the examples' `agent.lock` files are checked in.
 
 **The demos.** `--scripted` replaces the model; the owner is a test. The
 handoff demo (asks without waiting; the owner answers #1 after run 1, so
@@ -585,7 +902,9 @@ in a pty is not yet.
 
 - Every manifest runs **scripted** (yoagent's `MockProvider`) in CI: the
   agent's behaviour without a model or a key.
-- `yobuild check` on every example manifest in CI.
+- `yobuild check --locked` on every example manifest in CI, and the
+  handoff demo installing into an empty `YOBUILD_HOME` (M2b's "done
+  when").
 - Manifests with an `[[mcp]]` entry run scripted against a small stdio test
   server, copied from the bash-scripted servers in yoagent's
   `tests/mcp_stdio_test.rs`.
