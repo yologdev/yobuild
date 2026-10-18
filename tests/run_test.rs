@@ -691,10 +691,12 @@ async fn a_plugin_tool_the_entry_allows_runs_and_one_it_does_not_offer_is_a_warn
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn with_a_policy_plugin_calls_are_denied_while_none_judges_them() {
-    // A rutis plugin that judges no calls (no `before_tool`), marked as the
-    // agent's policy: with nothing judging, the call is denied, not run
-    // unjudged. Unmarked, the same call runs.
+async fn a_rutis_policy_plugin_is_waited_for_and_judges_the_first_call() {
+    // A rutis plugin that registers its call judge (`before_tool`) 1.5 s
+    // into its `apply`. Marked `policy`, the run waits for it — else the
+    // first call could find no policy and be denied (rutis 0.11's `load`
+    // happens to wait for an async `apply` too; yobuild does not count on
+    // it) — and then it judges.
     let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins/node_modules");
     if !runtime.join("@arcships/rutis-runtime").is_dir() {
         if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
@@ -707,9 +709,17 @@ async fn with_a_policy_plugin_calls_are_denied_while_none_judges_them() {
     std::os::unix::fs::symlink(&runtime, dir.path().join("node_modules")).unwrap();
     std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
     std::fs::write(
-        dir.path().join("idle.ts"),
+        dir.path().join("guard.ts"),
         "import { definePlugin } from '@arcships/rutis'\n\
-         export default definePlugin({ apply() {} })\n",
+         export default definePlugin({\n\
+           inject: ['yoagent'],\n\
+           async apply(ctx: any, config: { deny: boolean }) {\n\
+             await new Promise((done) => setTimeout(done, 1500))\n\
+             ctx.effect(ctx.use('yoagent').register('guard', {\n\
+               async before_tool(call: any) { if (config.deny) return { deny: `the guard denies ${call.tool}` } },\n\
+             }))\n\
+           },\n\
+         })\n",
     )
     .unwrap();
     std::fs::write(
@@ -717,12 +727,15 @@ async fn with_a_policy_plugin_calls_are_denied_while_none_judges_them() {
         r#"[{ "tools": [{ "name": "list_files", "arguments": { "path": "." } }] }, { "text": "done" }]"#,
     )
     .unwrap();
-    for (policy, denied) in [(true, true), (false, false)] {
+    for (policy, deny, expected) in [
+        (true, false, None),
+        (true, true, Some("the guard denies list_files")),
+    ] {
         std::fs::write(
             dir.path().join("agent.toml"),
             format!(
                 "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
-                 [[plugin]]\nrutis = \"./idle.ts\"\nruntime = \"node\"\npolicy = {policy}\n\
+                 [[plugin]]\nrutis = \"./guard.ts\"\nruntime = \"node\"\npolicy = {policy}\nconfig = {{ deny = {deny} }}\n\
                  [builtins]\ngate = \"off\"\n"
             ),
         )
@@ -730,6 +743,9 @@ async fn with_a_policy_plugin_calls_are_denied_while_none_judges_them() {
         let ended = run_once(dir.path()).await;
         let ran = results(&ended);
         assert_eq!(ran.len(), 1, "{ran:?}");
-        assert_eq!(ran[0].1, denied, "policy = {policy}: {ran:?}");
+        match expected {
+            None => assert!(!ran[0].1, "policy = {policy}, deny = {deny}: {ran:?}"),
+            Some(said) => assert!(ran[0].1 && ran[0].0.contains(said), "{ran:?}"),
+        }
     }
 }

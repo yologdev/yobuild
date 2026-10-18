@@ -196,7 +196,16 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         .await?;
     if !plan.rows.is_empty() {
         host.load(plan.rows.clone()).await?;
-        wait_for(&bridge, &plan.handlers, &host).await?;
+        // A rutis plugin marked `policy` registers its handler in its own
+        // time (a row is Active before its `apply` ends): a run started
+        // before would find no policy, or only another plugin's.
+        let judges = manifest
+            .plugins
+            .iter()
+            .filter(|p| p.policy && matches!(p.kind, PluginKind::Rutis { .. }))
+            .count();
+        let adapters = [plan.pi_handler.as_str(), plan.dsh_handler.as_str()];
+        wait_for(&bridge, &plan.handlers, (judges, &adapters), &host).await?;
     }
     if !plan.dsh_modules.is_empty() {
         dsh_services(&mut host, &layout, plan, manifest.dsh.host_services).await?;
@@ -1017,19 +1026,30 @@ async fn probe_services(
 
 /// Waits until the plugins' `handlers` are registered; a plugin that failed
 /// meanwhile fails it at once.
+/// Waits until each of `handlers` is registered, and, of `judges`, that
+/// many handlers judging calls (`before_tool`) besides the adapters'.
 async fn wait_for(
     bridge: &RutisBridge,
     handlers: &[String],
+    (judges, adapters): (usize, &[&str]),
     host: &PluginHost,
 ) -> Result<(), BoxError> {
     let registry = bridge.registry().clone();
-    let missing = || -> Vec<&str> {
+    let missing = || -> Vec<String> {
         let have = registry.handlers();
-        handlers
+        let mut missing: Vec<String> = handlers
             .iter()
-            .map(String::as_str)
-            .filter(|name| !have.iter().any(|h| h.name() == *name))
-            .collect()
+            .filter(|name| !have.iter().any(|h| h.name() == name.as_str()))
+            .cloned()
+            .collect();
+        let judging = have
+            .iter()
+            .filter(|h| h.hooks().contains(&"before_tool") && !adapters.contains(&h.name()))
+            .count();
+        if judging < judges {
+            missing.push(format!("{judges} rutis policy handler(s) (before_tool)"));
+        }
+        missing
     };
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
