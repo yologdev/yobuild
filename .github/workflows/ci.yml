@@ -35,14 +35,12 @@ jobs:
           # The adapters' locks come with the yoagent-rutis version Cargo.lock pins.
           cache-dependency-path: |
             frontend/plugins/package-lock.json
-            examples/package-lock.json
             Cargo.lock
       - name: Copy the adapters of the yoagent-rutis crate (adapters/)
         run: scripts/copy-adapters.sh
       - name: Install the npm packages
         run: |
           npm ci --prefix frontend/plugins
-          npm ci --prefix examples
           npm ci --prefix adapters/pi
           npm ci --prefix adapters/dsh
       - name: Format
@@ -93,4 +91,4 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/pty-coding" && cd "$RUNNER_TEMP/pty-coding"
           python3 "$GITHUB_WORKSPACE/tests/terminal_pty.py" "$GITHUB_WORKSPACE/target/debug/yobuild" \
-            run "$GITHUB_WORKSPACE/examples/coding.toml" --scripted "$GITHUB_WORKSPACE/examples/scripts/coding.json"
+            run "$GITHUB_WORKSPACE/examples/coding.toml" --scripted "$GITHUB_WORKSPACE/examples/scripts/coding.json" --locked

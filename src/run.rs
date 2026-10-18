@@ -6,10 +6,9 @@
 //! whole); then the runtimes, servers and tools (refusing two tools of one
 //! name); then the frontend.
 //!
-//! Until yobuild installs packages (M2b), a pinned plugin or server must
-//! already be installed, at exactly its version: pi packages, stdio MCP
-//! servers and the rutis runtime in `node_modules/` beside the manifest, DSH
-//! plugins in the DSH runtime's (`adapters/dsh`).
+//! Pinned plugins and servers are installed first (`crate::install`: locked
+//! in `agent.lock`, into the cache); a rutis plugin's runtime must be
+//! installed in its own package.
 //!
 //! The agent works in the process's working folder: yoagent's file tools
 //! read relative paths from there, so the gate, facts and bash do too.
@@ -43,6 +42,7 @@ use crate::frontend::session::UI_TIMEOUT;
 use crate::frontend::{
     services, web, ClientMessage, NoticeLevel, RunOutcome, ServerMessage, Session,
 };
+use crate::install;
 use crate::manifest::{
     Gate as GateMode, Manifest, Mcp, PluginKind, Source, Tools as ToolSet, Transport,
 };
@@ -91,6 +91,12 @@ pub struct Options {
     /// (default `127.0.0.1:8787`; with `phone`, `0.0.0.0:8787`).
     pub addr: Option<SocketAddr>,
     pub layout: Layout,
+    /// Refuse a missing or stale set in `agent.lock` instead of resolving
+    /// it again (CI; an agent someone checked).
+    pub locked: bool,
+    /// Where pinned packages are installed (`None`: `YOBUILD_HOME`, else
+    /// `~/.yobuild`).
+    pub cache: Option<PathBuf>,
 }
 
 impl Options {
@@ -103,6 +109,8 @@ impl Options {
             measure: false,
             addr: None,
             layout: Layout::default(),
+            locked: false,
+            cache: None,
         }
     }
 }
@@ -146,6 +154,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tracing::info!("{note}");
         session.notice(NoticeLevel::Warning, note.clone());
     }
+    // What changed in `agent.lock`.
+    for said in &checked.installed.said {
+        tracing::info!("{said}");
+        session.notice(NoticeLevel::Info, said.clone());
+    }
     let bridge = RutisBridge::install(root)?;
     services::provide(root, &session)?;
     // `ask_owner`, the tool and (for plugins) the host service: one
@@ -188,7 +201,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         false => None,
     };
     if plan.dsh {
-        let dir = layout.adapters.join("dsh");
+        let dir = plan.dsh_dir.clone();
         builder = builder.node("dsh", &dir);
         runtimes.push(("dsh".into(), dir));
         for (name, value) in dsh_home.iter().flat_map(DshHome::env) {
@@ -234,7 +247,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         wait_for(&bridge, &handlers, &judges, &host).await?;
     }
     if !plan.dsh_modules.is_empty() {
-        dsh_services(&mut host, &layout, plan, manifest.dsh.host_services).await?;
+        dsh_services(&mut host, plan, manifest.dsh.host_services).await?;
     }
 
     // The tools: yoagent's (in `cwd`), `ask_owner`, each MCP server's; no
@@ -645,6 +658,7 @@ struct Checked {
     plan: plugins::Plan,
     servers: HashMap<String, Launch>,
     notes: Vec<String>,
+    installed: install::Installed,
 }
 
 fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
@@ -721,12 +735,18 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
     }
 
     let prompt = Prompt::read(manifest)?;
-    let plan = plugins::plan(manifest, &options.layout, cwd, &lookup)?;
+    let installed = install::install(
+        manifest,
+        &options.layout.adapters,
+        options.cache.as_deref(),
+        options.locked,
+    )?;
+    let plan = plugins::plan(manifest, &options.layout, &installed, cwd, &lookup)?;
     notes.extend(plan.notes.iter().cloned());
     let servers = manifest
         .mcp
         .iter()
-        .map(|server| Ok((server.name.clone(), launch(server, &manifest.dir, &lookup)?)))
+        .map(|server| Ok((server.name.clone(), launch(server, &installed, &lookup)?)))
         .collect::<Result<_, BoxError>>()?;
     Ok(Checked {
         key,
@@ -738,6 +758,7 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
         plan,
         servers,
         notes,
+        installed,
     })
 }
 
@@ -1000,13 +1021,12 @@ async fn finish(
 /// start slowly).
 async fn dsh_services(
     host: &mut PluginHost,
-    layout: &Layout,
     plan: &plugins::Plan,
     host_services: bool,
 ) -> Result<(), BoxError> {
     let mut missing = Vec::new();
     for wait in [1000, 3000] {
-        missing = probe_services(host, layout, &plan.dsh_modules, wait).await?;
+        missing = probe_services(host, &plan.dsh_dir, &plan.dsh_modules, wait).await?;
         if missing.is_empty() {
             return Ok(());
         }
@@ -1077,11 +1097,10 @@ fn dsh_missing(missing: &[String], plan: &plugins::Plan, host_services: bool) ->
 /// probe is unloaded however it went.
 async fn probe_services(
     host: &mut PluginHost,
-    layout: &Layout,
+    base: &Path,
     modules: &[String],
     wait_ms: u64,
 ) -> Result<Vec<String>, BoxError> {
-    let base = layout.adapters.join("dsh");
     let out = tempfile::NamedTempFile::new()?.into_temp_path();
     std::fs::remove_file(&out)?;
     let id = "yobuild:dsh-services";
@@ -1215,7 +1234,7 @@ enum Launch {
 
 fn launch(
     server: &Mcp,
-    dir: &Path,
+    installed: &install::Installed,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Launch, BoxError> {
     let failed =
@@ -1238,11 +1257,9 @@ fn launch(
             let command = match source {
                 Source::Path(path) => path.clone(),
                 Source::Package(package) => {
-                    let install = format!("npm install {} in {}", package.spec(), dir.display());
-                    let installed =
-                        plugins::installed(package, &dir.join("node_modules"), &install)
-                            .map_err(|e| failed(&e))?;
-                    bin_of(&installed, package.name(), bin.as_deref()).map_err(|e| failed(&e))?
+                    let dir = plugins::in_set(installed, install::Set::Mcp, package)
+                        .map_err(|e| failed(&e))?;
+                    bin_of(&dir, package.name(), bin.as_deref()).map_err(|e| failed(&e))?
                 }
             };
             Launch::Stdio {

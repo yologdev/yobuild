@@ -8,9 +8,14 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/echo");
+/// The tests' cache of installed packages (`YOBUILD_HOME` for every
+/// `yobuild` they start): each set installed from npm once, kept across
+/// runs of the suite.
+const CACHE: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/yobuild-home");
 
 fn yobuild(args: &[&str], cwd: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_yobuild"))
+        .env("YOBUILD_HOME", CACHE)
         .args(args)
         .current_dir(cwd)
         .env_remove("RUST_LOG")
@@ -99,6 +104,7 @@ fn arguments_are_checked_before_anything_runs() {
 fn a_missing_key_stops_the_run_before_it_starts() {
     let (agent, _) = fixture();
     let out = Command::new(env!("CARGO_BIN_EXE_yobuild"))
+        .env("YOBUILD_HOME", CACHE)
         .args(["run", &agent, "--once", "x"])
         .env_remove("DEEPSEEK_API_KEY")
         .output()
@@ -259,7 +265,7 @@ fn a_pi_extension_file_from_the_manifest_gives_its_tool() {
 }
 
 #[test]
-fn a_pinned_pi_package_is_found_beside_the_manifest() {
+fn a_pinned_pi_package_runs_from_the_cache() {
     if !pi_installed() {
         return;
     }
@@ -267,7 +273,8 @@ fn a_pinned_pi_package_is_found_beside_the_manifest() {
         "",
         r#"[{ "tools": [{ "name": "pi_echo", "arguments": { "text": "hi" } }] }, { "text": "done" }]"#,
     );
-    let package = dir.path().join("node_modules/fake-pi");
+    // Not on npm: installed by hand into the cache, with its lock.
+    let package = dir.path().join("fake-pi");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
         package.join("package.json"),
@@ -295,18 +302,31 @@ fn a_pinned_pi_package_is_found_beside_the_manifest() {
         )
     };
     manifest("fake-pi@1.0.0");
+    yobuild::install::seed(
+        Path::new(CACHE),
+        &dir.path().join("agent.toml"),
+        yobuild::install::Set::Pi,
+        &[("fake-pi", "1.0.0", &package)],
+    )
+    .unwrap();
     let out = go();
     let stderr = text(&out.stderr);
     assert!(
         out.status.success() && stderr.contains("  pi_echo ✓"),
         "{stderr}"
     );
+    // Another version: the lock is stale, which `--locked` refuses.
     manifest("fake-pi@1.0.1");
-    let out = go();
+    let out = yobuild(
+        &[
+            "run", "agent.toml", "--scripted", "script.json", "--locked", "--once", "go",
+        ],
+        dir.path(),
+    );
     let stderr = text(&out.stderr);
     assert!(
-        stderr.starts_with("yobuild: plugin fake-pi: fake-pi is installed at 1.0.0")
-            && stderr.contains("not 1.0.1 (npm install fake-pi@1.0.1 in "),
+        stderr.starts_with("yobuild: /")
+            && stderr.ends_with("/agent.lock: its `pi` set is not current: the manifest's pins or the DSH base changed (--locked: run without it to resolve the set again)\n"),
         "{stderr}"
     );
 }
@@ -357,6 +377,7 @@ mod web {
             late: Duration,
         ) -> Page {
             let mut child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
+                .env("YOBUILD_HOME", super::CACHE)
                 .args(args)
                 .args(web)
                 .current_dir(dir)
@@ -537,6 +558,7 @@ fn ctrl_c_stops_a_once_run_as_aborted() {
         r#"[{ "tools": [{ "name": "bash", "arguments": { "command": "sleep 30" } }] }, { "text": "done" }]"#,
     );
     let child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
+        .env("YOBUILD_HOME", CACHE)
         .args([
             "run", "agent.toml", "--scripted", "script.json", "--once", "go",
         ])
@@ -676,19 +698,81 @@ fn a_plugin_allows_only_its_own_tools() {
     );
 }
 
+#[test]
+fn a_stale_lock_is_refused_with_locked_and_resolved_again_without() {
+    if !pi_installed() {
+        return;
+    }
+    let dir = project(
+        "[[plugin]]\npi = \"@juicesharp/rpiv-todo@2.12.0\"\n[builtins]\ngate = \"off\"\n",
+        r#"[{ "text": "done" }]"#,
+    );
+    // A lock made for another version (its packages left out: never
+    // installed).
+    let lock = dir.path().join("agent.lock");
+    std::fs::write(
+        &lock,
+        r#"{ "lockVersion": 1, "sets": { "pi": { "requested": { "@juicesharp/rpiv-todo": "2.11.0" }, "packages": { "": {} } } } }"#,
+    )
+    .unwrap();
+    let go = |locked: bool| {
+        let mut args = vec!["run", "agent.toml", "--scripted", "script.json"];
+        if locked {
+            args.push("--locked");
+        }
+        args.extend(["--once", "go"]);
+        yobuild(&args, dir.path())
+    };
+    let out = go(true);
+    let stderr = text(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("agent.lock: its `pi` set is not current"),
+        "{stderr}"
+    );
+    let out = go(false);
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("  Info: agent.lock: `pi` resolved again: +")
+            && stderr.contains("+@juicesharp/rpiv-todo 2.12.0"),
+        "{stderr}"
+    );
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&lock).unwrap()).unwrap();
+    assert_eq!(
+        written["sets"]["pi"]["requested"],
+        serde_json::json!({ "@juicesharp/rpiv-todo": "2.12.0" })
+    );
+    assert!(
+        written["sets"]["pi"]["packages"]["node_modules/@juicesharp/rpiv-todo"]["integrity"]
+            .as_str()
+            .is_some_and(|i| i.starts_with("sha512-")),
+        "{written}"
+    );
+    // Now current: --locked runs.
+    let out = go(true);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+}
+
 // -- the example agents (examples/*.toml), as their demos ran ---------------
 
-/// The examples folder, and whether its pi packages are installed
-/// (`scripts/try-coding-agent.sh --setup-only`; required in CI).
+/// The examples folder, when the adapters they load are installed
+/// (`scripts/try-coding-agent.sh --setup-only`; required in CI). Their
+/// pinned packages are installed into the tests' cache from their checked-in
+/// locks (`--locked`: a lock out of date fails the test), from npm the first
+/// time.
 fn examples() -> Option<std::path::PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    if dir.join("node_modules/@juicesharp/rpiv-todo").is_dir() && pi_installed() {
+    let dsh = Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/dsh/node_modules");
+    if pi_installed() && dsh.is_dir() {
         return Some(dir);
     }
     if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
-        panic!("the examples' packages are required: npm ci in examples/");
+        panic!(
+            "the examples need the adapters: scripts/copy-adapters.sh, then npm ci in adapters/dsh"
+        );
     }
-    eprintln!("SKIPPED: npm ci in examples/");
+    eprintln!("SKIPPED: scripts/copy-adapters.sh, then npm ci in adapters/dsh");
     None
 }
 
@@ -775,6 +859,7 @@ fn the_coding_examples_policy_blocks_a_deletion_with_nobody_there() {
             &ex.join("coding.toml").display().to_string(),
             "--scripted",
             &ex.join("scripts/coding.json").display().to_string(),
+            "--locked",
             "--once",
             "clean the build",
         ],
@@ -799,6 +884,7 @@ async fn the_handoff_example_asks_without_waiting_and_the_answer_starts_the_next
         "--scripted".to_owned(),
         ex.join("scripts/handoff.json").display().to_string(),
         "--measure".to_owned(),
+        "--locked".to_owned(),
     ];
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let task = "Look at this folder and write notes.md about it.";

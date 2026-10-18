@@ -9,8 +9,8 @@ Go — plus a few small built-ins of its own, on top of the
 > Status: **M2a (manifest and runner).** The built-ins and the frontend
 > (`yobuild::builtins`, `yobuild::frontend`, [`frontend/`](frontend/README.md),
 > with its [examples](examples/README.md)), the manifest
-> (`yobuild::manifest`) and `yobuild run` (plugins already installed;
-> installing them is M2b). Numbers quoted are measured in the yoagent
+> (`yobuild::manifest`), `yobuild run`, and installing pinned plugins
+> (`yobuild::install`, M2b; `yobuild check` is next). Numbers quoted are measured in the yoagent
 > repository.
 >
 > ```sh
@@ -75,16 +75,18 @@ web = true
 ```
 
 ```sh
-scripts/try-coding-agent.sh --setup-only   # once (Node 22.19+, npm): the adapters, the examples' packages
+scripts/try-coding-agent.sh --setup-only   # once (Node 22.19+, npm): the adapters and the frontend's plugins
 cd my-project
 DEEPSEEK_API_KEY=… cargo run --manifest-path path/to/yobuild/Cargo.toml -- run path/to/yobuild/examples/handoff.toml "the task"
 ```
 
 `yobuild run` loads its plugins' adapters from the checkout it was built
-from. A manifest's pi packages and stdio MCP servers are installed in
-`node_modules/` beside it, a rutis plugin's runtime in its own package, DSH
-plugins with `npm install --no-save --prefix adapters/dsh …`, at exactly
-their pinned versions; installing them is M2b. The other examples:
+from. It installs a manifest's pinned pi packages, DSH packages and stdio
+MCP servers itself (never running a package script), into
+`~/.yobuild/plugins/` (`YOBUILD_HOME`), as the lock beside the manifest
+says (`handoff.toml` → `handoff.lock`, written on the first run; check it
+in; `--locked` refuses a lock that is not current). A rutis plugin's
+runtime is installed in its own package. The other examples:
 [`examples/`](examples/README.md).
 
 ## Documents

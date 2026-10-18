@@ -36,6 +36,8 @@ use crate::builtins::Report;
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Manifest {
+    /// The manifest's file, as given (its lock is beside it, `<stem>.lock`).
+    pub path: PathBuf,
     /// The manifest's folder (absolute when read by [`Manifest::load`]):
     /// what its paths are relative to.
     pub dir: PathBuf,
@@ -662,6 +664,28 @@ impl Manifest {
             names.push(name.to_owned());
             Ok(())
         };
+        // Each set's pins (design §4): one npm project holds one version of
+        // a package at the top, so two entries of a set must agree.
+        let mut pins: Vec<(&str, Package)> = Vec::new();
+        let mut pinned = |set: &'static str, source: &Source, span: Range<usize>| {
+            let Source::Package(package) = source else {
+                return Ok(());
+            };
+            if let Some((_, other)) = pins
+                .iter()
+                .find(|(s, p)| *s == set && p.name() == package.name() && p != package)
+            {
+                let m = format!(
+                    "{}: another entry pins {} at {}, and the `{set}` set holds one version of a package",
+                    package.spec(),
+                    package.name(),
+                    other.version()
+                );
+                return Err((span, m));
+            }
+            pins.push((set, package.clone()));
+            Ok(())
+        };
         // Where an entry allows tools: with the gate off, that means nothing.
         let mut allowing: Option<Range<usize>> = None;
         let mut plugins = Vec::new();
@@ -675,8 +699,14 @@ impl Manifest {
             {
                 allowing.get_or_insert(a.span());
             }
-            let (plugin, name_span) = plugin(raw.into_inner(), span, dir).map_err(located)?;
+            let (plugin, name_span) =
+                plugin(raw.into_inner(), span.clone(), dir).map_err(located)?;
             unique(&plugin.name, name_span).map_err(located)?;
+            match &plugin.kind {
+                PluginKind::Pi(source) => pinned("pi", source, span).map_err(located)?,
+                PluginKind::Dsh(source) => pinned("dsh", source, span).map_err(located)?,
+                PluginKind::Rutis { .. } => {}
+            }
             plugins.push(plugin);
         }
         let mut mcp = Vec::new();
@@ -690,8 +720,12 @@ impl Manifest {
             {
                 allowing.get_or_insert(a.span());
             }
-            let (server, name_span) = server(raw.into_inner(), span, dir).map_err(located)?;
+            let (server, name_span) =
+                server(raw.into_inner(), span.clone(), dir).map_err(located)?;
             unique(&server.name, name_span).map_err(located)?;
+            if let Transport::Stdio { source, .. } = &server.transport {
+                pinned("mcp", source, span).map_err(located)?;
+            }
             mcp.push(server);
         }
         let builtins = builtins(raw.builtins).map_err(located)?;
@@ -702,6 +736,7 @@ impl Manifest {
         let frontend = frontend(raw.frontend).map_err(located)?;
 
         Ok(Manifest {
+            path: path.to_owned(),
             dir: dir.to_owned(),
             agent,
             limits,

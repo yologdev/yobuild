@@ -41,6 +41,8 @@ tracing = "0.1"
 # The `yobuild` binary's log (stderr, or a file under a terminal UI).
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
+# A cache folder's name: the hash of its set in `agent.lock`.
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "signal"] }

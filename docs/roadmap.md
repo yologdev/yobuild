@@ -107,12 +107,13 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
 **Done when** `yobuild run handoff.toml --scripted` reproduces today's
 demo, plus the new per-plugin hook time and per-runtime memory lines.
 
-## M2b — Install, lock, check (design §4; decided 2026-10-18)
+## M2b — Install, lock, check (design §4; decided 2026-10-18; in progress: install and lock #30)
 
 - Resolve and install pinned plugins and stdio MCP servers per ecosystem
   into the cache, in up to three sets (`pi`, `dsh` over the DSH adapter's
   base, `mcp`), each at `~/.yobuild/plugins/<set>/<hash>/`. Write
-  `agent.lock`: per set, npm's own lock (versions, URLs, integrity hashes).
+  the lock beside the manifest, named after it (`agent.toml` →
+  `agent.lock`): per set, npm's own lock (versions, URLs, integrity hashes).
   A stale set is resolved again; `--locked` refuses instead. Installs
   never run package scripts. Unpinned entries are refused (as now).
   `node_modules/` beside the manifest is no longer read. A pi package's

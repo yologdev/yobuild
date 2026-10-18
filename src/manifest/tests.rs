@@ -344,6 +344,31 @@ fn a_plugin_names_one_ecosystem_and_a_rutis_one_its_runtime() {
 }
 
 #[test]
+fn one_set_pins_one_version_of_a_package() {
+    assert_eq!(
+        error(&with(
+            "[[plugin]]\npi = \"x@1.0.0\"\n[[plugin]]\nname = \"y\"\npi = \"x@1.0.1\"\n"
+        )),
+        "6:1: x@1.0.1: another entry pins x at 1.0.0, and the `pi` set holds one version of a package"
+    );
+    assert_eq!(
+        error(&with(
+            "[[mcp]]\nnpm = \"s@1.0.0\"\n[[mcp]]\nname = \"t\"\nnpm = \"s@2.0.0\"\n"
+        )),
+        "6:1: s@2.0.0: another entry pins s at 1.0.0, and the `mcp` set holds one version of a package"
+    );
+    // The same version twice, or one package in two sets: no conflict.
+    read(&with(
+        "[[plugin]]\npi = \"x@1.0.0\"\n[[plugin]]\nname = \"y\"\npi = \"x@1.0.0\"\n",
+    ))
+    .unwrap();
+    read(&with(
+        "[[plugin]]\npi = \"x@1.0.0\"\n[[mcp]]\nname = \"y\"\nnpm = \"x@2.0.0\"\n",
+    ))
+    .unwrap();
+}
+
+#[test]
 fn names_are_unique_and_plain() {
     assert_eq!(
         error(&with(

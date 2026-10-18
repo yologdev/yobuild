@@ -1,9 +1,8 @@
 //! A manifest's plugins as plugin-host rows, by ecosystem — checked before
-//! anything starts. Until `yobuild` installs packages (M2b), a pinned
-//! package must already be installed, at exactly its version: a pi package
-//! in `node_modules/` beside the manifest, a DSH plugin in the DSH runtime's
-//! (`adapters/dsh`, installed with `--no-save`: copying the adapters again,
-//! or `npm ci` there, drops it).
+//! anything starts. A pinned package comes from its set in the cache
+//! (`crate::install`): a pi package from the `pi` set, a DSH package from
+//! the `dsh` set, where the `dsh` runtime then runs; DSH files run in
+//! `adapters/dsh`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -12,6 +11,7 @@ use serde_json::{json, Value as Json};
 
 use super::Layout;
 use crate::frontend::host::{rows_from_file, Row};
+use crate::install::{Installed, Set};
 use crate::manifest::{Manifest, Package, Plugin, PluginKind, Runtime, Source};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -26,8 +26,12 @@ pub(crate) struct Plan {
     pub rows: Vec<Row>,
     /// Start the `pi` runtime (`adapters/pi`).
     pub pi: bool,
-    /// Start the `dsh` runtime (`adapters/dsh`).
+    /// Start the `dsh` runtime, in `dsh_dir`.
     pub dsh: bool,
+    /// The `dsh` runtime's folder: the `dsh` set's when DSH packages are
+    /// pinned, else `adapters/dsh`; the DSH adapter's files it loads are
+    /// there.
+    pub dsh_dir: PathBuf,
     /// The rutis plugins' packages, each a Node runtime of its own
     /// (`rutis-<index>`): a plugin runs in its package's, where its imports
     /// resolve (and its Cordis: rutis refuses a plugin that resolves
@@ -91,6 +95,22 @@ pub(crate) fn installed(
         .into());
     }
     Ok(dir)
+}
+
+/// A pinned package in its installed set, at exactly its version.
+pub(crate) fn in_set(sets: &Installed, set: Set, package: &Package) -> Result<PathBuf, BoxError> {
+    let dir = sets.get(set).ok_or_else(|| {
+        format!(
+            "{} is pinned, but the `{}` set was not installed",
+            package.spec(),
+            set.name()
+        )
+    })?;
+    let fix = format!(
+        "the cache folder {} is not what agent.lock says: delete it and run again",
+        dir.display()
+    );
+    installed(package, &dir.join("node_modules"), &fix)
 }
 
 /// How long a helper script may take (it reads package files and imports
@@ -194,6 +214,7 @@ impl Helper {
 pub(crate) fn plan(
     manifest: &Manifest,
     layout: &Layout,
+    sets: &Installed,
     cwd: &Path,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Plan, BoxError> {
@@ -201,6 +222,9 @@ pub(crate) fn plan(
     let mut plan = Plan {
         pi_handler: format!("pi-extensions-{suffix}"),
         dsh_handler: format!("dsh-tools-{suffix}"),
+        dsh_dir: sets
+            .get(Set::Dsh)
+            .map_or_else(|| layout.adapters.join("dsh"), Path::to_path_buf),
         ..Plan::default()
     };
     let mut extensions: Vec<Json> = Vec::new();
@@ -213,7 +237,7 @@ pub(crate) fn plan(
                 if config.is_some() {
                     return Err(failed("a pi extension takes no config".into()));
                 }
-                let found = pi_extensions(manifest, layout, plugin, source).map_err(failed)?;
+                let found = pi_extensions(layout, sets, plugin, source).map_err(failed)?;
                 let files = found
                     .extensions
                     .iter()
@@ -225,7 +249,8 @@ pub(crate) fn plan(
                 plan.notes.extend(found.notes);
             }
             PluginKind::Dsh(source) => {
-                let (rows, peers) = dsh_rows_of(layout, plugin, source, config).map_err(failed)?;
+                let (rows, peers) =
+                    dsh_rows_of(layout, &plan.dsh_dir, plugin, source, config).map_err(failed)?;
                 plan.dsh_modules
                     .extend(rows.iter().map(|row| row.name().to_owned()));
                 plan.dsh_peers.extend(peers);
@@ -283,12 +308,15 @@ pub(crate) fn plan(
                 .push("[dsh] host_services has no effect: no DSH plugin".into());
         }
     } else {
-        let dsh = layout.adapters.join("dsh");
+        let dsh = plan.dsh_dir.clone();
         plan.dsh = true;
         plan.handlers.push(plan.dsh_handler.clone());
         if manifest.dsh.host_services {
-            plan.rows
-                .extend(rows_from_file(&dsh.join("host-services.json"), "dsh")?);
+            // Read in place: it names packages, which resolve from `dsh`.
+            plan.rows.extend(rows_from_file(
+                &layout.adapters.join("dsh/host-services.json"),
+                "dsh",
+            )?);
         }
         let base = |id: &str, name: &str| Row::new(id, name).runtime("dsh");
         plan.rows.extend([
@@ -341,17 +369,13 @@ struct PiFound {
 }
 
 fn pi_extensions(
-    manifest: &Manifest,
     layout: &Layout,
+    sets: &Installed,
     plugin: &Plugin,
     source: &Source,
 ) -> Result<PiFound, BoxError> {
     let dir = match source {
-        Source::Package(p) => installed(
-            p,
-            &manifest.dir.join("node_modules"),
-            &format!("npm install {} in {}", p.spec(), manifest.dir.display()),
-        )?,
+        Source::Package(p) => in_set(sets, Set::Pi, p)?,
         Source::Path(path) => {
             exists(path)?;
             path.clone()
@@ -417,6 +441,7 @@ pub(crate) fn dsh_plugin_rows(plan: &Plan, name: &str) -> Vec<String> {
 /// plugin's config replacing its first row's — and its peers.
 fn dsh_rows_of(
     layout: &Layout,
+    base: &Path,
     plugin: &Plugin,
     source: &Source,
     config: Option<serde_json::Map<String, Json>>,
@@ -433,17 +458,15 @@ fn dsh_rows_of(
         }
         Source::Package(p) => p,
     };
-    let base = layout.adapters.join("dsh");
     let modules = base.join("node_modules");
-    let install = format!(
-        "npm install --no-save --prefix {} {}; copying the adapters again, or npm ci there, drops it",
-        base.display(),
-        p.spec()
+    let fix = format!(
+        "the cache folder {} is not what agent.lock says: delete it and run again",
+        base.display()
     );
-    let dir = installed(p, &modules, &install)?;
+    let dir = installed(p, &modules, &fix)?;
     let inspected = node_json(
         &layout.adapters.join("dsh/inspect-package.mjs"),
-        &[&base, Path::new(p.name())],
+        &[base, Path::new(p.name())],
     )?;
     rows_of_bundle(&id, &inspected, config, &modules, &optional_peers(&dir)?)
 }
@@ -614,9 +637,13 @@ mod tests {
     }
 
     fn plan_of(dir: &Path, text: &str) -> Result<Plan, String> {
-        plan(&manifest(dir, text), &Layout::default(), dir, &|_: &str| {
-            None
-        })
+        plan(
+            &manifest(dir, text),
+            &Layout::default(),
+            &Installed::default(),
+            dir,
+            &|_: &str| None,
+        )
         .map_err(|e| e.to_string())
     }
 

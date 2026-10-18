@@ -10,11 +10,13 @@
 //!   host-counted facts, the approval gate, a scratch folder.
 //!
 //! - [`manifest`]: an agent in one TOML file, read strictly.
+//! - [`install`]: a manifest's pinned packages, locked and installed.
 //! - [`run`]: an agent from its manifest (the `yobuild run` command).
 //!
 //! Not published yet and without an API promise.
 
 pub mod builtins;
 pub mod frontend;
+pub mod install;
 pub mod manifest;
 pub mod run;

@@ -61,7 +61,8 @@ install() {
 }
 "$repo/scripts/copy-adapters.sh"
 install "$frontend/plugins"
-install "$repo/examples"
+# The example manifests' pinned packages are not installed here: `yobuild
+# run` installs them from each manifest's lock into ~/.yobuild.
 install "$rutis_plugins/pi"
 install "$rutis_plugins/dsh"
 
