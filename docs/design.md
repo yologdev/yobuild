@@ -361,8 +361,8 @@ and imports, and its peers installed. Once the DSH runtime runs, it
 checks the services the plugin's rows inject; a missing one is refused,
 not left waiting.
 
-M2b (below) installs pinned packages into a cache (done: #30), records
-what was installed in `agent.lock`, and adds `yobuild check` (next). Unix only, as the
+M2b (below) installs pinned packages into a cache (#30), records what
+was installed in `agent.lock`, and adds `yobuild check` (#31). Unix only, as the
 terminal UI and `--measure` are (Windows: open question 7).
 
 ### Install: sets, the cache, `agent.lock` (M2b, decided 2026-10-18)
@@ -631,7 +631,12 @@ and no task:
      named like yoagent's built-in: `run` refuses it".
    - **DSH:** `probe::dsh` over the `dsh` set gives its rows, tools,
      prompt guidance, the services its rows inject (present or missing)
-     and import errors. For a DSH file, the base is `adapters/dsh`.
+     and import errors. For a DSH file, the base is `adapters/dsh`. A
+     plugin whose rows are packages the probe's own base loads
+     (`dsh-web`, `dsh-system-prompt`, `dsh-tools`, `dsh-user-questions`,
+     the host services) would be loaded twice, which DSH refuses, so it is
+     not probed alone: a note says so, and the agent together checks it
+     (found with #31: `coding.toml` pins `dsh-user-questions`).
    - **rutis** has no probe. The plugin is loaded alone in its runtime, as
      `run` loads it, and `check` lists the handlers its row registers and
      the tools a run is offered.
@@ -662,7 +667,10 @@ and no task:
    **The one run.** The agent's extensions are not run. `check` calls the
    bridge's hooks directly, as the probe's `offered` does: `start_run`,
    `tools`, one `before_model`, then `finish`. That gives the plugins'
-   tools, each with its owner (`offered_by`). Their names are checked
+   tools, each with its owner (`offered_by`, read before `finish`: the
+   registry forgets a run's offers then). A rutis plugin that registered
+   handlers alone is given up to 3 s to register them together too (a
+   TypeScript row runs before its async `apply` ends). Their names are checked
    against the agent's own tools (the built-ins, `ask_owner`, each
    server's prefixed tools), which are known without running anything.
    No model is asked, and facts, report, budget and measure take no part.
@@ -670,19 +678,18 @@ and no task:
 Loading runs the plugins' code, as `run` would. `check` is not a sandbox.
 
 **The report** has one block per entry, then the agent. This is
-`handoff.toml`'s, sketched (lists shortened, the guidance length made
-up):
+`handoff.toml`'s (#31; the tool lists shortened):
 
 ```text
-plugin rpiv-todo  pi @juicesharp/rpiv-todo@2.12.0           ok
+plugin rpiv-todo  pi @juicesharp/rpiv-todo@2.12.0  ok
   tools: todo (allowed)
-plugin todo-plan  rutis ../frontend/plugins/todo-plan.ts     ok
-  handlers: none (a UI plugin: it draws, offers no tool)
-plugin dsh-free-search  dsh dsh-free-search@0.8.1           ok
-  tools: multi_search (allowed), research (allowed), … (7 allowed); its npm and test tools ask
-  prompt guidance: 1,204 characters
+plugin todo-plan  rutis …/frontend/plugins/todo-plan.ts  ok
+  handlers: none (it offers no tool)
+plugin dsh-free-search  dsh dsh-free-search@0.8.1  ok
+  tools: advanced_search (allowed), …, free_search_test (asks), multi_search (allowed), …
+  prompt guidance: 1543 characters
 agent handoff: ok
-  tools: 6 yoagent (read_file, list_files, search free; bash, write_file, edit_file judged per call), ask_owner (allowed), 8 allowed by entries, the rest ask
+  tools: bash (judged per call), read_file (free), …, ask_owner (allowed), free_search_test (asks), …, todo (allowed)
   install scripts not run (the DSH base): esbuild, fsevents, koffi
 ```
 

@@ -107,7 +107,7 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
 **Done when** `yobuild run handoff.toml --scripted` reproduces today's
 demo, plus the new per-plugin hook time and per-runtime memory lines.
 
-## M2b — Install, lock, check (design §4; decided 2026-10-18; in progress: install and lock #30)
+## M2b — Install, lock, check (design §4; decided 2026-10-18; install and lock #30, check #31)
 
 - Resolve and install pinned plugins and stdio MCP servers per ecosystem
   into the cache, in up to three sets (`pi`, `dsh` over the DSH adapter's

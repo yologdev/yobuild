@@ -61,7 +61,6 @@ impl Row {
         self.runtime.as_deref() == Some(runtime)
     }
 
-    #[cfg(test)]
     pub(crate) fn config_json(&self) -> &Json {
         &self.config
     }

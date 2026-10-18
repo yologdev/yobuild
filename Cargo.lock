@@ -2700,9 +2700,11 @@ dependencies = [
  "rutis-loader",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "yoagent",
 ]
 

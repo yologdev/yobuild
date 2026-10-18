@@ -14,6 +14,7 @@
 //! read relative paths from there, so the gate, facts and bash do too.
 
 pub(crate) mod allowed;
+pub mod check;
 pub(crate) mod measure;
 pub(crate) mod plugins;
 pub(crate) mod script;
@@ -160,96 +161,20 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tracing::info!("{said}");
         session.notice(NoticeLevel::Info, said.clone());
     }
-    let bridge = RutisBridge::install(root)?;
-    services::provide(root, &session)?;
-    // `ask_owner`, the tool and (for plugins) the host service: one
-    // numbering. Before the plugins start: one may use it as it loads. The
-    // service is there either way (rutis has no optional inject: a plugin
-    // injecting a missing service would never start), refusing without the
-    // built-in.
-    let ask_owner = manifest
-        .builtins
-        .ask_owner
-        .then(|| AskOwner::new(session.clone()));
-    services::provide_ask_owner(root, ask_owner.clone())?;
     let scratch = match manifest.builtins.scratch {
         true => Some(Scratch::create(name)?),
         false => None,
     };
-
-    // The runtimes and their plugins.
+    // `_dsh_home`: kept until the session ends.
+    let Started {
+        bridge,
+        host,
+        ask_owner,
+        runtimes,
+        dsh_home: _dsh_home,
+    } = start(root, &manifest, &checked.plan, &layout, &session, terminal).await?;
     let plan = &checked.plan;
-    let mut builder = PluginHost::builder();
-    // Each runtime and its folder: whose memory is said after each run.
-    let mut runtimes: Vec<(String, PathBuf)> = Vec::new();
-    if terminal {
-        // The terminal UI reads the keyboard: its runtime keeps the terminal.
-        // Its folder spelled as a rutis package's is (canonical), so one
-        // started from the same folder is seen as that (`--measure`).
-        let dir = layout.frontend.join("plugins");
-        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
-        builder = builder.node("ui", &dir).terminal("ui");
-        runtimes.push(("ui".into(), dir));
-    }
-    if plan.pi {
-        let dir = layout.adapters.join("pi");
-        builder = builder.node("pi", &dir);
-        runtimes.push(("pi".into(), dir));
-    }
-    // DSH's own host services, on request: in a home of their own.
-    let dsh_home = match plan.dsh && manifest.dsh.host_services {
-        true => Some(DshHome::new()?),
-        false => None,
-    };
-    if plan.dsh {
-        let dir = plan.dsh_dir.clone();
-        builder = builder.node("dsh", &dir);
-        runtimes.push(("dsh".into(), dir));
-        for (name, value) in dsh_home.iter().flat_map(DshHome::env) {
-            builder = builder.env("dsh", name, value);
-        }
-    }
-    // Each rutis plugin's package, a runtime of its own.
-    for (at, dir) in plan.rutis.iter().enumerate() {
-        let name = plugins::rutis_runtime_name(at);
-        builder = builder.node(&name, dir);
-        runtimes.push((name, dir.clone()));
-    }
-    builder = builder
-        .share("yoagent")
-        .share(services::FRONTEND)
-        .share(services::UI)
-        .share(services::ASK_OWNER);
-    let mut host = builder.start(root).await?;
-    if !plan.rows.is_empty() {
-        host.load(plan.rows.clone())
-            .await
-            .map_err(|e| dsh_waiting(e, plan, manifest.dsh.host_services))?;
-        // The adapters' handlers, each from its own row; and a rutis plugin
-        // marked `policy` registers its judge in its own time (a row may be
-        // Active before its `apply` ends): a run started before would find
-        // no policy, or only another plugin's — so wait for one from its
-        // own row (a pi policy is the pi row's handler).
-        let rows = |handler: &String| match *handler == plan.pi_handler {
-            true => PI_ROW,
-            false => DSH_ROW,
-        };
-        let handlers: Vec<(&str, &str)> = plan
-            .handlers
-            .iter()
-            .map(|h| (h.as_str(), rows(h)))
-            .collect();
-        let judges: Vec<String> = manifest
-            .plugins
-            .iter()
-            .filter(|p| p.policy && matches!(p.kind, PluginKind::Rutis { .. }))
-            .map(|p| plugins::row_id(&p.name))
-            .collect();
-        wait_for(&bridge, &handlers, &judges, &host).await?;
-    }
-    if !plan.dsh_modules.is_empty() {
-        dsh_services(&mut host, plan, manifest.dsh.host_services).await?;
-    }
+    let mut host = host;
 
     // The tools: yoagent's (in `cwd`), `ask_owner`, each MCP server's; no
     // two of one name. (A plugin's tools come with each run; yoagent keeps
@@ -664,7 +589,6 @@ struct Checked {
 
 fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
     let manifest = &options.manifest;
-    let lookup = |name: &str| std::env::var(name).ok();
     if options.once && options.task.as_deref().is_none_or(|t| t.trim().is_empty()) {
         return Err("a once run needs a task".into());
     }
@@ -726,29 +650,20 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
             }
         }
     }
-    // Nothing judging calls is allowed (an agent in a sandbox), but said.
-    if manifest.builtins.gate == GateMode::Off && !manifest.plugins.iter().any(|p| p.policy) {
-        notes.push(
-            "nothing judges tool calls: `gate = \"off\"` and no plugin is `policy = true` \
-             (every call runs as the agent asks; fine in a sandbox)"
-                .into(),
-        );
-    }
-
     let prompt = Prompt::read(manifest)?;
-    let installed = install::install(
+    let Prepared {
+        installed,
+        plan,
+        servers,
+        notes: more,
+    } = prepare(
         manifest,
-        &options.layout.adapters,
+        &options.layout,
         options.home.as_deref(),
         options.locked,
+        cwd,
     )?;
-    let plan = plugins::plan(manifest, &options.layout, &installed, cwd, &lookup)?;
-    notes.extend(plan.notes.iter().cloned());
-    let servers = manifest
-        .mcp
-        .iter()
-        .map(|server| Ok((server.name.clone(), launch(server, &installed, &lookup)?)))
-        .collect::<Result<_, BoxError>>()?;
+    notes.extend(more);
     Ok(Checked {
         key,
         config,
@@ -760,6 +675,166 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
         servers,
         notes,
         installed,
+    })
+}
+
+/// The plugins started as `run` starts them: the bridge, the frontend's
+/// services and `ask_owner`'s on `root`, then the runtimes and rows of
+/// `plan`, waited for (the adapters' handlers, each policy plugin's judge,
+/// the services DSH plugins inject). `terminal`: the terminal UI's runtime
+/// too (its row is loaded later).
+struct Started {
+    bridge: RutisBridge,
+    host: PluginHost,
+    ask_owner: Option<AskOwner>,
+    /// Each runtime and its folder (`--measure`).
+    runtimes: Vec<(String, PathBuf)>,
+    /// DSH's private home, while the `dsh` runtime uses it (removed when
+    /// dropped).
+    dsh_home: Option<DshHome>,
+}
+
+async fn start(
+    root: &Ctx,
+    manifest: &Manifest,
+    plan: &plugins::Plan,
+    layout: &Layout,
+    session: &Session,
+    terminal: bool,
+) -> Result<Started, BoxError> {
+    let bridge = RutisBridge::install(root)?;
+    services::provide(root, session)?;
+    // `ask_owner`, the tool and (for plugins) the host service: one
+    // numbering. Before the plugins start: one may use it as it loads. The
+    // service is there either way (rutis has no optional inject: a plugin
+    // injecting a missing service would never start), refusing without the
+    // built-in.
+    let ask_owner = manifest
+        .builtins
+        .ask_owner
+        .then(|| AskOwner::new(session.clone()));
+    services::provide_ask_owner(root, ask_owner.clone())?;
+    // The runtimes and their plugins.
+    let mut builder = PluginHost::builder();
+    // Each runtime and its folder: whose memory is said after each run.
+    let mut runtimes: Vec<(String, PathBuf)> = Vec::new();
+    if terminal {
+        // The terminal UI reads the keyboard: its runtime keeps the terminal.
+        // Its folder spelled as a rutis package's is (canonical), so one
+        // started from the same folder is seen as that (`--measure`).
+        let dir = layout.frontend.join("plugins");
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        builder = builder.node("ui", &dir).terminal("ui");
+        runtimes.push(("ui".into(), dir));
+    }
+    if plan.pi {
+        let dir = layout.adapters.join("pi");
+        builder = builder.node("pi", &dir);
+        runtimes.push(("pi".into(), dir));
+    }
+    // DSH's own host services, on request: in a home of their own.
+    let dsh_home = match plan.dsh && manifest.dsh.host_services {
+        true => Some(DshHome::new()?),
+        false => None,
+    };
+    if plan.dsh {
+        let dir = plan.dsh_dir.clone();
+        builder = builder.node("dsh", &dir);
+        runtimes.push(("dsh".into(), dir));
+        for (name, value) in dsh_home.iter().flat_map(DshHome::env) {
+            builder = builder.env("dsh", name, value);
+        }
+    }
+    // Each rutis plugin's package, a runtime of its own.
+    for (at, dir) in plan.rutis.iter().enumerate() {
+        let name = plugins::rutis_runtime_name(at);
+        builder = builder.node(&name, dir);
+        runtimes.push((name, dir.clone()));
+    }
+    builder = builder
+        .share("yoagent")
+        .share(services::FRONTEND)
+        .share(services::UI)
+        .share(services::ASK_OWNER);
+    let mut host = builder.start(root).await?;
+    if !plan.rows.is_empty() {
+        host.load(plan.rows.clone())
+            .await
+            .map_err(|e| dsh_waiting(e, plan, manifest.dsh.host_services))?;
+        // The adapters' handlers, each from its own row; and a rutis plugin
+        // marked `policy` registers its judge in its own time (a row may be
+        // Active before its `apply` ends): a run started before would find
+        // no policy, or only another plugin's — so wait for one from its
+        // own row (a pi policy is the pi row's handler).
+        let rows = |handler: &String| match *handler == plan.pi_handler {
+            true => PI_ROW,
+            false => DSH_ROW,
+        };
+        let handlers: Vec<(&str, &str)> = plan
+            .handlers
+            .iter()
+            .map(|h| (h.as_str(), rows(h)))
+            .collect();
+        let judges: Vec<String> = manifest
+            .plugins
+            .iter()
+            .filter(|p| p.policy && matches!(p.kind, PluginKind::Rutis { .. }))
+            .map(|p| plugins::row_id(&p.name))
+            .collect();
+        wait_for(&bridge, &handlers, &judges, &host).await?;
+    }
+    if !plan.dsh_modules.is_empty() {
+        dsh_services(&mut host, plan, manifest.dsh.host_services).await?;
+    }
+    Ok(Started {
+        bridge,
+        host,
+        ask_owner,
+        runtimes,
+        dsh_home,
+    })
+}
+
+/// What `run` and `check` both do before anything starts: the pinned
+/// packages installed, the plugins planned, each MCP server's launch.
+struct Prepared {
+    installed: install::Installed,
+    plan: plugins::Plan,
+    servers: HashMap<String, Launch>,
+    /// Said before the agent starts (a Warning notice each).
+    notes: Vec<String>,
+}
+
+fn prepare(
+    manifest: &Manifest,
+    layout: &Layout,
+    home: Option<&Path>,
+    locked: bool,
+    cwd: &Path,
+) -> Result<Prepared, BoxError> {
+    let lookup = |name: &str| std::env::var(name).ok();
+    let mut notes = Vec::new();
+    // Nothing judging calls is allowed (an agent in a sandbox), but said.
+    if manifest.builtins.gate == GateMode::Off && !manifest.plugins.iter().any(|p| p.policy) {
+        notes.push(
+            "nothing judges tool calls: `gate = \"off\"` and no plugin is `policy = true` \
+             (every call runs as the agent asks; fine in a sandbox)"
+                .into(),
+        );
+    }
+    let installed = install::install(manifest, &layout.adapters, home, locked)?;
+    let plan = plugins::plan(manifest, layout, &installed, cwd, &lookup)?;
+    notes.extend(plan.notes.iter().cloned());
+    let servers = manifest
+        .mcp
+        .iter()
+        .map(|server| Ok((server.name.clone(), launch(server, &installed, &lookup)?)))
+        .collect::<Result<_, BoxError>>()?;
+    Ok(Prepared {
+        installed,
+        plan,
+        servers,
+        notes,
     })
 }
 

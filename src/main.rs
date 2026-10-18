@@ -1,8 +1,13 @@
-//! `yobuild`: run an agent from its manifest.
+//! `yobuild`: run an agent from its manifest, or check it.
 //!
 //! ```text
 //! yobuild run <agent.toml> [--scripted FILE] [--once] [--measure] [--web ADDR] [--locked] [--] [TASK…]
+//! yobuild check <agent.toml> [--locked] [--json]
 //! ```
+//!
+//! `check` vets every plugin and MCP server without a model or a key (each
+//! alone, then the agent together; design §4): a report on stdout, as text
+//! or `--json`; the exit code is non-zero when anything has a problem.
 //!
 //! - `--scripted FILE`: the model's replies from a file (no provider, no key).
 //! - `--once`: run TASK alone, without a frontend; each tool call and notice
@@ -42,8 +47,8 @@ use yobuild::run::{run, Options};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-const USAGE: &str =
-    "usage: yobuild run <agent.toml> [--scripted FILE] [--once] [--measure] [--web ADDR] [--locked] [--] [TASK…]";
+const USAGE: &str = "usage: yobuild run <agent.toml> [--scripted FILE] [--once] [--measure] [--web ADDR] [--locked] [--] [TASK…]
+       yobuild check <agent.toml> [--locked] [--json]";
 
 fn main() -> ExitCode {
     match start() {
@@ -59,6 +64,7 @@ fn start() -> Result<ExitCode, BoxError> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("run") => {}
+        Some("check") => return check(args),
         Some("-h" | "--help") | None => {
             println!("{USAGE}");
             return Ok(ExitCode::SUCCESS);
@@ -154,6 +160,43 @@ fn start() -> Result<ExitCode, BoxError> {
 }
 
 /// The log: stderr, or a file when a terminal UI owns the screen (`agent`).
+/// `yobuild check`: the report on stdout (text, or JSON with `--json`);
+/// exit 1 when anything has a problem.
+fn check(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
+    use std::io::Write;
+    use yobuild::run::check::{check, CheckOptions};
+    let path = match args.next() {
+        Some(help) if help == "-h" || help == "--help" => {
+            println!("{USAGE}");
+            return Ok(ExitCode::SUCCESS);
+        }
+        Some(path) if !path.starts_with('-') => PathBuf::from(path),
+        _ => return Err(USAGE.into()),
+    };
+    let mut options = CheckOptions::new(Manifest::load(&path)?);
+    let mut json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--locked" => options.locked = true,
+            "--json" => json = true,
+            other => return Err(format!("unknown option {other}\n{USAGE}").into()),
+        }
+    }
+    logging(None)?;
+    let runtime = tokio::runtime::Runtime::new()?;
+    let report = runtime.block_on(check(options))?;
+    // Written so that a reader gone (a closed pipe) is not a panic.
+    let text = match json {
+        true => format!("{}\n", serde_json::to_string_pretty(&report)?),
+        false => report.text(),
+    };
+    let _ = std::io::stdout().write_all(text.as_bytes());
+    Ok(match report.ok() {
+        true => ExitCode::SUCCESS,
+        false => ExitCode::FAILURE,
+    })
+}
+
 fn logging(agent: Option<&str>) -> Result<Option<PathBuf>, BoxError> {
     use tracing_subscriber::EnvFilter;
     // The registry warns of no key for `--scripted`'s mock provider, which
