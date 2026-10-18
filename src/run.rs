@@ -205,17 +205,30 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         .share(services::ASK_OWNER);
     let mut host = builder.start(root).await?;
     if !plan.rows.is_empty() {
-        host.load(plan.rows.clone()).await?;
-        // A rutis plugin marked `policy` registers its handler in its own
-        // time (a row is Active before its `apply` ends): a run started
-        // before would find no policy, or only another plugin's.
-        let judges = manifest
+        host.load(plan.rows.clone())
+            .await
+            .map_err(|e| dsh_waiting(e, plan, manifest.dsh.host_services))?;
+        // The adapters' handlers, each from its own row; and a rutis plugin
+        // marked `policy` registers its judge in its own time (a row may be
+        // Active before its `apply` ends): a run started before would find
+        // no policy, or only another plugin's — so wait for one from its
+        // own row (a pi policy is the pi row's handler).
+        let rows = |handler: &String| match *handler == plan.pi_handler {
+            true => PI_ROW,
+            false => DSH_ROW,
+        };
+        let handlers: Vec<(&str, &str)> = plan
+            .handlers
+            .iter()
+            .map(|h| (h.as_str(), rows(h)))
+            .collect();
+        let judges: Vec<String> = manifest
             .plugins
             .iter()
             .filter(|p| p.policy && matches!(p.kind, PluginKind::Rutis { .. }))
-            .count();
-        let adapters = [plan.pi_handler.as_str(), plan.dsh_handler.as_str()];
-        wait_for(&bridge, &plan.handlers, (judges, &adapters), &host).await?;
+            .map(|p| plugins::row_id(&p.name))
+            .collect();
+        wait_for(&bridge, &handlers, &judges, &host).await?;
     }
     if !plan.dsh_modules.is_empty() {
         dsh_services(&mut host, &layout, plan, manifest.dsh.host_services).await?;
@@ -262,6 +275,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         pi: plan.pi_handler.clone(),
         dsh: plan.dsh_handler.clone(),
     };
+    let other_owner = other_owner(&manifest, plan, bridge.registry().clone(), adapters.clone());
     let offered = offered_check(
         bridge.registry().clone(),
         offerers(&manifest, plan),
@@ -277,7 +291,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             .flat_map(|p| p.allow.iter().map(|t| (p.name.clone(), t.clone())))
             .collect();
         if !names.is_empty() {
-            agent = agent.with_extension(allowed::AllowedCheck::new(session.clone(), names));
+            agent = agent.with_extension(
+                allowed::AllowedCheck::new(session.clone(), names).with_other_owner(other_owner),
+            );
         }
     }
     if let Some(report) = &manifest.builtins.report {
@@ -495,20 +511,27 @@ fn allowed(manifest: &Manifest) -> (Vec<String>, Vec<String>) {
     (servers, plugins)
 }
 
-/// Who may offer a plugin's allowed tool: a pi plugin through one of its
-/// own extension files (the pi adapter's handler; the file that registered
-/// the tool); a DSH plugin, any DSH plugin (the DSH adapter's handler: DSH
-/// does not say which plugin); a rutis plugin, a handler that is neither
-/// adapter's (handler names are a plugin's own choice, not tied to a
-/// manifest entry: any language plugin's).
+/// Who may offer a plugin's allowed tool, by the row that registered its
+/// handler (the owner the host sees, rutis 0.12's `caller_row`; design §4
+/// "Who a plugin is"): a pi plugin, the `pi` row's adapter handler and one
+/// of the plugin's own extension files (`source`, said by the adapter); a
+/// DSH plugin, the `dsh` row's adapter handler (all DSH plugins share it)
+/// or one of the plugin's own rows; a rutis plugin, its row
+/// `plugin:<name>`. Owners are compared whole: a handler registered from
+/// no row ("language plugin (session …)") is nobody's.
 #[derive(Debug, Clone, PartialEq)]
 enum Offerer {
     Pi(Vec<PathBuf>),
-    Dsh,
-    Rutis,
+    Dsh(Vec<String>),
+    Rutis(String),
 }
 
+/// The adapters' rows (`run/plugins.rs`).
+const PI_ROW: &str = "pi";
+const DSH_ROW: &str = "dsh";
+
 /// The adapters' handler names this process gave them (`Plan`).
+#[derive(Clone)]
 struct Adapters {
     pi: String,
     dsh: String,
@@ -518,16 +541,35 @@ impl Offerer {
     fn offers(&self, owner: &yoagent_rutis::ToolOwner, adapters: &Adapters) -> bool {
         match self {
             Offerer::Pi(files) => {
-                owner.handler() == adapters.pi
+                owner.owner() == PI_ROW
+                    && owner.handler() == adapters.pi
                     && owner.source().is_some_and(|source| {
                         let source =
                             std::fs::canonicalize(source).unwrap_or_else(|_| PathBuf::from(source));
                         files.contains(&source)
                     })
             }
-            Offerer::Dsh => owner.handler() == adapters.dsh,
-            Offerer::Rutis => owner.handler() != adapters.pi && owner.handler() != adapters.dsh,
+            Offerer::Dsh(rows) => {
+                (owner.owner() == DSH_ROW && owner.handler() == adapters.dsh)
+                    || rows.iter().any(|row| row == owner.owner())
+            }
+            Offerer::Rutis(row) => owner.owner() == row,
         }
+    }
+}
+
+/// Who may offer `plugin`'s allowed tools.
+fn offerer(plugin: &crate::manifest::Plugin, plan: &plugins::Plan) -> Offerer {
+    match &plugin.kind {
+        PluginKind::Pi(_) => Offerer::Pi(
+            plan.pi_files
+                .iter()
+                .find(|(name, _)| *name == plugin.name)
+                .map(|(_, files)| files.clone())
+                .unwrap_or_default(),
+        ),
+        PluginKind::Dsh(_) => Offerer::Dsh(plugins::dsh_plugin_rows(plan, &plugin.name)),
+        PluginKind::Rutis { .. } => Offerer::Rutis(plugins::row_id(&plugin.name)),
     }
 }
 
@@ -535,17 +577,7 @@ impl Offerer {
 fn offerers(manifest: &Manifest, plan: &plugins::Plan) -> HashMap<String, Vec<Offerer>> {
     let mut map: HashMap<String, Vec<Offerer>> = HashMap::new();
     for plugin in &manifest.plugins {
-        let offerer = match &plugin.kind {
-            PluginKind::Pi(_) => Offerer::Pi(
-                plan.pi_files
-                    .iter()
-                    .find(|(name, _)| *name == plugin.name)
-                    .map(|(_, files)| files.clone())
-                    .unwrap_or_default(),
-            ),
-            PluginKind::Dsh(_) => Offerer::Dsh,
-            PluginKind::Rutis { .. } => Offerer::Rutis,
-        };
+        let offerer = offerer(plugin, plan);
         for tool in &plugin.allow {
             map.entry(tool.clone()).or_default().push(offerer.clone());
         }
@@ -572,6 +604,28 @@ fn offered_check(
             return false;
         };
         allowed.iter().any(|o| o.offers(&owner, &adapters))
+    })
+}
+
+/// For `AllowedCheck`: the owner that offered an allowed tool in a run,
+/// when no entry that allows the name accepts it (the gate's rule: then it
+/// asks) — with its `source` for pi, whose extensions share one row.
+fn other_owner(
+    manifest: &Manifest,
+    plan: &plugins::Plan,
+    registry: Arc<yoagent_rutis::registry::Registry>,
+    adapters: Adapters,
+) -> allowed::OtherOwner {
+    let offerers = offerers(manifest, plan);
+    Arc::new(move |run: &str, _plugin: &str, tool: &str| {
+        let owner = registry.offered_by(run, tool)?;
+        let accepted = offerers
+            .get(tool)
+            .is_some_and(|all| all.iter().any(|o| o.offers(&owner, &adapters)));
+        (!accepted).then(|| match owner.source() {
+            Some(source) if owner.owner() == PI_ROW => format!("{} ({source})", owner.owner()),
+            _ => owner.owner().to_owned(),
+        })
     })
 }
 
@@ -946,6 +1000,45 @@ async fn dsh_services(
             return Ok(());
         }
     }
+    Err(dsh_missing(&missing, plan, host_services))
+}
+
+/// A `load` that failed because DSH plugins wait for services nobody
+/// provides (rutis says which, from what each row injects): said as the
+/// DSH check says it, with its hints. Any other failure as it is.
+fn dsh_waiting(error: BoxError, plan: &plugins::Plan, host_services: bool) -> BoxError {
+    use yoagent_rutis::rows::{RowState, RowsNotRunning};
+    let Some(not_running) = error.downcast_ref::<RowsNotRunning>() else {
+        return error;
+    };
+    let dsh_rows: Vec<&str> = plan
+        .rows
+        .iter()
+        .filter(|row| row.runtime_is("dsh") && row.id().starts_with("plugin:"))
+        .map(|row| row.id())
+        .collect();
+    let mut missing: Vec<String> = Vec::new();
+    for row in &not_running.rows {
+        // Not with a note: the list may be incomplete, which the error as
+        // it is says.
+        match (&row.state, &row.missing) {
+            (RowState::Waiting, Some(names))
+                if !names.is_empty()
+                    && row.note.is_none()
+                    && dsh_rows.contains(&row.id.as_str()) =>
+            {
+                missing.extend(names.iter().cloned());
+            }
+            _ => return error,
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    dsh_missing(&missing, plan, host_services)
+}
+
+/// "DSH plugins wait for services nobody provides: …", with what may help.
+fn dsh_missing(missing: &[String], plan: &plugins::Plan, host_services: bool) -> BoxError {
     let mut hints = Vec::new();
     if !host_services {
         hints.push("DSH's own host services come with [dsh] host_services = true".to_owned());
@@ -960,11 +1053,11 @@ async fn dsh_services(
         true => String::new(),
         false => format!(" ({})", hints.join("; ")),
     };
-    Err(format!(
+    format!(
         "DSH plugins wait for services nobody provides: {}{hints}",
         missing.join(", ")
     )
-    .into())
+    .into()
 }
 
 /// One look by `adapters/dsh/probe-services.ts` after `wait_ms`: the
@@ -1030,14 +1123,14 @@ async fn probe_services(
         .collect::<Result<_, _>>()?)
 }
 
-/// Waits until the plugins' `handlers` are registered; a plugin that failed
+/// Waits until each of `handlers` — (name, row) — is registered by that
+/// row, and each row of `judges` has registered a handler judging calls
+/// (`before_tool`; any one of its handlers will do); a plugin that failed
 /// meanwhile fails it at once.
-/// Waits until each of `handlers` is registered, and, of `judges`, that
-/// many handlers judging calls (`before_tool`) besides the adapters'.
 async fn wait_for(
     bridge: &RutisBridge,
-    handlers: &[String],
-    (judges, adapters): (usize, &[&str]),
+    handlers: &[(&str, &str)],
+    judges: &[String],
     host: &PluginHost,
 ) -> Result<(), BoxError> {
     let registry = bridge.registry().clone();
@@ -1045,15 +1138,18 @@ async fn wait_for(
         let have = registry.handlers();
         let mut missing: Vec<String> = handlers
             .iter()
-            .filter(|name| !have.iter().any(|h| h.name() == name.as_str()))
-            .cloned()
+            .filter(|(name, row)| !have.iter().any(|h| h.name() == *name && h.owner() == *row))
+            .map(|(name, row)| format!("{name} (from row {row})"))
             .collect();
-        let judging = have
-            .iter()
-            .filter(|h| h.hooks().contains(&"before_tool") && !adapters.contains(&h.name()))
-            .count();
-        if judging < judges {
-            missing.push(format!("{judges} rutis policy handler(s) (before_tool)"));
+        for row in judges {
+            let judging = have
+                .iter()
+                .any(|h| h.owner() == row && h.hooks().contains(&"before_tool"));
+            if !judging {
+                missing.push(format!(
+                    "a call judge (before_tool) from the policy plugin's row {row} (does it inject `yoagent`?)"
+                ));
+            }
         }
         missing
     };
@@ -1479,43 +1575,50 @@ mod tests {
             dsh: "dsh-tools-x1".into(),
         };
         let pi = Offerer::Pi(vec![ext.clone()]);
-        let from_a = ToolOwner::new("pi-extensions-x1", "p").with_source(ext.display().to_string());
-        let from_b = ToolOwner::new("pi-extensions-x1", "p").with_source("/elsewhere/b.ts");
-        let no_source = ToolOwner::new("pi-extensions-x1", "p");
-        let dsh = ToolOwner::new("dsh-tools-x1", "d");
-        let rutis = ToolOwner::new("words", "language plugin (session 1)");
-        // A plugin that took the adapters' usual names passes for neither.
-        let impostor = ToolOwner::new("pi-extensions", "language plugin (session 1)")
-            .with_source(ext.display().to_string());
+        let dsh_a = Offerer::Dsh(vec!["plugin:a".into(), "plugin:a:x".into()]);
+        let words = Offerer::Rutis("plugin:words".into());
+        let from_a =
+            ToolOwner::new("pi-extensions-x1", "pi").with_source(ext.display().to_string());
+        let from_b = ToolOwner::new("pi-extensions-x1", "pi").with_source("/elsewhere/b.ts");
+        let no_source = ToolOwner::new("pi-extensions-x1", "pi");
+        let dsh = ToolOwner::new("dsh-tools-x1", "dsh");
+        let rutis = ToolOwner::new("words", "plugin:words");
+        let no_row = ToolOwner::new("words", "language plugin (session 1)");
         let offers = |o: &Offerer, owner: &ToolOwner| o.offers(owner, &adapters);
         // The same file by another path (a symlink, `..`): still that file.
         #[cfg(unix)]
         {
             let link = dir.path().join("link");
             std::os::unix::fs::symlink(dir.path(), &link).unwrap();
-            let via_link = ToolOwner::new("pi-extensions-x1", "p")
+            let via_link = ToolOwner::new("pi-extensions-x1", "pi")
                 .with_source(link.join("sub/../a.ts").display().to_string());
             std::fs::create_dir(dir.path().join("sub")).unwrap();
             assert!(offers(&pi, &via_link));
         }
-        // Another handler claiming the same file is not the pi plugin.
-        let claims = ToolOwner::new("words", "x").with_source(ext.display().to_string());
-        assert!(!offers(&pi, &claims));
+        // pi: the pi row's adapter handler and one of the plugin's files.
         assert!(offers(&pi, &from_a));
         assert!(!offers(&pi, &from_b) && !offers(&pi, &no_source) && !offers(&pi, &dsh));
-        assert!(
-            !offers(&pi, &impostor) && !offers(&Offerer::Dsh, &ToolOwner::new("dsh-tools", "x"))
-        );
-        assert!(
-            offers(&Offerer::Dsh, &dsh)
-                && !offers(&Offerer::Dsh, &from_a)
-                && !offers(&Offerer::Dsh, &rutis)
-        );
-        assert!(
-            offers(&Offerer::Rutis, &rutis)
-                && !offers(&Offerer::Rutis, &dsh)
-                && !offers(&Offerer::Rutis, &from_a)
-        );
+        // The adapter's handler name from another row, or the pi row's
+        // file claimed by another handler: not the pi plugin.
+        let name_elsewhere =
+            ToolOwner::new("pi-extensions-x1", "plugin:x").with_source(ext.display().to_string());
+        let other_handler = ToolOwner::new("words", "pi").with_source(ext.display().to_string());
+        assert!(!offers(&pi, &name_elsewhere) && !offers(&pi, &other_handler));
+        // DSH: the dsh row's adapter handler, or the plugin's own rows.
+        assert!(offers(&dsh_a, &dsh));
+        assert!(offers(&dsh_a, &ToolOwner::new("own", "plugin:a:x")));
+        assert!(!offers(&dsh_a, &ToolOwner::new("own", "plugin:b")));
+        assert!(!offers(&dsh_a, &ToolOwner::new("dsh-tools-x1", "plugin:x")));
+        assert!(!offers(&dsh_a, &from_a) && !offers(&dsh_a, &rutis));
+        // rutis: its own row, exactly.
+        assert!(offers(&words, &rutis));
+        assert!(!offers(&words, &ToolOwner::new("words", "plugin:words2")));
+        assert!(!offers(&words, &ToolOwner::new("words", "plugin:other")));
+        assert!(!offers(&words, &dsh) && !offers(&words, &from_a));
+        // A handler from no row is nobody's.
+        for o in [&pi, &dsh_a, &words] {
+            assert!(!offers(o, &no_row));
+        }
     }
 
     #[test]
@@ -1523,8 +1626,11 @@ mod tests {
         let (session, _driver) = Session::new(false);
         drop(session);
         let registry = Arc::new(yoagent_rutis::registry::Registry::default());
-        let offerers: HashMap<String, Vec<Offerer>> =
-            [("web_fetch".to_owned(), vec![Offerer::Rutis])].into();
+        let offerers: HashMap<String, Vec<Offerer>> = [(
+            "web_fetch".to_owned(),
+            vec![Offerer::Rutis("plugin:w".into())],
+        )]
+        .into();
         let adapters = Adapters {
             pi: "pi-extensions-x1".into(),
             dsh: "dsh-tools-x1".into(),

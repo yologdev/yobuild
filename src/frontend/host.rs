@@ -56,6 +56,11 @@ impl Row {
         &self.name
     }
 
+    /// Whether it names `runtime` as the one that loads it.
+    pub(crate) fn runtime_is(&self, runtime: &str) -> bool {
+        self.runtime.as_deref() == Some(runtime)
+    }
+
     #[cfg(test)]
     pub(crate) fn config_json(&self) -> &Json {
         &self.config
@@ -263,12 +268,9 @@ impl PluginHostBuilder {
             )
             .into());
         }
-        // Only the names this host shares (rutis 0.11's rule; 0.12 shares
-        // every name, so a row injecting one nobody provides would wait in
-        // rutis — `load` failing with "did not start" before yobuild's DSH
-        // service check can name what it waits for).
+        // Every name shared (rutis 0.12's default): a row injecting one
+        // nobody provides waits in rutis, and `load` names what it lacks.
         let mut catalog = ServiceCatalog::new();
-        catalog.share_registered_only();
         for service in &self.shared {
             catalog.register_shared(service);
         }
@@ -311,6 +313,7 @@ impl PluginHostBuilder {
         }
         Ok(PluginHost {
             loader,
+            root: root.clone(),
             routes,
             runtimes,
             rows: Vec::new(),
@@ -321,6 +324,9 @@ impl PluginHostBuilder {
 /// Running runtimes and a loader; [`PluginHost::load`] adds plugins.
 pub struct PluginHost {
     loader: Loader,
+    /// The context the loader runs under: where a waiting row's services
+    /// are looked up.
+    root: Ctx,
     routes: Arc<Mutex<HashMap<String, String>>>,
     /// Each runtime's resolver: `reload` makes them forget a module.
     runtimes: Vec<(String, Arc<RuntimeResolver>)>,
@@ -482,16 +488,18 @@ impl PluginHost {
         })
     }
 
+    /// The loader's layers for the rows loaded now.
+    fn layers(&self) -> Result<Vec<Layer>, BoxError> {
+        let insert: Vec<Json> = self.rows.iter().map(Row::json).collect();
+        let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": insert }]))?;
+        Ok(vec![Layer::new("app", patches)])
+    }
+
     /// Apply the rows; fail on plugins this newly broke, and wait for
     /// `started` (the rows just added) to run. A plugin already failing — one
     /// a reload left stopped — does not fail every later change.
     async fn reconcile(&mut self, started: &[String]) -> Result<(), BoxError> {
-        let insert: Vec<Json> = self.rows.iter().map(Row::json).collect();
-        let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": insert }]))?;
-        let report = self
-            .loader
-            .reconcile(vec![Layer::new("app", patches)], None)
-            .await?;
+        let report = self.loader.reconcile(self.layers()?, None).await?;
         if !report.new_failures.is_empty() {
             return Err(format!("plugins failed to load: {:?}", report.new_failures).into());
         }
@@ -518,7 +526,7 @@ impl PluginHost {
             match self.state(&row.id) {
                 Started::Running => {}
                 Started::Failed(why) => out.push(why),
-                Started::Waiting(_) => {
+                Started::Waiting => {
                     let runtime = row.runtime.clone().unwrap_or_else(|| "?".into());
                     match waiting.iter_mut().find(|(r, _)| *r == runtime) {
                         Some((_, rows)) => rows.push(&row.id),
@@ -552,35 +560,49 @@ impl PluginHost {
             // does not create.
             Some(EntryStatus::Stopped) => stopped(),
             Some(EntryStatus::Disabled) => Started::Failed(format!("plugin `{id}` is disabled")),
-            Some(EntryStatus::Running(s)) => Started::Waiting(format!("{id} ({:?})", s.state)),
+            Some(EntryStatus::Running(_)) => Started::Waiting,
             // `EntryStatus` is non-exhaustive.
-            Some(other) => Started::Waiting(format!("{id} ({other:?})")),
-            None => Started::Waiting(format!("{id} (not loaded)")),
+            Some(_) => Started::Waiting,
+            None => Started::Waiting,
         }
     }
 
-    /// Wait until these rows run; fail naming those that failed or did not.
+    /// Wait until these rows run; fail naming those that failed or did not,
+    /// and for one still waiting at the end, the services it injects that
+    /// nobody provides (yoagent-rutis's `rows::wait_running`).
     async fn wait_running(&self, ids: &[String]) -> Result<(), BoxError> {
-        let deadline = tokio::time::Instant::now() + LOAD_TIMEOUT;
-        loop {
-            let mut waiting = Vec::new();
-            for id in ids {
-                match self.state(id) {
-                    Started::Running => {}
-                    // States that do not come back on their own: say so now
-                    // rather than at the timeout.
-                    Started::Failed(why) => return Err(why.into()),
-                    Started::Waiting(what) => waiting.push(what),
-                }
+        let layers = self.layers()?;
+        // A look at 15 s, then until LOAD_TIMEOUT: rows that only wait for
+        // services nobody provides are said at the first (a provider may
+        // start slowly), not after a minute; rows loading, or waiting for
+        // services that exist, get the whole time. (A row that cannot run
+        // ends either look at once; each look that ends with rows waiting
+        // asks the runtimes what those inject, for up to 10 s.) The error is
+        // kept as it is (`RowsNotRunning`): a caller may say what a row
+        // waits for in its own words.
+        let start = tokio::time::Instant::now();
+        let looks = [std::time::Duration::from_secs(15), LOAD_TIMEOUT];
+        for (n, look) in looks.into_iter().enumerate() {
+            let left = look.saturating_sub(start.elapsed());
+            let error = match yoagent_rutis::rows::wait_running(
+                &self.loader, &self.root, &layers, ids, left,
+            )
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => e,
+            };
+            let only_missing = error.rows.iter().all(|row| {
+                matches!(row.state, yoagent_rutis::rows::RowState::Waiting)
+                    && row.missing.as_ref().is_some_and(|m| !m.is_empty())
+            });
+            let last = n + 1 == looks.len();
+            let ends = error.rows.iter().any(|row| !row.state.may_run());
+            if last || ends || only_missing {
+                return Err(error.into());
             }
-            if waiting.is_empty() {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(format!("plugins did not start: {}", waiting.join(", ")).into());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+        unreachable!("the last look returns")
     }
 }
 
@@ -619,7 +641,7 @@ impl Resolver for Routed {
 /// How far a row got.
 enum Started {
     Running,
-    Waiting(String),
+    Waiting,
     Failed(String),
 }
 

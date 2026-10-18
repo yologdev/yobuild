@@ -44,16 +44,16 @@ impl Question {
         })
     }
 
-    /// The question as a plugin's, by the name it gives (not checked: a
-    /// host service does not know its caller): `<question> (asked by plugin
-    /// <name>)` in the owner's question and in the agent's steer. A name
-    /// blank, over 64 characters, or with a line break is refused.
-    pub fn asked_by(mut self, plugin: &str) -> Result<Self, String> {
-        let plugin = plugin.trim();
-        if plugin.is_empty() || plugin.chars().count() > 64 || plugin.contains(['\n', '\r']) {
-            return Err("`from` is the plugin's name: one line, up to 64 characters".into());
+    /// The question as asked by `name`, a `kind` of plugin ("plugin", "pi
+    /// extension", …): `<question> (asked by <kind> <name>)` in the owner's
+    /// question and in the agent's steer. A name blank, over 64 characters,
+    /// or with a line break is refused.
+    pub fn asked_by(mut self, kind: &str, name: &str) -> Result<Self, String> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 64 || name.contains(['\n', '\r']) {
+            return Err("a plugin's name is one line, up to 64 characters".into());
         }
-        self.question = format!("{} (asked by plugin {plugin})", self.question);
+        self.question = format!("{} (asked by {kind} {name})", self.question);
         Ok(self)
     }
 
@@ -264,13 +264,13 @@ mod tests {
     fn asked_by_names_the_plugin_on_one_line_of_up_to_64_characters() {
         let q = || Question::new("Which?", "", Vec::new()).unwrap();
         assert_eq!(
-            q().asked_by(" planner ").unwrap().question(),
+            q().asked_by("plugin", " planner ").unwrap().question(),
             "Which? (asked by plugin planner)"
         );
         // Counted in characters, not bytes.
-        assert!(q().asked_by(&"é".repeat(64)).is_ok());
+        assert!(q().asked_by("plugin", &"é".repeat(64)).is_ok());
         for refused in ["", "  ", "a\rb", "a\nb", &"x".repeat(65)] {
-            assert!(q().asked_by(refused).is_err(), "{refused:?}");
+            assert!(q().asked_by("plugin", refused).is_err(), "{refused:?}");
         }
     }
 

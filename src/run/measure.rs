@@ -47,6 +47,21 @@ impl Measure {
     }
 }
 
+impl Measure {
+    /// How a handler is said: the adapters by their usual names; a manifest
+    /// plugin's by its row (`plugin:<name>`, the owner the host saw), not
+    /// the name it chose; any other as it is.
+    fn said(&self, handler: &str, owners: &[(String, String)]) -> String {
+        if let Some((_, said)) = self.names.iter().find(|(name, _)| name == handler) {
+            return said.clone();
+        }
+        match owners.iter().find(|(name, _)| name == handler) {
+            Some((_, owner)) if owner.starts_with("plugin:") => owner.clone(),
+            _ => handler.to_owned(),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl Extension for Measure {
     fn name(&self) -> &str {
@@ -65,15 +80,19 @@ impl RunHooks for Measure {
         // the last extension); the plugins' handling of this run's end event
         // (`on_event`, sent after the extensions' `finish`) counts in the
         // next run's.
+        let owners: Vec<(String, String)> = self
+            .registry
+            .handlers()
+            .iter()
+            .map(|h| (h.name().to_owned(), h.owner().to_owned()))
+            .collect();
         let spent: Vec<Spent> = self
             .registry
             .take_timings()
             .iter()
             .map(Spent::from)
             .map(|mut s| {
-                if let Some((_, said)) = self.names.iter().find(|(name, _)| *name == s.handler) {
-                    s.handler = said.clone();
-                }
+                s.handler = self.said(&s.handler, &owners);
                 s
             })
             .collect();
@@ -293,6 +312,24 @@ mod tests {
         assert!(memory(&[("pi".into(), PathBuf::from("/nowhere"))])
             .await
             .is_empty());
+    }
+
+    #[test]
+    fn handlers_are_said_by_the_adapters_names_or_their_plugins_row() {
+        let measure = Measure::new(
+            None,
+            Arc::new(Registry::default()),
+            Vec::new(),
+            vec![("pi-extensions-x1".into(), "pi-extensions".into())],
+        );
+        let owners = [
+            ("pi-extensions-x1".to_owned(), "pi".to_owned()),
+            ("words".to_owned(), "plugin:words".to_owned()),
+            ("loose".to_owned(), "language plugin (session 1)".to_owned()),
+        ];
+        assert_eq!(measure.said("pi-extensions-x1", &owners), "pi-extensions");
+        assert_eq!(measure.said("words", &owners), "plugin:words");
+        assert_eq!(measure.said("loose", &owners), "loose");
     }
 
     #[test]

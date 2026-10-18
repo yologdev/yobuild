@@ -96,10 +96,11 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
   they can call host services.
 - yoagent-rutis 0.6 and rutis 0.12 (#24, done): pi's nested calls only
   within the calling extension.
-- Who a plugin is: the row the host sees (design §4, proposed): `allow`,
-  a rutis policy plugin's wait, and `ask_owner`'s "asked by" keyed on the
-  row (rutis 0.12's `caller_row`); a plugin waiting for a missing service
-  said at start, if sharing every service name holds up in tests.
+- Who a plugin is: the row the host sees (design §4; #25, and its code):
+  `allow`, a rutis policy plugin's wait, and `ask_owner`'s "asked by"
+  keyed on the row (rutis 0.12's `caller_row`); a plugin waiting for a
+  missing service named at start (yoagent-rutis 0.6.1's
+  `rows::wait_running`, every service name shared).
 
 **Done when** `yobuild run handoff.toml --scripted` reproduces today's
 demo, plus the new per-plugin hook time and per-runtime memory lines.

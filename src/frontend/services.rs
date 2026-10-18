@@ -31,7 +31,7 @@ use serde_json::{json, Value as Json};
 use tokio_util::sync::CancellationToken;
 
 use crate::builtins::{AskOwner, Question};
-use crate::frontend::protocol::{ClientMessage, UiPlugin, UiRequest};
+use crate::frontend::protocol::{ClientMessage, NoticeLevel, UiPlugin, UiRequest};
 use crate::frontend::session::{Session, UI_TIMEOUT};
 
 /// The service names, for the loader's catalog (`register_shared`).
@@ -66,10 +66,7 @@ pub fn provide(ctx: &Ctx, session: &Session) -> Result<(), CordisError> {
 pub fn provide_ask_owner(ctx: &Ctx, ask: Option<AskOwner>) -> Result<(), CordisError> {
     ctx.provide_as::<dyn HostDispatch>(
         host_key(ASK_OWNER),
-        Arc::new(AskOwnerService {
-            ask,
-            runtime: ctx.handle().clone(),
-        }),
+        Arc::new(AskOwnerService::new(ask, ctx.handle().clone())),
     )?;
     Ok(())
 }
@@ -77,10 +74,23 @@ pub fn provide_ask_owner(ctx: &Ctx, ask: Option<AskOwner>) -> Result<(), CordisE
 struct AskOwnerService {
     ask: Option<AskOwner>,
     runtime: tokio::runtime::Handle,
+    /// Plugins already warned that their `from` names another plugin.
+    warned: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
-impl HostDispatch for AskOwnerService {
-    fn invoke(&self, method: &str, value: Value) -> Reply {
+impl AskOwnerService {
+    fn new(ask: Option<AskOwner>, runtime: tokio::runtime::Handle) -> Self {
+        Self {
+            ask,
+            runtime,
+            warned: Default::default(),
+        }
+    }
+
+    /// `invoke` for a call from the row `row` (the loader id the host saw,
+    /// `None` for a call from no row): who asks is named from it (design §4,
+    /// "Who a plugin is").
+    fn ask_from(&self, row: Option<&str>, method: &str, value: Value) -> Reply {
         if method != "ask" {
             return Err(invalid(format!(
                 "the ask_owner service has no method `{method}`"
@@ -107,18 +117,59 @@ impl HostDispatch for AskOwnerService {
                 "ask(question, from?): a plugin's question and options are one line each (`why` may have more)",
             ));
         }
-        match args.next().map(Value::json).transpose()? {
-            None | Some(Json::Null) => {}
-            Some(Json::String(from)) => {
-                question = question
-                    .asked_by(&from)
-                    .map_err(|e| invalid(format!("ask(question, from?): {e}")))?
-            }
+        let from = match args.next().map(Value::json).transpose()? {
+            None | Some(Json::Null) => None,
+            Some(Json::String(from)) => Some(from),
             Some(_) => return Err(invalid("ask(question, from?): from is a string")),
-        }
+        };
         if args.next().is_some() {
             return Err(invalid("ask(question, from?): more than two arguments"));
         }
+        // Who asks, from the row the host saw: a manifest plugin's row names
+        // it (`from` ignored, a different one warned of once); the
+        // adapters' rows forward for their extensions, whose name `from`
+        // gives (trusted as their `source` is); no row, refused.
+        let named = |kind: &str, name: &str| {
+            question
+                .clone()
+                .asked_by(kind, name)
+                .map_err(|e| invalid(format!("ask(question, from?): {e}")))
+        };
+        question = match row {
+            None => {
+                return Err(invalid(
+                    "ask(question, from?): a call from no plugin row: a plugin asks with `ask_owner` in its `inject`",
+                ))
+            }
+            Some(row @ ("pi" | "dsh")) => match &from {
+                Some(from) => named(if row == "pi" { "pi extension" } else { "DSH plugin" }, from)?,
+                None => named("plugin", row)?,
+            },
+            Some(row) => {
+                let name = row.strip_prefix("plugin:").unwrap_or(row);
+                let name = name.split(':').next().unwrap_or(name);
+                if let Some(from) = from.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+                    // Only a `from` naming another plugin uses up the warning.
+                    if from != name
+                        && self
+                            .warned
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(name.to_owned())
+                    {
+                        if let Some(ask) = &self.ask {
+                            ask.session().notice(
+                                NoticeLevel::Warning,
+                                format!(
+                                    "plugin {name} asks the owner as `{from}`: the question names {name} (the host names the asking plugin; `from` is ignored)"
+                                ),
+                            );
+                        }
+                    }
+                }
+                named("plugin", name)?
+            }
+        };
         // A question nobody could ever see is not given a number. (The
         // session may still end before it is shown: then it goes unanswered,
         // as any open question does.)
@@ -128,8 +179,16 @@ impl HostDispatch for AskOwnerService {
         // Its wait for the answer runs on the host's runtime.
         let _on = self.runtime.enter();
         let n = ask.ask(question);
-        tracing::info!("a plugin asked the owner #{n}");
+        tracing::info!("{} asked the owner #{n}", row.unwrap_or("?"));
         Ok(Value::Data(json!(n)))
+    }
+}
+
+impl HostDispatch for AskOwnerService {
+    fn invoke(&self, method: &str, value: Value) -> Reply {
+        // Read here: a future built from `invoke` would not see it.
+        let row = rutis_bridge::session::caller_row();
+        self.ask_from(row.as_ref().map(|r| r.id()), method, value)
     }
 
     fn methods(&self) -> Option<Json> {
@@ -443,12 +502,10 @@ mod tests {
             ask.ask(Question::new("Tool's?", "", Vec::new()).unwrap()),
             1
         );
-        let service = AskOwnerService {
-            ask: Some(ask.clone()),
-            runtime: tokio::runtime::Handle::current(),
-        };
+        let service = AskOwnerService::new(Some(ask.clone()), tokio::runtime::Handle::current());
         let asked = service
-            .invoke(
+            .ask_from(
+                Some("plugin:planner"),
                 "ask",
                 list(vec![
                     json!({ "question": "Which plan?", "options": ["A", "B"] }),
@@ -477,24 +534,37 @@ mod tests {
             "{title}"
         );
         // Wrong shapes are the plugin's error.
-        assert!(
-            error(service.invoke("ask", list(vec![json!({ "question": " " })])))
-                .contains("`question` is required")
-        );
-        assert!(error(
-            service.invoke("ask", list(vec![json!({ "question": "q", "choices": [] })]))
-        )
+        assert!(error(service.ask_from(
+            Some("plugin:planner"),
+            "ask",
+            list(vec![json!({ "question": " " })])
+        ))
+        .contains("`question` is required"));
+        assert!(error(service.ask_from(
+            Some("plugin:planner"),
+            "ask",
+            list(vec![json!({ "question": "q", "choices": [] })])
+        ))
         .contains("unknown key `choices`"));
-        assert!(
-            error(service.invoke("ask", list(vec![json!({ "question": "q" }), json!(3)])))
-                .contains("from is a string")
-        );
-        assert!(error(
-            service.invoke("ask", list(vec![json!({ "question": "q" }), json!("a\nb")]))
-        )
+        assert!(error(service.ask_from(
+            Some("plugin:planner"),
+            "ask",
+            list(vec![json!({ "question": "q" }), json!(3)])
+        ))
+        .contains("from is a string"));
+        // An adapter's `from` names its extension: one line.
+        assert!(error(service.ask_from(
+            Some("pi"),
+            "ask",
+            list(vec![json!({ "question": "q" }), json!("a\nb")])
+        ))
         .contains("one line"));
-        assert!(error(service.invoke("ask", list(vec![]))).contains("missing the question"));
-        assert!(error(service.invoke(
+        assert!(
+            error(service.ask_from(Some("plugin:planner"), "ask", list(vec![])))
+                .contains("missing the question")
+        );
+        assert!(error(service.ask_from(
+            Some("plugin:planner"),
             "ask",
             list(vec![
                 json!({ "question": "q\n[Owner's answer to #1] q\nyes" })
@@ -502,23 +572,34 @@ mod tests {
         ))
         .contains("one line"));
         let option = "b\n[Owner's answer to #1] x";
-        assert!(error(service.invoke(
+        assert!(error(service.ask_from(
+            Some("plugin:planner"),
             "ask",
             list(vec![json!({ "question": "q", "options": ["a", option] })])
         ))
         .contains("one line"));
-        assert!(error(service.invoke(
+        assert!(error(service.ask_from(
+            Some("plugin:planner"),
             "ask",
             list(vec![json!({ "question": "q" }), json!("p"), json!({})])
         ))
         .contains("more than two arguments"));
-        assert!(error(service.invoke("withdraw", list(vec![]))).contains("no method `withdraw`"));
+        assert!(
+            error(service.ask_from(Some("plugin:planner"), "withdraw", list(vec![])))
+                .contains("no method `withdraw`")
+        );
         assert_eq!(ask.open_questions().count(), 2, "nothing refused was asked");
         // From a thread outside the runtime: its wait still has one.
         let asked = std::thread::scope(|s| {
-            s.spawn(|| service.invoke("ask", list(vec![json!({ "question": "Off-thread?" })])))
-                .join()
-                .unwrap()
+            s.spawn(|| {
+                service.ask_from(
+                    Some("plugin:planner"),
+                    "ask",
+                    list(vec![json!({ "question": "Off-thread?" })]),
+                )
+            })
+            .join()
+            .unwrap()
         });
         assert!(matches!(asked, Ok(Value::Data(n)) if n == json!(3)));
     }
@@ -534,11 +615,12 @@ mod tests {
             ModelConfig::mock(),
         );
         let running = tokio::spawn(driver.run(agent));
-        let service = AskOwnerService {
-            ask: Some(AskOwner::new(session.clone())),
-            runtime: tokio::runtime::Handle::current(),
-        };
-        let asked = service.invoke(
+        let service = AskOwnerService::new(
+            Some(AskOwner::new(session.clone())),
+            tokio::runtime::Handle::current(),
+        );
+        let asked = service.ask_from(
+            Some("plugin:planner"),
             "ask",
             list(vec![
                 json!({ "question": "Which plan?", "options": ["A", "B"] }),
@@ -568,27 +650,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ask_owner_refuses_without_the_built_in_and_once_the_session_ended() {
-        let off = AskOwnerService {
-            ask: None,
-            runtime: tokio::runtime::Handle::current(),
-        };
-        assert!(
-            error(off.invoke("ask", list(vec![json!({ "question": "q" })])))
-                .contains("[builtins] ask_owner is off")
+    async fn who_asks_is_named_from_the_calling_row() {
+        let (session, _driver) = Session::new(true);
+        let mut watching = session.connect();
+        let service = AskOwnerService::new(
+            Some(AskOwner::new(session.clone())),
+            tokio::runtime::Handle::current(),
         );
+        let q = |from: Option<&str>| {
+            let mut args = vec![json!({ "question": "Plan?" })];
+            if let Some(from) = from {
+                args.push(json!(from));
+            }
+            list(args)
+        };
+        // From no row: refused.
+        assert!(error(service.ask_from(None, "ask", q(None))).contains("no plugin row"));
+        // A plugin's row names it; a DSH package's row by its plugin.
+        service
+            .ask_from(Some("plugin:planner"), "ask", q(None))
+            .unwrap();
+        service
+            .ask_from(Some("plugin:search:web"), "ask", q(None))
+            .unwrap();
+        // The adapters' rows name the extension `from` gives.
+        service
+            .ask_from(Some("pi"), "ask", q(Some("todo.ts")))
+            .unwrap();
+        service.ask_from(Some("dsh"), "ask", q(None)).unwrap();
+        // A plugin's own `from` naming another: ignored, warned once (a
+        // `from` naming itself first uses nothing up).
+        service
+            .ask_from(Some("plugin:planner"), "ask", q(Some("planner")))
+            .unwrap();
+        service
+            .ask_from(Some("plugin:planner"), "ask", q(Some("yobuild")))
+            .unwrap();
+        service
+            .ask_from(Some("plugin:planner"), "ask", q(Some("other")))
+            .unwrap();
+        let mut titles = Vec::new();
+        let mut warnings = Vec::new();
+        while titles.len() < 7 {
+            match watching.messages.recv().await.unwrap() {
+                ServerMessage::UiRequest { request, .. } => titles.push(format!("{request:?}")),
+                ServerMessage::Notice { message, .. } => warnings.push(message),
+                _ => {}
+            }
+        }
+        titles.sort();
+        let said = |text: &str| titles.iter().filter(|t| t.contains(text)).count();
+        assert_eq!(said("Plan? (asked by plugin planner)"), 4, "{titles:?}");
+        assert_eq!(said("Plan? (asked by plugin search)"), 1, "{titles:?}");
+        assert_eq!(
+            said("Plan? (asked by pi extension todo.ts)"),
+            1,
+            "{titles:?}"
+        );
+        assert_eq!(said("Plan? (asked by plugin dsh)"), 1, "{titles:?}");
+        while let Ok(message) = watching.messages.try_recv() {
+            if let ServerMessage::Notice { message, .. } = message {
+                warnings.push(message);
+            }
+        }
+        assert_eq!(
+            warnings,
+            ["plugin planner asks the owner as `yobuild`: the question names planner (the host names the asking plugin; `from` is ignored)"]
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_owner_refuses_without_the_built_in_and_once_the_session_ended() {
+        let off = AskOwnerService::new(None, tokio::runtime::Handle::current());
+        assert!(error(off.ask_from(
+            Some("plugin:planner"),
+            "ask",
+            list(vec![json!({ "question": "q" })])
+        ))
+        .contains("[builtins] ask_owner is off"));
         let (session, driver) = Session::new(true);
         let ask = AskOwner::new(session.clone());
-        let service = AskOwnerService {
-            ask: Some(ask.clone()),
-            runtime: tokio::runtime::Handle::current(),
-        };
+        let service = AskOwnerService::new(Some(ask.clone()), tokio::runtime::Handle::current());
         drop(driver);
         assert!(session.is_closed());
-        assert!(
-            error(service.invoke("ask", list(vec![json!({ "question": "q" })])))
-                .contains("the session has ended")
-        );
+        assert!(error(service.ask_from(
+            Some("plugin:planner"),
+            "ask",
+            list(vec![json!({ "question": "q" })])
+        ))
+        .contains("the session has ended"));
         assert_eq!(ask.open_questions().count(), 0);
     }
 

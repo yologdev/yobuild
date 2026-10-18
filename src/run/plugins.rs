@@ -248,8 +248,8 @@ pub(crate) fn plan(
                         plan.rutis.len() - 1
                     }
                 };
-                let mut row = Row::new(format!("plugin:{}", plugin.name), path.display())
-                    .runtime(rutis_runtime_name(at));
+                let mut row =
+                    Row::new(row_id(&plugin.name), path.display()).runtime(rutis_runtime_name(at));
                 if let Some(config) = config {
                     row = row.config(Json::Object(config));
                 }
@@ -388,6 +388,30 @@ fn pi_extensions(
     Ok(PiFound { extensions, notes })
 }
 
+/// A manifest plugin's row id, `plugin:<name>` (a DSH package's rows add
+/// `:<row id>`): the owner the host records for what the row registers.
+pub(crate) fn row_id(name: &str) -> String {
+    format!("plugin:{name}")
+}
+
+/// The ids of a DSH plugin's rows in `plan`: `plugin:<name>`, or each
+/// `plugin:<name>:<row id>` (names hold no `:`, so no other plugin's).
+pub(crate) fn dsh_plugin_rows(plan: &Plan, name: &str) -> Vec<String> {
+    let id = row_id(name);
+    plan.rows
+        .iter()
+        .filter(|row| row.runtime_is("dsh"))
+        .map(|row| row.id())
+        .filter(|row| {
+            *row == id
+                || row
+                    .strip_prefix(id.as_str())
+                    .is_some_and(|rest| rest.starts_with(':'))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
 /// A DSH plugin's rows — a file is one row; a package, the rows its bundle
 /// patch inserts (as DSH installs it), each `plugin:<name>:<row id>`, the
 /// plugin's config replacing its first row's — and its peers.
@@ -397,7 +421,7 @@ fn dsh_rows_of(
     source: &Source,
     config: Option<serde_json::Map<String, Json>>,
 ) -> Result<(Vec<Row>, Vec<String>), BoxError> {
-    let id = format!("plugin:{}", plugin.name);
+    let id = row_id(&plugin.name);
     let p = match source {
         Source::Path(path) => {
             exists(path)?;
@@ -965,6 +989,25 @@ mod tests {
         let plan = plan_of(&link, "[[plugin]]\npi = \"./p.ts\"\n").unwrap();
         let canonical = std::fs::canonicalize(real.path().join("p.ts")).unwrap();
         assert_eq!(plan.pi_files, [("p".to_owned(), vec![canonical])]);
+    }
+
+    #[test]
+    fn a_dsh_plugins_rows_are_its_own_and_no_other_plugins() {
+        let plan = Plan {
+            rows: vec![
+                Row::new("plugin:a", "x").runtime("dsh"),
+                Row::new("plugin:a:x", "x").runtime("dsh"),
+                Row::new("plugin:ab", "x").runtime("dsh"),
+                Row::new("plugin:ab:y", "x").runtime("dsh"),
+                // A rutis plugin's row, of another runtime.
+                Row::new("plugin:a2", "x").runtime("rutis-0"),
+                Row::new("dsh", "x").runtime("dsh"),
+            ],
+            ..Plan::default()
+        };
+        assert_eq!(dsh_plugin_rows(&plan, "a"), ["plugin:a", "plugin:a:x"]);
+        assert_eq!(dsh_plugin_rows(&plan, "ab"), ["plugin:ab", "plugin:ab:y"]);
+        assert!(dsh_plugin_rows(&plan, "a2").is_empty());
     }
 
     /// Copies a folder of files and folders (no links).
