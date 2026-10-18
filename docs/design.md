@@ -363,10 +363,10 @@ imports, and its peers installed. Once the DSH runtime runs, it checks the
 services the plugin's rows inject; a missing one is refused, not left
 waiting.
 
-M2b (proposed, below) installs pinned packages into a cache, records
+M2b (below) installs pinned packages into a cache, records
 what was installed in `agent.lock`, and adds `yobuild check`.
 
-### Install: sets, the cache, `agent.lock` (M2b, proposed)
+### Install: sets, the cache, `agent.lock` (M2b, decided 2026-10-18)
 
 **What is installed:** the npm packages a manifest pins, which are its pi
 plugins, DSH plugins and stdio MCP servers. Some things are not installed:
@@ -429,8 +429,9 @@ the adapter's. A missing or stale set is resolved again in a temp folder:
    unpacked.
 3. Take the lock's `packages`.
 
-Only that set changes. The file is rewritten, and an Info notice says so
-("agent.lock: `pi` resolved again: +@x/y 1.0.0").
+Only that set changes. The file is rewritten, and an Info notice says
+what changed, packages added and removed ("agent.lock: `pi` resolved
+again: +@x/y 1.0.0, −@x/z 0.3.1").
 
 With `--locked` (on `run` and `check`), a missing or stale set is an
 error instead. This is for CI and for an agent someone checked: it never
@@ -480,7 +481,7 @@ network only to resolve or install a set.
 `examples/package.json` goes. The tests' packages pinned beside a
 manifest move to a test cache (`YOBUILD_HOME` in a temp folder).
 
-### Vet: `yobuild check agent.toml` (M2b, proposed)
+### Vet: `yobuild check agent.toml` (M2b, decided 2026-10-18)
 
 `yobuild check <agent.toml> [--locked] [--json]` needs no model, no key
 and no task:

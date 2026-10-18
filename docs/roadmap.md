@@ -107,7 +107,7 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
 **Done when** `yobuild run handoff.toml --scripted` reproduces today's
 demo, plus the new per-plugin hook time and per-runtime memory lines.
 
-## M2b — Install, lock, check (design §4, proposed)
+## M2b — Install, lock, check (design §4; decided 2026-10-18)
 
 - Resolve and install pinned plugins and stdio MCP servers per ecosystem
   into the cache, in up to three sets (`pi`, `dsh` over the DSH adapter's
@@ -184,11 +184,13 @@ never loading, and a denied approval leaves the agent without the plugin.
    apart), together with the adapter files' location.
 4. **Manifest format.** Decided (2026-10-16): TOML — read by serde in
    the Rust core, strictly, with no runtime needed to read a manifest.
-5. **Plugin installs.** Proposed in design §4 (M2b): one cache per
+5. **Plugin installs.** Decided (2026-10-18, design §4): one cache per
    ecosystem set and lock hash, shared by agents with the same set, not
-   one per agent folder. Up for review with it: the lock as JSON carrying
-   npm's own lock, a stale set resolved again by default (`--locked`
-   refuses), and the adapters staying in `adapters/` until M4.
+   one per agent folder; the lock is JSON carrying npm's own lock (`npm
+   ci` verifies it); a stale set is resolved again by default, said with
+   what was added and removed, and `--locked` refuses (CI); the adapters
+   stay in `adapters/` until M4; `check` vets each plugin alone (the
+   matrix's verdict), then the agent together (`run`'s start).
 6. **The gate.** Decided: Rust (it is on the safety path — design §9), an
    allow-list, the TypeScript deny-list kept as an example. Still open, the
    rule for what belongs in Rust: are the five reasons in design §9 (safety, hot
