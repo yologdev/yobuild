@@ -1420,4 +1420,13 @@ async fn check_allows_a_servers_tool_its_entry_allows() {
         Some("asks")
     );
     assert_eq!(kind(&report.agent.tools, "bash").as_deref(), Some("judged"));
+    // Each tool with what it says it does and its arguments' schema.
+    let echo = report
+        .agent
+        .tools
+        .iter()
+        .find(|t| t.name == "server__echo")
+        .unwrap();
+    assert!(echo.description.is_some(), "{echo:?}");
+    assert!(echo.parameters.is_some(), "{echo:?}");
 }

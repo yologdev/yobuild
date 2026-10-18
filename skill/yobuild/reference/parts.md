@@ -8,7 +8,7 @@ a plugin listed here can still need a setting this list does not know.
 
 | Need | Part | What it does |
 |---|---|---|
-| ask the owner without stopping | `ask_owner = true` | the tool `ask_owner` (question, why, options): it returns at once with a number; the answer arrives later as the agent's next message |
+| ask the owner without stopping | `ask_owner = true` | the tool `ask_owner` (`question`, optional `why` and `options`): it returns at once with a number; the answer arrives later as a message `[Owner's answer to #N] …` — steering a run going on, or starting the next |
 | a required ending | `report = "handoff"` or `["Done", "Next"]` | the run is not done until the last answer names every section (else it is sent back, 3 times, then fails) |
 | what changed | `facts = true` | after each run: the git diff since the start, new commits and files, tokens, tool calls, open questions |
 | approval before risky calls | `gate = "allow-list"` (the default) | reading is free; `bash` commands and writes are judged; every other tool asks the owner unless an entry's `allow` names it |
@@ -18,11 +18,13 @@ a plugin listed here can still need a setting this list does not know.
 
 ## Plugins that load
 
-From the compatibility matrix (yoagent's
-`docs/evals/plugin-compatibility.md`, run 2026-10-16: each package loaded
-unchanged, its tools listed, none called). **CI** marks a pin yobuild's
-own CI runs (its examples) — the others are as of that date: pin the
-version, then `yobuild check`.
+**CI** rows are the pins yobuild's own examples run, checked by its CI on
+every change: use these versions. The rest are from yoagent's
+compatibility matrix (`docs/evals/plugin-compatibility.md`, run
+2026-10-16: each package loaded unchanged, its tools listed, none
+called), at the version it tested: as of that date, so `yobuild check`
+decides. Tool names and arguments: `yobuild check --json` lists them
+(`agent.tools[].parameters`).
 
 ### pi (`[[plugin]] pi = "…"`)
 
@@ -47,28 +49,54 @@ installed: `pi-mcp-extension`, `@langfuse/pi-observability-plugin`,
 
 | Capability | Package | What yoagent gets |
 |---|---|---|
-| web search | `dsh-free-search@0.8.1` **CI** | with `config = { provider = "bing", … }`: `multi_search`, `research`, `advanced_search`, `domain_search`, `platform_search`, `video_search`, `cache_search` (and `free_search_test`), prompt guidance |
+| web search | `dsh-free-search@0.8.1` **CI** | with the tested config, `config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }` (keep it): `multi_search`, `research`, `advanced_search`, `domain_search`, `platform_search`, `video_search`, `cache_search` — allow these seven — and `free_search_test` (leave it asking); prompt guidance. The searches return extracted page text. 0.8.1 is the DSH base's own pin: another version is refused |
 | ask the user (DSH's way) | `@deepseek-ai/dsh-tool-ask-user@0.2.0-rc.2` with `@deepseek-ai/dsh-user-questions@0.2.0-rc.2` **CI** | the tool `ask_user_question` — prefer `ask_owner` |
-| spreadsheets and documents | `dsh-univer-office@0.3.7` | 14 tools |
-| charts and diagrams | `@dfy-plugins/dsh-visualize@0.1.5` | 1 tool |
+| spreadsheets and documents | `dsh-univer-office@0.3.7` | 14 tools (the matrix loaded it with DSH's host services: likely needs `[dsh] host_services = true`) |
+| charts and diagrams | `@dfy-plugins/dsh-visualize@0.1.5` | 1 tool (likewise) |
 
 Most popular DSH plugins need DSH's own app (its web server, model layer,
 agents): `yobuild check` refuses them with "DSH plugins wait for services
-nobody provides". Some need only DSH's own host services: try
-`[dsh] host_services = true`.
+nobody provides". Some need only DSH's own host services (files,
+attachments, credentials, storage, sessions, skills): set
+`[dsh] host_services = true`, as `check`'s fix says.
 
 ### rutis (`[[plugin]] rutis = "…"`)
 
 Your own plugin, in TypeScript, written with the rutis SDK
-(`@arcships/rutis`): `definePlugin({ inject: ['yoagent'], apply(ctx) {
-ctx.use('yoagent').register(name, { tools(), call_tool() }) } })`. See
-yobuild's `frontend/plugins/` for examples.
+(`@arcships/rutis`), in an npm package of its own (`"type": "module"`,
+`@arcships/rutis-runtime` 0.12.0 installed):
+
+```ts
+import { definePlugin } from '@arcships/rutis'
+
+export default definePlugin({
+  inject: ['yoagent'],              // required: its tools are its own only through it
+  apply(ctx: any) {
+    ctx.effect(ctx.use('yoagent').register('my-tools', {
+      async tools() {
+        return [{ name: 'shout', description: 'Say it loudly', parameters: { type: 'object', properties: { text: { type: 'string' } } } }]
+      },
+      async call_tool(call: any) {            // call.tool, call.args, call.signal
+        return { text: String(call.args.text).toUpperCase() }   // or a string; is_error: true for a failure
+      },
+    }))
+  },
+})
+```
+
+`[[plugin]] rutis = "plugins/shout.ts"`, `runtime = "node"`. (yobuild's
+`frontend/plugins/` are UI plugins, which offer no tools.)
 
 ## MCP servers (`[[mcp]]`)
 
 Any MCP server works: stdio (`npm = "<package>@<version>"`, run from
-yobuild's cache) or HTTP (`url`). `check` lists its tools; `allow` the ones
-that only read. A well-known one: `@modelcontextprotocol/server-filesystem`
-(`args = ["<folder>"]`; read tools `read_text_file`, `list_directory`,
-`search_files`, and writing ones to leave asking). Pin its current
-version: `npm view @modelcontextprotocol/server-filesystem version`.
+yobuild's cache) or HTTP (`url`, and a `name`). `check` lists its tools;
+`allow` the ones that only read. A well-known one:
+`@modelcontextprotocol/server-filesystem` (`name = "files"`,
+`args = ["<folder>"]`): with `yobuild check`, 1.0.0 lists `read_file`,
+`read_text_file`, `read_media_file`, `read_multiple_files`,
+`list_directory`, `list_directory_with_sizes`, `directory_tree`,
+`search_files`, `get_file_info`, `list_allowed_directories` (reading:
+allow these) and `write_file`, `edit_file`, `create_directory`,
+`move_file` (writing: leave them asking). The agent sees them as
+`files__<tool>`.

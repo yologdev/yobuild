@@ -7,7 +7,7 @@
 //! hooks called directly for the tools it would be offered. Loading runs
 //! the plugins' code, as `run` would: not a sandbox.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -112,6 +112,34 @@ impl ToolKind {
 pub struct Tool {
     pub name: String,
     pub kind: ToolKind,
+    /// What the tool says it does (`--json` only; when the tool was seen).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Its arguments' JSON Schema, as the model is given it (`--json` only;
+    /// for a scripted reply's `arguments`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<serde_json::Value>,
+}
+
+impl Tool {
+    fn new(name: impl Into<String>, kind: ToolKind) -> Tool {
+        Tool {
+            name: name.into(),
+            kind,
+            description: None,
+            parameters: None,
+        }
+    }
+}
+
+/// Each tool's description and schema, by name, from the tool objects seen.
+type Schemas = HashMap<String, (String, serde_json::Value)>;
+
+fn schema_of(tool: &dyn yoagent::AgentTool) -> (String, (String, serde_json::Value)) {
+    (
+        tool.name().to_owned(),
+        (tool.description().to_owned(), tool.parameters_schema()),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -541,13 +569,14 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                     &name,
                     allowed_or_asks(plugin.allow.contains(&name)),
                 );
-                Tool { name, kind }
+                Tool::new(name, kind)
             })
             .collect();
         entries.push(entry);
     }
     // Each MCP server: its tools, none called.
     let mut server_tools: Vec<Tool> = Vec::new();
+    let mut schemas: Schemas = HashMap::new();
     for server in &manifest.mcp {
         let (ecosystem, source) = match &server.transport {
             Transport::Stdio { source, .. } => (Ecosystem::Stdio, source_text(source)),
@@ -577,6 +606,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             Ok(tools) => {
                 let prefix = format!("{}__", server.name);
                 for tool in tools {
+                    schemas.extend([schema_of(tool.as_ref())]);
                     let name = tool.name().to_owned();
                     let own = name.strip_prefix(&prefix).unwrap_or(&name);
                     // A server's names are its own: never judged by name.
@@ -584,7 +614,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                         true => ToolKind::Runs,
                         false => allowed_or_asks(server.allow.iter().any(|a| a == own)),
                     };
-                    entry.tools.push(Tool { name, kind });
+                    entry.tools.push(Tool::new(name, kind));
                 }
                 server_tools.extend(entry.tools.iter().cloned());
             }
@@ -627,9 +657,24 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             cwd: &cwd,
             server_tools: &server_tools,
             expected: &expected,
+            schemas: &std::sync::Mutex::new(Schemas::new()),
         };
         together(&context, &mut agent).await;
+        schemas.extend(context.schemas.lock().unwrap().drain());
     }
+    // Each tool seen with its description and arguments' schema.
+    let fill = |tools: &mut Vec<Tool>| {
+        for tool in tools.iter_mut() {
+            if let Some((description, parameters)) = schemas.get(&tool.name) {
+                tool.description = Some(description.clone());
+                tool.parameters = Some(parameters.clone());
+            }
+        }
+    };
+    for entry in &mut entries {
+        fill(&mut entry.tools);
+    }
+    fill(&mut agent.tools);
     Ok(Report::new(entries, agent))
 }
 
@@ -645,7 +690,15 @@ fn source_text(source: &Source) -> String {
 /// bridge's hooks called directly (`start_run`, `tools`, one
 /// `before_model`, `finish`), as the probe does — no model asked. A run
 /// stopped or failed at its first request is an error: every run would be.
-async fn offered(bridge: &RutisBridge) -> Result<Vec<(String, Option<ToolOwner>)>, BoxError> {
+/// A tool one run is offered, and who offered it.
+struct Offer {
+    name: String,
+    owner: Option<ToolOwner>,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+async fn offered(bridge: &RutisBridge) -> Result<Vec<Offer>, BoxError> {
     let cancel = CancellationToken::new();
     let prompt = [Message::user("check")];
     let run = RunContext::new(RUN, &prompt, &cancel);
@@ -654,22 +707,30 @@ async fn offered(bridge: &RutisBridge) -> Result<Vec<(String, Option<ToolOwner>)
         .start_run(&run)
         .await
         .map_err(|e| format!("starting a run: {e}"))?;
-    let names: Vec<String> = hooks
+    let tools: Vec<(String, String, serde_json::Value)> = hooks
         .tools(&run)
         .await
         .iter()
-        .map(|t| t.name().to_owned())
+        .map(|t| {
+            (
+                t.name().to_owned(),
+                t.description().to_owned(),
+                t.parameters_schema(),
+            )
+        })
         .collect();
     let turn = TurnContext::new("", &prompt, &[], RUN).with_run_prompts(&prompt);
     let stopped = match hooks.before_model(&turn).await {
         TurnDecision::Stop(why) | TurnDecision::Fail(why) => Some(why),
         _ => None,
     };
-    let owned = names
+    let owned = tools
         .into_iter()
-        .map(|name| {
-            let owner = bridge.registry().offered_by(RUN, &name);
-            (name, owner)
+        .map(|(name, description, parameters)| Offer {
+            owner: bridge.registry().offered_by(RUN, &name),
+            name,
+            description,
+            parameters,
         })
         .collect();
     hooks
@@ -791,7 +852,10 @@ async fn rutis_alone(
         };
         match offered(&bridge).await {
             Ok(offered) => {
-                for (tool, owner) in offered {
+                for Offer {
+                    name: tool, owner, ..
+                } in offered
+                {
                     match owner {
                         Some(owner) if owner.owner() == id => alone.tools.push(tool),
                         None => alone.notes.push(format!(
@@ -825,6 +889,8 @@ struct Together_<'a> {
     server_tools: &'a [Tool],
     /// The rows that registered handlers alone.
     expected: &'a [String],
+    /// Where the tools' descriptions and schemas go.
+    schemas: &'a std::sync::Mutex<Schemas>,
 }
 
 /// The agent together, through `run`'s own start: a refusal there is a
@@ -839,6 +905,7 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         cwd,
         server_tools,
         expected,
+        schemas,
     } = *context;
     let root = match Ctx::root() {
         Ok(root) => root,
@@ -891,10 +958,14 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         }
         let offered = offered(&bridge).await?;
         // The agent's own tools: yoagent's, ask_owner, the servers'.
-        let yoagents: Vec<String> = tools_for(manifest.builtins.tools, cwd)
-            .iter()
-            .map(|t| t.name().to_owned())
-            .collect();
+        let own_tools = tools_for(manifest.builtins.tools, cwd);
+        let yoagents: Vec<String> = own_tools.iter().map(|t| t.name().to_owned()).collect();
+        let mut seen: Schemas = own_tools.iter().map(|t| schema_of(t.as_ref())).collect();
+        if manifest.builtins.ask_owner {
+            seen.extend([schema_of(&AskOwner::new(session.clone()))]);
+        }
+        seen.extend(offered.iter().map(|o| (o.name.clone(), (o.description.clone(), o.parameters.clone()))));
+        schemas.lock().unwrap().extend(seen);
         let mut own: HashSet<String> = yoagents.iter().cloned().collect();
         if manifest.builtins.ask_owner {
             own.insert(AskOwner::TOOL.to_owned());
@@ -922,19 +993,16 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
                 true => ToolKind::Free,
                 false => ToolKind::Judged,
             };
-            tools.push(Tool {
-                name: name.clone(),
-                kind: kind_of(gate_off, name, otherwise),
-            });
+            tools.push(Tool::new(name.clone(), kind_of(gate_off, name, otherwise)));
         }
         if manifest.builtins.ask_owner {
-            tools.push(Tool {
-                name: AskOwner::TOOL.to_owned(),
-                kind: kind_of(gate_off, AskOwner::TOOL, ToolKind::Allowed),
-            });
+            tools.push(Tool::new(
+                AskOwner::TOOL,
+                kind_of(gate_off, AskOwner::TOOL, ToolKind::Allowed),
+            ));
         }
         tools.extend(server_tools.iter().cloned());
-        for (name, owner) in &offered {
+        for Offer { name, owner, .. } in &offered {
             let by = owner.as_ref().map_or("no plugin row", |o| o.owner());
             if own.contains(name) {
                 agent.notes.push(format!(
@@ -946,10 +1014,7 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
                 true => ToolKind::Allowed,
                 false => ToolKind::Asks,
             };
-            tools.push(Tool {
-                name: name.clone(),
-                kind: kind_of(gate_off, name, otherwise),
-            });
+            tools.push(Tool::new(name.clone(), kind_of(gate_off, name, otherwise)));
         }
         agent.tools = tools;
         // Each plugin's allowed names, as `run`'s `AllowedCheck` says them
@@ -957,7 +1022,7 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         // no entry allowing it accepts.
         for plugin in &manifest.plugins {
             for name in &plugin.allow {
-                let Some((_, owner)) = offered.iter().find(|(offered, _)| offered == name) else {
+                let Some(Offer { owner, .. }) = offered.iter().find(|o| o.name == *name) else {
                     agent.notes.push(format!(
                         "plugin {} allows `{name}`, which no plugin offered (a typo, or offered only in some runs)",
                         plugin.name
@@ -1013,10 +1078,7 @@ mod tests {
     }
 
     fn tool(name: &str, kind: ToolKind) -> Tool {
-        Tool {
-            name: name.into(),
-            kind,
-        }
+        Tool::new(name, kind)
     }
 
     #[test]

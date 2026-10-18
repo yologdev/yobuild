@@ -2,9 +2,11 @@
 
 Find the message, then do what its row says.
 
-**Where yobuild says the fix itself.** A row with a hint comment (in this
-file's source) is one yobuild knows (`src/hints.rs`; a test keeps the two
-in step). It gives that fix as `What to do: …`:
+<!-- For maintainers: a row with a hint comment is one yobuild knows
+(src/hints.rs); a test keeps the two in step both ways. -->
+
+**Where yobuild says the fix itself.** For a failure it knows, yobuild
+gives the fix as `What to do: …` (or `what to do:`, or `fix`):
 
 - after a run that ended `Stopped`, `Error` or `Rejected`: an Info Notice
   to every frontend (under `--once`, printed among the notices as
@@ -14,10 +16,12 @@ in step). It gives that fix as `What to do: …`:
   run (the run itself may still complete);
 - after an Error Notice `A plugin stopped: …` it knows: an Info Notice;
 - under `yobuild: …` when `run` is refused at start: `  what to do: …`;
-- in `yobuild check`: a `  fix: …` line under the problem, `fix` in
-  `--json`.
+- under `yobuild: …` when `yobuild check` stops with an error: the same;
+- in `yobuild check`'s report: a `  fix: …` line under the problem, `fix`
+  in `--json`.
 
-Rows without a hint comment are guidance only: yobuild does not say them.
+The rows below say which failures those are and what the fix means; for
+the others yobuild says nothing, and the row is the fix.
 
 **Three kinds of failure:**
 

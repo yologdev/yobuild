@@ -193,7 +193,17 @@ fn check(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
     }
     logging(None)?;
     let runtime = tokio::runtime::Runtime::new()?;
-    let report = runtime.block_on(check(options))?;
+    let report = match runtime.block_on(check(options)) {
+        Ok(report) => report,
+        // As `run`'s refusals: the fix when yobuild knows one.
+        Err(e) => {
+            eprintln!("yobuild: {e}");
+            if let Some(fix) = yobuild::run::what_to_do_at_start(&e.to_string()) {
+                eprintln!("  what to do: {fix}");
+            }
+            return Ok(ExitCode::FAILURE);
+        }
+    };
     // Written so that a reader gone (a closed pipe) is not a panic.
     let text = match json {
         true => format!("{}\n", serde_json::to_string_pretty(&report)?),

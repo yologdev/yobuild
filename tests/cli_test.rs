@@ -905,10 +905,27 @@ fn check_says_what_run_would_refuse() {
         report["agent"]["notes"],
         serde_json::json!(["plugin fixture-needs-services allows `fixture_typo`, which no plugin offered (a typo, or offered only in some runs)"])
     );
-    assert!(report["agent"]["tools"]
+    // Each tool with its kind, description and arguments' schema.
+    let tool = report["agent"]["tools"]
         .as_array()
         .unwrap()
-        .contains(&serde_json::json!({ "name": "fixture_services", "kind": "allowed" })));
+        .iter()
+        .find(|t| t["name"] == "fixture_services")
+        .unwrap()
+        .clone();
+    assert_eq!(tool["kind"], "allowed");
+    assert!(tool["description"].is_string(), "{tool}");
+    assert_eq!(tool["parameters"]["type"], "object", "{tool}");
+    let read = report["agent"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "read_file")
+        .unwrap();
+    assert!(
+        read["parameters"]["properties"]["path"].is_object(),
+        "{read}"
+    );
 }
 
 #[test]

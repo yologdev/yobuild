@@ -18,13 +18,27 @@ Until yobuild is installable on its own, it runs from a checkout of
 
 ```sh
 git clone https://github.com/yologdev/yobuild && cd yobuild
-scripts/try-coding-agent.sh --setup-only   # Node 22.19+, npm 11.19+: the adapters
+scripts/try-coding-agent.sh --setup-only   # Node 22.19+ and npm: the adapters
 cargo build
 ```
 
-Then call it by path from the agent's own folder (the agent works in the
-folder it is started in): `path/to/yobuild/target/debug/yobuild …`.
-Below, `yobuild` means that path.
+Pinned DSH plugins need npm 11.19 or later to install (an older npm
+writes an incomplete lock, which yobuild refuses). Call yobuild by path
+from the agent's folder: `path/to/yobuild/target/debug/yobuild …` — below,
+`yobuild` means that path.
+
+## Where things go
+
+One folder per agent; the agent works in the folder `yobuild run` is
+started in (usually this one, or the project it works on):
+
+```text
+my-agent/
+  agent.toml          the manifest
+  agent.lock          written by the first `yobuild check` or `run` (when it pins packages); commit it
+  prompts/agent.md    the prompt
+  scripts/demo.json   the scripted replies
+```
 
 ## The method
 
@@ -35,41 +49,60 @@ Below, `yobuild` means that path.
 2. **Pick parts by capability**, fewest first: the built-ins (`ask_owner`
    for questions without waiting, `report` for a required ending, `facts`
    for what changed, the gate, a scratch folder, `tools = "read-only"`);
-   then a plugin from [reference/parts.md](reference/parts.md); then an MCP
-   server. Prefer what `parts.md` lists as loading.
-3. **Write** `agent.toml` and its prompt file — keys and patterns in
-   [reference/manifest.md](reference/manifest.md). Pin exact versions
-   (`npm view <package> version`); `allow` only tools that read or plan
-   (never `bash` or the writers: the gate judges those call by call);
-   never a secret in a file (`${NAME}` from the environment); set a
-   budget.
-4. **Check**: `yobuild check agent.toml --json`.
-   - Nothing on stdout: an error stopped it before anything started — read
-     stderr (`yobuild: …`), which names the file, the entry or the setting,
-     and often `  what to do: …`.
-   - Else read `ok`. Each problem has a `message` and, when yobuild knows
-     one, a `fix`; do it. Read each note and decide. Repeat until `ok` is
-     true. `check` does not look at the model's key.
+   then a plugin from [reference/parts.md](reference/parts.md) at the
+   version it lists (**CI** rows first: yobuild's own CI runs them); then
+   an MCP server. A part not listed: pin `npm view <package> version`.
+3. **Write** `agent.toml` and its prompt: keys, patterns and how to write
+   the prompt in [reference/manifest.md](reference/manifest.md). `allow`
+   only tools that read or plan (never `bash` or the writers: the gate
+   judges those call by call); never a secret in a file (`${NAME}` from
+   the environment); set a budget.
+4. **Check**: `yobuild check agent.toml --json` — it installs and loads
+   every plugin and server (it runs their code, and needs the network the
+   first time), without a model.
+   - Nothing on stdout: an error stopped it before anything started.
+     Read stderr: `yobuild: …` names the file, the entry or the setting,
+     and `  what to do: …` follows when yobuild knows the fix.
+   - Else read `ok`. Problems are at `entries[].problems` and
+     `agent.problems`, each `{ "message", "fix" }` (`fix` when yobuild
+     knows one): do the fix. Read each note (`entries[].notes`,
+     `agent.notes`) and decide. Repeat until `ok` is true.
+   - `agent.tools` lists every tool a run gets, with its `kind` (`free`,
+     `judged`, `allowed`, `asks`, `runs`), its `description` and its
+     `parameters` (the arguments' JSON Schema): use these names and
+     arguments in the prompt and the scripted replies.
+   - `check` does not look at the model's key.
 5. **Run scripted** — [reference/scripted.md](reference/scripted.md): a
    reply file that calls the tools the task needs, then
-   `yobuild run agent.toml --scripted script.json --once "<task>"`. Expect
-   each tool call `✓` (or `✗` where the gate should ask: under `--once`
-   nobody answers) and a last line `Completed`.
+   `yobuild run agent.toml --scripted scripts/demo.json --once "<task>"`.
+   Only the model is scripted: plugins and servers run for real (a search
+   really searches). Expect each call `✓` — `✗` only where the gate would
+   ask, since under `--once` nobody answers — and a last line `Completed`.
 6. **Run live**, after asking the person (it costs money): the provider's
-   key in the environment, then `yobuild run agent.toml` (the web page
-   prints its URL; the terminal UI opens). Tell the person how to answer
-   the agent's questions. Commit `agent.toml`, its lock (`agent.lock`,
-   written on the first run), the prompt and the reply file.
-7. **When a run fails**: read how it ended — under `--once` the last line;
-   else `yobuild: the last run ended …` — and the `What to do: …` yobuild
-   gives. Find it in [reference/failures.md](reference/failures.md) when
-   it gives none. Change the manifest or the prompt, and run again,
-   scripted first.
+   key in the environment, then `yobuild run agent.toml "<task>"` (or
+   without a task: the person types it in the page). Tell the person:
+   - **the web page**: open the URL yobuild prints (the task starts when
+     it is open); the agent's questions — `ask_owner`'s, and the gate's
+     Allow/Block — appear docked above the message box, the page usable
+     meanwhile;
+   - **a phone**: with `phone = true`, yobuild prints a link on the local
+     network: open it on a phone on the same Wi-Fi;
+   - **the terminal UI**: questions are answered in its editor.
+
+   Commit `agent.toml`, `agent.lock`, the prompt and the reply file.
+7. **When a run fails**: read how it ended — under `--once` the last
+   line; else `yobuild: the last run ended …` on stderr — and the fix
+   yobuild gives: `What to do: …` (a notice; under `--once` printed as
+   `  Info: What to do: …`), `  what to do: …` under the last-run line,
+   or `fix` in `check`. They are the same fixes. When it gives none, find
+   the message in [reference/failures.md](reference/failures.md). Change
+   the manifest or the prompt, and run again, scripted first.
 
 ## The rules
 
-- Never `gate = "off"` unless the agent runs in a sandbox: it lets every
-  tool call run as the agent asks.
+- `gate = "off"` only where something else judges calls: the agent runs
+  in a sandbox, or a plugin with `policy = true` is the approval policy.
+  It lets every call run as the agent asks.
 - Never write a secret into a file: `${NAME}`, set in the environment.
 - Never add plugin packages to yobuild's `adapters/`, and never edit a
   lock by hand: yobuild installs pinned plugins into its cache from the
@@ -79,7 +112,7 @@ Below, `yobuild` means that path.
 
 ## References
 
-- [reference/manifest.md](reference/manifest.md) — every manifest key, with patterns.
+- [reference/manifest.md](reference/manifest.md) — every manifest key, patterns, writing the prompt.
 - [reference/parts.md](reference/parts.md) — what each built-in, plugin and server gives.
 - [reference/scripted.md](reference/scripted.md) — the scripted reply file and its traps.
 - [reference/failures.md](reference/failures.md) — every failure, what it means, what to do.
