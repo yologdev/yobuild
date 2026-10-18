@@ -428,10 +428,11 @@ yobuild's takes a row's id (they share one name space).
   `invoke`. From `plugin:<name>` the question reads "… (asked by plugin
   <name>)", to the owner and in the agent's steer; `from` is then
   ignored (a Warning once a session if it names another plugin, so
-  plugins written for #22 keep working). From the `pi` or `dsh` row — an
-  adapter forwarding the service for its extensions, later — `from` is
-  trusted as the extension's name, as `source` is for pi's tools: "(asked
-  by pi extension <from>)". A call from no row — a plugin that reached the
+  plugins written for #22 keep working). From the `pi` or `dsh` row — were an
+  adapter to forward the service for its extensions, which is not planned
+  (§3: pi and DSH get no `ask_owner`) — `from` is trusted as the
+  extension's name, as `source` is for pi's tools: "(asked by pi
+  extension <from>)". A call from no row — a plugin that reached the
   service without injecting it — is refused.
 - **What `--measure` shows:** rutis handlers by their owner
   (`plugin:<name>`), not the names they chose; the adapters as
