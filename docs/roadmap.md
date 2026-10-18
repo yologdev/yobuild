@@ -107,18 +107,26 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
 **Done when** `yobuild run handoff.toml --scripted` reproduces today's
 demo, plus the new per-plugin hook time and per-runtime memory lines.
 
-## M2b — Install, lock, check
+## M2b — Install, lock, check (design §4, proposed)
 
 - Resolve and install pinned plugins and stdio MCP servers per ecosystem
-  into the cache, write `agent.lock`; installs never run package scripts;
-  unpinned entries are refused.
-- `yobuild check`: vet every plugin without a model, using the probe
-  exposed by yoagent-rutis (a git dependency until its release); list each
-  MCP server's tools without calling any.
+  into the cache, in up to three sets (`pi`, `dsh` over the DSH adapter's
+  base, `mcp`), each at `~/.yobuild/plugins/<set>/<hash>/`. Write
+  `agent.lock`: per set, npm's own lock (versions, URLs, integrity hashes).
+  A stale set is resolved again; `--locked` refuses instead. Installs
+  never run package scripts. Unpinned entries are refused (as now).
+  `node_modules/` beside the manifest is no longer read.
+- `yobuild check`: each plugin alone through yoagent-rutis's `probe` (the
+  matrix's verdict; rutis plugins loaded as `run` loads them; MCP servers
+  `tools/list`, no call). Then the agent together, through `run`'s own
+  start without a model: host services, a policy's judge, tool-name
+  clashes, an `allow` naming a tool that is not offered. A text report, or
+  `--json`; exit 1 on a problem.
+- Two PRs after this design: the install and the lock, then `check`.
 
-**Done when** `yobuild run handoff.toml` installs from a clean cache and
-runs, and `yobuild check` reports the same as the compatibility matrix
-for the plugins it uses.
+**Done when** `yobuild run handoff.toml` installs from a clean cache (an
+empty `YOBUILD_HOME`) and runs, and `yobuild check` reports the same as
+the compatibility matrix for the plugins it uses.
 
 ## M3 — The skill and a gallery
 
@@ -176,8 +184,11 @@ never loading, and a denied approval leaves the agent without the plugin.
    apart), together with the adapter files' location.
 4. **Manifest format.** Decided (2026-10-16): TOML — read by serde in
    the Rust core, strictly, with no runtime needed to read a manifest.
-5. **Plugin installs.** One cache per ecosystem and lockfile hash (proposed),
-   or per agent folder (simpler, bigger)?
+5. **Plugin installs.** Proposed in design §4 (M2b): one cache per
+   ecosystem set and lock hash, shared by agents with the same set, not
+   one per agent folder. Up for review with it: the lock as JSON carrying
+   npm's own lock, a stale set resolved again by default (`--locked`
+   refuses), and the adapters staying in `adapters/` until M4.
 6. **The gate.** Decided: Rust (it is on the safety path — design §9), an
    allow-list, the TypeScript deny-list kept as an example. Still open, the
    rule for what belongs in Rust: are the five reasons in design §9 (safety, hot
