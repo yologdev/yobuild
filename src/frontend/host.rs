@@ -263,7 +263,12 @@ impl PluginHostBuilder {
             )
             .into());
         }
+        // Only the names this host shares (rutis 0.11's rule; 0.12 shares
+        // every name, so a row injecting one nobody provides would wait in
+        // rutis — `load` failing with "did not start" before yobuild's DSH
+        // service check can name what it waits for).
         let mut catalog = ServiceCatalog::new();
+        catalog.share_registered_only();
         for service in &self.shared {
             catalog.register_shared(service);
         }

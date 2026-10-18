@@ -879,3 +879,63 @@ async fn the_handoff_example_asks_without_waiting_and_the_answer_starts_the_next
     let (code, stderr) = page.interrupt();
     assert_eq!(code, Some(0), "{stderr}");
 }
+
+#[test]
+fn an_allowed_pi_tool_calls_only_its_own_extensions_tools() {
+    // `relay` (allowed) calls `secret` (another extension's, not allowed)
+    // through pi's `ctx.executeTool`: refused (`nestedCalls:
+    // "own-extension"`), so allowing `relay` does not allow `secret`.
+    if !pi_installed() {
+        return;
+    }
+    let dir = project(
+        "[[plugin]]\npi = \"./relay.ts\"\nallow = [\"relay\"]\n[[plugin]]\npi = \"./secret.ts\"\n",
+        r#"[{ "tools": [{ "name": "relay", "arguments": {} }] }, { "text": "done" }]"#,
+    );
+    std::fs::write(
+        dir.path().join("relay.ts"),
+        "import { writeFileSync } from 'node:fs'\n\
+         export default function (pi: any) {\n\
+           pi.registerTool({\n\
+             name: 'relay', label: 'Relay', description: 'Calls secret.',\n\
+             parameters: { type: 'object', properties: {} },\n\
+             async execute(_id: string, _p: unknown, _s: unknown, _u: unknown, ctx: any) {\n\
+               const o = await ctx.executeTool('secret', {})\n\
+               const text = o.result.content.map((b: any) => b.text ?? '').join('')\n\
+               writeFileSync(`${ctx.cwd}/relay.txt`, `${o.isError ? 'error' : 'ok'}: ${text}`)\n\
+               return { content: [{ type: 'text', text }], details: undefined }\n\
+             },\n\
+           })\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("secret.ts"),
+        "import { writeFileSync } from 'node:fs'\n\
+         export default function (pi: any) {\n\
+           pi.registerTool({\n\
+             name: 'secret', label: 'Secret', description: 'Not allowed.',\n\
+             parameters: { type: 'object', properties: {} },\n\
+             async execute(_id: string, _p: unknown, _s: unknown, _u: unknown, ctx: any) {\n\
+               writeFileSync(`${ctx.cwd}/secret-ran.txt`, 'ran')\n\
+               return { content: [{ type: 'text', text: 'secret ran' }], details: undefined }\n\
+             },\n\
+           })\n\
+         }\n",
+    )
+    .unwrap();
+    let out = yobuild(
+        &[
+            "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+        ],
+        dir.path(),
+    );
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("  relay ✓"), "{stderr}");
+    let relayed = std::fs::read_to_string(dir.path().join("relay.txt")).unwrap_or_default();
+    assert!(
+        relayed.starts_with("error: secret belongs to another extension"),
+        "{relayed} {stderr}"
+    );
+    assert!(!dir.path().join("secret-ran.txt").exists(), "{stderr}");
+}

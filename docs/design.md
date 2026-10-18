@@ -156,18 +156,16 @@ allow = ["read_text_file"]           # offered to the model as `files__read_text
   its handler could narrow that). The adapters' handler names are made
   per process and unguessable, so no plugin can take one first and pass
   for pi or DSH.
-- **Limits for pi** (pi's extensions share one adapter and one Node
-  process):
-  - Until yoagent-rutis's pi adapter runs exactly the tools it offered
-    (yoagent PR #333, coming in 0.5.1), an extension that registers the
-    same name after the run's tools were taken could run in the allowing
-    one's place.
+- **pi** (its extensions share one adapter and one Node process):
+  - The adapter runs exactly the tools a run was offered (yoagent-rutis
+    0.5.1): an extension registering the same name later never runs in
+    the allowing one's place.
   - A pi tool can call other pi tools itself (`ctx.executeTool`); those
-    calls never reach the gate (only pi's own handlers judge them). So
-    allowing a pi tool also allows what it calls — a code runner, all of
-    it. A host option restricting such calls to the calling extension's
-    own tools (or turning them off) is asked of yoagent-rutis; yobuild
-    will use "own extension".
+    calls never reach the gate (only pi's own handlers judge them).
+    yobuild sets the adapter's `nestedCalls: "own-extension"`, so they
+    reach only the calling extension's own tools: allowing a pi tool
+    allows what its own extension offers, not the others' (a code runner
+    is still all of it).
   - Per-extension trust guards against honest name clashes, not against a
     hostile extension loaded in the same runtime: it shares the process.
 - **MCP:** an MCP server's names are scoped by their prefix: each is

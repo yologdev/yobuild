@@ -264,7 +264,15 @@ pub(crate) fn plan(
         plan.rows.push(
             Row::new("pi", pi.join("pi-extensions-adapter.ts").display())
                 .runtime("pi")
-                .config(json!({ "extensions": extensions, "cwd": cwd, "name": plan.pi_handler })),
+                // `own-extension`: a pi tool's own calls to other tools
+                // (`ctx.executeTool`) reach only its extension's tools, so
+                // allowing it does not allow the others' (design §2).
+                .config(json!({
+                    "extensions": extensions,
+                    "cwd": cwd,
+                    "name": plan.pi_handler,
+                    "nestedCalls": "own-extension",
+                })),
         );
         plan.rows
             .push(Row::new("pi-host-ui", pi.join("host-ui.ts").display()).runtime("pi"));
