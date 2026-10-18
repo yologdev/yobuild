@@ -2688,15 +2688,16 @@ dependencies = [
 
 [[package]]
 name = "yoagent-rutis"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c1c468578599d7869648378a5610a0266d72d8cc33d1e7dce8001f26b295f28"
+checksum = "e66ffb04b32b2cb54d94bcc36b963f1dfe605ab8e7d0b2f966e80fbc3b4af7f0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "futures",
  "rutis",
  "rutis-bridge",
+ "rutis-loader",
  "serde",
  "serde_json",
  "tokio",

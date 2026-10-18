@@ -205,7 +205,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         .share(services::ASK_OWNER);
     let mut host = builder.start(root).await?;
     if !plan.rows.is_empty() {
-        host.load(plan.rows.clone()).await?;
+        host.load(plan.rows.clone())
+            .await
+            .map_err(|e| dsh_waiting(e, plan, manifest.dsh.host_services))?;
         // A rutis plugin marked `policy` registers its handler in its own
         // time (a row is Active before its `apply` ends): a run started
         // before would find no policy, or only another plugin's.
@@ -946,6 +948,41 @@ async fn dsh_services(
             return Ok(());
         }
     }
+    Err(dsh_missing(&missing, plan, host_services))
+}
+
+/// A `load` that failed because DSH plugins wait for services nobody
+/// provides (rutis says which, from what each row injects): said as the
+/// DSH check says it, with its hints. Any other failure as it is.
+fn dsh_waiting(error: BoxError, plan: &plugins::Plan, host_services: bool) -> BoxError {
+    use yoagent_rutis::rows::{RowState, RowsNotRunning};
+    let Some(not_running) = error.downcast_ref::<RowsNotRunning>() else {
+        return error;
+    };
+    let dsh_rows: Vec<&str> = plan
+        .rows
+        .iter()
+        .filter(|row| row.runtime_is("dsh") && row.id().starts_with("plugin:"))
+        .map(|row| row.id())
+        .collect();
+    let mut missing: Vec<String> = Vec::new();
+    for row in &not_running.rows {
+        match (&row.state, &row.missing) {
+            (RowState::Waiting, Some(names))
+                if !names.is_empty() && dsh_rows.contains(&row.id.as_str()) =>
+            {
+                missing.extend(names.iter().cloned());
+            }
+            _ => return error,
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    dsh_missing(&missing, plan, host_services)
+}
+
+/// "DSH plugins wait for services nobody provides: …", with what may help.
+fn dsh_missing(missing: &[String], plan: &plugins::Plan, host_services: bool) -> BoxError {
     let mut hints = Vec::new();
     if !host_services {
         hints.push("DSH's own host services come with [dsh] host_services = true".to_owned());
@@ -960,11 +997,11 @@ async fn dsh_services(
         true => String::new(),
         false => format!(" ({})", hints.join("; ")),
     };
-    Err(format!(
+    format!(
         "DSH plugins wait for services nobody provides: {}{hints}",
         missing.join(", ")
     )
-    .into())
+    .into()
 }
 
 /// One look by `adapters/dsh/probe-services.ts` after `wait_ms`: the

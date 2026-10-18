@@ -510,7 +510,8 @@ async fn a_dsh_plugin_waiting_for_services_nobody_provides_is_refused() {
     manifest("");
     let e = try_once(dir.path()).await.err().unwrap();
     assert!(
-        e.starts_with("DSH plugins wait for services nobody provides: fs,")
+        e.starts_with("DSH plugins wait for services nobody provides: ")
+            && e.contains("fs,")
             && e.ends_with("[dsh] host_services = true)"),
         "{e}"
     );

@@ -23,7 +23,7 @@ tempfile = "3"
 # `dsh/host-services.json`). rutis 0.12 throughout: the runtimes
 # (`frontend/plugins`, the adapters') must match.
 yoagent = "0.25.7"
-yoagent-rutis = { version = "0.6", features = ["node"] }
+yoagent-rutis = { version = "0.6.1", features = ["node", "loader"] }
 rutis = "0.12"
 rutis-bridge = { version = "0.12", default-features = false, features = ["node"] }
 rutis-loader = { version = "0.12", features = ["node"] }
