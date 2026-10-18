@@ -599,11 +599,67 @@ fn resolve(
         Json::Object(packages) => packages.clone(),
         _ => return Err(format!("npm's lock for {} has no packages", set.name()).into()),
     };
+    let missing = missing(&packages);
+    if !missing.is_empty() {
+        let version = npm(dir.path(), &["--version".to_owned()]).unwrap_or_default();
+        return Err(format!(
+            "npm {} wrote an incomplete lock for the `{}` set (another npm would refuse to install it): {}; upgrade npm (11.19 resolves it whole)",
+            version.trim(),
+            set.name(),
+            missing.join(", ")
+        )
+        .into());
+    }
     Ok(SetLock {
         base,
         requested: pins.clone(),
         packages,
     })
+}
+
+/// What npm's `packages` lacks: each entry's `dependencies` and
+/// `optionalDependencies` must resolve, as Node resolves them, from the
+/// entry's own `node_modules` up to the root's (a v3 lock lists every
+/// platform's optional packages). npm 11.5 drops a peer-only package's
+/// optional dependencies when it resolves a lock, and a newer `npm ci`
+/// refuses that lock: "dep of package" each.
+fn missing(packages: &Map<String, Json>) -> Vec<String> {
+    let mut out = Vec::new();
+    for (path, entry) in packages {
+        for key in ["dependencies", "optionalDependencies"] {
+            let Some(deps) = entry[key].as_object() else {
+                continue;
+            };
+            for dep in deps.keys() {
+                // `a/node_modules/b` looks in `a/node_modules/b/node_modules`,
+                // then `a/node_modules`, then the root's.
+                let mut at = path.as_str();
+                let found = loop {
+                    let candidate = match at.is_empty() {
+                        true => format!("node_modules/{dep}"),
+                        false => format!("{at}/node_modules/{dep}"),
+                    };
+                    if packages.contains_key(&candidate) {
+                        break true;
+                    }
+                    if at.is_empty() {
+                        break false;
+                    }
+                    at = match at.rfind("/node_modules/") {
+                        Some(i) => &at[..i],
+                        None => "",
+                    };
+                };
+                if !found {
+                    let of = path
+                        .rsplit_once("node_modules/")
+                        .map_or("the root", |(_, n)| n);
+                    out.push(format!("{dep} of {of}"));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The package name and version of each entry in npm's `packages`.
@@ -992,6 +1048,32 @@ mod tests {
             npm_error(stderr),
             "npm error code EUSAGE\nnpm error\nnpm error `npm ci` can only install when in sync.\nnpm error\nnpm error A complete log of this run can be found in: /x.log"
         );
+    }
+
+    #[test]
+    fn a_lock_missing_a_dependency_is_found() {
+        let packages: Map<String, Json> = serde_json::from_str(
+            r#"{
+                "": { "dependencies": { "a": "1" } },
+                "node_modules/a": { "version": "1.0.0", "dependencies": { "b": "1" }, "optionalDependencies": { "a-linux": "1", "a-darwin": "1" } },
+                "node_modules/a/node_modules/b": { "version": "1.0.0", "dependencies": { "c": "1" } },
+                "node_modules/c": { "version": "1.0.0" },
+                "node_modules/a-darwin": { "version": "1.0.0" }
+            }"#,
+        )
+        .unwrap();
+        // b is nested under a; c is found from b up at the root; a-linux is
+        // nowhere.
+        assert_eq!(missing(&packages), ["a-linux of a"]);
+        // The adapter's own lock is whole.
+        let adapter = Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/dsh/package-lock.json");
+        if let Ok(text) = std::fs::read_to_string(adapter) {
+            let lock: Json = serde_json::from_str(&text).unwrap();
+            assert_eq!(
+                missing(lock["packages"].as_object().unwrap()),
+                Vec::<String>::new()
+            );
+        }
     }
 
     #[test]

@@ -471,7 +471,11 @@ the adapter's. A missing or stale set is resolved again in a temp folder:
      `@juicesharp/rpiv-i18n`, declared `*`), then fixed by the lock.
 2. Run `npm install --package-lock-only`. Nothing is unpacked; it fetches
    package metadata, so it needs the network.
-3. Take the lock's `packages`. An install writes the `package.json`
+3. Take the lock's `packages`, checked whole: every package's
+   dependencies and optional dependencies are in it (npm 11.5 drops a
+   peer-only package's optional platform packages, and a newer `npm ci`
+   refuses such a lock; it is refused here, naming the npm version). An
+   install writes the `package.json`
    again from fixed fields — for `dsh` the adapter's (`"type": "module"`
    among them: the runtime's own files are ESM `.ts`), for `pi` and
    `mcp` `name`, `"private": true`, `"type": "module"` — plus the
