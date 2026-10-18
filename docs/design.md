@@ -155,7 +155,8 @@ allow = ["read_text_file"]           # offered to the model as `files__read_text
   than the two adapters' counts as the rutis owner (a manifest key naming
   its handler could narrow that). The adapters' handler names are made
   per process and unguessable, so no plugin can take one first and pass
-  for pi or DSH.
+  for pi or DSH. (Proposed: by the row that registered the tool, as the
+  host sees it — §4, "Who a plugin is".)
 - **pi** (its extensions share one adapter and one Node process):
   - The adapter runs exactly the tools a run was offered (yoagent-rutis
     0.5.1): an extension registering the same name later never runs in
@@ -306,7 +307,8 @@ tool does: without waiting.
   and nobody would be told. Without `[builtins] ask_owner = true` every
   `ask` is refused, saying so (the plugin goes without); so is one after
   the session ended.
-- **One method:** `ask({ question, why?, options? }, from?)` → the
+- **One method** (`from`'s meaning proposed to change — §4, "Who a
+  plugin is"): `ask({ question, why?, options? }, from?)` → the
   question's number, at once. The same shape as the tool's arguments,
   checked by the same `Question::from_json` (a blank question, unknown keys
   or a non-string option are refused with an error the plugin sees); a
@@ -319,7 +321,9 @@ tool does: without waiting.
   `[Owner skipped #N]` — in the run under way, or, when the agent is idle,
   as the prompt of a new run (which costs what a run costs). A plugin that
   needs the answer itself uses the dialogs instead.
-- **Who asks:** a host service does not know its caller. `from` is the
+- **Who asks** (proposed: named by the host from the calling row — §4,
+  "Who a plugin is"; what follows is until then): a host service does
+  not know its caller. `from` is the
   plugin's name as it gives it — one line, up to 64 characters, not
   verified — and the question reads "… (asked by plugin <from>)" to the
   owner and in the agent's steer. Without it, a plugin's question looks
@@ -362,6 +366,92 @@ tool does: without waiting.
   For an MCP server: connect, list its tools (`tools/list`), call none.
 - **Report** per plugin: what it adds, what is ignored (commands, UI), what
   it needs that is missing — before the agent runs.
+
+### Who a plugin is: the row the host sees (proposed)
+
+Since rutis 0.12 the host sees which loader row makes each call into it
+(`caller_row`), and yoagent-rutis 0.6 records that row's id as the owner of
+every handler a language plugin registers through a row that injects
+`yoagent` (`HandlerInfo::owner`, `offered_by(run, tool).owner()`). The
+plugin does not say it; the host does. A plugin that reaches `yoagent`
+without declaring it in its `inject` gets no row: its owner is "language
+plugin (session …)", which is no row's id and never counts as a plugin's.
+
+yobuild's rows: a manifest's rutis plugin is `plugin:<name>` (in its
+package's runtime); a DSH plugin is `plugin:<name>` (a file) or
+`plugin:<name>:<row id>` (a package's rows), in the `dsh` runtime; the
+adapters are the rows `pi` and `dsh`; the helpers `pi-host-ui`,
+`dsh-host-dialogs`, `dsh-web`, `dsh-system-prompt`, `dsh-tools` (DSH's
+package of that name: a row id, not the adapter's handler),
+`terminal-ui` and `yobuild:dsh-services` register no tool handlers.
+Names hold no `:`, so `plugin:a:x` is never another plugin's `plugin:a`;
+owners are compared whole, never by prefix. yobuild uses no instanced
+groups (whose copies of a row would share its id), and no Rust plugin of
+yobuild's takes a row's id (they share one name space).
+
+- **Allowed tools** (§2), by the kind of entry, not the shape of the id:
+  - rutis: the owner is the plugin's own row, `plugin:<name>` — not, as
+    now, any handler that is not an adapter's.
+  - pi: the `pi` row, and the extension file (`source`, said by the
+    adapter) one of that plugin's — as now; pi's extensions share the
+    row.
+  - DSH: the `dsh` row (the adapter, which all DSH plugins share, so they
+    still count as one), or one of that plugin's own rows when the
+    plugin registers a handler itself.
+  - Any other owner — another plugin's row, or no row — is not this
+    entry's: the tool asks. The first time an allowed name is offered
+    only by another owner, a Warning says so ("plugin A allows `x`,
+    offered by `plugin:B`" / "offered by no row: does it inject
+    `yoagent`?"), next to today's warning for a name nobody offered.
+- **The adapters' handler names stay random** (#18): an owner can no
+  longer be faked by a name, but a plugin that registers a fixed
+  `pi-extensions` first would make the real adapter's registration fail
+  (yoagent-rutis refuses a second handler of a name). Start-up waits for
+  the handler named so *and* owned by the `pi` / `dsh` row.
+- **A policy plugin** (`policy = true`, §7), at start: a rutis one is
+  waited for until a handler that judges calls (`before_tool`) is owned by
+  its row `plugin:<name>` (any one of its handlers will do) — not, as now,
+  until as many judging rutis handlers exist as rutis policy plugins,
+  whoever owns them. A pi one is covered by the wait for the `pi` row's
+  handler, as now. One that registers without injecting `yoagent` is
+  never its row's: start-up fails after the wait, hinting at `inject`.
+  During the session nothing changes: `require_policy` still asks only
+  that *some* plugin judges calls (§7), not that this one does.
+- **`ask_owner` for plugins** (§3): the service reads the calling row in
+  `invoke`. From `plugin:<name>` the question reads "… (asked by plugin
+  <name>)", to the owner and in the agent's steer; `from` is then
+  ignored (a Warning once a session if it names another plugin, so
+  plugins written for #22 keep working). From the `pi` or `dsh` row — an
+  adapter forwarding the service for its extensions, later — `from` is
+  trusted as the extension's name, as `source` is for pi's tools: "(asked
+  by pi extension <from>)". A call from no row — a plugin that reached the
+  service without injecting it — is refused.
+- **What `--measure` shows:** rutis handlers by their owner
+  (`plugin:<name>`), not the names they chose; the adapters as
+  `pi-extensions` / `dsh-tools`, as now.
+- **A plugin that waits for a service nobody provides** should be said,
+  not left waiting unseen. Settled in the code PR, by tests, not here:
+  rutis 0.12's default of sharing every name makes such a row wait in
+  rutis (so `load` sees it), but it also gates the names DSH's rows
+  provide each other through Cordis (`tools`, `systemPrompt`,
+  `userQuestions`), may let one runtime's plugins inject services
+  another's provide (DSH's private ones among them, §6), and fails a
+  second provider of one name across runtimes. If those hold up, yobuild
+  switches and names what a waiting row lacks — from the loader
+  (`Loader::check`'s `Supply::Missing`, or a row's described `inject`),
+  and for DSH rows by running the DSH service check when `load` reports
+  them waiting, so its message stays; if not, yobuild keeps
+  `share_registered_only` and uses `Loader::check` alone. Also checked
+  there: who owns a handler a child plugin (`ctx.plugin`) registers.
+
+What it does not change: a row is the unit the host can see, not the
+code. A call is its row's even when another plugin's code makes it (a
+leased service handed on, a service re-provided as `host-ui.ts` does),
+and plugins sharing a runtime share a process — per-row trust guards
+against honest mistakes and name clashes, not against a hostile plugin
+in the same runtime (§6). An honest rutis plugin that injects `yoagent`
+(as it must to register at all) sees no difference; an `allow` that
+relied on another plugin offering the tool now asks, and is warned about.
 
 ## 5. The frontend
 
