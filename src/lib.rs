@@ -17,6 +17,7 @@
 
 pub mod builtins;
 pub mod frontend;
+pub(crate) mod hints;
 pub mod install;
 pub mod manifest;
 pub mod run;

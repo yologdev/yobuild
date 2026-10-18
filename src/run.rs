@@ -117,6 +117,16 @@ impl Options {
     }
 }
 
+/// What to do about a run that ended `outcome` with `error` (design §11):
+/// for a run stopped or failed, the fix from yobuild's one table of them.
+pub fn what_to_do(outcome: RunOutcome, error: Option<&str>) -> Option<&'static str> {
+    let stopped = outcome == RunOutcome::Stopped;
+    match stopped || outcome == RunOutcome::Error {
+        true => crate::hints::what_to_do(stopped, error.unwrap_or_default()),
+        false => None,
+    }
+}
+
 /// How the session ended: its last run's outcome (none when no run was
 /// made), the notices it gave, and the agent (its messages) unless the
 /// session was stopped with Ctrl+C.
@@ -988,10 +998,16 @@ fn watch(
     let (ended, ended_rx) = tokio::sync::watch::channel(0u64);
     let mut watching = session.observe();
     let record = seen.clone();
+    let notify = session.clone();
     let task = tokio::spawn(async move {
         loop {
             match watching.messages.recv().await {
                 Some(ServerMessage::RunEnd { outcome, error, .. }) => {
+                    // A run that did not complete: what to do, for every
+                    // frontend (design §11).
+                    if let Some(fix) = what_to_do(outcome, error.as_deref()) {
+                        notify.notice(NoticeLevel::Info, format!("What to do: {fix}."));
+                    }
                     {
                         let mut seen = record.lock().unwrap();
                         seen.first.get_or_insert_with(|| (outcome, error.clone()));

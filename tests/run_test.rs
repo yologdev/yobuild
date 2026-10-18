@@ -267,6 +267,14 @@ async fn a_run_a_limit_stops_is_stopped_not_completed() {
     let error = ended.error.clone().unwrap_or_default();
     assert!(error.contains("Max turns"), "{error}");
     assert_eq!(results(&ended).len(), 1);
+    // What to do, for every frontend.
+    assert!(
+        ended.notices.iter().any(|(_, m)| m.starts_with(
+            "What to do: send \"continue\" (a new run, with fresh limits; not under --once, which ends after one run), or raise [limits] max_turns"
+        )),
+        "{:?}",
+        ended.notices
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1332,7 +1340,7 @@ async fn check_says_a_rutis_plugin_that_stops_or_waits() {
         report.entries[0]
             .problems
             .iter()
-            .any(|p| p.contains("boom")),
+            .any(|p| p.message.contains("boom")),
         "{}",
         report.text()
     );

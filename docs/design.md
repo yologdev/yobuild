@@ -1119,7 +1119,7 @@ whatever wraps them.
 | session budget | `[Agent stopped: session budget of $2.00 spent (…)]` | `Stopped` | all the session's runs together | "continue" stops at once (the session's total stays spent); restart — which starts a new conversation: the history lives in the process — or raise `session_budget_usd` |
 | loop | `[Agent stopped: repeated tool call — X was called repeatedly with identical arguments after being asked to change approach.]` | `Stopped` | the agent called one tool with the same arguments over and over | change the prompt, or what the tool returns; send "continue" |
 | ask_owner | a question open (with `facts`: `; 1 question(s) waiting on you`) | the facts line | the owner has not answered | answer in the page or the terminal: during a run the answer steers it; when idle it starts the next run |
-| facts | `Stopped early: <reason>. Send "continue" to pick up where it left off.` | a Warning Notice | any `Stopped` run | right for limits and loops; after a session budget, restart instead (facts will say so, see below) |
+| facts | `Stopped early: <reason>.` | a Warning Notice | any `Stopped` run (it had no report) | `What to do: …` follows it (#33: facts no longer gives the fix itself) |
 
 **Not failures, though they read like one:** facts' `not a git
 repository`, `changes unknown: no snapshot at the start (git: …)`,
@@ -1172,8 +1172,8 @@ too:
   (`yobuild: the last run ended Stopped: [Agent stopped: Max turns
   reached (50/50)]`, and `--once`'s outcome) is followed by `  what to
   do: …`. A run that ends `Stopped` or `Error` gets the same as a Notice,
-  so the page shows it. Facts' `Send "continue"` becomes the hint's
-  (after a session budget: restart).
+  so the page shows it. Facts' `Send "continue"` is dropped for the
+  hint's (after a session budget: restart) — done in #33.
 - **`check`**: each problem with a hint gets it. In `--json`, problems
   become objects, `{ "message", "fix" }` (`fix` absent when there is
   none), and the report's `version` becomes 2; in the text, a `  fix: …`
