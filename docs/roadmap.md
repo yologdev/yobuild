@@ -122,8 +122,9 @@ demo, plus the new per-plugin hook time and per-runtime memory lines.
 - `yobuild check`: each plugin alone through yoagent-rutis's `probe` (the
   matrix's verdict; rutis plugins loaded as `run` loads them; MCP servers
   `tools/list`, no call; a pi tool the probe kept only by leaving a
-  built-in out is a problem, since `run` refuses it). Then the agent together, through `run`'s own
-  start without a model: host services, a policy's judge, tool-name
+  built-in out is a problem, since `run` refuses it; yoagent-rutis's
+  `probe` feature, on crates.io since 0.4). Then the agent together,
+  through `run`'s own start without a model: host services, a policy's judge, tool-name
   clashes, an `allow` naming a tool that is not offered. A text report, or
   `--json`; exit 1 on a problem.
 - Two PRs after this design: the install and the lock, then `check`.
@@ -163,8 +164,8 @@ a coding agent, not by hand.
   copied by `scripts/copy-adapters.sh`) and the terminal UI installed
   into the cache too (design §4).
 - Docs site, the video re-cut for yobuild, posts.
-- Release 0.1. Requires the yoagent-rutis release with the probe from
-  crates.io (no git dependencies in a release).
+- Release 0.1 (no git dependencies in a release: yoagent-rutis and its
+  `probe` come from crates.io already).
 
 **Done when** someone who has not seen the repository installs yobuild,
 runs `yobuild new`, and has a gallery agent running from the docs alone;
