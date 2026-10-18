@@ -7,7 +7,11 @@ of their own, and one that reads or sets up the terminal from there is
 stopped (SIGTTIN / SIGTTOU). This drives the real mode: the screen must draw,
 a typed prompt must run, and no process of the agent may be stopped.
 
-Usage: terminal_pty.py <path to the built coding_agent example> (Unix).
+Usage (Unix):
+  terminal_pty.py <path to the built coding_agent example>
+  terminal_pty.py <program> <arguments…>   e.g. yobuild run examples/coding.toml
+                                           --scripted examples/scripts/coding.json
+With no arguments after the program, the example's `--no-dsh` is given.
 """
 import os
 import pty
@@ -19,9 +23,10 @@ import sys
 import time
 
 exe = sys.argv[1]
+args = sys.argv[2:] or ["--no-dsh"]
 pid, fd = pty.fork()
 if pid == 0:
-    os.execv(exe, [exe, "--no-dsh"])
+    os.execv(exe, [exe, *args])
 
 screen = b""
 closed = False  # the pty hit EOF: the agent is gone

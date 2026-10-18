@@ -87,3 +87,10 @@ jobs:
         run: |
           cargo build --locked
           python3 tests/run_terminal_pty.py target/debug/yobuild
+      - name: The coding example (yobuild run examples/coding.toml) on a pty (its pi policy asks before rm -rf build, Block from the keyboard)
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          mkdir -p "$RUNNER_TEMP/pty-coding" && cd "$RUNNER_TEMP/pty-coding"
+          python3 "$GITHUB_WORKSPACE/tests/terminal_pty.py" "$GITHUB_WORKSPACE/target/debug/yobuild" \
+            run "$GITHUB_WORKSPACE/examples/coding.toml" --scripted "$GITHUB_WORKSPACE/examples/scripts/coding.json"

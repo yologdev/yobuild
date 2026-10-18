@@ -708,6 +708,14 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
             }
         }
     }
+    // Nothing judging calls is allowed (an agent in a sandbox), but said.
+    if manifest.builtins.gate == GateMode::Off && !manifest.plugins.iter().any(|p| p.policy) {
+        notes.push(
+            "nothing judges tool calls: `gate = \"off\"` and no plugin is `policy = true` \
+             (every call runs, deleting and overwriting included; fine in a sandbox)"
+                .into(),
+        );
+    }
 
     let prompt = Prompt::read(manifest)?;
     let plan = plugins::plan(manifest, &options.layout, cwd, &lookup)?;

@@ -971,3 +971,91 @@ async fn a_rutis_plugin_waiting_for_a_service_nobody_provides_is_named() {
         started.elapsed()
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_judging_calls_is_said() {
+    let off = project("[builtins]\ngate = \"off\"\n");
+    let ended = run_once(off.path()).await;
+    let said = |ended: &Ended| {
+        ended.notices.iter().any(|(level, m)| {
+            *level == yobuild::frontend::NoticeLevel::Warning
+                && m.starts_with("nothing judges tool calls: `gate = \"off\"`")
+        })
+    };
+    assert!(said(&ended), "{:?}", ended.notices);
+    // With the gate on (the default), nothing to say.
+    let on = project("");
+    assert!(!said(&run_once(on.path()).await));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_after_the_policy_plugin_died_is_denied() {
+    // A rutis policy plugin that lets calls through, and takes its runtime
+    // down once the run makes a file. The call after must be denied, not
+    // run unjudged.
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins/node_modules");
+    if !runtime.join("@arcships/rutis-runtime").is_dir() {
+        if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
+            panic!("the rutis runtime is required: npm ci in frontend/plugins");
+        }
+        eprintln!("SKIPPED: npm ci in frontend/plugins");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let signal = dir.path().join("die-now");
+    std::os::unix::fs::symlink(&runtime, dir.path().join("node_modules")).unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    std::fs::write(
+        dir.path().join("guard.ts"),
+        "import { existsSync } from 'node:fs'\n\
+         import { definePlugin } from '@arcships/rutis'\n\
+         export default definePlugin({\n\
+           inject: ['yoagent'],\n\
+           apply(ctx: any, config: { file: string }) {\n\
+             ctx.effect(ctx.use('yoagent').register('guard', { async before_tool() {} }))\n\
+             const timer = setInterval(() => {\n\
+               if (existsSync(config.file)) { clearInterval(timer); setTimeout(() => { throw new Error('gone') }) }\n\
+             }, 50)\n\
+           },\n\
+         })\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        format!(
+            r#"[{{ "tools": [{{ "name": "bash", "arguments": {{ "command": "touch {}; sleep 2" }} }}] }},
+                {{ "tools": [{{ "name": "list_files", "arguments": {{ "path": "." }} }}] }},
+                {{ "text": "done" }}]"#,
+            signal.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        format!(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
+             [[plugin]]\nrutis = \"./guard.ts\"\nruntime = \"node\"\npolicy = true\nconfig = {{ file = \"{}\" }}\n\
+             [builtins]\ngate = \"off\"\n",
+            signal.display()
+        ),
+    )
+    .unwrap();
+    let ended = run_once(dir.path()).await;
+    let ran = results(&ended);
+    assert_eq!(ran.len(), 2, "{ran:?}");
+    assert!(!ran[0].1, "the first call ran: {ran:?}");
+    assert!(
+        ran[1].1
+            && ran[1]
+                .0
+                .contains("plugin handler `guard` is no longer available"),
+        "after the policy died, a call is denied: {ran:?} {:?}",
+        ended.notices
+    );
+    // And the owner is told.
+    let said = ended
+        .notices
+        .iter()
+        .any(|(_, m)| m.starts_with("A plugin stopped: the `rutis-0` runtime is not running"));
+    assert!(said, "{:?}", ended.notices);
+}

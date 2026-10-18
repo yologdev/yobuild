@@ -538,7 +538,10 @@ manifest nor `yobuild run` has yet. What a manifest gained for them:
   DSH plugin: DSH's adapter judges no calls, so every call would be
   denied. Usually with `gate = "off"` — the plugin is the gate; with both,
   a call may be asked about twice. `gate = "off"` with no policy plugin
-  leaves nothing judging calls: allowed, for an agent in a sandbox.
+  leaves nothing judging calls: allowed, for an agent in a sandbox, and
+  said as a Warning at start. A policy plugin that dies mid-session
+  denies the calls it would have judged (its handler is gone) and the
+  owner is told it stopped.
 - **The UI plugins** (`todo-plan.ts`, `search-links.ts`: browser drawing,
   offered through the `frontend` service) are rutis plugins
   (`rutis = "../frontend/plugins/todo-plan.ts"`, `runtime = "node"`),
