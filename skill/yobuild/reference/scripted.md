@@ -57,6 +57,9 @@ answer:
   project, the agent's own files and the scratch folder run: `✓`.
 - `ask_owner` prints `✓` (`Asked the owner as #1 …`): the question stays
   open and is never answered.
+- A tool that runs and fails (a search engine down, a rate limit, a page
+  not found) prints `✗ <its own error>` — not `Tool call denied: …`. That
+  is the tool's day, not the manifest: run again, or script around it.
 - A tool the agent does not have (one not in `agent.tools`): `✗` (the
   gate asks about it first, and nobody answers).
 

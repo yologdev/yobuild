@@ -31,7 +31,7 @@ decides. Tool names and arguments: `yobuild check --json` lists them
 | Capability | Package | What yoagent gets |
 |---|---|---|
 | a plan / to-do list | `@juicesharp/rpiv-todo@2.12.0` **CI** | the tool `todo` |
-| web search and pages | `pi-web-access@0.41.0` | 4 tools |
+| web search and pages | `pi-web-access@0.41.0` | 4 tools (untested by yobuild's CI: `check` first) |
 | delegate to sub-agents | `pi-subagents@0.78.0` | 4 tools, 2 skills (skills are not loaded by yobuild) |
 | a wiki of notes | `openwiki@0.7.2` | 6 tools |
 | code health (lint, types) | `pi-lens@4.4.3` | 8 tools |
@@ -49,7 +49,7 @@ installed: `pi-mcp-extension`, `@langfuse/pi-observability-plugin`,
 
 | Capability | Package | What yoagent gets |
 |---|---|---|
-| web search | `dsh-free-search@0.8.1` **CI** | with the tested config, `config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }` (keep it): `multi_search`, `research`, `advanced_search`, `domain_search`, `platform_search`, `video_search`, `cache_search` — allow these seven — and `free_search_test` (leave it asking); prompt guidance. The searches return extracted page text. 0.8.1 is the DSH base's own pin: another version is refused |
+| web search | `dsh-free-search@0.8.1` **CI** | with the tested config, `config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }` (keep it): `multi_search`, `research`, `advanced_search`, `domain_search`, `platform_search`, `video_search`, `cache_search` — allow these seven — and `free_search_test` (leave it asking). It adds prompt guidance (text in the system prompt on using its tools: no need to repeat it). The searches return extracted page text; `check --json` describes each. No `[dsh] host_services` needed. 0.8.1 is the DSH base's own pin: another version is refused |
 | ask the user (DSH's way) | `@deepseek-ai/dsh-tool-ask-user@0.2.0-rc.2` with `@deepseek-ai/dsh-user-questions@0.2.0-rc.2` **CI** | the tool `ask_user_question` — prefer `ask_owner` |
 | spreadsheets and documents | `dsh-univer-office@0.3.7` | 14 tools (the matrix loaded it with DSH's host services: likely needs `[dsh] host_services = true`) |
 | charts and diagrams | `@dfy-plugins/dsh-visualize@0.1.5` | 1 tool (likewise) |

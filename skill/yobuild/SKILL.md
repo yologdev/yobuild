@@ -29,8 +29,9 @@ from the agent's folder: `path/to/yobuild/target/debug/yobuild …` — below,
 
 ## Where things go
 
-One folder per agent; the agent works in the folder `yobuild run` is
-started in (usually this one, or the project it works on):
+One folder per agent, anywhere (not inside the yobuild checkout); the
+agent works in the folder `yobuild run` is started in (usually this one,
+or the project it works on):
 
 ```text
 my-agent/
@@ -52,8 +53,9 @@ my-agent/
    then a plugin from [reference/parts.md](reference/parts.md) at the
    version it lists (**CI** rows first: yobuild's own CI runs them); then
    an MCP server. A part not listed: pin `npm view <package> version`.
-3. **Write** `agent.toml` and its prompt: keys, patterns and how to write
-   the prompt in [reference/manifest.md](reference/manifest.md). `allow`
+3. **Write** `agent.toml` and a first prompt (`check` reads it), then
+   revise the prompt once `check` has listed the tools: keys, patterns and
+   how to write the prompt in [reference/manifest.md](reference/manifest.md). `allow`
    only tools that read or plan (never `bash` or the writers: the gate
    judges those call by call); never a secret in a file (`${NAME}` from
    the environment); set a budget.
@@ -71,7 +73,9 @@ my-agent/
      `judged`, `allowed`, `asks`, `runs`), its `description` and its
      `parameters` (the arguments' JSON Schema): use these names and
      arguments in the prompt and the scripted replies.
-   - `check` does not look at the model's key.
+   - `check` does not look at the model's key. A budget for a model with
+     no price is refused already (the manifest is), so a clean `check`
+     means the budget is accepted.
 5. **Run scripted** — [reference/scripted.md](reference/scripted.md): a
    reply file that calls the tools the task needs, then
    `yobuild run agent.toml --scripted scripts/demo.json --once "<task>"`.
@@ -90,6 +94,9 @@ my-agent/
    - **the terminal UI**: questions are answered in its editor.
 
    Commit `agent.toml`, `agent.lock`, the prompt and the reply file.
+   Once the lock is committed, `--locked` (on `check` and `run`, as in CI)
+   refuses a lock that no longer matches the manifest instead of
+   resolving it again.
 7. **When a run fails**: read how it ended — under `--once` the last
    line; else `yobuild: the last run ended …` on stderr — and the fix
    yobuild gives: `What to do: …` (a notice; under `--once` printed as

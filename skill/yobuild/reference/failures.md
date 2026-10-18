@@ -28,7 +28,9 @@ the others yobuild says nothing, and the row is the fix.
 - **Refused before anything starts**: `yobuild: …` on stderr, exit 1, no
   agent started. `yobuild check` gives the same error and prints no
   report — read stderr when stdout is empty. `check` does not look at the
-  key or the budgets: a clean `check` does not mean the key is set.
+  key: a clean `check` does not mean the key is set. (A budget for an
+  unpriced model is refused by the manifest itself, so `check` refuses it
+  too.)
 - **Refused at start**: a plugin, a server or a built-in could not start
   (`check`: the agent is `refused`, with the problem).
 - **During a run**: a run ended other than `Completed`, a tool call was

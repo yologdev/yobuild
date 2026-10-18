@@ -67,8 +67,12 @@ terminal = false                      # the terminal UI instead of the web page
 
 **`[agent]`**
 - `name`: one plain name (no `/`, not `.` or `..`).
-- `model`: `provider/id`, the id as the provider's API names it (the
-  examples use `deepseek/deepseek-flash`). Providers and their key
+- `model`: `provider/id`, the id as the provider's API names it. Ids with
+  a price in yoagent's table (so a budget works): `deepseek/deepseek-flash`
+  (the examples'), `deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-pro`;
+  `anthropic/claude-sonnet-5`, `anthropic/claude-haiku-4-5`,
+  `anthropic/claude-opus-5-5`; `openai/gpt-5.5`. Use the provider whose key
+  the person has. Providers and their key
   variables: `anthropic` (`ANTHROPIC_API_KEY`), `openai`
   (`OPENAI_API_KEY`), `deepseek` (`DEEPSEEK_API_KEY`), `google`
   (`GEMINI_API_KEY` or `GOOGLE_API_KEY`), `groq`, `mistral`, `xai`, `qwen`
@@ -95,8 +99,8 @@ price`").
   `config` is the plugin's own. DSH files and DSH packages cannot be in
   one manifest yet. yobuild's DSH base (the packages its DSH runtime
   carries) pins some DSH packages itself — `dsh-free-search` 0.8.1,
-  `@deepseek-ai/dsh-tool-ask-user` and `dsh-user-questions` 0.2.0-rc.2 —
-  and one of those must be pinned at that version.
+  `@deepseek-ai/dsh-tool-ask-user` and `dsh-user-questions` 0.2.0-rc.2:
+  if you pin one of these, pin it at that version.
 - `rutis = "<path>"` with `runtime = "node"` (only Node runs, for now): a
   local plugin, loaded in its own npm package — the nearest folder above
   it with a `package.json`, which must be `"type": "module"` for a `.ts`
@@ -163,7 +167,10 @@ listens.
   with the question listed as waiting;
 - what it must never do without asking;
 - how to end: with `report`, yobuild appends its instruction (the
-  sections) itself; say what goes in each.
+  sections) itself; say what goes in each. The check is lenient: each
+  section name must appear anywhere in the last answer, in any case — so
+  choose names that appear only as headings (`Sources cited`, not
+  `Brief`).
 
 `examples/prompts/handoff.md` in yobuild is a whole one.
 
@@ -175,7 +182,19 @@ listens.
   prompt says to carry on with what does not depend on it, or end with
   the question waiting — the answer starts the next run. A scripted run
   shows only that the question was asked.
+- **Ask before working** (clarify, then do): `ask_owner`, and either no
+  `report`, or `report = "handoff"` — a run that only asks still ends with
+  every section: the question under "Waiting on you", the others "none
+  yet". A `report` without a section for open questions fails such a run
+  (sent back 3 times, then `[Extension failed: report]`).
 - **A coding agent with a policy** (`examples/coding.toml`): a pi
   extension with `policy = true`, `gate = "off"`, the terminal.
 - **A reader** (`examples/minimal.toml`): `tools = "read-only"`, no
-  plugins.
+  plugins. It has no tool that writes: its work is its last answer.
+  `scratch` adds nothing then (the read-only tools reach only the agent's
+  folder).
+- **Not in a git repository**: leave `facts` off — it only says "not a
+  git repository".
+- **A budget**: start small (`budget_usd = 0.5` for a short task) and
+  raise it once a live run shows the cost (yobuild says each run's tokens
+  with `facts`).
