@@ -768,6 +768,178 @@ fn a_stale_lock_is_refused_with_locked_and_resolved_again_without() {
     assert!(out.status.success(), "{}", text(&out.stderr));
 }
 
+// -- yobuild check ------------------------------------------------------------
+
+/// `yobuild check` on a manifest, in `cwd`: its exit code and stdout.
+fn check(args: &[&str], cwd: &Path) -> (Option<i32>, String, String) {
+    let mut all = vec!["check"];
+    all.extend(args);
+    let out = yobuild(&all, cwd);
+    (out.status.code(), text(&out.stdout), text(&out.stderr))
+}
+
+#[test]
+fn check_passes_the_example_agents_and_gives_the_matrixs_verdict() {
+    let Some(ex) = examples() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| ex.join(name).display().to_string();
+    let (code, out, err) = check(&[&path("handoff.toml"), "--locked"], dir.path());
+    assert_eq!(code, Some(0), "{out}{err}");
+    // The plugins the compatibility matrix lists as loading, loading.
+    for line in [
+        "plugin rpiv-todo  pi @juicesharp/rpiv-todo@2.12.0  ok\n  tools: todo (allowed)\n",
+        "plugin dsh-free-search  dsh dsh-free-search@0.8.1  ok\n",
+        "  handlers: none (it offers no tool)\n",
+        "agent handoff: ok\n",
+        "ask_owner (allowed)",
+        "read_file (free)",
+        "bash (judged per call)",
+        "multi_search (allowed)",
+        // (Which of the base's packages have scripts is the adapter
+        // lock's: esbuild and koffi on every platform.)
+        "install scripts not run (the DSH base): esbuild",
+        "koffi",
+    ] {
+        assert!(out.contains(line), "{line:?} in\n{out}");
+    }
+    // Every name it allows is offered by it: no note.
+    assert!(!out.contains("note:"), "{out}");
+    let (code, out, err) = check(&[&path("coding.toml"), "--locked"], dir.path());
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(
+        out.contains(
+            "not probed alone: the probe's DSH base loads @deepseek-ai/dsh-user-questions itself"
+        ) && out.contains("ask_user_question (runs)")
+            && out.contains("agent coding: ok"),
+        "{out}"
+    );
+    let (code, out, _) = check(&[&path("minimal.toml"), "--locked"], dir.path());
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        out,
+        "agent minimal: ok\n  tools: read_file (free), list_files (free), search (free)\n"
+    );
+}
+
+#[test]
+fn check_says_what_run_would_refuse() {
+    if !pi_installed() || !installed_dsh() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let adapters = Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters");
+    let write = |name: &str, body: String| {
+        std::fs::write(
+            dir.path().join(name),
+            format!("[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n{body}"),
+        )
+        .unwrap();
+    };
+    // A pi tool named like a built-in: the probe loads it without the
+    // built-in, `run` refuses it.
+    write(
+        "shadow.toml",
+        format!(
+            "[[plugin]]\npi = \"{}\"\n",
+            adapters.join("pi/fixture-shadow.ts").display()
+        ),
+    );
+    let (code, out, _) = check(&["shadow.toml"], dir.path());
+    assert_eq!(code, Some(1), "{out}");
+    assert!(
+        out.contains(
+            "  problem: its tool `read_file` is named like yoagent's built-in: `run` refuses it\n"
+        ) && out.contains("agent a: not started together: an entry has a problem\n"),
+        "{out}"
+    );
+    // A DSH plugin needing DSH's host services: fine alone (the probe gives
+    // them), refused together without `[dsh] host_services`.
+    let needs = format!(
+        "[[plugin]]\ndsh = \"{}\"\nallow = [\"fixture_services\", \"fixture_typo\"]\n",
+        adapters.join("dsh/fixture-needs-services.ts").display()
+    );
+    write("needs.toml", needs.clone());
+    let (code, out, _) = check(&["needs.toml"], dir.path());
+    assert_eq!(code, Some(1), "{out}");
+    assert!(
+        out.contains("plugin fixture-needs-services  dsh ")
+            && out.contains("  ok\n  tools: fixture_services (allowed)\n")
+            && out.contains("  problem: `run` would refuse it at start: DSH plugins wait for services nobody provides: "),
+        "{out}"
+    );
+    // With them: started, and the typo in its `allow` a note (as JSON).
+    write(
+        "needs.toml",
+        format!("{needs}[dsh]\nhost_services = true\n"),
+    );
+    let (code, out, _) = check(&["needs.toml", "--json"], dir.path());
+    assert_eq!(code, Some(0), "{out}");
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["agent"]["together"], "started");
+    assert_eq!(
+        report["agent"]["notes"],
+        serde_json::json!(["plugin fixture-needs-services allows `fixture_typo`, which no plugin offered (a typo, or offered only in some runs)"])
+    );
+    assert!(report["agent"]["tools"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!({ "name": "fixture_services", "kind": "allowed" })));
+}
+
+#[test]
+fn check_refuses_what_run_refuses_before_anything_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\nprompt = \"gone.md\"\n",
+    )
+    .unwrap();
+    let (code, out, err) = check(&["agent.toml"], dir.path());
+    assert_eq!(code, Some(1));
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.starts_with("yobuild: prompt ") && err.contains("gone.md"),
+        "{err}"
+    );
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\npi = \"./gone.ts\"\n",
+    )
+    .unwrap();
+    let (code, _, err) = check(&["agent.toml"], dir.path());
+    assert_eq!(code, Some(1));
+    assert!(
+        err.starts_with("yobuild: plugin gone: ") && err.contains("does not exist"),
+        "{err}"
+    );
+}
+
+#[test]
+fn check_lists_an_mcp_servers_tools_and_refuses_bad_arguments() {
+    let (agent, _) = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let (code, out, err) = check(&[&agent], dir.path());
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(
+        out.contains("  ok\n  tools: server__echo (runs)\n") && out.contains("agent echoer: ok\n"),
+        "{out}"
+    );
+    let (code, _, err) = check(&[], dir.path());
+    assert_eq!(code, Some(1));
+    assert!(err.starts_with("yobuild: usage: yobuild run "), "{err}");
+    let (code, _, err) = check(&[&agent, "--once"], dir.path());
+    assert_eq!(code, Some(1));
+    assert!(err.starts_with("yobuild: unknown option --once"), "{err}");
+}
+
+/// Whether DSH's runtime is installed (`npm ci` in `adapters/dsh`).
+fn installed_dsh() -> bool {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("adapters/dsh/node_modules")
+        .is_dir()
+}
+
 // -- the example agents (examples/*.toml), as their demos ran ---------------
 
 /// The examples folder, when the adapters they load are installed

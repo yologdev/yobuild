@@ -661,26 +661,7 @@ fn missing(packages: &Map<String, Json>) -> Vec<String> {
                 continue;
             };
             for dep in deps.keys() {
-                // `a/node_modules/b` looks in `a/node_modules/b/node_modules`,
-                // then `a/node_modules`, then the root's.
-                let mut at = path.as_str();
-                let found = loop {
-                    let candidate = match at.is_empty() {
-                        true => format!("node_modules/{dep}"),
-                        false => format!("{at}/node_modules/{dep}"),
-                    };
-                    if packages.contains_key(&candidate) {
-                        break true;
-                    }
-                    if at.is_empty() {
-                        break false;
-                    }
-                    at = match at.rfind("/node_modules/") {
-                        Some(i) => &at[..i],
-                        None => "",
-                    };
-                };
-                if !found {
+                if resolve_from(packages, path, dep).is_none() {
                     let of = path
                         .rsplit_once("node_modules/")
                         .map_or("the root", |(_, n)| n);
@@ -690,6 +671,126 @@ fn missing(packages: &Map<String, Json>) -> Vec<String> {
         }
     }
     out
+}
+
+/// Where `dep` resolves from the package at `path` (a key of `packages`),
+/// as Node resolves it: `a/node_modules/b` looks in
+/// `a/node_modules/b/node_modules`, then `a/node_modules`, then the root's.
+fn resolve_from(packages: &Map<String, Json>, path: &str, dep: &str) -> Option<String> {
+    let mut at = path;
+    loop {
+        let candidate = match at.is_empty() {
+            true => format!("node_modules/{dep}"),
+            false => format!("{at}/node_modules/{dep}"),
+        };
+        if packages.contains_key(&candidate) {
+            return Some(candidate);
+        }
+        if at.is_empty() {
+            return None;
+        }
+        at = match at.rfind("/node_modules/") {
+            Some(i) => &at[..i],
+            None => "",
+        };
+    }
+}
+
+/// The paths in `packages` a package at `path` brings: itself, and what its
+/// dependencies, optional dependencies and peers resolve to, transitively.
+fn brought(packages: &Map<String, Json>, path: &str) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut todo = vec![path.to_owned()];
+    while let Some(at) = todo.pop() {
+        if !seen.insert(at.clone()) {
+            continue;
+        }
+        let Some(entry) = packages.get(&at) else {
+            continue;
+        };
+        for key in ["dependencies", "optionalDependencies", "peerDependencies"] {
+            for dep in entry[key].as_object().into_iter().flat_map(|d| d.keys()) {
+                if let Some(found) = resolve_from(packages, &at, dep) {
+                    todo.push(found);
+                }
+            }
+        }
+    }
+    seen
+}
+
+/// The installed packages that have install scripts (npm's
+/// `hasInstallScript`), which were not run: by pin, each package a pin
+/// brings in its set; in the `dsh` set the base's own apart, said once
+/// (what every DSH plugin gets).
+#[derive(Debug, Default)]
+pub(crate) struct InstallScripts {
+    by_pin: BTreeMap<(Set, String), Vec<String>>,
+    pub base: Vec<String>,
+}
+
+impl InstallScripts {
+    /// The packages with install scripts `pin` brings in `set`.
+    pub fn of(&self, set: Set, pin: &str) -> Vec<String> {
+        self.by_pin
+            .get(&(set, pin.to_owned()))
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+/// What the manifest's lock says about install scripts (nothing when it has
+/// no lock). With a `dsh` set it reads the DSH adapter's own lock too, to
+/// tell the base's packages apart.
+pub(crate) fn install_scripts(
+    manifest: &Manifest,
+    adapters: &Path,
+) -> Result<InstallScripts, BoxError> {
+    let mut out = InstallScripts::default();
+    let Some(lock) = Lock::read(&lock_path(manifest))? else {
+        return Ok(out);
+    };
+    let name_of = |path: &str| path.rsplit_once("node_modules/").map(|(_, n)| n.to_owned());
+    let scripted = |packages: &Map<String, Json>, path: &str| {
+        packages
+            .get(path)
+            .is_some_and(|p| p["hasInstallScript"] == Json::Bool(true))
+    };
+    // The base's packages: those the adapter's own lock has, at the same
+    // place and version.
+    let mut base = BTreeSet::new();
+    if let Some(set) = lock.sets.get(&Set::Dsh) {
+        let path = adapters.join("dsh/package-lock.json");
+        let adapter: Json = serde_json::from_slice(&read(&path)?)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        for (at, entry) in adapter["packages"].as_object().into_iter().flatten() {
+            if !at.is_empty()
+                && set.packages.get(at).map(|p| &p["version"]) == Some(&entry["version"])
+            {
+                base.insert(at.clone());
+            }
+        }
+        out.base = base
+            .iter()
+            .filter(|at| scripted(&set.packages, at))
+            .filter_map(|at| name_of(at))
+            .collect();
+    }
+    for (set, entry) in &lock.sets {
+        for pin in entry.requested.keys() {
+            let mut names: Vec<String> = brought(&entry.packages, &format!("node_modules/{pin}"))
+                .into_iter()
+                // The base is the `dsh` set's: each set is its own project.
+                .filter(|at| !(*set == Set::Dsh && base.contains(at)))
+                .filter(|at| scripted(&entry.packages, at))
+                .filter_map(|at| name_of(&at))
+                .collect();
+            names.sort();
+            names.dedup();
+            out.by_pin.insert((*set, pin.clone()), names);
+        }
+    }
+    Ok(out)
 }
 
 /// What is wrong with a lock entry read from a file, if anything: each pin
@@ -1173,6 +1274,65 @@ mod tests {
                 Vec::<String>::new()
             );
         }
+    }
+
+    #[test]
+    fn a_pin_brings_its_dependencies_and_peers() {
+        let packages: Map<String, Json> = serde_json::from_str(
+            r#"{
+                "": { "dependencies": { "a": "1", "p": "1" } },
+                "node_modules/a": { "version": "1.0.0", "dependencies": { "b": "1" }, "peerDependencies": { "p": "*" } },
+                "node_modules/a/node_modules/b": { "version": "1.0.0", "hasInstallScript": true },
+                "node_modules/p": { "version": "1.0.0" },
+                "node_modules/other": { "version": "1.0.0" }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            brought(&packages, "node_modules/a")
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["node_modules/a", "node_modules/a/node_modules/b", "node_modules/p"]
+        );
+    }
+
+    #[test]
+    fn install_scripts_belong_to_the_pin_that_brings_them_and_the_base_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapters = tempfile::tempdir().unwrap();
+        std::fs::create_dir(adapters.path().join("dsh")).unwrap();
+        // The base: esbuild 1, which has a script.
+        std::fs::write(
+            adapters.path().join("dsh/package-lock.json"),
+            r#"{ "packages": { "": {}, "node_modules/esbuild": { "version": "1.0.0" } } }"#,
+        )
+        .unwrap();
+        let set = |pins: &str, packages: &str| {
+            format!(r#"{{ "requested": {pins}, "packages": {packages} }}"#)
+        };
+        let dsh = set(
+            r#"{ "d": "1.0.0" }"#,
+            r#"{ "": {}, "node_modules/d": { "version": "1.0.0", "dependencies": { "esbuild": "1", "k": "1" } },
+                 "node_modules/esbuild": { "version": "1.0.0", "hasInstallScript": true },
+                 "node_modules/k": { "version": "1.0.0", "hasInstallScript": true } }"#,
+        );
+        // The pi set brings its own esbuild: its own, whatever the base has.
+        let pi = set(
+            r#"{ "p": "1.0.0" }"#,
+            r#"{ "": {}, "node_modules/p": { "version": "1.0.0", "dependencies": { "esbuild": "1" } },
+                 "node_modules/esbuild": { "version": "1.0.0", "hasInstallScript": true } }"#,
+        );
+        std::fs::write(
+            dir.path().join("agent.lock"),
+            format!(r#"{{ "lockVersion": 1, "sets": {{ "dsh": {dsh}, "pi": {pi} }} }}"#),
+        )
+        .unwrap();
+        let m = manifest(dir.path(), "");
+        let scripts = install_scripts(&m, adapters.path()).unwrap();
+        assert_eq!(scripts.base, ["esbuild"]);
+        assert_eq!(scripts.of(Set::Dsh, "d"), ["k"]);
+        assert_eq!(scripts.of(Set::Pi, "p"), ["esbuild"]);
+        assert!(scripts.of(Set::Mcp, "p").is_empty());
     }
 
     #[test]

@@ -1141,3 +1141,254 @@ async fn a_tool_a_dsh_plugins_child_registers_is_its_parents_only_through_its_ro
         }
     }
 }
+
+// -- yobuild check, through `check()` ------------------------------------------
+
+/// `check` on the project's `agent.toml`.
+async fn check_dir(dir: &Path) -> yobuild::run::check::Report {
+    use yobuild::run::check::{check, CheckOptions};
+    let manifest = Manifest::load(dir.join("agent.toml")).unwrap();
+    let mut options = CheckOptions::new(manifest);
+    options.home = Some(CACHE.into());
+    check(options).await.unwrap()
+}
+
+/// The kind of `tool` in `tools`, as JSON says it.
+fn kind(tools: &[yobuild::run::check::Tool], tool: &str) -> Option<String> {
+    tools.iter().find(|t| t.name == tool).map(|t| {
+        serde_json::to_value(t.kind)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_owned()
+    })
+}
+
+/// A rutis package in a temp folder with the frontend's runtime, or `None`
+/// when that is not installed.
+fn rutis_package() -> Option<tempfile::TempDir> {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins/node_modules");
+    if !runtime.join("@arcships/rutis-runtime").is_dir() {
+        if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
+            panic!("the rutis runtime is required: npm ci in frontend/plugins");
+        }
+        eprintln!("SKIPPED: npm ci in frontend/plugins");
+        return None;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(&runtime, dir.path().join("node_modules")).unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    Some(dir)
+}
+
+/// A rutis plugin registering handler `handler` with `tools`.
+fn rutis_tools(handler: &str, tools: &[&str]) -> String {
+    let list: Vec<String> = tools
+        .iter()
+        .map(|t| format!("{{ name: '{t}', description: '{t}', parameters: {{ type: 'object', properties: {{}} }} }}"))
+        .collect();
+    format!(
+        "import {{ definePlugin }} from '@arcships/rutis'\n\
+         export default definePlugin({{\n\
+           inject: ['yoagent'],\n\
+           apply(ctx: any) {{\n\
+             ctx.effect(ctx.use('yoagent').register('{handler}', {{\n\
+               async tools() {{ return [{}] }},\n\
+               async call_tool() {{ return {{ text: 'ok' }} }},\n\
+             }}))\n\
+           }},\n\
+         }})\n",
+        list.join(", ")
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_judges_a_rutis_plugins_tools_by_who_offers_them() {
+    let Some(dir) = rutis_package() else { return };
+    std::fs::write(
+        dir.path().join("lib.ts"),
+        rutis_tools("lib-tools", &["shout"]),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("app.ts"),
+        "import { definePlugin } from '@arcships/rutis'\nexport default definePlugin({ apply() {} })\n",
+    )
+    .unwrap();
+    for (allowing, allowed) in [("lib", true), ("app", false)] {
+        let allow = |name: &str| match name == allowing {
+            true => "allow = [\"shout\"]\n",
+            false => "",
+        };
+        std::fs::write(
+            dir.path().join("agent.toml"),
+            format!(
+                "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
+                 [[plugin]]\nrutis = \"./lib.ts\"\nruntime = \"node\"\n{}\
+                 [[plugin]]\nrutis = \"./app.ts\"\nruntime = \"node\"\n{}",
+                allow("lib"),
+                allow("app")
+            ),
+        )
+        .unwrap();
+        let report = check_dir(dir.path()).await;
+        assert!(report.ok, "{}", report.text());
+        let lib = &report.entries[0];
+        assert_eq!(lib.handlers.as_deref(), Some(&["lib-tools".to_owned()][..]));
+        assert_eq!(
+            kind(&lib.tools, "shout").as_deref(),
+            Some(if allowed { "allowed" } else { "asks" })
+        );
+        assert_eq!(report.entries[1].handlers.as_deref(), Some(&[][..]));
+        assert_eq!(
+            kind(&report.agent.tools, "shout").as_deref(),
+            Some(if allowed { "allowed" } else { "asks" }),
+            "{}",
+            report.text()
+        );
+        let warned = report.agent.notes.iter().any(|n| {
+            n == "plugin app allows `shout`, but it was offered by `plugin:lib`, not by it: the tool asks"
+        });
+        assert_eq!(warned, !allowed, "{:?}", report.agent.notes);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_notes_a_tool_offered_twice_or_named_like_the_agents_own() {
+    let Some(dir) = rutis_package() else { return };
+    std::fs::write(dir.path().join("a.ts"), rutis_tools("a-tools", &["shout"])).unwrap();
+    std::fs::write(
+        dir.path().join("b.ts"),
+        rutis_tools("b-tools", &["shout", "read_file", "write"]),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
+         [[plugin]]\nrutis = \"./a.ts\"\nruntime = \"node\"\n\
+         [[plugin]]\nrutis = \"./b.ts\"\nruntime = \"node\"\n",
+    )
+    .unwrap();
+    let report = check_dir(dir.path()).await;
+    let text = report.text();
+    assert!(report.ok, "{text}");
+    assert!(
+        report
+            .agent
+            .notes
+            .iter()
+            .any(|n| n == "plugins a, b all offer a tool named `shout`: a run gets one of them"),
+        "{text}"
+    );
+    assert!(
+        report.agent.notes.iter().any(|n| n
+            == "`read_file`, offered by plugin:b, is named like the agent's own tool: yoagent keeps its own"),
+        "{text}"
+    );
+    // yoagent's read_file once, free; a plugin's `write` judged by name.
+    assert_eq!(
+        report
+            .agent
+            .tools
+            .iter()
+            .filter(|t| t.name == "read_file")
+            .count(),
+        1
+    );
+    assert_eq!(
+        kind(&report.agent.tools, "read_file").as_deref(),
+        Some("free")
+    );
+    assert_eq!(
+        kind(&report.agent.tools, "write").as_deref(),
+        Some("judged")
+    );
+    assert_eq!(
+        kind(&report.entries[1].tools, "write").as_deref(),
+        Some("judged")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_says_a_rutis_plugin_that_stops_or_waits() {
+    let Some(dir) = rutis_package() else { return };
+    // Its row runs, then its `apply` throws.
+    std::fs::write(
+        dir.path().join("late.ts"),
+        "import { definePlugin } from '@arcships/rutis'\n\
+         export default definePlugin({ async apply() { await new Promise(r => setTimeout(r, 300)); throw new Error('boom') } })\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\nrutis = \"./late.ts\"\nruntime = \"node\"\n",
+    )
+    .unwrap();
+    let report = check_dir(dir.path()).await;
+    // (Whether `load` waits for its async `apply` or the row stops after,
+    // the failure is the entry's problem.)
+    assert!(!report.ok);
+    assert!(
+        report.entries[0]
+            .problems
+            .iter()
+            .any(|p| p.contains("boom")),
+        "{}",
+        report.text()
+    );
+    // Waiting for a service nobody provides: not checked alone (another
+    // plugin may provide it), refused together.
+    std::fs::write(
+        dir.path().join("needy.ts"),
+        "import { definePlugin } from '@arcships/rutis'\n\
+         export default definePlugin({ inject: ['nosuchService'], apply() {} })\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\nrutis = \"./needy.ts\"\nruntime = \"node\"\n",
+    )
+    .unwrap();
+    let report = check_dir(dir.path()).await;
+    let text = report.text();
+    assert!(!report.ok, "{text}");
+    assert!(!report.entries[0].checked_alone, "{text}");
+    assert!(
+        text.contains(
+            "  note: not checked alone: it waits for a service another plugin may provide"
+        ) && text.contains("agent a: 1 problem\n  problem: `run` would refuse it at start: ")
+            && text.contains("nothing provides nosuchService"),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_allows_a_servers_tool_its_entry_allows() {
+    let dir = project("[[mcp]]\nname = \"other\"\nnpm = \"./server.sh\"\n");
+    // `server` allows its echo; `other` does not.
+    let text = std::fs::read_to_string(dir.path().join("agent.toml")).unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        text.replacen(
+            "env = { MODE = \"loud\" }\n",
+            "env = { MODE = \"loud\" }\nallow = [\"echo\"]\n",
+            1,
+        ),
+    )
+    .unwrap();
+    let report = check_dir(dir.path()).await;
+    assert!(report.ok, "{}", report.text());
+    assert_eq!(
+        kind(&report.entries[0].tools, "server__echo").as_deref(),
+        Some("allowed")
+    );
+    assert_eq!(
+        kind(&report.agent.tools, "server__echo").as_deref(),
+        Some("allowed")
+    );
+    assert_eq!(
+        kind(&report.agent.tools, "other__echo").as_deref(),
+        Some("asks")
+    );
+    assert_eq!(kind(&report.agent.tools, "bash").as_deref(), Some("judged"));
+}

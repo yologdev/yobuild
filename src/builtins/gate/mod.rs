@@ -42,6 +42,10 @@ use crate::frontend::{session::UI_TIMEOUT, Session, UiRequest};
 /// is not allowed by its name alone.
 pub const READ_ONLY_TOOLS: [&str; 3] = ["read_file", "list_files", "search"];
 
+/// Tools the gate judges call by call, by name, whoever offers them: what a
+/// `bash` command runs, what a write or an edit touches.
+pub const JUDGED_TOOLS: [&str; 5] = ["bash", "write_file", "write", "edit_file", "edit"];
+
 /// An extension that asks the owner before a tool call does anything it
 /// does not know to be harmless, and refuses it when nobody answers "Allow"
 /// (no frontend, a timeout, "Block" or a dismissed question). The refusal

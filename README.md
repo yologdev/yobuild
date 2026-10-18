@@ -6,12 +6,12 @@ Harness plugins, MCP servers, rutis plugins in Rust, TypeScript, Python or
 Go — plus a few small built-ins of its own, on top of the
 [yoagent](https://github.com/yologdev/yoagent) loop.
 
-> Status: **M2b (install, lock, check): install and lock done; `yobuild check` next.** The built-ins and the frontend
+> Status: **M2b (install, lock, check).** The built-ins and the frontend
 > (`yobuild::builtins`, `yobuild::frontend`, [`frontend/`](frontend/README.md),
 > with its [examples](examples/README.md)), the manifest
-> (`yobuild::manifest`), `yobuild run`, and installing pinned plugins
-> (`yobuild::install`, M2b; `yobuild check` is next). Numbers quoted are measured in the yoagent
-> repository.
+> (`yobuild::manifest`), `yobuild run`, installing pinned plugins
+> (`yobuild::install`) and `yobuild check` (each plugin vetted without a
+> model). Numbers quoted are measured in the yoagent repository.
 >
 > ```sh
 > scripts/try-coding-agent.sh                         # in the checkout: installs the plugin runtimes, runs the coding agent example
@@ -86,7 +86,11 @@ MCP servers itself (never running a package script), into
 `~/.yobuild/plugins/` (`YOBUILD_HOME`), as the lock beside the manifest
 says (`handoff.toml` → `handoff.lock`, written on the first run; check it
 in; `--locked` refuses a lock that is not current). A rutis plugin's
-runtime is installed in its own package. The other examples:
+runtime is installed in its own package. `yobuild check agent.toml`
+vets every plugin and MCP server without a model or a key — each alone
+(the compatibility matrix's probe), then the agent together — and says
+what each adds, how the gate treats each tool, and what `run` would
+refuse (exit 1). The other examples:
 [`examples/`](examples/README.md).
 
 ## Documents
