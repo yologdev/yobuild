@@ -442,8 +442,13 @@ yobuild's takes a row's id (they share one name space).
   service a plugin provides can be injected by another runtime's plugins,
   and a second provider of one name fails: plugins are trusted code (§6)
   and DSH's own services live in its private home, but this is wider than
-  before. Not checked yet: who owns a handler that a child plugin
-  (`ctx.plugin`) registers.
+  before.
+- **Child plugins:** a rutis plugin cannot start one (its context has no
+  `ctx.plugin`); a DSH plugin, a Cordis plugin, can — and what a child
+  registers through `yoagent` has no row (its owner is "language plugin
+  (session …)"), so it is nobody's: the parent's `allow` does not free it,
+  it asks, and the warning says the plugin must register from its own row
+  (tested).
 
 What it does not change: a row is the unit the host can see, not the
 code. A call is its row's even when another plugin's code makes it (a

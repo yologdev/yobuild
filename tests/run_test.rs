@@ -1059,3 +1059,52 @@ async fn a_call_after_the_policy_plugin_died_is_denied() {
         .any(|(_, m)| m.starts_with("A plugin stopped: the `rutis-0` runtime is not running"));
     assert!(said, "{:?}", ended.notices);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_a_dsh_plugins_child_registers_is_nobodys() {
+    // A DSH plugin (a Cordis plugin) starts a child plugin that injects
+    // `yoagent` and registers `shout`: the child has no row, so the tool is
+    // nobody's — the parent's `allow` does not free it (it asks, refused
+    // with nobody there), and the Warning says why.
+    if !installed("dsh") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("parent.ts"),
+        "export const name = 'parent'\n\
+         export function apply(ctx: any) {\n\
+           ctx.plugin({\n\
+             name: 'kid',\n\
+             inject: ['yoagent'],\n\
+             apply(c: any) {\n\
+               c.yoagent.register('kid-tools', {\n\
+                 async tools() { return [{ name: 'shout', description: 'Shout', parameters: { type: 'object', properties: {} } }] },\n\
+                 async call_tool() { return { text: 'HEY' } },\n\
+               })\n\
+             },\n\
+           })\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        r#"[{ "tools": [{ "name": "shout", "arguments": {} }] }, { "text": "done" }]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\ndsh = \"./parent.ts\"\nallow = [\"shout\"]\n",
+    )
+    .unwrap();
+    let ended = run_once(dir.path()).await;
+    let ran = results(&ended);
+    assert!(
+        ran.len() == 1 && ran[0].1 && ran[0].0.contains("not allowed"),
+        "{ran:?}"
+    );
+    let warned = ended.notices.iter().any(|(_, m)| {
+        m.starts_with("plugin parent allows `shout`, but it was offered from no plugin row")
+    });
+    assert!(warned, "{:?}", ended.notices);
+}
