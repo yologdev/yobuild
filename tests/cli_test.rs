@@ -217,6 +217,12 @@ fn a_run_that_did_not_complete_exits_non_zero() {
         stdout.lines().last().unwrap().starts_with("Stopped: "),
         "{stdout}"
     );
+    // `--once` prints what to do among its notices.
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("  Info: What to do: send \"continue\" (a new run, with fresh limits"),
+        "{stderr}"
+    );
 }
 
 /// Whether pi's runtime is installed (`scripts/copy-adapters.sh`, `npm ci`
@@ -492,7 +498,8 @@ async fn the_web_page_exits_by_how_the_last_run_ended() {
     let (code, stderr) = page.interrupt();
     assert_eq!(code, Some(1), "{stderr}");
     assert!(
-        stderr.contains("yobuild: the last run ended Stopped: "),
+        stderr.contains("yobuild: the last run ended Stopped: ")
+            && stderr.contains("\n  what to do: send \"continue\" (a new run, with fresh limits"),
         "{stderr}"
     );
 
@@ -848,7 +855,7 @@ fn check_says_what_run_would_refuse() {
     assert_eq!(code, Some(1), "{out}");
     assert!(
         out.contains(
-            "  problem: its tool `read_file` is named like yoagent's built-in: `run` refuses it\n"
+            "  problem: its tool `read_file` is named like yoagent's built-in: `run` refuses it\n  fix: this pi extension's tool cannot run beside yoagent's own of that name: choose another plugin\n"
         ) && out.contains("agent a: not started together: an entry has a problem\n"),
         "{out}"
     );
@@ -859,6 +866,23 @@ fn check_says_what_run_would_refuse() {
         adapters.join("dsh/fixture-needs-services.ts").display()
     );
     write("needs.toml", needs.clone());
+    let (code, out, _) = check(&["needs.toml", "--json"], dir.path());
+    assert_eq!(code, Some(1), "{out}");
+    // As JSON: the problem and its fix.
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["version"], 2);
+    assert_eq!(report["agent"]["together"], "refused");
+    let problem = &report["agent"]["problems"][0];
+    assert!(
+        problem["message"].as_str().unwrap().starts_with(
+            "`run` would refuse it at start: DSH plugins wait for services nobody provides: "
+        ),
+        "{out}"
+    );
+    assert_eq!(
+        problem["fix"],
+        "set [dsh] host_services = true for DSH's own services, or add the DSH plugin the hint names as a [[plugin]]"
+    );
     let (code, out, _) = check(&["needs.toml"], dir.path());
     assert_eq!(code, Some(1), "{out}");
     assert!(

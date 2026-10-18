@@ -127,6 +127,9 @@ fn start() -> Result<ExitCode, BoxError> {
         let code = match ended {
             Err(e) => {
                 eprintln!("yobuild: {e}");
+                if let Some(fix) = yobuild::run::what_to_do_at_start(&e.to_string()) {
+                    eprintln!("  what to do: {fix}");
+                }
                 ExitCode::FAILURE
             }
             // The last run's answer (`--once`: the task's) and how it ended.
@@ -135,12 +138,19 @@ fn start() -> Result<ExitCode, BoxError> {
                 if let (true, Some(answer)) = (once, answer) {
                     println!("{answer}");
                 }
+                // (`--once` printed what to do among its notices.)
+                let fix = ended
+                    .outcome
+                    .and_then(|o| yobuild::run::what_to_do(o, ended.error.as_deref()));
                 let error = ended.error.map(|e| format!(": {e}")).unwrap_or_default();
                 match (ended.outcome, once) {
                     (Some(outcome), true) => println!("{outcome:?}{error}"),
                     (Some(RunOutcome::Completed) | None, false) | (None, true) => {}
                     (Some(outcome), false) => {
-                        eprintln!("yobuild: the last run ended {outcome:?}{error}")
+                        eprintln!("yobuild: the last run ended {outcome:?}{error}");
+                        if let Some(fix) = fix {
+                            eprintln!("  what to do: {fix}");
+                        }
                     }
                 }
                 match ended.outcome {

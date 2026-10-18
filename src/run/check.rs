@@ -49,7 +49,7 @@ const SETTLE: Duration = Duration::from_secs(3);
 const STILL: Duration = Duration::from_millis(500);
 
 /// The report's shape, for whoever reads `--json`.
-const REPORT_VERSION: u32 = 1;
+const REPORT_VERSION: u32 = 2;
 
 /// The run id `check` starts its one run with.
 const RUN: &str = "yobuild-check";
@@ -147,6 +147,25 @@ impl Ecosystem {
     }
 }
 
+/// A problem, and what to do about it (from yobuild's table of fixes,
+/// design §11), when known.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[non_exhaustive]
+pub struct Problem {
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
+}
+
+impl Problem {
+    fn new(message: impl Into<String>) -> Problem {
+        let message = message.into();
+        let fix =
+            crate::hints::hint(crate::hints::Scope::Start, &message).map(|h| h.fix.to_owned());
+        Problem { message, fix }
+    }
+}
+
 /// One plugin or MCP server, alone.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,8 +181,9 @@ pub struct Entry {
     /// is checked together only).
     pub checked_alone: bool,
     /// What keeps it from giving the agent what it offers (`run` would
-    /// refuse it, or it would not work).
-    pub problems: Vec<String>,
+    /// refuse it, or it would not work), each with its fix when yobuild
+    /// knows one.
+    pub problems: Vec<Problem>,
     /// What is worth knowing and changes nothing (skills not loaded, …).
     pub notes: Vec<String>,
     /// Its tools as its entry names them: allowed when its `allow` lists
@@ -201,7 +221,7 @@ pub enum Together {
 pub struct Agent {
     pub name: String,
     pub together: Together,
-    pub problems: Vec<String>,
+    pub problems: Vec<Problem>,
     pub notes: Vec<String>,
     /// The tools a run gets and how the gate treats each: yoagent's,
     /// `ask_owner`, the servers', then the plugins' (one named like the
@@ -242,7 +262,13 @@ impl Report {
     /// The report as text: a block per entry, then the agent.
     pub fn text(&self) -> String {
         let mut out = String::new();
-        let count = |problems: &[String]| match problems.len() {
+        let said = |out: &mut String, problem: &Problem| {
+            out.push_str(&format!("  problem: {}\n", problem.message));
+            if let Some(fix) = &problem.fix {
+                out.push_str(&format!("  fix: {fix}\n"));
+            }
+        };
+        let count = |problems: &[Problem]| match problems.len() {
             0 => "ok".to_owned(),
             1 => "1 problem".to_owned(),
             n => format!("{n} problems"),
@@ -272,7 +298,7 @@ impl Report {
                 entry.source,
             ));
             for problem in &entry.problems {
-                out.push_str(&format!("  problem: {problem}\n"));
+                said(&mut out, problem);
             }
             if !entry.tools.is_empty() {
                 out.push_str(&format!("  tools: {}\n", tools(&entry.tools)));
@@ -305,7 +331,7 @@ impl Report {
         };
         out.push_str(&format!("agent {}: {verdict}\n", agent.name));
         for problem in &agent.problems {
-            out.push_str(&format!("  problem: {problem}\n"));
+            said(&mut out, problem);
         }
         if !agent.tools.is_empty() {
             out.push_str(&format!("  tools: {}\n", tools(&agent.tools)));
@@ -432,11 +458,11 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                     .collect();
                 let report =
                     yoagent_rutis::probe::pi(&layout.adapters, &cwd, &files, &[], None).await;
-                entry.problems.extend(report.problem());
+                entry.problems.extend(report.problem().map(Problem::new));
                 for builtin in &report.without {
-                    entry.problems.push(format!(
+                    entry.problems.push(Problem::new(format!(
                         "its tool `{builtin}` is named like yoagent's built-in: `run` refuses it"
-                    ));
+                    )));
                 }
                 report.tools
             }
@@ -469,7 +495,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                         None,
                     )
                     .await;
-                    entry.problems.extend(report.problem());
+                    entry.problems.extend(report.problem().map(Problem::new));
                     entry.guidance_chars = Some(report.guidance_chars);
                     report.tools
                 } else {
@@ -486,7 +512,9 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                     Ok(alone) => {
                         entry.handlers = Some(alone.handlers);
                         entry.notes.extend(alone.notes);
-                        entry.problems.extend(alone.problems);
+                        entry
+                            .problems
+                            .extend(alone.problems.into_iter().map(Problem::new));
                         alone.tools
                     }
                     // Waiting for a service another plugin may provide:
@@ -499,7 +527,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                         Vec::new()
                     }
                     Err(e) => {
-                        entry.problems.push(e.to_string());
+                        entry.problems.push(Problem::new(e.to_string()));
                         Vec::new()
                     }
                 }
@@ -560,7 +588,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                 }
                 server_tools.extend(entry.tools.iter().cloned());
             }
-            Err(e) => entry.problems.push(e.to_string()),
+            Err(e) => entry.problems.push(Problem::new(e.to_string())),
         }
         entries.push(entry);
     }
@@ -815,7 +843,7 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
     let root = match Ctx::root() {
         Ok(root) => root,
         Err(e) => {
-            agent.problems.push(e.to_string());
+            agent.problems.push(Problem::new(e.to_string()));
             return;
         }
     };
@@ -833,7 +861,7 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
                 agent.together = Together::Refused;
                 agent
                     .problems
-                    .push(format!("`run` would refuse it at start: {e}"));
+                    .push(Problem::new(format!("`run` would refuse it at start: {e}")));
                 return Ok(());
             }
         };
@@ -854,12 +882,12 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         })
         .await;
         for row in expected.iter().filter(|row| !owners.contains(row)) {
-            agent.problems.push(format!(
+            agent.problems.push(Problem::new(format!(
                 "{row} registered its handlers alone, but none with the other plugins"
-            ));
+            )));
         }
         for stopped in host.stopped(&[]) {
-            agent.problems.push(format!("a plugin stopped: {stopped}"));
+            agent.problems.push(Problem::new(format!("a plugin stopped: {stopped}")));
         }
         let offered = offered(&bridge).await?;
         // The agent's own tools: yoagent's, ask_owner, the servers'.
@@ -957,7 +985,7 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
     }
     .await;
     if let Err(e) = result {
-        agent.problems.push(e.to_string());
+        agent.problems.push(Problem::new(e.to_string()));
     }
     if let Some(shut) = shut(&root).await {
         agent.notes.push(shut);
@@ -1037,7 +1065,7 @@ mod tests {
     #[test]
     fn problems_and_entries_not_checked_are_said() {
         let mut bad = entry("b", Ecosystem::Pi);
-        bad.problems = vec!["one".into(), "two".into()];
+        bad.problems = vec![Problem::new("one"), Problem::new("two")];
         let mut skipped = entry("s", Ecosystem::Dsh);
         skipped.checked_alone = false;
         skipped.notes = vec!["not probed alone".into()];
@@ -1064,7 +1092,7 @@ mod tests {
             Agent {
                 name: "x".into(),
                 together: Together::Refused,
-                problems: vec!["`run` would refuse it".into()],
+                problems: vec![Problem::new("`run` would refuse it")],
                 ..Agent::default()
             },
         );
@@ -1087,13 +1115,20 @@ mod tests {
             },
         );
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["version"], 1);
+        assert_eq!(json["version"], 2);
         assert_eq!(json["ok"], true);
         assert_eq!(json["agent"]["together"], "started");
         assert_eq!(json["entries"][0]["kind"], "plugin");
         assert_eq!(json["entries"][0]["ecosystem"], "dsh");
         assert_eq!(json["entries"][0]["checkedAlone"], true);
         assert_eq!(json["entries"][0]["guidanceChars"], 3);
+        let mut bad = entry("b", Ecosystem::Pi);
+        bad.problems = vec![Problem::new("one")];
+        let json = serde_json::to_value(Report::new(vec![bad], Agent::default())).unwrap();
+        assert_eq!(
+            json["entries"][0]["problems"][0],
+            serde_json::json!({ "message": "one" })
+        );
     }
 
     #[test]

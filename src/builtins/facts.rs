@@ -130,12 +130,11 @@ impl RunHooks for FactsRun {
     }
 
     async fn finish(&mut self, outcome: &RunOutcome) {
-        // A run a limit stopped has no report: say so, and how to go on.
+        // A run a limit stopped has no report: say so (what to do is `run`'s
+        // Notice, from the one table of fixes).
         if let RunEnd::Stopped { reason } = outcome.end() {
-            self.session.notice(
-                NoticeLevel::Warning,
-                format!("Stopped early: {reason}. Send \"continue\" to pick up where it left off."),
-            );
+            self.session
+                .notice(NoticeLevel::Warning, format!("Stopped early: {reason}."));
         }
         let (tokens_in, tokens_out, tools) = *self.counts.lock().unwrap();
         let changed = match tokio::time::timeout(GIT_TIME, self.start.changes(&self.cwd)).await {

@@ -117,6 +117,28 @@ impl Options {
     }
 }
 
+/// The session budget's name: a run it stops says "session budget of …".
+pub(crate) const SESSION_BUDGET: &str = "session budget";
+
+/// What to do about a run that ended `outcome` with `error` (design §11):
+/// a stop's fix (yoagent's limits, budgets and loop check; else what a
+/// plugin's stop calls for); a failed or rejected run's when yobuild knows
+/// one (`hints`). None for a completed or aborted run.
+pub fn what_to_do(outcome: RunOutcome, error: Option<&str>) -> Option<&'static str> {
+    let error = error.unwrap_or_default();
+    match outcome {
+        RunOutcome::Stopped => crate::hints::what_to_do(true, error),
+        RunOutcome::Error | RunOutcome::Rejected => crate::hints::what_to_do(false, error),
+        _ => None,
+    }
+}
+
+/// What to do about a refusal `run` gives at start (a plugin, a server, the
+/// terminal UI), when yobuild knows (`hints`).
+pub fn what_to_do_at_start(error: &str) -> Option<&'static str> {
+    crate::hints::hint(crate::hints::Scope::Start, error).map(|h| h.fix)
+}
+
 /// How the session ended: its last run's outcome (none when no run was
 /// made), the notices it gave, and the agent (its messages) unless the
 /// session was stopped with Ctrl+C.
@@ -345,6 +367,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                     if reported.insert(stopped.clone()) {
                         tracing::error!("{stopped}");
                         session.notice(NoticeLevel::Error, format!("A plugin stopped: {stopped}"));
+                        if let Some(fix) = what_to_do_at_start(&format!("a plugin stopped: {stopped}")) {
+                            session.notice(NoticeLevel::Info, format!("What to do: {fix}."));
+                        }
                     }
                 }
                 if terminal && !host.is_running(ui) {
@@ -629,7 +654,7 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
         .limits
         .session_budget_usd
         .and_then(|usd| Budget::for_model(usd, &config))
-        .map(|b| b.across_runs().with_name("session budget"));
+        .map(|b| b.across_runs().with_name(SESSION_BUDGET));
     let unpriced: Vec<&str> = [
         (manifest.limits.budget_usd.is_some() && budget.is_none()).then_some("budget_usd"),
         (manifest.limits.session_budget_usd.is_some() && session_budget.is_none())
@@ -988,10 +1013,22 @@ fn watch(
     let (ended, ended_rx) = tokio::sync::watch::channel(0u64);
     let mut watching = session.observe();
     let record = seen.clone();
+    // A handle to say what to do; the task ends on `Closed`, which needs the
+    // session's end, so it never keeps a session alive on its own (`run`
+    // holds one until the end anyway).
+    let notify = session.clone();
     let task = tokio::spawn(async move {
+        // The hints for refused tool calls said this run (each once).
+        let mut said: HashSet<&'static str> = HashSet::new();
         loop {
             match watching.messages.recv().await {
                 Some(ServerMessage::RunEnd { outcome, error, .. }) => {
+                    said.clear();
+                    // A run that did not complete: what to do, for every
+                    // frontend (design §11).
+                    if let Some(fix) = what_to_do(outcome, error.as_deref()) {
+                        notify.notice(NoticeLevel::Info, format!("What to do: {fix}."));
+                    }
                     {
                         let mut seen = record.lock().unwrap();
                         seen.first.get_or_insert_with(|| (outcome, error.clone()));
@@ -999,7 +1036,7 @@ fn watch(
                     }
                     ended.send_modify(|n| *n += 1);
                 }
-                Some(ServerMessage::Event { event, .. }) if print => {
+                Some(ServerMessage::Event { event, .. }) => {
                     if let AgentEvent::ToolExecutionEnd {
                         tool_name,
                         result,
@@ -1016,10 +1053,25 @@ fn watch(
                             })
                             .collect();
                         let text = text.join(" ");
-                        let first = text.lines().next().unwrap_or_default();
-                        match is_error {
-                            true => eprintln!("  {tool_name} ✗ {first}"),
-                            false => eprintln!("  {tool_name} ✓"),
+                        // A call refused for a reason yobuild knows (the
+                        // policy plugin gone, a handler failed): what to do,
+                        // once a run — the run itself may still complete.
+                        if is_error {
+                            if let Some(h) = crate::hints::hint(crate::hints::Scope::Call, &text) {
+                                if said.insert(h.id) {
+                                    notify.notice(
+                                        NoticeLevel::Info,
+                                        format!("What to do: {}.", h.fix),
+                                    );
+                                }
+                            }
+                        }
+                        if print {
+                            let first = text.lines().next().unwrap_or_default();
+                            match is_error {
+                                true => eprintln!("  {tool_name} ✗ {first}"),
+                                false => eprintln!("  {tool_name} ✓"),
+                            }
                         }
                     }
                 }
@@ -1481,6 +1533,27 @@ fn lan_ip() -> Option<std::net::IpAddr> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn what_to_do_is_said_for_stopped_failed_and_rejected_runs_only() {
+        let turns = "[Agent stopped: Max turns reached (50/50)]";
+        assert!(what_to_do(RunOutcome::Stopped, Some(turns))
+            .unwrap()
+            .contains("max_turns"));
+        assert!(what_to_do(RunOutcome::Stopped, None)
+            .unwrap()
+            .starts_with("a plugin stopped the run"));
+        assert!(what_to_do(
+            RunOutcome::Rejected,
+            Some("input rejected: the plugin host is not running (shut down)")
+        )
+        .is_some());
+        assert_eq!(what_to_do(RunOutcome::Error, None), None);
+        assert_eq!(what_to_do(RunOutcome::Completed, Some(turns)), None);
+        assert_eq!(what_to_do(RunOutcome::Aborted, Some(turns)), None);
+        assert!(what_to_do_at_start("the terminal UI stopped: …").is_some());
+        assert_eq!(what_to_do_at_start("Auth error: x"), None);
+    }
     use super::*;
 
     #[test]

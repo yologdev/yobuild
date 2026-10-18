@@ -792,7 +792,10 @@ async fn facts_warn_when_a_limit_stopped_the_run() {
     let seen = until_run_end(&mut owner).await;
     let warning = one(notices(&seen, NoticeLevel::Warning));
     assert!(warning.starts_with("Stopped early: "), "{warning}");
-    assert!(warning.ends_with("Send \"continue\" to pick up where it left off."));
+    assert!(
+        warning.ends_with('.') && !warning.contains("continue"),
+        "{warning}"
+    );
     // The facts are still told.
     one(notices(&seen, NoticeLevel::Info));
     quit(&session, run).await;
