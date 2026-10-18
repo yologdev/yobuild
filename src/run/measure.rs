@@ -203,10 +203,10 @@ fn report(spent: &[Spent], memory: &[(String, u64)]) -> Option<String> {
 #[cfg(unix)]
 const PS_TIME: Duration = Duration::from_secs(2);
 
-/// Each runtime's resident memory in KB: the process this one started for
-/// it (its last argument is its folder's `package.json`) and what that one
-/// started in turn. A runtime not found — or `ps` failing or slow — is left
-/// out.
+/// Each runtime's resident memory in KB: the processes this one started
+/// for it (their last argument is its folder's `package.json`) and what
+/// those started in turn — runtimes of one folder together ([`by_folder`]).
+/// A runtime not found — or `ps` failing or slow — is left out.
 #[cfg(unix)]
 async fn memory(runtimes: &[(String, PathBuf)]) -> Vec<(String, u64)> {
     let ps = tokio::process::Command::new("ps")
@@ -247,17 +247,35 @@ async fn memory(runtimes: &[(String, PathBuf)]) -> Vec<(String, u64)> {
         }
         total
     };
-    let mut taken = Vec::new();
-    runtimes
-        .iter()
-        .filter_map(|(name, dir)| {
+    by_folder(runtimes)
+        .into_iter()
+        .filter_map(|(dir, names)| {
             let anchor = format!(" {}", dir.join("package.json").display());
-            let (pid, ..) = rows.iter().find(|(pid, parent, _, command)| {
-                *parent == me && command.ends_with(&anchor) && !taken.contains(pid)
-            })?;
-            taken.push(*pid);
-            Some((name.clone(), tree(*pid)))
+            let total: u64 = rows
+                .iter()
+                .filter(|(_, parent, _, command)| *parent == me && command.ends_with(&anchor))
+                .map(|(pid, ..)| tree(*pid))
+                .sum();
+            (total > 0).then_some((names, total))
         })
+        .collect()
+}
+
+/// The runtimes by folder, in order, each folder's names joined (`ui +
+/// rutis-0`): runtimes started from one folder (the terminal UI's and a
+/// rutis package's, both `frontend/plugins`) cannot be told apart from
+/// outside, so they are said together rather than each given the other's.
+fn by_folder(runtimes: &[(String, PathBuf)]) -> Vec<(&PathBuf, String)> {
+    let mut folders: Vec<(&PathBuf, Vec<&str>)> = Vec::new();
+    for (name, dir) in runtimes {
+        match folders.iter_mut().find(|(d, _)| *d == dir) {
+            Some((_, names)) => names.push(name),
+            None => folders.push((dir, vec![name])),
+        }
+    }
+    folders
+        .into_iter()
+        .map(|(dir, names)| (dir, names.join(" + ")))
         .collect()
 }
 
@@ -330,6 +348,23 @@ mod tests {
         assert_eq!(measure.said("pi-extensions-x1", &owners), "pi-extensions");
         assert_eq!(measure.said("words", &owners), "plugin:words");
         assert_eq!(measure.said("loose", &owners), "loose");
+    }
+
+    #[test]
+    fn runtimes_of_one_folder_are_said_together() {
+        let runtimes = [
+            ("ui".to_owned(), PathBuf::from("/f")),
+            ("pi".to_owned(), PathBuf::from("/p")),
+            ("rutis-0".to_owned(), PathBuf::from("/f")),
+        ];
+        let said: Vec<(&PathBuf, String)> = by_folder(&runtimes);
+        assert_eq!(
+            said,
+            [
+                (&PathBuf::from("/f"), "ui + rutis-0".to_owned()),
+                (&PathBuf::from("/p"), "pi".to_owned())
+            ]
+        );
     }
 
     #[test]
