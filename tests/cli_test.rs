@@ -345,9 +345,20 @@ mod web {
 
         /// The same, connecting `late` after it serves.
         pub async fn open_after(dir: &std::path::Path, task: &str, late: Duration) -> Page {
+            let args = ["run", "agent.toml", "--scripted", "script.json"];
+            Self::start(dir, &args, &["--web", "127.0.0.1:0", task], late).await
+        }
+
+        /// `yobuild <args> <web>` in `dir`, connected `late` after it serves.
+        pub async fn start(
+            dir: &std::path::Path,
+            args: &[&str],
+            web: &[&str],
+            late: Duration,
+        ) -> Page {
             let mut child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
-                .args(["run", "agent.toml", "--scripted", "script.json"])
-                .args(["--web", "127.0.0.1:0", task])
+                .args(args)
+                .args(web)
                 .current_dir(dir)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -377,6 +388,30 @@ mod web {
                 }
             };
             Page { child, socket }
+        }
+
+        /// The next message, whatever it is.
+        pub async fn next(&mut self) -> Json {
+            let wait = async {
+                while let Some(Ok(message)) = self.socket.next().await {
+                    if let Message::Text(text) = message {
+                        return serde_json::from_str(&text).unwrap();
+                    }
+                }
+                panic!("the page closed")
+            };
+            tokio::time::timeout(Duration::from_secs(60), wait)
+                .await
+                .expect("a message in 60 s")
+        }
+
+        /// Sends `message` as the page would.
+        pub async fn send(&mut self, message: Json) {
+            use futures::SinkExt;
+            self.socket
+                .send(Message::Text(message.to_string().into()))
+                .await
+                .unwrap();
         }
 
         /// The next message of type `kind`.
@@ -639,4 +674,208 @@ fn a_plugin_allows_only_its_own_tools() {
         stderr.contains("  beta_echo ✗ Tool call denied: not allowed"),
         "{stderr}"
     );
+}
+
+// -- the example agents (examples/*.toml), as their demos ran ---------------
+
+/// The examples folder, and whether its pi packages are installed
+/// (`scripts/try-coding-agent.sh --setup-only`; required in CI).
+fn examples() -> Option<std::path::PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    if dir.join("node_modules/@juicesharp/rpiv-todo").is_dir() && pi_installed() {
+        return Some(dir);
+    }
+    if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
+        panic!("the examples' packages are required: npm ci in examples/");
+    }
+    eprintln!("SKIPPED: npm ci in examples/");
+    None
+}
+
+#[test]
+fn the_minimal_example_reads_and_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let ex = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let out = yobuild(
+        &[
+            "run",
+            &ex.join("minimal.toml").display().to_string(),
+            "--scripted",
+            &ex.join("scripts/minimal.json").display().to_string(),
+            "--once",
+            "look",
+        ],
+        dir.path(),
+    );
+    let stderr = text(&out.stderr);
+    assert!(
+        out.status.success() && stderr.contains("  list_files ✓"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn the_minimal_example_reads_only_inside_its_folder() {
+    use serde_json::{json, Value as Json};
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("in.txt"), "inside").unwrap();
+    std::fs::write(dir.path().join("out.txt"), "outside").unwrap();
+    let ex = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    // Each call in its own turn, in this order.
+    let calls = [
+        ("read_file", json!({ "path": "in.txt" })),
+        ("read_file", json!({ "path": "../out.txt" })),
+        ("read_file", json!({ "path": dir.path().join("out.txt") })),
+        ("list_files", json!({ "path": dir.path() })),
+        (
+            "search",
+            json!({ "pattern": "outside", "path": dir.path() }),
+        ),
+        ("bash", json!({ "command": "cat ../out.txt" })),
+    ];
+    let mut script: Vec<Json> = calls
+        .iter()
+        .map(|(name, arguments)| json!({ "tools": [{ "name": name, "arguments": arguments }] }))
+        .collect();
+    script.push(json!({ "text": "done" }));
+    let script_path = dir.path().join("script.json");
+    std::fs::write(&script_path, Json::Array(script).to_string()).unwrap();
+    let out = yobuild(
+        &[
+            "run",
+            &ex.join("minimal.toml").display().to_string(),
+            "--scripted",
+            &script_path.display().to_string(),
+            "--once",
+            "look",
+        ],
+        &project,
+    );
+    let stderr = text(&out.stderr);
+    let marks: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("  ") && (l.contains(" ✓") || l.contains(" ✗")))
+        .collect();
+    assert_eq!(marks.len(), 6, "{stderr}");
+    assert!(marks[0].starts_with("  read_file ✓"), "{marks:?}");
+    for refused in &marks[1..] {
+        assert!(refused.contains(" ✗"), "{marks:?}");
+    }
+}
+
+#[test]
+fn the_coding_examples_policy_blocks_a_deletion_with_nobody_there() {
+    let Some(ex) = examples() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let out = yobuild(
+        &[
+            "run",
+            &ex.join("coding.toml").display().to_string(),
+            "--scripted",
+            &ex.join("scripts/coding.json").display().to_string(),
+            "--once",
+            "clean the build",
+        ],
+        dir.path(),
+    );
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("  list_files ✓"), "{stderr}");
+    assert!(
+        stderr.contains("  bash ✗ Tool call denied: the user blocked it"),
+        "{stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_handoff_example_asks_without_waiting_and_the_answer_starts_the_next_run() {
+    let Some(ex) = examples() else { return };
+    let dir = project("", "[]");
+    let args = [
+        "run".to_owned(),
+        ex.join("handoff.toml").display().to_string(),
+        "--scripted".to_owned(),
+        ex.join("scripts/handoff.json").display().to_string(),
+        "--measure".to_owned(),
+    ];
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let task = "Look at this folder and write notes.md about it.";
+    let mut page = web::Page::start(
+        dir.path(),
+        &args,
+        &["--web", "127.0.0.1:0", task],
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let mut question = None;
+    let mut facts = Vec::new();
+    let mut ended = 0;
+    let mut second_prompt = None;
+    let mut ran = Vec::new();
+    let mut ui_plugins = serde_json::Value::Null;
+    while ended < 2 {
+        let m = page.next().await;
+        match m["type"].as_str() {
+            Some("hello") => ui_plugins = m["uiPlugins"].clone(),
+            Some("uiPlugins") => ui_plugins = m["uiPlugins"].clone(),
+            Some("uiRequest") => {
+                // The agent's question, the only one: a gate question here
+                // would mean an allowed tool asked.
+                assert!(question.is_none(), "a second question: {m}");
+                let shown = m["request"].to_string();
+                assert!(shown.contains("bullet list"), "{m}");
+                question = Some(m["id"].clone());
+            }
+            Some("event") if m["event"]["type"] == "toolExecutionEnd" => {
+                let tool = m["event"]["toolName"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                assert_eq!(m["event"]["isError"], false, "{tool} failed: {m}");
+                ran.push(tool);
+            }
+            Some("notice") => facts.push(m["message"].as_str().unwrap_or_default().to_owned()),
+            Some("runStart") if ended == 1 => {
+                second_prompt = m["prompt"].as_str().map(str::to_owned)
+            }
+            Some("runEnd") => {
+                assert_eq!(m["outcome"], "completed", "{m}");
+                ended += 1;
+                if ended == 1 {
+                    // The owner comes back, and answers.
+                    let id = question.clone().expect("the agent asked the owner");
+                    page.send(serde_json::json!({ "type": "uiResponse", "id": id, "value": "Bullet list" }))
+                        .await;
+                }
+            }
+            _ => {}
+        }
+    }
+    // Every scripted call ran: the plan (a pi tool the manifest allows),
+    // the question, reading, writing.
+    for tool in ["todo", "ask_owner", "list_files", "write_file"] {
+        assert!(ran.iter().any(|t| t == tool), "{tool} did not run: {ran:?}");
+    }
+    // The todo-plan UI plugin (a rutis plugin of frontend/plugins) is up.
+    assert!(ui_plugins.to_string().contains("todo-plan"), "{ui_plugins}");
+    let second = second_prompt.unwrap_or_default();
+    assert!(second.starts_with("[Owner's answer to #1]"), "{second}");
+    assert!(dir.path().join("notes.md").exists(), "run 2 wrote notes.md");
+    // Each run's plugin time and runtime memory (`--measure`).
+    let measured = facts
+        .iter()
+        .filter(|f| f.starts_with("Plugin time this run: "))
+        .count();
+    assert_eq!(measured, 2, "{facts:?}");
+    assert!(
+        facts.iter().any(|f| f.contains("Runtime memory: pi ")),
+        "{facts:?}"
+    );
+    let facts: Vec<&String> = facts.iter().filter(|f| f.starts_with("Facts:")).collect();
+    assert_eq!(facts.len(), 2, "{facts:?}");
+    assert!(facts[1].contains("new: notes.md"), "{facts:?}");
+    let (code, stderr) = page.interrupt();
+    assert_eq!(code, Some(0), "{stderr}");
 }

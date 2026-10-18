@@ -417,15 +417,14 @@ Stays in yoagent: the loop, providers, tools, `Extension`; yoagent-rutis
 (bridge, pi and DSH adapters, the compatibility matrix and its probe);
 yoagent-workers.
 
-### The examples as manifests (proposed)
+### The examples as manifests
 
-`handoff_agent.rs`, `coding_agent.rs` and `minimal_browser.rs` become
+`handoff_agent.rs`, `coding_agent.rs` and `minimal_browser.rs` became
 `examples/handoff.toml`, `coding.toml` and `minimal.toml`, each with its
 prompt file and its scripted replies (`examples/scripts/`). The handoff
-and minimal `.rs` examples are removed once their manifests do what they
-did, checked in CI; `coding_agent.rs` stays for its `--watch` (plugins
-reloaded as their files change), which neither a manifest nor
-`yobuild run` has yet. What a manifest gains for them:
+and minimal `.rs` examples are gone; `coding_agent.rs` stays for its
+`--watch` (plugins reloaded as their files change), which neither a
+manifest nor `yobuild run` has yet. What a manifest gained for them:
 
 - **Which of yoagent's tools** (`minimal_browser`: reading only, in the
   agent's folder). `[builtins] tools = "coding"` (the default: yoagent's

@@ -1,0 +1,47 @@
+# A personal handoff agent: hand it a task — research, writing, planning or
+# code — and walk away (what examples/handoff_agent.rs was, as a manifest).
+# It plans with a pi extension (rpiv-todo, drawn in the browser by the
+# todo-plan UI plugin), searches with DeepSeek Harness's free web search,
+# asks you without waiting, and ends each run with a report and the facts.
+#
+#   scripts/try-coding-agent.sh --setup-only        # once: adapters, npm ci
+#   cd my-project
+#   DEEPSEEK_API_KEY=… yobuild run path/to/examples/handoff.toml "the task"
+
+[agent]
+name   = "handoff"
+model  = "deepseek/deepseek-flash"
+prompt = "./prompts/handoff.md"
+
+[limits]
+max_turns          = 80
+max_tokens         = 4_000_000   # per run: research reads a lot
+max_minutes        = 30
+session_budget_usd = 2.0         # all runs together
+
+[[plugin]]
+pi    = "@juicesharp/rpiv-todo@2.12.0"
+allow = ["todo"]
+
+[[plugin]]
+rutis   = "../frontend/plugins/todo-plan.ts"   # draws the plan in the browser
+runtime = "node"
+
+[[plugin]]
+dsh    = "dsh-free-search@0.8.1"
+config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }
+# The searches it offers with this config (not its `npm` and test tools).
+allow  = [
+  "multi_search", "research", "advanced_search", "domain_search", "platform_search",
+  "video_search", "cache_search",
+]
+
+[builtins]
+ask_owner = true
+report    = "handoff"
+facts     = true
+gate      = "allow-list"
+scratch   = true
+
+[frontend]
+web = true

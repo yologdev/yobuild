@@ -690,6 +690,66 @@ async fn a_plugin_tool_the_entry_allows_runs_and_one_it_does_not_offer_is_a_warn
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rutis_policy_plugin_is_waited_for_and_judges_the_first_call() {
+    // A rutis plugin that registers its call judge (`before_tool`) 1.5 s
+    // into its `apply`. Marked `policy`, the run waits for it — else the
+    // first call could find no policy and be denied (rutis 0.11's `load`
+    // happens to wait for an async `apply` too; yobuild does not count on
+    // it) — and then it judges.
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins/node_modules");
+    if !runtime.join("@arcships/rutis-runtime").is_dir() {
+        if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
+            panic!("the rutis runtime is required: npm ci in frontend/plugins");
+        }
+        eprintln!("SKIPPED: npm ci in frontend/plugins");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(&runtime, dir.path().join("node_modules")).unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    std::fs::write(
+        dir.path().join("guard.ts"),
+        "import { definePlugin } from '@arcships/rutis'\n\
+         export default definePlugin({\n\
+           inject: ['yoagent'],\n\
+           async apply(ctx: any, config: { deny: boolean }) {\n\
+             await new Promise((done) => setTimeout(done, 1500))\n\
+             ctx.effect(ctx.use('yoagent').register('guard', {\n\
+               async before_tool(call: any) { if (config.deny) return { deny: `the guard denies ${call.tool}` } },\n\
+             }))\n\
+           },\n\
+         })\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        r#"[{ "tools": [{ "name": "list_files", "arguments": { "path": "." } }] }, { "text": "done" }]"#,
+    )
+    .unwrap();
+    for (policy, deny, expected) in [
+        (true, false, None),
+        (true, true, Some("the guard denies list_files")),
+    ] {
+        std::fs::write(
+            dir.path().join("agent.toml"),
+            format!(
+                "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
+                 [[plugin]]\nrutis = \"./guard.ts\"\nruntime = \"node\"\npolicy = {policy}\nconfig = {{ deny = {deny} }}\n\
+                 [builtins]\ngate = \"off\"\n"
+            ),
+        )
+        .unwrap();
+        let ended = run_once(dir.path()).await;
+        let ran = results(&ended);
+        assert_eq!(ran.len(), 1, "{ran:?}");
+        match expected {
+            None => assert!(!ran[0].1, "policy = {policy}, deny = {deny}: {ran:?}"),
+            Some(said) => assert!(ran[0].1 && ran[0].0.contains(said), "{ran:?}"),
+        }
+    }
+}
+
 /// A rutis plugin (its package the project, the runtime linked from
 /// `frontend/plugins`) that asks the owner through the `ask_owner` service
 /// as it starts and writes what it got to `asked.txt`.

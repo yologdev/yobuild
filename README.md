@@ -16,12 +16,12 @@ Go — plus a few small built-ins of its own, on top of the
 > ```sh
 > scripts/try-coding-agent.sh                         # in the checkout: installs the plugin runtimes, runs the coding agent example
 > cd ~ && mkdir research && cd research && git init   # anywhere outside the checkout
-> path/to/yobuild/scripts/try-handoff.sh --demo       # the handoff agent, scripted; works in the current directory
+> path/to/yobuild/scripts/try-handoff.sh --demo       # the handoff agent (examples/handoff.toml), scripted; works in the current directory
 > ```
 
 ## The idea in one example
 
-The `handoff_agent` example ([`examples/`](examples/README.md)) is a delegate you hand a task to
+The handoff agent ([`examples/handoff.toml`](examples/handoff.toml)) is a delegate you hand a task to
 and walk away from. It plans, researches, asks you only what is yours to
 decide — without waiting for the answer — and ends every run with a report
 and facts the model cannot make up. Of what it does:
@@ -33,56 +33,59 @@ and facts the model cannot make up. Of what it does:
   without blocking, check the report, add the facts — and a frontend
   (browser, phone).
 
-The agent is mostly a *selection*. That example is about 600 lines of Rust,
-mostly wiring (a third is its scripted demo). yobuild turns the wiring into a manifest
-(this one comes as `handoff.toml` in a later step of M2a: until then its prompt file
-is not there, and its plugins must be installed by hand at these versions — the pi
-package with `--legacy-peer-deps`, as `frontend/plugins/.npmrc` does):
+The agent is mostly a *selection*. As a Rust example it was about 600 lines,
+mostly wiring (a third its scripted demo). yobuild turns the wiring into a
+manifest — this is the whole agent, beside its prompt file:
 
 ```toml
 [agent]
 name   = "handoff"
 model  = "deepseek/deepseek-flash"
-prompt = "prompts/handoff.md"
+prompt = "./prompts/handoff.md"
+
+[limits]
+max_turns          = 80
+max_tokens         = 4_000_000
+max_minutes        = 30
+session_budget_usd = 2.0
 
 [[plugin]]
 pi    = "@juicesharp/rpiv-todo@2.12.0"
 allow = ["todo"]                       # runs without asking the owner
 
 [[plugin]]
+rutis   = "../frontend/plugins/todo-plan.ts"   # draws the plan in the page
+runtime = "node"
+
+[[plugin]]
 dsh    = "dsh-free-search@0.8.1"
-config = { provider = "bing", bingMarket = "en-US" }
-allow  = ["multi_search", "web_search"]
+config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }
+allow  = ["multi_search", "research", "advanced_search", "domain_search",
+          "platform_search", "video_search", "cache_search"]
 
 [builtins]
 ask_owner = true          # questions that do not block the run
 report    = "handoff"     # Done / Waiting on you / Decisions / Next, then facts
+facts     = true
 gate      = "allow-list"  # ask before anything not known to be harmless
+scratch   = true
 
 [frontend]
 web = true
-phone = true
 ```
 
 ```sh
-yobuild run handoff.toml
+scripts/try-coding-agent.sh --setup-only   # once (Node 22.19+, npm): the adapters, the examples' packages
+cd my-project
+DEEPSEEK_API_KEY=… cargo run --manifest-path path/to/yobuild/Cargo.toml -- run path/to/yobuild/examples/handoff.toml "the task"
 ```
 
-To run an agent today, from a checkout (`yobuild run` loads its plugins'
-adapters from the checkout it was built from). This one has an MCP server
-(bash: Unix) and needs no Node; plugins and the terminal UI need the setup
-line (Node 22.19+, npm) first:
-
-```sh
-scripts/try-coding-agent.sh --setup-only   # for plugins and the terminal UI
-cargo run -- run tests/fixtures/echo/agent.toml \
-  --scripted tests/fixtures/echo/script.json --once "echo hi"
-```
-
-A manifest's pi packages, stdio MCP servers and the rutis runtime are
-installed in `node_modules/` beside it, DSH plugins with
-`npm install --no-save --prefix adapters/dsh …`, at exactly their pinned
-versions; installing them is M2b.
+`yobuild run` loads its plugins' adapters from the checkout it was built
+from. A manifest's pi packages and stdio MCP servers are installed in
+`node_modules/` beside it, a rutis plugin's runtime in its own package, DSH
+plugins with `npm install --no-save --prefix adapters/dsh …`, at exactly
+their pinned versions; installing them is M2b. The other examples:
+[`examples/`](examples/README.md).
 
 ## Documents
 

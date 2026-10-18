@@ -1,7 +1,7 @@
 {
   "name": "yoagent-frontend-plugins",
   "private": true,
-  "description": "EXPERIMENTAL: the yoagent-frontend plugins — a terminal UI (pi-tui) on the frontend protocol, and a sample browser UI plugin.",
+  "description": "EXPERIMENTAL: the yoagent-frontend plugins \u2014 a terminal UI (pi-tui) on the frontend protocol, and browser UI plugins (search links, the todo plan).",
   "type": "module",
   "engines": {
     "node": ">=22.19"
@@ -9,8 +9,6 @@
   "dependencies": {
     "@arcships/rutis": "0.11.0",
     "@arcships/rutis-runtime": "0.11.0",
-    "@earendil-works/pi-tui": "1.1.0",
-    "@juicesharp/rpiv-i18n": "2.12.0",
-    "@juicesharp/rpiv-todo": "2.12.0"
+    "@earendil-works/pi-tui": "1.1.0"
   }
 }

@@ -1,0 +1,37 @@
+# A coding agent in the terminal (what examples/coding_agent.rs is, without
+# its --watch): yoagent's tools, a pi extension as the approval policy
+# (confirm-dangerous.ts asks before `rm -rf` and the like), DeepSeek
+# Harness's web search and ask-user tool, and links for search results in the
+# browser (the search-links UI plugin).
+#
+#   DEEPSEEK_API_KEY=… yobuild run path/to/examples/coding.toml
+
+[agent]
+name   = "coding"
+model  = "deepseek/deepseek-flash"
+prompt = "./prompts/coding.md"
+
+[[plugin]]
+pi     = "../frontend/plugins/pi-extensions/confirm-dangerous.ts"
+policy = true   # calls are denied, not run unjudged, while no plugin judges them
+                # (the pi runtime down, say; it counts any plugin that judges calls)
+
+[[plugin]]
+rutis   = "../frontend/plugins/search-links.ts"
+runtime = "node"
+
+[[plugin]]
+dsh = "@deepseek-ai/dsh-user-questions@0.2.0-rc.2"
+
+[[plugin]]
+dsh = "@deepseek-ai/dsh-tool-ask-user@0.2.0-rc.2"
+
+[[plugin]]
+dsh    = "dsh-free-search@0.8.1"
+config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }
+
+[builtins]
+gate = "off"    # the pi extension is the gate
+
+[frontend]
+terminal = true
