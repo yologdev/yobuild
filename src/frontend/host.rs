@@ -488,9 +488,6 @@ impl PluginHost {
         })
     }
 
-    /// Apply the rows; fail on plugins this newly broke, and wait for
-    /// `started` (the rows just added) to run. A plugin already failing — one
-    /// a reload left stopped — does not fail every later change.
     /// The loader's layers for the rows loaded now.
     fn layers(&self) -> Result<Vec<Layer>, BoxError> {
         let insert: Vec<Json> = self.rows.iter().map(Row::json).collect();
@@ -498,6 +495,9 @@ impl PluginHost {
         Ok(vec![Layer::new("app", patches)])
     }
 
+    /// Apply the rows; fail on plugins this newly broke, and wait for
+    /// `started` (the rows just added) to run. A plugin already failing — one
+    /// a reload left stopped — does not fail every later change.
     async fn reconcile(&mut self, started: &[String]) -> Result<(), BoxError> {
         let report = self.loader.reconcile(self.layers()?, None).await?;
         if !report.new_failures.is_empty() {
@@ -572,18 +572,16 @@ impl PluginHost {
     /// nobody provides (yoagent-rutis's `rows::wait_running`).
     async fn wait_running(&self, ids: &[String]) -> Result<(), BoxError> {
         let layers = self.layers()?;
-        // Looks at 5 s and 15 s, then until LOAD_TIMEOUT: rows that only
-        // wait for services nobody provides are said at the second look (a
-        // provider may start slowly), not after a minute; rows loading, or
-        // waiting for services that exist, get the whole time. The error is
+        // A look at 15 s, then until LOAD_TIMEOUT: rows that only wait for
+        // services nobody provides are said at the first (a provider may
+        // start slowly), not after a minute; rows loading, or waiting for
+        // services that exist, get the whole time. (A row that cannot run
+        // ends either look at once; each look that ends with rows waiting
+        // asks the runtimes what those inject, for up to 10 s.) The error is
         // kept as it is (`RowsNotRunning`): a caller may say what a row
         // waits for in its own words.
         let start = tokio::time::Instant::now();
-        let looks = [
-            std::time::Duration::from_secs(5),
-            std::time::Duration::from_secs(15),
-            LOAD_TIMEOUT,
-        ];
+        let looks = [std::time::Duration::from_secs(15), LOAD_TIMEOUT];
         for (n, look) in looks.into_iter().enumerate() {
             let left = look.saturating_sub(start.elapsed());
             let error = match yoagent_rutis::rows::wait_running(
@@ -600,7 +598,7 @@ impl PluginHost {
             });
             let last = n + 1 == looks.len();
             let ends = error.rows.iter().any(|row| !row.state.may_run());
-            if last || ends || (only_missing && n >= 1) {
+            if last || ends || only_missing {
                 return Err(error.into());
             }
         }

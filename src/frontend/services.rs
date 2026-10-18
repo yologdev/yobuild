@@ -148,9 +148,15 @@ impl AskOwnerService {
             Some(row) => {
                 let name = row.strip_prefix("plugin:").unwrap_or(row);
                 let name = name.split(':').next().unwrap_or(name);
-                if let Some(from) = from.as_deref().map(str::trim) {
-                    let first = self.warned.lock().unwrap().insert(name.to_owned());
-                    if from != name && first {
+                if let Some(from) = from.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+                    // Only a `from` naming another plugin uses up the warning.
+                    if from != name
+                        && self
+                            .warned
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(name.to_owned())
+                    {
                         if let Some(ask) = &self.ask {
                             ask.session().notice(
                                 NoticeLevel::Warning,
@@ -672,7 +678,11 @@ mod tests {
             .ask_from(Some("pi"), "ask", q(Some("todo.ts")))
             .unwrap();
         service.ask_from(Some("dsh"), "ask", q(None)).unwrap();
-        // A plugin's own `from` naming another: ignored, warned once.
+        // A plugin's own `from` naming another: ignored, warned once (a
+        // `from` naming itself first uses nothing up).
+        service
+            .ask_from(Some("plugin:planner"), "ask", q(Some("planner")))
+            .unwrap();
         service
             .ask_from(Some("plugin:planner"), "ask", q(Some("yobuild")))
             .unwrap();
@@ -681,7 +691,7 @@ mod tests {
             .unwrap();
         let mut titles = Vec::new();
         let mut warnings = Vec::new();
-        while titles.len() < 6 {
+        while titles.len() < 7 {
             match watching.messages.recv().await.unwrap() {
                 ServerMessage::UiRequest { request, .. } => titles.push(format!("{request:?}")),
                 ServerMessage::Notice { message, .. } => warnings.push(message),
@@ -690,7 +700,7 @@ mod tests {
         }
         titles.sort();
         let said = |text: &str| titles.iter().filter(|t| t.contains(text)).count();
-        assert_eq!(said("Plan? (asked by plugin planner)"), 3, "{titles:?}");
+        assert_eq!(said("Plan? (asked by plugin planner)"), 4, "{titles:?}");
         assert_eq!(said("Plan? (asked by plugin search)"), 1, "{titles:?}");
         assert_eq!(
             said("Plan? (asked by pi extension todo.ts)"),

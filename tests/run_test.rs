@@ -723,6 +723,18 @@ async fn a_rutis_policy_plugin_is_waited_for_and_judges_the_first_call() {
          })\n",
     )
     .unwrap();
+    // Another plugin's judge, up at once and letting every call through:
+    // the guard's wait is for a judge from *its* row, so this one does not
+    // end it.
+    std::fs::write(
+        dir.path().join("other.ts"),
+        "import { definePlugin } from '@arcships/rutis'\n\
+         export default definePlugin({\n\
+           inject: ['yoagent'],\n\
+           apply(ctx: any) { ctx.effect(ctx.use('yoagent').register('other', { async before_tool() {} })) },\n\
+         })\n",
+    )
+    .unwrap();
     std::fs::write(
         dir.path().join("script.json"),
         r#"[{ "tools": [{ "name": "list_files", "arguments": { "path": "." } }] }, { "text": "done" }]"#,
@@ -736,6 +748,7 @@ async fn a_rutis_policy_plugin_is_waited_for_and_judges_the_first_call() {
             dir.path().join("agent.toml"),
             format!(
                 "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
+                 [[plugin]]\nrutis = \"./other.ts\"\nruntime = \"node\"\n\
                  [[plugin]]\nrutis = \"./guard.ts\"\nruntime = \"node\"\npolicy = {policy}\nconfig = {{ deny = {deny} }}\n\
                  [builtins]\ngate = \"off\"\n"
             ),
@@ -844,6 +857,9 @@ async fn a_plugin_asks_the_owner_through_the_service_numbered_with_the_tool() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rutis_plugins_allow_holds_only_for_its_own_rows_tools() {
+    // (`lib` is marked `policy`, with a judge that lets every call through
+    // to the gate: so start-up waits for its handler, and `shout` is
+    // offered from the first run.)
     // Two rutis plugins of one package: `lib` offers `shout`. Allowed by
     // `lib`, it runs; allowed by `app` (which offers nothing), it is
     // another row's tool: it asks (nobody there: refused), and a Warning
@@ -868,6 +884,7 @@ async fn a_rutis_plugins_allow_holds_only_for_its_own_rows_tools() {
              ctx.effect(ctx.use('yoagent').register('lib-tools', {\n\
                async tools() { return [{ name: 'shout', description: 'Shout', parameters: { type: 'object', properties: {} } }] },\n\
                async call_tool() { return { text: 'HEY' } },\n\
+               async before_tool() {},\n\
              }))\n\
            },\n\
          })\n",
@@ -884,8 +901,9 @@ async fn a_rutis_plugins_allow_holds_only_for_its_own_rows_tools() {
         r#"[{ "tools": [{ "name": "shout", "arguments": {} }] }, { "text": "done" }]"#,
     )
     .unwrap();
-    for (allowing, runs) in [("lib", true), ("app", false)] {
-        let allow = |name: &str| match name == allowing {
+    // Allowed by both: `lib`'s entry frees it, and nothing is warned.
+    for (allowing, runs) in [("lib", true), ("app", false), ("both", true)] {
+        let allow = |name: &str| match name == allowing || allowing == "both" {
             true => "allow = [\"shout\"]\n",
             false => "",
         };
@@ -893,7 +911,7 @@ async fn a_rutis_plugins_allow_holds_only_for_its_own_rows_tools() {
             dir.path().join("agent.toml"),
             format!(
                 "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
-                 [[plugin]]\nrutis = \"./lib.ts\"\nruntime = \"node\"\n{}\
+                 [[plugin]]\nrutis = \"./lib.ts\"\nruntime = \"node\"\npolicy = true\n{}\
                  [[plugin]]\nrutis = \"./app.ts\"\nruntime = \"node\"\n{}",
                 allow("lib"),
                 allow("app")
@@ -904,9 +922,52 @@ async fn a_rutis_plugins_allow_holds_only_for_its_own_rows_tools() {
         let ran = results(&ended);
         assert_eq!(ran.len(), 1, "{ran:?}");
         assert_eq!(!ran[0].1, runs, "allowed by {allowing}: {ran:?}");
+        if !runs {
+            assert!(ran[0].0.contains("not allowed"), "the gate asked: {ran:?}");
+        }
         let warned = ended.notices.iter().any(|(_, m)| {
             m == "plugin app allows `shout`, but it was offered by `plugin:lib`, not by it: the tool asks"
         });
         assert_eq!(warned, !runs, "{:?}", ended.notices);
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rutis_plugin_waiting_for_a_service_nobody_provides_is_named() {
+    // Not a DSH plugin: said as rutis says it, without the DSH check's hints.
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins/node_modules");
+    if !runtime.join("@arcships/rutis-runtime").is_dir() {
+        if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
+            panic!("the rutis runtime is required: npm ci in frontend/plugins");
+        }
+        eprintln!("SKIPPED: npm ci in frontend/plugins");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(&runtime, dir.path().join("node_modules")).unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    std::fs::write(
+        dir.path().join("needy.ts"),
+        "import { definePlugin } from '@arcships/rutis'\n\
+         export default definePlugin({ inject: ['nosuchService'], apply() {} })\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\nrutis = \"./needy.ts\"\nruntime = \"node\"\n",
+    )
+    .unwrap();
+    let started = std::time::Instant::now();
+    let e = try_once(dir.path()).await.err().unwrap();
+    assert!(
+        e.contains("plugin:needy (waiting): nothing provides nosuchService") && !e.contains("DSH"),
+        "{e}"
+    );
+    // Said at the first look, not after the minute a loading row gets.
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(45),
+        "{:?}",
+        started.elapsed()
+    );
 }

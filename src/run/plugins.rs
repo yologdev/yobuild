@@ -991,6 +991,25 @@ mod tests {
         assert_eq!(plan.pi_files, [("p".to_owned(), vec![canonical])]);
     }
 
+    #[test]
+    fn a_dsh_plugins_rows_are_its_own_and_no_other_plugins() {
+        let plan = Plan {
+            rows: vec![
+                Row::new("plugin:a", "x").runtime("dsh"),
+                Row::new("plugin:a:x", "x").runtime("dsh"),
+                Row::new("plugin:ab", "x").runtime("dsh"),
+                Row::new("plugin:ab:y", "x").runtime("dsh"),
+                // A rutis plugin's row, of another runtime.
+                Row::new("plugin:a2", "x").runtime("rutis-0"),
+                Row::new("dsh", "x").runtime("dsh"),
+            ],
+            ..Plan::default()
+        };
+        assert_eq!(dsh_plugin_rows(&plan, "a"), ["plugin:a", "plugin:a:x"]);
+        assert_eq!(dsh_plugin_rows(&plan, "ab"), ["plugin:ab", "plugin:ab:y"]);
+        assert!(dsh_plugin_rows(&plan, "a2").is_empty());
+    }
+
     /// Copies a folder of files and folders (no links).
     fn copy_dir(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).unwrap();

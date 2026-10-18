@@ -108,7 +108,8 @@ impl RunHooks for CheckRun {
             return;
         }
         for (plugin, tool, owner) in &self.others {
-            let by = match owner.starts_with("plugin:") || owner == "pi" || owner == "dsh" {
+            let row = owner.split(' ').next().unwrap_or(owner);
+            let by = match row.starts_with("plugin:") || row == "pi" || row == "dsh" {
                 true => format!("offered by `{owner}`, not by it"),
                 false => {
                     "offered from no plugin row (does the plugin inject `yoagent`?)".to_owned()
@@ -144,6 +145,14 @@ mod tests {
 
     /// The warnings the session gave over two runs, each with a turn.
     async fn warnings_over_two_runs(names: Vec<(String, String)>) -> Vec<String> {
+        warnings_with(names, None).await
+    }
+
+    /// The same, with `other_owner` for the check.
+    async fn warnings_with(
+        names: Vec<(String, String)>,
+        other_owner: Option<OtherOwner>,
+    ) -> Vec<String> {
         let (session, driver) = Session::new(true);
         let mut watching = session.observe();
         let agent = Agent::from_provider(
@@ -154,7 +163,13 @@ mod tests {
             ModelConfig::mock(),
         )
         .with_tools(vec![Box::new(ListFilesTool::default())])
-        .with_extension(AllowedCheck::new(session.clone(), names));
+        .with_extension({
+            let check = AllowedCheck::new(session.clone(), names);
+            match other_owner {
+                Some(other) => check.with_other_owner(other),
+                None => check,
+            }
+        });
         let running = tokio::spawn(driver.run(agent));
         let mut warnings = Vec::new();
         for text in ["a", "b"] {
@@ -181,6 +196,26 @@ mod tests {
         assert_eq!(
             warnings_over_two_runs(names).await,
             ["plugin p offered no tool `gone`, which its `allow` names (a typo, or a tool it offers only in some runs)"]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_allowed_name_offered_by_another_owner_is_said_once() {
+        let names = vec![
+            ("p".to_owned(), "list_files".to_owned()),
+            ("q".to_owned(), "list_files".to_owned()),
+        ];
+        let owner: OtherOwner = Arc::new(|_run: &str, plugin: &str, _tool: &str| match plugin {
+            "p" => Some("language plugin (session 1)".to_owned()),
+            _ => Some("plugin:b".to_owned()),
+        });
+        let warnings = warnings_with(names, Some(owner)).await;
+        assert_eq!(
+            warnings,
+            [
+                "plugin p allows `list_files`, but it was offered from no plugin row (does the plugin inject `yoagent`?): the tool asks",
+                "plugin q allows `list_files`, but it was offered by `plugin:b`, not by it: the tool asks",
+            ]
         );
     }
 }

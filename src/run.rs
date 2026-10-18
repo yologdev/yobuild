@@ -607,23 +607,25 @@ fn offered_check(
     })
 }
 
-/// For `AllowedCheck`: the owner that offered a plugin's allowed tool in a
-/// run, when that plugin's entry does not accept it.
+/// For `AllowedCheck`: the owner that offered an allowed tool in a run,
+/// when no entry that allows the name accepts it (the gate's rule: then it
+/// asks) — with its `source` for pi, whose extensions share one row.
 fn other_owner(
     manifest: &Manifest,
     plan: &plugins::Plan,
     registry: Arc<yoagent_rutis::registry::Registry>,
     adapters: Adapters,
 ) -> allowed::OtherOwner {
-    let by_plugin: HashMap<String, Offerer> = manifest
-        .plugins
-        .iter()
-        .map(|p| (p.name.clone(), offerer(p, plan)))
-        .collect();
-    Arc::new(move |run: &str, plugin: &str, tool: &str| {
+    let offerers = offerers(manifest, plan);
+    Arc::new(move |run: &str, _plugin: &str, tool: &str| {
         let owner = registry.offered_by(run, tool)?;
-        let offerer = by_plugin.get(plugin)?;
-        (!offerer.offers(&owner, &adapters)).then(|| owner.owner().to_owned())
+        let accepted = offerers
+            .get(tool)
+            .is_some_and(|all| all.iter().any(|o| o.offers(&owner, &adapters)));
+        (!accepted).then(|| match owner.source() {
+            Some(source) if owner.owner() == PI_ROW => format!("{} ({source})", owner.owner()),
+            _ => owner.owner().to_owned(),
+        })
     })
 }
 
@@ -1017,9 +1019,13 @@ fn dsh_waiting(error: BoxError, plan: &plugins::Plan, host_services: bool) -> Bo
         .collect();
     let mut missing: Vec<String> = Vec::new();
     for row in &not_running.rows {
+        // Not with a note: the list may be incomplete, which the error as
+        // it is says.
         match (&row.state, &row.missing) {
             (RowState::Waiting, Some(names))
-                if !names.is_empty() && dsh_rows.contains(&row.id.as_str()) =>
+                if !names.is_empty()
+                    && row.note.is_none()
+                    && dsh_rows.contains(&row.id.as_str()) =>
             {
                 missing.extend(names.iter().cloned());
             }
