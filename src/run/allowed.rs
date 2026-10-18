@@ -112,7 +112,7 @@ impl RunHooks for CheckRun {
             let by = match row.starts_with("plugin:") || row == "pi" || row == "dsh" {
                 true => format!("offered by `{owner}`, not by it"),
                 false => {
-                    "offered from no plugin row (it must inject `yoagent` itself; a child plugin it starts has no row)".to_owned()
+                    "offered from no plugin row (it must inject `yoagent`: a child plugin registers through its parent's row only if the parent does)".to_owned()
                 }
             };
             self.check.session.notice(
@@ -213,7 +213,7 @@ mod tests {
         assert_eq!(
             warnings,
             [
-                "plugin p allows `list_files`, but it was offered from no plugin row (it must inject `yoagent` itself; a child plugin it starts has no row): the tool asks",
+                "plugin p allows `list_files`, but it was offered from no plugin row (it must inject `yoagent`: a child plugin registers through its parent's row only if the parent does): the tool asks",
                 "plugin q allows `list_files`, but it was offered by `plugin:b`, not by it: the tool asks",
             ]
         );

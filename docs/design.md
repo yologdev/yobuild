@@ -450,12 +450,15 @@ yobuild's takes a row's id (they share one name space).
   and a second provider of one name fails: plugins are trusted code (§6)
   and DSH's own services live in its private home, but this is wider than
   before.
-- **Child plugins:** a rutis plugin cannot start one (its context has no
-  `ctx.plugin`); a DSH plugin, a Cordis plugin, can — and what a child
-  registers through `yoagent` has no row (its owner is "language plugin
-  (session …)"), so it is nobody's: the parent's `allow` does not free it,
-  it asks, and the warning says the plugin must register from its own row
-  (tested).
+- **Child plugins:** a plugin written with the rutis SDK (`definePlugin`)
+  cannot start one (its context has no `ctx.plugin`); a plain Cordis
+  plugin can — a DSH plugin, or a rutis row whose file is a Cordis plugin.
+  A child registers through its parent's row when the parent injects
+  `yoagent`: its tools are the parent's (its code started the child). When
+  the parent does not, the child reaches `yoagent` through no row (other
+  rows of the runtime provide it) — nobody's: the parent's `allow` does not
+  free it, it asks, and the warning says so — or, where no row provides
+  it, never registers (tested for DSH, both ways).
 
 What it does not change: a row is the unit the host can see, not the
 code. A call is its row's even when another plugin's code makes it (a
