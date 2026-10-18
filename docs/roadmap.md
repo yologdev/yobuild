@@ -91,9 +91,11 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
   `[limits] session_budget_usd`, `policy = true` on a plugin; the demos
   as CI tests — the handoff one answering over the page's WebSocket).
 - `ask_owner` as a host service (design §3; #22), so plugins can ask
-  the owner too — rutis plugins (Node) now; pi extensions and DSH plugins
-  once their adapters forward it; Python and Go once it is checked that
-  they can call host services.
+  the owner too — rutis plugins (Node); not pi extensions or DSH plugins
+  (decided 2026-10-18: it would be a yobuild-only API in ecosystems that
+  have none, which their plugins would not run elsewhere with; revisited
+  if a real plugin needs it); Python and Go once it is checked that they
+  can call host services.
 - yoagent-rutis 0.6 and rutis 0.12 (#24, done): pi's nested calls only
   within the calling extension.
 - Who a plugin is: the row the host sees (design §4; #25, and its code):

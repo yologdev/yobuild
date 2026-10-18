@@ -337,9 +337,16 @@ tool does: without waiting.
 - **Not judged by the gate:** asking does nothing the owner has not
   seen; like the tool, it is always allowed. A reset withdraws the open
   questions, as for the tool.
-- **rutis plugins, for now:** a `[[plugin]] rutis = …` plugin calls it
-  directly. pi extensions and DSH plugins use their own ecosystems' APIs;
-  reaching it from them needs adapter support, as the dialogs have (later).
+- **rutis plugins only (decided 2026-10-18):** a `[[plugin]] rutis = …`
+  plugin calls it directly. pi extensions and DSH plugins are not given
+  it: neither ecosystem has a way to ask without waiting (pi's
+  `ctx.ui.select`/`confirm`/`input` and DSH's `userQuestions` block until
+  answered, and those already reach the owner through the adapters), so
+  adapter support would mean a yobuild-only API in each — one no
+  published plugin calls, and that a plugin written against it could not
+  run anywhere else, against yobuild's point of running plugins
+  unchanged. A plugin written for yobuild is a rutis plugin and has the
+  service. Revisited only if a real pi or DSH plugin needs it.
   `yobuild run` starts Node runtimes only (§2); whether Python and Go
   plugins can call host services is checked before they are supported
   (roadmap).
@@ -421,10 +428,11 @@ yobuild's takes a row's id (they share one name space).
   `invoke`. From `plugin:<name>` the question reads "… (asked by plugin
   <name>)", to the owner and in the agent's steer; `from` is then
   ignored (a Warning once a session if it names another plugin, so
-  plugins written for #22 keep working). From the `pi` or `dsh` row — an
-  adapter forwarding the service for its extensions, later — `from` is
-  trusted as the extension's name, as `source` is for pi's tools: "(asked
-  by pi extension <from>)". A call from no row — a plugin that reached the
+  plugins written for #22 keep working). From the `pi` or `dsh` row — were an
+  adapter to forward the service for its extensions, which is not planned
+  (§3: pi and DSH get no `ask_owner`) — `from` is trusted as the
+  extension's name, as `source` is for pi's tools: "(asked by pi
+  extension <from>)". A call from no row — a plugin that reached the
   service without injecting it — is refused.
 - **What `--measure` shows:** rutis handlers by their owner
   (`plugin:<name>`), not the names they chose; the adapters as
@@ -442,8 +450,16 @@ yobuild's takes a row's id (they share one name space).
   service a plugin provides can be injected by another runtime's plugins,
   and a second provider of one name fails: plugins are trusted code (§6)
   and DSH's own services live in its private home, but this is wider than
-  before. Not checked yet: who owns a handler that a child plugin
-  (`ctx.plugin`) registers.
+  before.
+- **Child plugins:** a plugin written with the rutis SDK (`definePlugin`)
+  cannot start one (its context has no `ctx.plugin`); a plain Cordis
+  plugin can — a DSH plugin, or a rutis row whose file is a Cordis plugin.
+  A child registers through its parent's row when the parent injects
+  `yoagent`: its tools are the parent's (its code started the child). When
+  the parent does not, the child reaches `yoagent` through no row (other
+  rows of the runtime provide it) — nobody's: the parent's `allow` does not
+  free it, it asks, and the warning says so — or, where no row provides
+  it, never registers (tested for DSH, both ways).
 
 What it does not change: a row is the unit the host can see, not the
 code. A call is its row's even when another plugin's code makes it (a

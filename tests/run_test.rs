@@ -1059,3 +1059,63 @@ async fn a_call_after_the_policy_plugin_died_is_denied() {
         .any(|(_, m)| m.starts_with("A plugin stopped: the `rutis-0` runtime is not running"));
     assert!(said, "{:?}", ended.notices);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_a_dsh_plugins_child_registers_is_its_parents_only_through_its_row() {
+    // A DSH plugin (a Cordis plugin) starts a child plugin that injects
+    // `yoagent` and registers `shout`. When the parent injects `yoagent`
+    // too, the child registers through the parent's row: the tool is the
+    // parent's, and its `allow` frees it. When it does not, the child
+    // reaches `yoagent` through no row (other rows of the runtime provide
+    // it): the tool is nobody's — it asks (refused with nobody there), and
+    // the Warning says why.
+    if !installed("dsh") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let parent = |inject: &str| {
+        format!(
+            "export const name = 'parent'\n\
+             {inject}\
+             export function apply(ctx: any) {{\n\
+               ctx.plugin({{\n\
+                 name: 'kid',\n\
+                 inject: ['yoagent'],\n\
+                 apply(c: any) {{\n\
+                   c.yoagent.register('kid-tools', {{\n\
+                     async tools() {{ return [{{ name: 'shout', description: 'Shout', parameters: {{ type: 'object', properties: {{}} }} }}] }},\n\
+                     async call_tool() {{ return {{ text: 'HEY' }} }},\n\
+                   }})\n\
+                 }},\n\
+               }})\n\
+             }}\n"
+        )
+    };
+    std::fs::write(
+        dir.path().join("script.json"),
+        r#"[{ "tools": [{ "name": "shout", "arguments": {} }] }, { "text": "done" }]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\ndsh = \"./parent.ts\"\nallow = [\"shout\"]\n",
+    )
+    .unwrap();
+    for (inject, runs) in [("export const inject = ['yoagent']\n", true), ("", false)] {
+        std::fs::write(dir.path().join("parent.ts"), parent(inject)).unwrap();
+        let ended = run_once(dir.path()).await;
+        let ran = results(&ended);
+        assert_eq!(ran.len(), 1, "{ran:?}");
+        let warned = ended.notices.iter().any(|(_, m)| {
+            m.starts_with("plugin parent allows `shout`, but it was offered from no plugin row")
+        });
+        match runs {
+            true => assert!(!ran[0].1 && !warned, "{ran:?} {:?}", ended.notices),
+            false => assert!(
+                ran[0].1 && ran[0].0.contains("not allowed") && warned,
+                "{ran:?} {:?}",
+                ended.notices
+            ),
+        }
+    }
+}
