@@ -58,7 +58,7 @@ paths).
 push). The yoagent-rutis PR above continues alongside M2a (decided
 2026-10-16): M2a does not need it; M2b's `yobuild check` does.
 
-## M2a — Manifest and runner (in progress: the manifest #9, `yobuild run` #11 and #12, measuring #17, allow scoping #18, the examples #23, `ask_owner` for plugins #22, rutis 0.12 #24 done)
+## M2a — Manifest and runner (done: the manifest #9, `yobuild run` #11 and #12, measuring #17, allow scoping #18, the examples #23, `ask_owner` for plugins #22, rutis 0.12 #24, who a plugin is #25–#28)
 
 - Manifest schema (§2 of the design), in TOML (decided 2026-10-16),
   strict parsing, good errors.
@@ -107,7 +107,7 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
 **Done when** `yobuild run handoff.toml --scripted` reproduces today's
 demo, plus the new per-plugin hook time and per-runtime memory lines.
 
-## M2b — Install, lock, check (design §4; decided 2026-10-18; install and lock #30, check #31)
+## M2b — Install, lock, check (done: design #29, install and lock #30, check #31)
 
 - Resolve and install pinned plugins and stdio MCP servers per ecosystem
   into the cache, in up to three sets (`pi`, `dsh` over the DSH adapter's
@@ -134,17 +134,28 @@ demo, plus the new per-plugin hook time and per-runtime memory lines.
 empty `YOBUILD_HOME`) and runs, and `yobuild check` reports the same as
 the compatibility matrix for the plugins it uses.
 
-## M3 — The skill and a gallery
+## M3 — The skill and a gallery (design §11; decided 2026-10-19)
 
-- `SKILL.md` ("build an agent with yobuild"): pick parts by capability
-  (from the measured compatibility list), `yobuild check`, write the
-  manifest, run scripted, then live; what to do when a plugin is refused.
-- Example manifests from plugins that load today:
+- `skill/yobuild/SKILL.md` ("build an agent with yobuild"): ask, pick
+  parts by capability (from the measured compatibility list), write the
+  manifest, `yobuild check`, run scripted, then live; with
+  `reference/manifest.md`, `scripted.md`, `parts.md` and `failures.md`.
+- What to do when a run fails: every failure `check` and `run` give —
+  the built-ins' (the gate, the report, limits and budgets, `ask_owner`,
+  facts, scratch), a policy plugin's, the loop check's, the model's and
+  the session's — what it means and the fix, in `failures.md` and in
+  yobuild itself (`run/hints.rs`: `run` says `what to do: …` after a run
+  that did not complete, and in a Notice; `check` gives each problem its
+  `fix`, its JSON at version 2).
+- The gallery (`gallery/<name>/`, each checked and run scripted in CI),
+  first web research (`pi-web-access`), your MCP server, and the
+  spreadsheet clerk (`dsh-univer-office`, if `check` passes it); then
+  from plugins that load today:
 
   | Agent | Parts |
   |---|---|
   | Spreadsheet clerk | `dsh-univer-office` (14 tools) + ask_owner + report |
-  | Research brief | `pi-web-access` or `dsh-free-search` + `rpiv-todo` |
+  | Web research | `pi-web-access` + ask_owner + report |
   | Code-quality reviewer | `pi-lens` (8 tools) + `@plannotator/pi-extension` |
   | Docs maintainer | `openwiki` (6 tools) + gate on writes |
   | Delegating lead | `pi-subagents` + budget |
@@ -155,12 +166,13 @@ the compatibility matrix for the plugins it uses.
   builds it with the skill, end to end.
 
 **Done when** three agents in the gallery were built through the skill by
-a coding agent, not by hand.
+a coding agent, not by hand, and each is checked and run scripted in CI.
 
 ## M4 — Share
 
 - `yobuild new <name>` (a manifest and a prompt to edit), `cargo install
-  yobuild` (and a prebuilt binary).
+  yobuild` (and a prebuilt binary), `yobuild skill install` (the skill
+  into `~/.claude/skills/`).
 - Running without the repository: the adapters (today `adapters/`,
   copied by `scripts/copy-adapters.sh`) and the terminal UI installed
   into the cache too (design §4).

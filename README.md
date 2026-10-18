@@ -6,7 +6,7 @@ Harness plugins, MCP servers, rutis plugins in Rust, TypeScript, Python or
 Go — plus a few small built-ins of its own, on top of the
 [yoagent](https://github.com/yologdev/yoagent) loop.
 
-> Status: **M2b (install, lock, check).** The built-ins and the frontend
+> Status: **M3 (the skill and a gallery), designed; M2b (install, lock, check) done.** The built-ins and the frontend
 > (`yobuild::builtins`, `yobuild::frontend`, [`frontend/`](frontend/README.md),
 > with its [examples](examples/README.md)), the manifest
 > (`yobuild::manifest`), `yobuild run`, installing pinned plugins
