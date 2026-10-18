@@ -757,8 +757,10 @@ fn a_stale_lock_is_refused_with_locked_and_resolved_again_without() {
         "{written}"
     );
     assert!(
-        !packages.keys().any(|k| k.starts_with("node_modules/@earendil-works/pi-")
-            || k == "node_modules/typebox"),
+        !packages
+            .keys()
+            .any(|k| k.starts_with("node_modules/@earendil-works/pi-")
+                || k == "node_modules/typebox"),
         "{written}"
     );
     // Now current: --locked runs.
