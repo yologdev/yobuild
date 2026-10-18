@@ -127,6 +127,9 @@ fn start() -> Result<ExitCode, BoxError> {
         let code = match ended {
             Err(e) => {
                 eprintln!("yobuild: {e}");
+                if let Some(fix) = yobuild::run::what_to_do_at_start(&e.to_string()) {
+                    eprintln!("  what to do: {fix}");
+                }
                 ExitCode::FAILURE
             }
             // The last run's answer (`--once`: the task's) and how it ended.

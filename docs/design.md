@@ -1161,7 +1161,10 @@ Part of M3 (decided 2026-10-19), not only the skill's `failures.md`.
 The tables help only where the failure is seen. So yobuild says the fix
 too:
 
-- **One table in code**, `run/hints.rs`: a pattern of the reason (inside
+- **One table in code**, `src/hints.rs` (#33; each hint scoped to where
+  its message is seen — a run's stop, its failure or rejection, a refused
+  tool call, a refusal at start — and matched on the message's own fixed
+  text, so no fix is given for another failure): a pattern of the reason (inside
   yoagent's brackets) → what to do. A test runs both ways: each hint's
   pattern matches a real message the tests produce (from the run and
   built-in tests that already make them: a limit, the report, the gate,

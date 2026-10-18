@@ -32,6 +32,9 @@ pub const UI_TIMEOUT: Duration = Duration::from_secs(300);
 /// so a page opened mid-run or after it shows what happened.
 pub const HISTORY: usize = 5000;
 
+/// The error of a run whose agent task failed (no `AgentEnd`).
+pub(crate) const TASK_FAILED: &str = "the run ended unexpectedly: the agent task failed";
+
 /// How long a withdrawal for a question not asked yet is remembered: the
 /// asker's `withdraw` can overtake its own `request` on the way to the host.
 const EARLY_WITHDRAWAL: Duration = Duration::from_secs(60);
@@ -662,10 +665,7 @@ impl Driver {
                         level: NoticeLevel::Error,
                         message: "The agent's run failed unexpectedly (see the host's logs); later runs may be missing tools.".into(),
                     });
-                    (
-                        RunOutcome::Error,
-                        Some("the run ended unexpectedly: the agent task failed".into()),
-                    )
+                    (RunOutcome::Error, Some(TASK_FAILED.into()))
                 }
                 (None, true, _) if aborted => (RunOutcome::Aborted, Some("aborted".into())),
                 (None, true, Some((outcome, message))) => (outcome, Some(message)),

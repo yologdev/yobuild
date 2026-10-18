@@ -160,7 +160,8 @@ pub struct Problem {
 impl Problem {
     fn new(message: impl Into<String>) -> Problem {
         let message = message.into();
-        let fix = crate::hints::hint(&message).map(|h| h.fix.to_owned());
+        let fix =
+            crate::hints::hint(crate::hints::Scope::Start, &message).map(|h| h.fix.to_owned());
         Problem { message, fix }
     }
 }
@@ -1121,6 +1122,13 @@ mod tests {
         assert_eq!(json["entries"][0]["ecosystem"], "dsh");
         assert_eq!(json["entries"][0]["checkedAlone"], true);
         assert_eq!(json["entries"][0]["guidanceChars"], 3);
+        let mut bad = entry("b", Ecosystem::Pi);
+        bad.problems = vec![Problem::new("one")];
+        let json = serde_json::to_value(Report::new(vec![bad], Agent::default())).unwrap();
+        assert_eq!(
+            json["entries"][0]["problems"][0],
+            serde_json::json!({ "message": "one" })
+        );
     }
 
     #[test]
