@@ -398,7 +398,8 @@ package, the `dsh` runtime starts in the set's folder instead of
 
 - A manifest with both DSH files and DSH packages is refused for now:
   "DSH files and DSH packages cannot run together yet: the packages run in
-  the cache, the files in `adapters/dsh`".
+  the cache, the files in `adapters/dsh`". This is one rule on purpose,
+  even when every DSH package is one the base already holds.
 - A DSH package the base already pins (`dsh-free-search`, DSH's
   `dsh-tool-ask-user` and `dsh-user-questions`) adds nothing to the set at
   the same version. At another version it is refused: "pinned by the DSH
@@ -448,13 +449,27 @@ without one. A set whose pins are all gone is removed from the file.
 manifest's pins for that ecosystem, and, for `dsh`, its `base` equals
 the adapter's. A missing or stale set is resolved again in a temp folder:
 
-1. Write the set's `package.json` and `.npmrc`, the same ones the install
-   uses (below). For `dsh` this is the adapter's `package.json` with the
-   packages added, and its lock as the start, so DSH's base stays as the
-   adapter pinned it.
+1. Write the set's `package.json` and `.npmrc` (below). Its `name` is
+   fixed per set (`yobuild-pi`, `yobuild-mcp`; for `dsh`, the adapter's),
+   so agents with the same pins get the same lock and share a folder.
+   - For `dsh`, it is the adapter's `package.json` with the packages
+     added, and the adapter's lock is the start, so DSH's base stays as
+     the adapter pinned it.
+   - For `pi`, it lists the pins plus their peers. yobuild reads each
+     pin's `peerDependencies` (and `peerDependenciesMeta`) with
+     `npm view <name>@<version> --json` and adds each peer that is not
+     pi's own, at its declared range; a peer that is itself pinned keeps
+     the pin, and two ranges for one peer are both written, joined (`a b`,
+     npm's intersection). Only the pins' own peers are added: with
+     `legacy-peer-deps`, a dependency's peers are not installed, and one
+     that needs them fails when imported (`check` shows it). A peer's
+     version is the newest its range allows at the first resolve (e.g.
+     `@juicesharp/rpiv-i18n`, declared `*`), then fixed by the lock.
 2. Run `npm install --package-lock-only`. Nothing is unpacked; it fetches
    package metadata, so it needs the network.
-3. Take the lock's `packages`.
+3. Take the lock's `packages`. Its root entry (`packages[""]`) is the
+   `package.json`: an install writes that file back from it, not worked
+   out again, so `npm ci` finds the two in step.
 
 Only that set changes. The file is rewritten, and an Info notice says
 what changed, packages added and removed ("agent.lock: `pi` resolved
@@ -468,19 +483,25 @@ checked: it never resolves anew unseen. `--locked` still installs a
 current set whose folder is missing, which needs the network or npm's
 cache.
 
-**npm's settings.** Every npm call, resolving or installing, runs in a
-folder whose `.npmrc` sets what decides the result:
+**npm's settings.** The settings that decide the result are passed on
+the command line, which wins over every npm config file and variable:
+`--ignore-scripts`, `--legacy-peer-deps` for `pi` (`=false` otherwise),
+`--package-lock=true`, `--install-strategy=hoisted`, `--strict-peer-deps=false`,
+`--install-links=false`, `--omit=` (nothing omitted), plus `--no-audit
+--no-fund`. The set's `.npmrc` repeats them, for anyone running npm there
+by hand. The child's environment drops every `npm_config_*` variable
+except the registry and its login (`npm_config_registry`,
+`npm_config_//…:_authToken` and the like).
 
-- `ignore-scripts=true`;
-- `legacy-peer-deps=true` for `pi`, false otherwise;
-- `package-lock=true` and `install-strategy=hoisted`.
-
-Every call also passes `--ignore-scripts --no-audit --no-fund
---prefer-offline` on the command line. From the owner's own npm
-configuration, only the registry and its login count (a private
-registry's token stays in the owner's `~/.npmrc`; yobuild neither writes
-nor reads tokens). This way two machines resolve the same pins the same
-way.
+The owner's `~/.npmrc` still applies to what is not passed: the registry
+and its login (a private registry's token stays there; yobuild neither
+writes nor reads tokens), the proxy and certificates, and a few keys
+that could still change a result, which yobuild does not override:
+`before` (resolve as of a date), and `os`/`cpu`/`libc` (which optional
+platform packages `npm ci` installs; the lock still fixes their
+versions). Resolving uses no `--prefer-offline`, so it reads the
+registry's current metadata; installing does use it, since the lock
+fixes every version and npm checks every hash.
 
 **Installing.** A set lives at `~/.yobuild/plugins/<set>/<hash>/`
 (`YOBUILD_HOME` replaces `~/.yobuild`). Every agent whose lock holds the
@@ -510,8 +531,9 @@ A missing folder is made in `<hash>.partial-<random>` beside it:
 4. Write a stamp, then rename the folder into place.
 
 If another yobuild made the same folder first, the rename fails and this
-copy is dropped: the same lock gives the same content. A folder without
-its stamp is not used; it is removed and made again. A `.partial-*`
+copy is dropped: the same lock gives the same content. The stamp is
+written before the rename, so a folder in place without its stamp was
+changed by hand: it is not used, and is removed and made again. A `.partial-*`
 folder older than an hour is removed, since a crashed install leaves one.
 A folder in place is never changed. Deleting `~/.yobuild/plugins` is
 always safe while no agent runs, since every lock can make it again.
@@ -544,11 +566,15 @@ tests.
 fixtures `fake-pi`, and `srv`, the MCP server for the `bin` test). Such
 tests seed a cache instead: a helper writes a set's folder with its stamp
 (the fixture copied into `node_modules/`) and a matching `agent.lock`,
-through the same hash function, in a temp `YOBUILD_HOME`. The "wrong
-version refused" tests become:
+through the same hash function, in a temp `YOBUILD_HOME`; these tests
+run with a current lock, so nothing is resolved. The "wrong version
+refused" tests become two, on a real package from npm
+(`@juicesharp/rpiv-todo`, which the handoff example pins), whose lock is
+seeded at another version:
 
-- `--locked` with a stale set is refused;
-- without it, the set is resolved again and said.
+- `--locked` with that stale set is refused, naming the set;
+- without it, the set is resolved again and the notice says what
+  changed.
 
 The handoff and coding demos install their real packages from npm into a
 temp `YOBUILD_HOME`; CI has the network.
@@ -572,7 +598,7 @@ and no task:
      does. The probe retries a tool refused for sharing a built-in's name
      with that built-in left out (`without`), and calls that a clean
      load. `run` does not retry (the adapter refuses such a tool), so for
-     yobuild a non-empty `without` is a problem: "its tool `read` is
+     yobuild a non-empty `without` is a problem: "its tool `read_file` is
      named like yoagent's built-in: `run` refuses it".
    - **DSH:** `probe::dsh` over the `dsh` set gives its rows, tools,
      prompt guidance, the services its rows inject (present or missing)
