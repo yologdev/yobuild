@@ -170,7 +170,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     let mut runtimes: Vec<(String, PathBuf)> = Vec::new();
     if terminal {
         // The terminal UI reads the keyboard: its runtime keeps the terminal.
+        // Its folder spelled as a rutis package's is (canonical), so one
+        // started from the same folder is seen as that (`--measure`).
         let dir = layout.frontend.join("plugins");
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
         builder = builder.node("ui", &dir).terminal("ui");
         runtimes.push(("ui".into(), dir));
     }
@@ -712,7 +715,7 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
     if manifest.builtins.gate == GateMode::Off && !manifest.plugins.iter().any(|p| p.policy) {
         notes.push(
             "nothing judges tool calls: `gate = \"off\"` and no plugin is `policy = true` \
-             (every call runs, deleting and overwriting included; fine in a sandbox)"
+             (every call runs as the agent asks; fine in a sandbox)"
                 .into(),
         );
     }
