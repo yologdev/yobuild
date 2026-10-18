@@ -30,7 +30,7 @@ Three ways in, one engine:
 |---|---|---|
 | `yobuild run agent.toml` | a person | runs an agent from its manifest |
 | `yobuild check agent.toml` | a person, CI, a coding agent | installs and vets every plugin; reports what each adds and needs, without calling a model |
-| the **skill** (`SKILL.md`) | a coding agent | teaches the method: pick parts, vet, write the manifest, run scripted, then live |
+| the **skill** (`SKILL.md`) | a coding agent | teaches the method: ask, pick parts, write the manifest, vet it, run scripted, then live (§11) |
 
 ## 2. The manifest
 
@@ -934,6 +934,8 @@ in a pty is not yet.
 - `yobuild check --locked` on every example manifest in CI, and the
   handoff demo installing into an empty `YOBUILD_HOME` (M2b's "done
   when").
+- The gallery's agents (§11): each `yobuild check --locked` and run
+  scripted in CI.
 - Manifests with an `[[mcp]]` entry run scripted against a small stdio test
   server, copied from the bash-scripted servers in yoagent's
   `tests/mcp_stdio_test.rs`.
@@ -996,27 +998,45 @@ and the riskiest part of the plan, so it comes last.
 A coding agent (Claude Code first; the files are plain Markdown, so others
 can read them) builds an agent for a person with yobuild. The skill
 teaches it the method. That method is the product's main way in: a person
-describes an agent, and the coding agent picks the parts, vets them,
-writes the manifest, runs it scripted, then live.
+describes an agent, and the coding agent asks, picks the parts, writes
+the manifest, vets it, runs it scripted, then live.
 
 **Where it lives.** `skill/yobuild/` in this repository, in Claude Code's
 skill layout:
 
-- `SKILL.md`: short — when to use it, the method, the rules. Its
-  frontmatter `description` names what triggers it ("build an agent",
-  "an agent that …", "run plugins from pi or DSH as an agent").
-- `reference/manifest.md`: every manifest key, with the example manifests
-  as patterns.
+- `SKILL.md`: short — what the skill does and when to use it, the method,
+  the rules. Its frontmatter has `name: yobuild` (lowercase and hyphens,
+  as the folder) and a `description` saying what it does and when to use
+  it ("build an agent", "an agent that …", "run plugins from pi or DSH as
+  an agent"), short: until the skill triggers, the description is all a
+  coding agent loads.
+- `reference/manifest.md`: every manifest key, with the example
+  manifests as patterns.
+- `reference/scripted.md`: the `--scripted` reply file (a JSON list of
+  `{ "text": … }` or `{ "tools": [{ "name", "arguments" }] }`, nothing
+  else) and its traps: with `report`, the last reply must hold every
+  section name, else the continues use the replies up and the run ends
+  `Error` ("(no more mock responses)"); `ask_owner`'s questions are never
+  answered under `--once`.
 - `reference/parts.md`: capabilities → parts — the built-ins first, then
-  plugins that load (from the compatibility matrix, each pinned at a
-  version `yobuild check` passed), then MCP servers.
-- `reference/failures.md`: every failure `check` and `run` can give, what
-  it means and what to do (below).
+  plugins that load, then MCP servers. Each plugin row names the version
+  `yobuild check` passed and the date; the gallery's CI checks the ones
+  it uses, the rest are as of that date.
+- `reference/failures.md`: every failure `check` and `run` give, what it
+  means and what to do (below).
 
-`SKILL.md` links the references, so a coding agent reads them only when
-it needs them. Installed by copying the folder into `~/.claude/skills/`
-or a project's `.claude/skills/` (the README says how); `yobuild skill
-install` is M4's, with the rest of running without the repository.
+`SKILL.md` links each reference by its path, relative and one level
+deep, so a coding agent reads one only when it needs it. Installed by
+copying the folder into `~/.claude/skills/` or a project's
+`.claude/skills/` (the README says how); `yobuild skill install` comes
+with M4's install (roadmap M4).
+
+**A working `yobuild`.** Until M4, `yobuild` runs from a checkout of this
+repository, set up once (`scripts/try-coding-agent.sh --setup-only`: the
+adapters, the frontend's plugins), and is called by path
+(`path/to/yobuild/target/debug/yobuild`, or `cargo run --manifest-path
+path/to/yobuild/Cargo.toml -- …`) from the agent's own folder. `SKILL.md`
+says so first.
 
 **The method `SKILL.md` teaches:**
 
@@ -1026,95 +1046,154 @@ install` is M4's, with the rest of running without the repository.
 2. **Pick parts by capability**, fewest first: the built-ins (`ask_owner`
    for questions without waiting, `report` for a required ending, `facts`
    for what changed, the gate, a scratch folder, `tools = "read-only"`),
-   then a plugin from `reference/parts.md`, then an MCP server. Nothing
-   that `parts.md` does not list as loading, unless `check` passes it.
+   then a plugin from `reference/parts.md`, then an MCP server.
 3. **Write** the manifest and its prompt file. Pin exact versions (`npm
-   view <package> version`); `allow` only tools that read or plan; never
-   a secret in the file (`${NAME}` from the environment); a budget.
-4. **Check**: `yobuild check agent.toml --json`, until `ok` is true. Each
-   problem has a fix (`reference/failures.md`, and the `fix` the report
-   gives); each note is read and decided on.
-5. **Run scripted**: a reply file (`--scripted`) that calls the tools the
-   task needs; `yobuild run agent.toml --scripted script.json --once
-   "<task>"`. Expect every tool call ✓ (or ✗ where the gate should ask)
-   and `Completed`.
+   view <package> version`); `allow` only tools that read or plan (never
+   `bash` or the writers: the gate judges those call by call); never a
+   secret in the file (`${NAME}` from the environment); a budget.
+4. **Check**: `yobuild check agent.toml --json`. When it prints nothing on
+   stdout, an error stopped it before anything started — read stderr
+   (`yobuild: …`), which names the file, the entry or the setting. Else
+   fix each problem (`reference/failures.md`; once `run/hints.rs` lands,
+   each problem carries its `fix`) and decide on each note, until `ok` is
+   true.
+5. **Run scripted** (`reference/scripted.md`): a reply file that calls
+   the tools the task needs; `yobuild run agent.toml --scripted
+   script.json --once "<task>"`. Expect every tool call ✓ — or ✗ where
+   the gate should ask: under `--once` nobody answers, so `bash` and the
+   writers are refused unless the scratch frees them — and `Completed`.
 6. **Run live**, after asking the person (it costs money): the provider's
    key in the environment; `yobuild run agent.toml`; tell the person how
-   to answer the agent's questions. Commit the manifest, its lock and the
-   prompt.
-7. **When a run fails**, read how it ended (the last lines, or the
-   outcome), find it in `reference/failures.md`, change the manifest or
-   the prompt, and run again — scripted first.
+   to answer the agent's questions. Commit the manifest, its lock, the
+   prompt and the reply file.
+7. **When a run fails**, read how it ended (`--once`: the outcome on
+   stdout; else `yobuild: the last run ended …` on stderr), find it in
+   `reference/failures.md`, change the manifest or the prompt, and run
+   again — scripted first.
 
 **The rules:** never `gate = "off"` unless the agent runs in a sandbox;
-never write a secret into a file; never install into `adapters/` or edit
-a lock by hand (yobuild resolves it); never skip `check`; ask before a
-live run.
+never write a secret into a file; never add plugin packages to
+`adapters/` or edit a lock by hand (yobuild installs pinned plugins into
+its cache from the lock it writes); never skip `check`; ask before a live
+run.
 
-### When a run fails: what each part says and what to do
+### When a run fails: what each says and what to do
 
-A failure is one of three kinds. **Refused before anything starts**: an
-error, exit 1, nothing ran — the message names the file, the entry, or
-the setting. **Refused at start**: a plugin `run` could not start — the
-same in `check`. **Stopped or refused during a run**: a run ended other
-than `Completed`, or a tool call was refused — the agent and the owner
-see it, and `run` exits 1 if the last run did not complete.
+A failure is one of three kinds:
 
-The built-ins, in the third kind, are the ones a person meets most:
+- **Refused before anything starts**: an error on stderr (`yobuild: …`),
+  exit 1, no agent started (packages may have been installed — never
+  with their scripts). The message names the file, the entry or the
+  setting. `check` gives the same error, and no report.
+- **Refused at start**: a plugin, a server or a built-in `run` could not
+  start (`check`: the agent `refused`).
+- **During a run**: the run ended other than `Completed`, or a tool call
+  was refused, or a Notice said something stopped. The agent and the
+  owner see it; `run` exits 1 when the last run did not complete.
 
-| Part | What it says | What it means | What to do |
+How a run ended is `Completed`, `Stopped: …`, `Error: …`, `Rejected: …`
+or `Aborted: …` (`--once`'s last line; the page's `runEnd`). A stop by a
+limit, a budget or the loop check is yoagent's marker:
+`[Agent stopped: <reason>]`. A built-in that fails the run is
+`[Extension failed: <name>] <reason>`. The tables quote the reason inside
+those brackets; `run/hints.rs` matches the reason, so its patterns hold
+whatever wraps them.
+
+**During a run — the built-ins, the gate's policy plugins and the loop:**
+
+| Part | What it says | Where | What it means | What to do |
+|---|---|---|---|---|
+| gate | `Tool call denied: the owner blocked it` | the tool's result | the owner answered Block | nothing, if meant |
+| gate | `Tool call denied: not allowed: the owner declined, or nobody answered` | the tool's result | no frontend, or the question timed out; under `--once` nobody is ever there | open the page (or the terminal) and answer. A plugin's or server's tool that only reads or plans: `allow` it on its entry. `bash`, `write_file`/`write`, `edit_file`/`edit` cannot be allowed: the gate judges each call; with `[builtins] scratch = true` (off by default) what the agent writes in the scratch folder is free |
+| gate (an `allow` that did nothing) | Warning `plugin A allows \`x\`, but it was offered by \`plugin:B\`, not by it: the tool asks`, or `… which no plugin offered` | a Notice after the first run | a plugin's allowed tool is freed only when its own row offers it | fix the name, or allow it on the entry that offers it (`yobuild check` says which before a run) |
+| policy plugin | `Tool call denied: no plugin policy is loaded to judge this call` | the tool's result | `policy = true`, and the plugin that judges calls went away mid-session (at start, `run` waited for it) | restart; the Error Notice `A plugin stopped: …` and the log say why it went |
+| policy plugin | `plugin handler \`X\` is no longer available: its plugin unloaded` | the tool's result | the same: its runtime died or it was unloaded | as above |
+| policy plugin | `plugin handler \`X\` did not answer \`before_tool\` within …` | the tool's result | the policy took longer than its wait (the dialogs' plus 30 s) | answer its question sooner; the plugin may hang |
+| policy plugin | its own reason (e.g. `confirm-dangerous.ts`'s Block) | the tool's result | the policy refused the call | as the policy says |
+| plugins | `a required plugin handler failed this run: …` | the tool's result | a plugin's hook failed | the log; `yobuild check` |
+| plugins | `the plugin host is not running (…)` | the tool's result; input `Rejected` | the plugin host shut down | restart |
+| plugins | Error Notice `A plugin stopped: …`, `the \`X\` runtime is not running (its plugins wait: …)` | a Notice | a plugin or its runtime died | the log; restart |
+| report | `[Extension failed: report] the answer was still not accepted after 3 continues` | `Error` | the last answer never named every required section (checked anywhere in it, any case; the prompt already asks for them) | a model that follows the prompt better; fewer, plainer section names (`report = ["Done", "Next"]`); or remove `report`. Scripted: the last reply must name them |
+| limits | `[Agent stopped: Max turns reached (50/50)]` (also `Max tokens reached`, `Max duration reached`) | `Stopped` | the run hit its limit — yoagent's defaults (50 turns, 1M tokens, 10 min) when `[limits]` sets none | send "continue": a new run, with fresh limits (not under `--once`, which ends after one run); or raise `max_turns`/`max_tokens`/`max_minutes` |
+| budget | `[Agent stopped: budget of $1.00 spent ($1.0012)]` | `Stopped` | the run's `budget_usd` | as limits: each run has its own |
+| session budget | `[Agent stopped: session budget of $2.00 spent (…)]` | `Stopped` | all the session's runs together | "continue" stops at once (the session's total stays spent); restart — which starts a new conversation: the history lives in the process — or raise `session_budget_usd` |
+| loop | `[Agent stopped: repeated tool call — X was called repeatedly with identical arguments after being asked to change approach.]` | `Stopped` | the agent called one tool with the same arguments over and over | change the prompt, or what the tool returns; send "continue" |
+| ask_owner | a question open (with `facts`: `; 1 question(s) waiting on you`) | the facts line | the owner has not answered | answer in the page or the terminal: during a run the answer steers it; when idle it starts the next run |
+| facts | `Stopped early: <reason>. Send "continue" to pick up where it left off.` | a Warning Notice | any `Stopped` run | right for limits and loops; after a session budget, restart instead (facts will say so, see below) |
+
+**Not failures, though they read like one:** facts' `not a git
+repository`, `changes unknown: no snapshot at the start (git: …)`,
+`changes since the start unknown (git: …)` are Info: facts cannot tell
+what changed (`git init` the folder for facts to). `[builtins] ask_owner
+is off` is the error a plugin's own `ask_owner` call gets: the person sees
+it only if the plugin shows it (`ask_owner = true` to let it ask).
+
+**During a run — the model and the session:**
+
+| What it says | How it ended | What it means | What to do |
 |---|---|---|---|
-| gate | `Tool call denied: the owner blocked it` | the owner answered Block | nothing, if meant; else answer Allow next time |
-| gate | `not allowed: the owner declined, or nobody answered` | no frontend, or the question timed out; with `--once` nobody is ever there | open the page and answer; for a tool that only reads or plans, `allow` it on its entry; `[builtins] scratch` frees what the agent makes there |
-| policy plugin | `no plugin policy is loaded to judge this call` | `policy = true`, and the plugin judging calls is not up | `yobuild check`; its runtime may have stopped ("A plugin stopped: …") |
-| policy plugin | `plugin handler … is no longer available` | the policy plugin's runtime died mid-session | the log names why; restart the agent |
-| report | `the answer was still not accepted after 3 continues` | the model never ended with the required sections | name the sections in the prompt; fewer or plainer section names (`report = ["Done", "Next"]`); or `report` off |
-| limits | `Stopped: Max turns reached (80/80)` (also tokens, duration) | the run hit `[limits] max_turns` (`max_tokens`, `max_minutes`) | send "continue" (a new run, the same limits); or raise the limit |
-| budget | `Stopped: budget of $1.00 spent ($1.0012)` | the run's `budget_usd` | as limits |
-| session budget | `Stopped: session budget of $2.00 spent (…)` | every run of the session together | a new session (restart); or raise `session_budget_usd` |
-| loop | `Not executed: the run was stopped for repeating …` | yoagent stopped a tool called over and over | change the prompt or the tool; send "continue" |
-| ask_owner | a question left open (facts: `1 question(s) waiting on you`) | the owner has not answered | answer it in the page; the answer arrives as the next run's steer |
-| ask_owner (a plugin asking) | `[builtins] ask_owner is off` | a plugin asked through the service | `ask_owner = true` |
-| facts | `changes unknown (git: …)`, `not a git repository` | facts cannot tell what changed | informational; `git init` the folder for facts |
-| scratch | `cannot make the scratch folder …` | the temp folder is not writable | fix `TMPDIR`, or `scratch = false` |
-| terminal UI | `the terminal UI stopped: …` | its runtime died | the log file it names |
+| the provider's error (a bad key: 401; a rate limit: 429; the network) | `Error: …` | the model could not be asked | the key's variable (`yobuild run` names it when missing); wait and send again; the network |
+| `input rejected: …` | `Rejected: …` | an extension refused the prompt (the plugin host not running, above) | as its reason says |
+| `stopped with Ctrl+C` | `Aborted: …` | the person stopped it | nothing |
+| `The agent's run failed unexpectedly (see the host's logs); later runs may be missing tools.` | `Error` | the agent loop panicked | the log; restart |
+| `the terminal UI stopped: …` | exit 1 | the terminal UI's runtime died | the log file it names |
 
-`reference/failures.md` has this table and the other two kinds: every
-manifest error's form (`file:line:col: message`), a missing key, an
-unpriced budget, the prompt, the lock (`--locked`, an incomplete lock
-from an old npm, a version not on the registry), a plugin `plan` refuses
-(not installed, a DSH base pin, DSH files beside packages), DSH services
-nobody provides (`[dsh] host_services`), a policy's judge that never
-registers (does it inject `yoagent`?), an MCP server with no tools or an
-`allow` it does not list.
+**Refused at start:** a DSH plugin waiting for services nobody provides
+(`[dsh] host_services = true`, or install the peer the hint names); a
+policy plugin whose judge never registers (does it inject `yoagent`?); an
+MCP server with no tools, or an `allow` naming a tool it does not list; a
+plugin that fails to load; `cannot make the scratch folder …` (the temp
+folder is not writable: fix `TMPDIR`, or `scratch = false`).
+
+**Refused before anything starts:** every manifest error
+(`file:line:col: message`); a missing key (`… needs its key in VAR`); a
+budget for an unpriced model; the prompt (missing, or `{scratch}` without
+the scratch); the lock (`--locked: run without it to resolve the set
+again`; an incomplete lock from an old npm: upgrade npm; a version not on
+the registry); what `plan` refuses (not installed, a DSH pin the base
+holds at another version, DSH files beside DSH packages).
+`reference/failures.md` lists each with its fix.
 
 ### Making failures actionable in yobuild itself
 
-The table is useful only where the failure is seen. So yobuild says the
-fix too:
+The tables help only where the failure is seen. So yobuild says the fix
+too:
 
-- **One table in code**, `run/hints.rs`: a message's pattern → what to
-  do. `reference/failures.md` is checked against it by a test (each hint
-  appears there), so the two cannot drift.
+- **One table in code**, `run/hints.rs`: a pattern of the reason (inside
+  yoagent's brackets) → what to do. A test runs both ways: each hint's
+  pattern matches a real message the tests produce (from the run and
+  built-in tests that already make them: a limit, the report, the gate,
+  a session budget), and appears in `reference/failures.md`; and each
+  row of `failures.md` that names a fix has a hint. A yoagent upgrade
+  that rewords a message fails that test.
 - **`run`**: when the last run did not complete, the line that says so
-  (`yobuild: the last run ended Stopped: Max turns reached (80/80)`, and
-  `--once`'s outcome) is followed by `  what to do: …`. A run stopped by
-  a built-in also gets a Notice with the fix, so the page shows it (facts
-  already says `Send "continue"`; the rest follow).
-- **`check`**: each problem with a hint gets it: `fix` in `--json`, a
-  `  fix: …` line in the text. Errors before anything starts keep their
-  own wording, which already names the fix in most cases ("needs its key
-  in DEEPSEEK_API_KEY", "run without --locked to resolve the set again");
-  the few that do not gain one.
+  (`yobuild: the last run ended Stopped: [Agent stopped: Max turns
+  reached (50/50)]`, and `--once`'s outcome) is followed by `  what to
+  do: …`. A run that ends `Stopped` or `Error` gets the same as a Notice,
+  so the page shows it. Facts' `Send "continue"` becomes the hint's
+  (after a session budget: restart).
+- **`check`**: each problem with a hint gets it. In `--json`, problems
+  become objects, `{ "message", "fix" }` (`fix` absent when there is
+  none), and the report's `version` becomes 2; in the text, a `  fix: …`
+  line under the problem. Errors before anything starts keep their own
+  wording, which names the fix in most cases (`needs its key in
+  DEEPSEEK_API_KEY`, `--locked: run without it to resolve the set
+  again`); the few that do not gain one.
 
 ### The gallery
 
 Agents built through the skill by a coding agent (M3's "done when": three
-of them), each in `gallery/<name>/`: the manifest, its prompt, its lock, a
-scripted reply file, and a README (what it does, how to run it). Each is
-`yobuild check --locked` and run scripted in CI, as the examples are.
-First three, from parts known to load: **research brief**
-(`dsh-free-search` + `rpiv-todo`, report), **your MCP server** (an
-`[[mcp]]` entry, e.g. the filesystem server, + `ask_owner`), and one
-from a plugin new to yobuild (the spreadsheet clerk, `dsh-univer-office`,
-if `check` passes it; else the next from the roadmap's list).
+of them), each in `gallery/<name>/`: the manifest, its prompt, its lock,
+a scripted reply file, and a README (what it does, how to run it). Each
+is `yobuild check --locked` and run scripted in CI, as the examples are
+(§8). Agents yobuild's own repository holds; others' agents, shared, are
+M4's (vision). The first three, each showing something the examples do
+not:
+
+- **Web research** — `pi-web-access` (a pi package new to yobuild) +
+  `ask_owner` + `report`: a brief on a question, sources cited.
+- **Your MCP server** — an `[[mcp]]` entry (the filesystem server, its
+  read tools allowed) + `ask_owner`: the pattern for any server.
+- **Spreadsheet clerk** — `dsh-univer-office` (a DSH package new to
+  yobuild) + `ask_owner` + `report`, if `check` passes it; else the next
+  from the roadmap's list.
