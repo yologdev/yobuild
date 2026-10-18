@@ -715,6 +715,57 @@ fn the_minimal_example_reads_and_completes() {
 }
 
 #[test]
+fn the_minimal_example_reads_only_inside_its_folder() {
+    use serde_json::{json, Value as Json};
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("in.txt"), "inside").unwrap();
+    std::fs::write(dir.path().join("out.txt"), "outside").unwrap();
+    let ex = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    // Each call in its own turn, in this order.
+    let calls = [
+        ("read_file", json!({ "path": "in.txt" })),
+        ("read_file", json!({ "path": "../out.txt" })),
+        ("read_file", json!({ "path": dir.path().join("out.txt") })),
+        ("list_files", json!({ "path": dir.path() })),
+        (
+            "search",
+            json!({ "pattern": "outside", "path": dir.path() }),
+        ),
+        ("bash", json!({ "command": "cat ../out.txt" })),
+    ];
+    let mut script: Vec<Json> = calls
+        .iter()
+        .map(|(name, arguments)| json!({ "tools": [{ "name": name, "arguments": arguments }] }))
+        .collect();
+    script.push(json!({ "text": "done" }));
+    let script_path = dir.path().join("script.json");
+    std::fs::write(&script_path, Json::Array(script).to_string()).unwrap();
+    let out = yobuild(
+        &[
+            "run",
+            &ex.join("minimal.toml").display().to_string(),
+            "--scripted",
+            &script_path.display().to_string(),
+            "--once",
+            "look",
+        ],
+        &project,
+    );
+    let stderr = text(&out.stderr);
+    let marks: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("  ") && (l.contains(" ✓") || l.contains(" ✗")))
+        .collect();
+    assert_eq!(marks.len(), 6, "{stderr}");
+    assert!(marks[0].starts_with("  read_file ✓"), "{marks:?}");
+    for refused in &marks[1..] {
+        assert!(refused.contains(" ✗"), "{marks:?}");
+    }
+}
+
+#[test]
 fn the_coding_examples_policy_blocks_a_deletion_with_nobody_there() {
     let Some(ex) = examples() else { return };
     let dir = tempfile::tempdir().unwrap();
@@ -762,10 +813,29 @@ async fn the_handoff_example_asks_without_waiting_and_the_answer_starts_the_next
     let mut facts = Vec::new();
     let mut ended = 0;
     let mut second_prompt = None;
+    let mut ran = Vec::new();
+    let mut ui_plugins = serde_json::Value::Null;
     while ended < 2 {
         let m = page.next().await;
         match m["type"].as_str() {
-            Some("uiRequest") => question = Some(m["id"].clone()),
+            Some("hello") => ui_plugins = m["uiPlugins"].clone(),
+            Some("uiPlugins") => ui_plugins = m["uiPlugins"].clone(),
+            Some("uiRequest") => {
+                // The agent's question, the only one: a gate question here
+                // would mean an allowed tool asked.
+                assert!(question.is_none(), "a second question: {m}");
+                let shown = m["request"].to_string();
+                assert!(shown.contains("bullet list"), "{m}");
+                question = Some(m["id"].clone());
+            }
+            Some("event") if m["event"]["type"] == "toolExecutionEnd" => {
+                let tool = m["event"]["toolName"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                assert_eq!(m["event"]["isError"], false, "{tool} failed: {m}");
+                ran.push(tool);
+            }
             Some("notice") => facts.push(m["message"].as_str().unwrap_or_default().to_owned()),
             Some("runStart") if ended == 1 => {
                 second_prompt = m["prompt"].as_str().map(str::to_owned)
@@ -783,6 +853,13 @@ async fn the_handoff_example_asks_without_waiting_and_the_answer_starts_the_next
             _ => {}
         }
     }
+    // Every scripted call ran: the plan (a pi tool the manifest allows),
+    // the question, reading, writing.
+    for tool in ["todo", "ask_owner", "list_files", "write_file"] {
+        assert!(ran.iter().any(|t| t == tool), "{tool} did not run: {ran:?}");
+    }
+    // The todo-plan UI plugin (a rutis plugin of frontend/plugins) is up.
+    assert!(ui_plugins.to_string().contains("todo-plan"), "{ui_plugins}");
     let second = second_prompt.unwrap_or_default();
     assert!(second.starts_with("[Owner's answer to #1]"), "{second}");
     assert!(dir.path().join("notes.md").exists(), "run 2 wrote notes.md");

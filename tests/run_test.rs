@@ -689,3 +689,47 @@ async fn a_plugin_tool_the_entry_allows_runs_and_one_it_does_not_offer_is_a_warn
         ["plugin fixture-tools offered no tool `fixture_ech`, which its `allow` names (a typo, or a tool it offers only in some runs)"]
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_a_policy_plugin_calls_are_denied_while_none_judges_them() {
+    // A rutis plugin that judges no calls (no `before_tool`), marked as the
+    // agent's policy: with nothing judging, the call is denied, not run
+    // unjudged. Unmarked, the same call runs.
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins/node_modules");
+    if !runtime.join("@arcships/rutis-runtime").is_dir() {
+        if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
+            panic!("the rutis runtime is required: npm ci in frontend/plugins");
+        }
+        eprintln!("SKIPPED: npm ci in frontend/plugins");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(&runtime, dir.path().join("node_modules")).unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    std::fs::write(
+        dir.path().join("idle.ts"),
+        "import { definePlugin } from '@arcships/rutis'\n\
+         export default definePlugin({ apply() {} })\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        r#"[{ "tools": [{ "name": "list_files", "arguments": { "path": "." } }] }, { "text": "done" }]"#,
+    )
+    .unwrap();
+    for (policy, denied) in [(true, true), (false, false)] {
+        std::fs::write(
+            dir.path().join("agent.toml"),
+            format!(
+                "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
+                 [[plugin]]\nrutis = \"./idle.ts\"\nruntime = \"node\"\npolicy = {policy}\n\
+                 [builtins]\ngate = \"off\"\n"
+            ),
+        )
+        .unwrap();
+        let ended = run_once(dir.path()).await;
+        let ran = results(&ended);
+        assert_eq!(ran.len(), 1, "{ran:?}");
+        assert_eq!(ran[0].1, denied, "policy = {policy}: {ran:?}");
+    }
+}

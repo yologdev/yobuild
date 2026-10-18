@@ -612,15 +612,32 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
         .limits
         .budget_usd
         .and_then(|usd| Budget::for_model(usd, &config));
+    // Named apart: a run stopped by one says which ("session budget of $2.00
+    // spent").
     let session_budget = manifest
         .limits
         .session_budget_usd
         .and_then(|usd| Budget::for_model(usd, &config))
-        .map(Budget::across_runs);
-    let unpriced = (manifest.limits.budget_usd.is_some() && budget.is_none())
-        || (manifest.limits.session_budget_usd.is_some() && session_budget.is_none());
-    if unpriced {
-        notes.push("the budget is not kept: a scripted model has no price".into());
+        .map(|b| b.across_runs().with_name("session budget"));
+    let unpriced: Vec<&str> = [
+        (manifest.limits.budget_usd.is_some() && budget.is_none()).then_some("budget_usd"),
+        (manifest.limits.session_budget_usd.is_some() && session_budget.is_none())
+            .then_some("session_budget_usd"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !unpriced.is_empty() {
+        let which = unpriced.join(" and ");
+        match provider {
+            Some(_) => notes.push(format!("{which} not kept: a scripted model has no price")),
+            // The manifest found a price; the run must too, or the limit is
+            // not kept unsaid.
+            None => {
+                let model = format!("{}/{}", model.provider(), model.id());
+                return Err(format!("{which}: {model} has no price here").into());
+            }
+        }
     }
 
     let prompt = Prompt::read(manifest)?;
@@ -1238,6 +1255,21 @@ fn lan_ip() -> Option<std::net::IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_is_reading_listing_and_searching_only() {
+        let names = |set| -> Vec<String> {
+            tools_for(set, Path::new("/p"))
+                .iter()
+                .map(|t| t.name().to_owned())
+                .collect()
+        };
+        assert_eq!(
+            names(ToolSet::ReadOnly),
+            ["read_file", "list_files", "search"]
+        );
+        assert!(names(ToolSet::Coding).contains(&"bash".to_owned()));
+    }
 
     fn manifest(dir: &Path, text: &str) -> Manifest {
         Manifest::parse(

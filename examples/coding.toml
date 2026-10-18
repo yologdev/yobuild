@@ -13,7 +13,8 @@ prompt = "./prompts/coding.md"
 
 [[plugin]]
 pi     = "../frontend/plugins/pi-extensions/confirm-dangerous.ts"
-policy = true   # no run goes on unguarded: without it up, every call is denied
+policy = true   # calls are denied, not run unjudged, while no plugin judges them
+                # (the pi runtime down, say; it counts any plugin that judges calls)
 
 [[plugin]]
 rutis   = "../frontend/plugins/search-links.ts"

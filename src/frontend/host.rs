@@ -61,6 +61,11 @@ impl Row {
         &self.config
     }
 
+    #[cfg(test)]
+    pub(crate) fn runtime_name(&self) -> Option<&str> {
+        self.runtime.as_deref()
+    }
+
     pub fn new(id: impl Into<String>, name: impl ToString) -> Self {
         Row {
             id: id.into(),

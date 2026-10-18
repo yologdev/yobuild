@@ -423,13 +423,30 @@ fn optional_peers(dir: &Path) -> Result<HashSet<String>, BoxError> {
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let manifest: Json =
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(manifest["peerDependenciesMeta"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter(|(_, meta)| meta["optional"] == Json::Bool(true))
-        .map(|(name, _)| name.clone())
-        .collect())
+    let meta = match &manifest["peerDependenciesMeta"] {
+        Json::Null => return Ok(HashSet::new()),
+        Json::Object(meta) => meta,
+        _ => {
+            return Err(format!("{}: peerDependenciesMeta is not an object", path.display()).into())
+        }
+    };
+    let mut optional = HashSet::new();
+    for (name, entry) in meta {
+        match entry.get("optional") {
+            None | Some(Json::Bool(false)) => {}
+            Some(Json::Bool(true)) => {
+                optional.insert(name.clone());
+            }
+            Some(other) => {
+                return Err(format!(
+                    "{}: peerDependenciesMeta {name}: optional is {other}, not true or false",
+                    path.display()
+                )
+                .into())
+            }
+        }
+    }
+    Ok(optional)
 }
 
 /// The rows of what DSH would install (`inspected`, from
@@ -821,6 +838,19 @@ mod tests {
             optional_peers(dir.path()).unwrap(),
             ["@d/ui".to_owned()].into()
         );
+        // Another shape is an error, not "none optional".
+        for (meta, said) in [
+            (r#""yes""#, "is not an object"),
+            (
+                r#"{ "@d/ui": { "optional": "true" } }"#,
+                "optional is \"true\"",
+            ),
+        ] {
+            let text = format!(r#"{{ "peerDependenciesMeta": {meta} }}"#);
+            std::fs::write(dir.path().join("package.json"), text).unwrap();
+            let e = optional_peers(dir.path()).unwrap_err().to_string();
+            assert!(e.contains(said), "{e}");
+        }
     }
 
     #[test]
@@ -835,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rutis_plugin_runs_beside_the_manifest_with_the_rutis_runtime() {
+    fn a_rutis_plugin_runs_in_its_packages_runtime_one_per_package() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("p.ts"), "").unwrap();
         // No package above it: refused.
@@ -863,6 +893,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.rutis, [dir.path().canonicalize().unwrap()]);
+        // Two plugins of one package (one by another spelling) share its
+        // runtime; another package's has its own.
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(other.join("node_modules")).unwrap();
+        copy_dir(
+            &dir.path().join("node_modules"),
+            &other.join("node_modules"),
+        );
+        std::fs::write(other.join("package.json"), "{}").unwrap();
+        std::fs::write(other.join("q.ts"), "").unwrap();
+        std::fs::write(dir.path().join("r.ts"), "").unwrap();
+        let three = plan_of(
+            dir.path(),
+            "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\n\
+             [[plugin]]\nrutis = \"./other/q.ts\"\nruntime = \"node\"\n\
+             [[plugin]]\nrutis = \"./other/../r.ts\"\nruntime = \"node\"\n",
+        )
+        .unwrap();
+        let canonical = |p: &Path| p.canonicalize().unwrap();
+        assert_eq!(three.rutis, [canonical(dir.path()), canonical(&other)]);
+        let runtimes: Vec<&str> = three
+            .rows
+            .iter()
+            .map(|r| r.runtime_name().unwrap())
+            .collect();
+        assert_eq!(runtimes, ["rutis-0", "rutis-1", "rutis-0"]);
         // `..` is resolved before looking up: a folder the path names on
         // its way is not the plugin's package.
         // (The runtime taken away, so the refusal names the folder.)
@@ -901,5 +957,19 @@ mod tests {
         let plan = plan_of(&link, "[[plugin]]\npi = \"./p.ts\"\n").unwrap();
         let canonical = std::fs::canonicalize(real.path().join("p.ts")).unwrap();
         assert_eq!(plan.pi_files, [("p".to_owned(), vec![canonical])]);
+    }
+
+    /// Copies a folder of files and folders (no links).
+    fn copy_dir(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
     }
 }
