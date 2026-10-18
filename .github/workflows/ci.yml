@@ -36,6 +36,8 @@ jobs:
           cache-dependency-path: |
             frontend/plugins/package-lock.json
             Cargo.lock
+      - name: Node and npm versions
+        run: node --version && npm --version
       - name: Copy the adapters of the yoagent-rutis crate (adapters/)
         run: scripts/copy-adapters.sh
       - name: Install the npm packages

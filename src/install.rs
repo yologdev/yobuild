@@ -442,14 +442,30 @@ fn npm(dir: &Path, args: &[String]) -> Result<String, BoxError> {
     let stdout = String::from_utf8_lossy(&stdout.join().unwrap_or_default()).into_owned();
     let stderr = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
     if !status.success() {
-        let tail: Vec<&str> = stderr.trim().lines().rev().take(15).collect();
-        let tail: Vec<&str> = tail.into_iter().rev().collect();
-        return Err(failed(&tail.join("\n")).into());
+        return Err(failed(&npm_error(&stderr)).into());
     }
     if !stderr.trim().is_empty() {
         tracing::debug!("npm {} in {}: {}", args[0], dir.display(), stderr.trim());
     }
     Ok(stdout)
+}
+
+/// What npm said went wrong: its message up to the usage text it prints
+/// after a misuse (`npm error Usage:` and the option list), at most 20 lines;
+/// the whole log stays in npm's own log file, which it names last.
+fn npm_error(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr.trim().lines().collect();
+    let usage = lines
+        .iter()
+        .position(|l| l.trim_start_matches("npm error").trim() == "Usage:")
+        .unwrap_or(lines.len());
+    let mut said: Vec<&str> = lines[..usage].iter().take(20).copied().collect();
+    if let Some(log) = lines.iter().rev().find(|l| l.contains("complete log")) {
+        if !said.contains(log) {
+            said.push(log);
+        }
+    }
+    said.join("\n")
 }
 
 /// pi's own packages, which the adapter supplies: never installed in the
@@ -967,6 +983,15 @@ mod tests {
         assert!(!npm_variable_kept("npm_config_legacy_peer_deps"));
         assert!(!npm_variable_kept("NPM_CONFIG_BEFORE"));
         assert!(!npm_variable_kept("npm_config_omit"));
+    }
+
+    #[test]
+    fn npm_errors_keep_their_message_not_the_usage() {
+        let stderr = "npm error code EUSAGE\nnpm error\nnpm error `npm ci` can only install when in sync.\nnpm error\nnpm error Usage:\nnpm error npm ci\nnpm error   --install-links\nnpm error A complete log of this run can be found in: /x.log\n";
+        assert_eq!(
+            npm_error(stderr),
+            "npm error code EUSAGE\nnpm error\nnpm error `npm ci` can only install when in sync.\nnpm error\nnpm error A complete log of this run can be found in: /x.log"
+        );
     }
 
     #[test]
