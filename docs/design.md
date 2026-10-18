@@ -312,7 +312,8 @@ tool does: without waiting.
   question's number, at once. The same shape as the tool's arguments,
   checked by the same `Question::from_json` (a blank question, unknown keys
   or a non-string option are refused with an error the plugin sees); a
-  plugin's question is one line (`why` may have more), and a third
+  plugin's question and each option are one line (`why` may have more),
+  and a third
   argument is refused. Two or more options make it a choice; otherwise a
   free answer.
 - **The answer reaches the agent, not the plugin:** as with the tool, it
