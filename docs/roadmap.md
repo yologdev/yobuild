@@ -85,7 +85,11 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
 - `allow = [...]` (#15) on `[[plugin]]` and `[[mcp]]` entries (design §2,
   Allowed tools): the tools the gate lets run without asking — so a
   manifest agent that plans and searches does not ask before each call.
-- `handoff.toml`, `coding.toml`, `minimal.toml` replace the three examples.
+- `handoff.toml`, `coding.toml`, `minimal.toml` replace the three examples (`coding_agent.rs`
+  stays for its `--watch`)
+  (design §7, "The examples as manifests": `[builtins] tools`,
+  `[limits] session_budget_usd`, `policy = true` on a plugin; the demos
+  as CI tests — the handoff one answering over the page's WebSocket).
 - `ask_owner` as a host service (design §3; #22), so plugins can ask
   the owner too — rutis plugins (Node) now; pi extensions and DSH plugins
   once their adapters forward it; Python and Go once it is checked that
