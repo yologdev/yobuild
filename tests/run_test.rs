@@ -749,3 +749,88 @@ async fn a_rutis_policy_plugin_is_waited_for_and_judges_the_first_call() {
         }
     }
 }
+
+/// A rutis plugin (its package the project, the runtime linked from
+/// `frontend/plugins`) that asks the owner through the `ask_owner` service
+/// as it starts and writes what it got to `asked.txt`.
+fn asking_plugin(builtin: bool) -> Option<tempfile::TempDir> {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins/node_modules");
+    if !runtime.join("@arcships/rutis-runtime").is_dir() {
+        if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
+            panic!("the rutis runtime is required: npm ci in frontend/plugins");
+        }
+        eprintln!("SKIPPED: npm ci in frontend/plugins");
+        return None;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(&runtime, dir.path().join("node_modules")).unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    std::fs::write(
+        dir.path().join("asker.ts"),
+        "import { writeFileSync } from 'node:fs'\n\
+         import { definePlugin } from '@arcships/rutis'\n\
+         export default definePlugin({\n\
+           inject: ['ask_owner'],\n\
+           async apply(ctx, config: { out: string }) {\n\
+             let got: string\n\
+             try { got = String(await ctx.use('ask_owner').ask({ question: 'Plan?', options: ['A', 'B'] }, 'planner')) }\n\
+             catch (e) { got = 'refused: ' + (e as Error).message }\n\
+             writeFileSync(config.out, got)\n\
+           },\n\
+         })\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        r#"[{ "tools": [{ "name": "ask_owner", "arguments": { "question": "Which?" } }] }, { "text": "done" }]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        format!(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
+             [[plugin]]\nrutis = \"./asker.ts\"\nruntime = \"node\"\nconfig = {{ out = \"{}\" }}\n\
+             [builtins]\nask_owner = {builtin}\nfacts = true\n",
+            dir.path().join("asked.txt").display()
+        ),
+    )
+    .unwrap();
+    Some(dir)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_asks_the_owner_through_the_service_numbered_with_the_tool() {
+    let Some(on) = asking_plugin(true) else {
+        return;
+    };
+    let ended = run_once(on.path()).await;
+    // The plugin asked as it started, the agent's tool in its run: one
+    // numbering (in either order: a row runs before its `apply` ends), both
+    // still waiting, nobody being there.
+    let plugins = std::fs::read_to_string(on.path().join("asked.txt")).unwrap();
+    let asked = results(&ended);
+    let tools = if plugins == "1" { "#2" } else { "#1" };
+    assert!(
+        ["1", "2"].contains(&plugins.as_str())
+            && asked[0].0.contains(&format!("Asked the owner as {tools}")),
+        "{plugins} {asked:?}"
+    );
+    let facts = ended
+        .notices
+        .iter()
+        .find(|(_, m)| m.starts_with("Facts:"))
+        .map(|(_, m)| m.clone())
+        .unwrap_or_default();
+    assert!(facts.contains("2 question(s) waiting on you"), "{facts}");
+    // Without the built-in, the service is there (the plugin starts) and
+    // says why it does not ask.
+    let Some(off) = asking_plugin(false) else {
+        return;
+    };
+    run_once(off.path()).await;
+    let got = std::fs::read_to_string(off.path().join("asked.txt")).unwrap();
+    assert!(
+        got.starts_with("refused: ") && got.contains("[builtins] ask_owner is off"),
+        "{got}"
+    );
+}

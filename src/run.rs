@@ -148,6 +148,16 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     }
     let bridge = RutisBridge::install(root)?;
     services::provide(root, &session)?;
+    // `ask_owner`, the tool and (for plugins) the host service: one
+    // numbering. Before the plugins start: one may use it as it loads. The
+    // service is there either way (rutis has no optional inject: a plugin
+    // injecting a missing service would never start), refusing without the
+    // built-in.
+    let ask_owner = manifest
+        .builtins
+        .ask_owner
+        .then(|| AskOwner::new(session.clone()));
+    services::provide_ask_owner(root, ask_owner.clone())?;
     let scratch = match manifest.builtins.scratch {
         true => Some(Scratch::create(name)?),
         false => None,
@@ -188,12 +198,12 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         builder = builder.node(&name, dir);
         runtimes.push((name, dir.clone()));
     }
-    let mut host = builder
+    builder = builder
         .share("yoagent")
         .share(services::FRONTEND)
         .share(services::UI)
-        .start(root)
-        .await?;
+        .share(services::ASK_OWNER);
+    let mut host = builder.start(root).await?;
     if !plan.rows.is_empty() {
         host.load(plan.rows.clone()).await?;
         // A rutis plugin marked `policy` registers its handler in its own
@@ -214,10 +224,6 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // The tools: yoagent's (in `cwd`), `ask_owner`, each MCP server's; no
     // two of one name. (A plugin's tools come with each run; yoagent keeps
     // one of these over a plugin's of the same name, and says so.)
-    let ask_owner = manifest
-        .builtins
-        .ask_owner
-        .then(|| AskOwner::new(session.clone()));
     let mut tools = Tools::default();
     tools.add("yoagent", tools_for(manifest.builtins.tools, &cwd));
     if let Some(ask) = &ask_owner {
