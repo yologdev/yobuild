@@ -281,7 +281,7 @@ without the manifest.
 
 | Part | Plugs in as | Where |
 |---|---|---|
-| `ask_owner` | a tool, and for plugins a host service (proposed, below); returns at once, the answer comes back as steering (mid-run, or starting the next run) | `yobuild::builtins::AskOwner` (M1) |
+| `ask_owner` | a tool, and for plugins a host service (below); returns at once, the answer comes back as steering (mid-run, or starting the next run) | `yobuild::builtins::AskOwner` (M1) |
 | `report` | an `Extension`: `on_stop` sends the agent back until the required sections are there | `yobuild::builtins::Report` (M1) |
 | `facts` | an `Extension`: `on_event` counts tokens and tool calls, `finish` adds changes since the start (git snapshot), new files, open questions | `yobuild::builtins::Facts` (M1) |
 | `gate` | a `before_tool` policy: an allow-list of programs and their options; everything else (deleting, overwriting above all) asks; refused with nobody there; plugin and MCP tools ask unless their entry allows them (`allow`) | `yobuild::builtins::Gate` (M1; `confirm-dangerous.ts` stays as the pi example) |
@@ -291,7 +291,7 @@ without the manifest.
 What makes a built-in a built-in: more than one kind of agent wants it,
 it is small, and it has no opinion about the task.
 
-### `ask_owner` for plugins (proposed)
+### `ask_owner` for plugins
 
 The agent asks the owner with the `ask_owner` tool. A plugin may need to
 ask too — a planner that wants the owner to choose between plans, a
@@ -312,7 +312,8 @@ tool does: without waiting.
   question's number, at once. The same shape as the tool's arguments,
   checked by the same `Question::from_json` (a blank question, unknown keys
   or a non-string option are refused with an error the plugin sees); a
-  plugin's question is one line (`why` may have more), and a third
+  plugin's question and each option are one line (`why` may have more),
+  and a third
   argument is refused. Two or more options make it a choice; otherwise a
   free answer.
 - **The answer reaches the agent, not the plugin:** as with the tool, it

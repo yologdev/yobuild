@@ -90,7 +90,7 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
   (design §7, "The examples as manifests": `[builtins] tools`,
   `[limits] session_budget_usd`, `policy = true` on a plugin; the demos
   as CI tests — the handoff one answering over the page's WebSocket).
-- `ask_owner` as a host service (design §3, proposed), so plugins can ask
+- `ask_owner` as a host service (design §3; #22), so plugins can ask
   the owner too — rutis plugins (Node) now; pi extensions and DSH plugins
   once their adapters forward it; Python and Go once it is checked that
   they can call host services.
