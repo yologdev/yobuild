@@ -991,7 +991,7 @@ owner's approval (`ask_owner`) and the fail-closed rules. This is what
 rutis was built for — software that adds its own plugins while it runs —
 and the riskiest part of the plan, so it comes last.
 
-## 11. The skill, and what to do when a run fails (M3, proposed)
+## 11. The skill, and what to do when a run fails (M3; decided 2026-10-19)
 
 ### The skill
 
@@ -1026,8 +1026,8 @@ skill layout:
   means and what to do (below).
 
 `SKILL.md` links each reference by its path, relative and one level
-deep, so a coding agent reads one only when it needs it. Installed by
-copying the folder into `~/.claude/skills/` or a project's
+deep, so a coding agent reads one only when it needs it. It lives in this
+repository and is installed by copying the folder (decided 2026-10-19) into `~/.claude/skills/` or a project's
 `.claude/skills/` (the README says how); `yobuild skill install` comes
 with M4's install (roadmap M4).
 
@@ -1156,6 +1156,8 @@ holds at another version, DSH files beside DSH packages).
 
 ### Making failures actionable in yobuild itself
 
+Part of M3 (decided 2026-10-19), not only the skill's `failures.md`.
+
 The tables help only where the failure is seen. So yobuild says the fix
 too:
 
@@ -1196,4 +1198,5 @@ not:
   read tools allowed) + `ask_owner`: the pattern for any server.
 - **Spreadsheet clerk** — `dsh-univer-office` (a DSH package new to
   yobuild) + `ask_owner` + `report`, if `check` passes it; else the next
-  from the roadmap's list.
+  from the roadmap's list. (The choice of these three was left to the
+design, 2026-10-19.)
