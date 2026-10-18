@@ -93,6 +93,20 @@ what each adds, how the gate treats each tool, and what `run` would
 refuse (exit 1). The other examples:
 [`examples/`](examples/README.md).
 
+## The skill: a coding agent builds the agent
+
+[`skill/yobuild/`](skill/yobuild/SKILL.md) teaches a coding agent (Claude
+Code first) to build an agent with yobuild: ask what it is for, pick the
+parts, write the manifest, `yobuild check`, run it scripted, then live —
+and what to do when a run fails. Install it by copying the folder:
+
+```sh
+cp -r skill/yobuild ~/.claude/skills/yobuild        # for every project
+cp -r skill/yobuild .claude/skills/yobuild          # or for one
+```
+
+Then ask Claude Code for an agent ("make me an agent that …").
+
 ## Documents
 
 - [Vision](docs/vision.md) — why, for whom, what it is not.
