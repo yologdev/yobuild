@@ -337,9 +337,16 @@ tool does: without waiting.
 - **Not judged by the gate:** asking does nothing the owner has not
   seen; like the tool, it is always allowed. A reset withdraws the open
   questions, as for the tool.
-- **rutis plugins, for now:** a `[[plugin]] rutis = …` plugin calls it
-  directly. pi extensions and DSH plugins use their own ecosystems' APIs;
-  reaching it from them needs adapter support, as the dialogs have (later).
+- **rutis plugins only (decided 2026-10-18):** a `[[plugin]] rutis = …`
+  plugin calls it directly. pi extensions and DSH plugins are not given
+  it: neither ecosystem has a way to ask without waiting (pi's
+  `ctx.ui.select`/`confirm`/`input` and DSH's `userQuestions` block until
+  answered, and those already reach the owner through the adapters), so
+  adapter support would mean a yobuild-only API in each — one no
+  published plugin calls, and that a plugin written against it could not
+  run anywhere else, against yobuild's point of running plugins
+  unchanged. A plugin written for yobuild is a rutis plugin and has the
+  service. Revisited only if a real pi or DSH plugin needs it.
   `yobuild run` starts Node runtimes only (§2); whether Python and Go
   plugins can call host services is checked before they are supported
   (roadmap).
