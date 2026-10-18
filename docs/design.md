@@ -638,8 +638,13 @@ and no task:
      not probed alone: a note says so, and the agent together checks it
      (found with #31: `coding.toml` pins `dsh-user-questions`).
    - **rutis** has no probe. The plugin is loaded alone in its runtime, as
-     `run` loads it, and `check` lists the handlers its row registers and
-     the tools a run is offered.
+     `run` loads it (with `run`'s services, on an open session with
+     nobody there), and `check` lists the handlers its row registers (once
+     they stop changing, up to 3 s) and the tools a run is offered. A row
+     that stops, or a run that would stop at its first request, is a
+     problem; a tool offered from no row (a child plugin's) is a note. One
+     waiting for a service nobody provides alone — another plugin may
+     provide it — is checked together only.
    - **An MCP server** is launched as `run` launches it and asked for
      `tools/list`. No tool is called.
 3. **The agent together, through `run`'s own start.** This is `run`'s
@@ -653,8 +658,11 @@ and no task:
    started. What `run` only warns about is a note. It catches:
    - a DSH plugin that needs `[dsh] host_services` (a problem);
    - a `policy = true` plugin whose judge never registers (a problem);
-   - two entries offering one tool name (a note: yoagent keeps one, and
-     says which);
+   - two plugins offering one tool name (a note naming them: a run gets
+     one), and a plugin's tool named like one of the agent's own (a note:
+     yoagent keeps its own);
+   - a rutis plugin that registered handlers alone but none together, or
+     a plugin that stops (problems);
    - an `allow` naming a tool its entry does not offer (a note, as in
      `run`, since a plugin may offer a tool only in some runs). Today
      that is a Warning only after the first run; `check` says it before
@@ -668,12 +676,14 @@ and no task:
    bridge's hooks directly, as the probe's `offered` does: `start_run`,
    `tools`, one `before_model`, then `finish`. That gives the plugins'
    tools, each with its owner (`offered_by`, read before `finish`: the
-   registry forgets a run's offers then). A rutis plugin that registered
-   handlers alone is given up to 3 s to register them together too (a
-   TypeScript row runs before its async `apply` ends). Their names are checked
+   registry forgets a run's offers then). Their names are checked
    against the agent's own tools (the built-ins, `ask_owner`, each
    server's prefixed tools), which are known without running anything.
-   No model is asked, and facts, report, budget and measure take no part.
+   A run stopped or failed at its first request (`before_model`) is a
+   problem: every run would be. A rutis plugin that registered handlers
+   alone is given up to 3 s to register them together too (a TypeScript
+   row runs before its async `apply` ends). No model is asked, and facts,
+   report, budget and measure take no part.
 
 Loading runs the plugins' code, as `run` would. `check` is not a sandbox.
 
@@ -693,14 +703,19 @@ agent handoff: ok
   install scripts not run (the DSH base): esbuild, fsevents, koffi
 ```
 
-A tool is one of four kinds: **free** (read-only, never asks),
-**judged** per call by the gate, **allowed** by an entry's `allow` (or
-the built-in's), or it **asks**. With `gate = "off"`, every tool runs as
-the agent asks, and the line says so. A block can also show what is
-ignored (skills, prompts, themes), what is missing and why, and the
-install scripts not run that belong to it. `--json` gives the same as one
-object, for the skill (M3). The exit code is 1 when any entry has a
-problem; notes are not problems.
+A tool is one of five kinds: **free** (read-only, never asks),
+**judged** per call by the gate (`bash`, the writers and editors, by
+name, whoever offers them), **allowed** by an entry's `allow` (or the
+built-in's), **asks**, or, with `gate = "off"`, **runs** as the agent
+asks. A block can also show what is ignored (skills, prompts, themes),
+what is missing and why, and the install scripts not run that belong to
+it; an entry checked together only says "not checked" when the agent was
+not started. `--json` gives the same as one object, for the skill (M3):
+camelCase, with `version`, `ok`, and the agent's `together` (`skipped`,
+`refused`, `started`). The exit code is 1 when anything has a problem
+(an entry, or the agent: refused at start, or not started); notes are
+not problems. What stops `run` before anything starts (the prompt, an
+install, a plugin that cannot be planned) stops `check` too, as an error.
 
 CI runs `yobuild check --locked` on every example manifest (§8).
 

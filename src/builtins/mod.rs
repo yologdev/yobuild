@@ -30,6 +30,6 @@ mod scratch;
 
 pub use ask_owner::{AskOwner, OpenQuestions, Question};
 pub use facts::Facts;
-pub use gate::{Check, Gate, OfferedCheck, READ_ONLY_TOOLS};
+pub use gate::{Check, Gate, OfferedCheck, JUDGED_TOOLS, READ_ONLY_TOOLS};
 pub use report::Report;
 pub use scratch::Scratch;

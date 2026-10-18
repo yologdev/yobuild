@@ -678,22 +678,23 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
     })
 }
 
-/// The plugins started as `run` starts them: the bridge, the frontend's
-/// services and `ask_owner`'s on `root`, then the runtimes and rows of
-/// `plan`, waited for (the adapters' handlers, each policy plugin's judge,
-/// the services DSH plugins inject). `terminal`: the terminal UI's runtime
-/// too (its row is loaded later).
+/// The plugins as [`start`] started them.
 struct Started {
     bridge: RutisBridge,
     host: PluginHost,
     ask_owner: Option<AskOwner>,
     /// Each runtime and its folder (`--measure`).
     runtimes: Vec<(String, PathBuf)>,
-    /// DSH's private home, while the `dsh` runtime uses it (removed when
-    /// dropped).
+    /// DSH's home with its host services, while the `dsh` runtime uses it
+    /// (a private one is removed when dropped).
     dsh_home: Option<DshHome>,
 }
 
+/// The plugins started as `run` starts them: the bridge, the frontend's
+/// services and `ask_owner`'s on `root`, then the runtimes and rows of
+/// `plan`, waited for (the adapters' handlers, each policy plugin's judge,
+/// the services DSH plugins inject). `terminal`: the terminal UI's runtime
+/// too (its row is loaded later).
 async fn start(
     root: &Ctx,
     manifest: &Manifest,

@@ -721,15 +721,27 @@ fn brought(packages: &Map<String, Json>, path: &str) -> BTreeSet<String> {
 
 /// The installed packages that have install scripts (npm's
 /// `hasInstallScript`), which were not run: by pin, each package a pin
-/// brings; the DSH base's own once, apart (what every DSH plugin gets).
+/// brings in its set; in the `dsh` set the base's own apart, said once
+/// (what every DSH plugin gets).
 #[derive(Debug, Default)]
 pub(crate) struct InstallScripts {
-    pub by_pin: BTreeMap<(Set, String), Vec<String>>,
+    by_pin: BTreeMap<(Set, String), Vec<String>>,
     pub base: Vec<String>,
 }
 
+impl InstallScripts {
+    /// The packages with install scripts `pin` brings in `set`.
+    pub fn of(&self, set: Set, pin: &str) -> Vec<String> {
+        self.by_pin
+            .get(&(set, pin.to_owned()))
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
 /// What the manifest's lock says about install scripts (nothing when it has
-/// no lock).
+/// no lock). With a `dsh` set it reads the DSH adapter's own lock too, to
+/// tell the base's packages apart.
 pub(crate) fn install_scripts(
     manifest: &Manifest,
     adapters: &Path,
@@ -768,7 +780,9 @@ pub(crate) fn install_scripts(
         for pin in entry.requested.keys() {
             let mut names: Vec<String> = brought(&entry.packages, &format!("node_modules/{pin}"))
                 .into_iter()
-                .filter(|at| !base.contains(at) && scripted(&entry.packages, at))
+                // The base is the `dsh` set's: each set is its own project.
+                .filter(|at| !(*set == Set::Dsh && base.contains(at)))
+                .filter(|at| scripted(&entry.packages, at))
                 .filter_map(|at| name_of(&at))
                 .collect();
             names.sort();
@@ -1280,6 +1294,45 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["node_modules/a", "node_modules/a/node_modules/b", "node_modules/p"]
         );
+    }
+
+    #[test]
+    fn install_scripts_belong_to_the_pin_that_brings_them_and_the_base_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapters = tempfile::tempdir().unwrap();
+        std::fs::create_dir(adapters.path().join("dsh")).unwrap();
+        // The base: esbuild 1, which has a script.
+        std::fs::write(
+            adapters.path().join("dsh/package-lock.json"),
+            r#"{ "packages": { "": {}, "node_modules/esbuild": { "version": "1.0.0" } } }"#,
+        )
+        .unwrap();
+        let set = |pins: &str, packages: &str| {
+            format!(r#"{{ "requested": {pins}, "packages": {packages} }}"#)
+        };
+        let dsh = set(
+            r#"{ "d": "1.0.0" }"#,
+            r#"{ "": {}, "node_modules/d": { "version": "1.0.0", "dependencies": { "esbuild": "1", "k": "1" } },
+                 "node_modules/esbuild": { "version": "1.0.0", "hasInstallScript": true },
+                 "node_modules/k": { "version": "1.0.0", "hasInstallScript": true } }"#,
+        );
+        // The pi set brings its own esbuild: its own, whatever the base has.
+        let pi = set(
+            r#"{ "p": "1.0.0" }"#,
+            r#"{ "": {}, "node_modules/p": { "version": "1.0.0", "dependencies": { "esbuild": "1" } },
+                 "node_modules/esbuild": { "version": "1.0.0", "hasInstallScript": true } }"#,
+        );
+        std::fs::write(
+            dir.path().join("agent.lock"),
+            format!(r#"{{ "lockVersion": 1, "sets": {{ "dsh": {dsh}, "pi": {pi} }} }}"#),
+        )
+        .unwrap();
+        let m = manifest(dir.path(), "");
+        let scripts = install_scripts(&m, adapters.path()).unwrap();
+        assert_eq!(scripts.base, ["esbuild"]);
+        assert_eq!(scripts.of(Set::Dsh, "d"), ["k"]);
+        assert_eq!(scripts.of(Set::Pi, "p"), ["esbuild"]);
+        assert!(scripts.of(Set::Mcp, "p").is_empty());
     }
 
     #[test]

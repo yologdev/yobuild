@@ -159,7 +159,6 @@ fn start() -> Result<ExitCode, BoxError> {
     })
 }
 
-/// The log: stderr, or a file when a terminal UI owns the screen (`agent`).
 /// `yobuild check`: the report on stdout (text, or JSON with `--json`);
 /// exit 1 when anything has a problem.
 fn check(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
@@ -190,13 +189,19 @@ fn check(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
         true => format!("{}\n", serde_json::to_string_pretty(&report)?),
         false => report.text(),
     };
-    let _ = std::io::stdout().write_all(text.as_bytes());
-    Ok(match report.ok() {
+    // A reader gone (a closed pipe) is not an error; any other failure is.
+    if let Err(e) = std::io::stdout().write_all(text.as_bytes()) {
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(format!("writing the report: {e}").into());
+        }
+    }
+    Ok(match report.ok {
         true => ExitCode::SUCCESS,
         false => ExitCode::FAILURE,
     })
 }
 
+/// The log: stderr, or a file when a terminal UI owns the screen (`agent`).
 fn logging(agent: Option<&str>) -> Result<Option<PathBuf>, BoxError> {
     use tracing_subscriber::EnvFilter;
     // The registry warns of no key for `--scripted`'s mock provider, which

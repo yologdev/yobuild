@@ -795,7 +795,10 @@ fn check_passes_the_example_agents_and_gives_the_matrixs_verdict() {
         "read_file (free)",
         "bash (judged per call)",
         "multi_search (allowed)",
-        "install scripts not run (the DSH base): esbuild, fsevents, koffi",
+        // (Which of the base's packages have scripts is the adapter
+        // lock's: esbuild and koffi on every platform.)
+        "install scripts not run (the DSH base): esbuild",
+        "koffi",
     ] {
         assert!(out.contains(line), "{line:?} in\n{out}");
     }
@@ -872,7 +875,8 @@ fn check_says_what_run_would_refuse() {
     let (code, out, _) = check(&["needs.toml", "--json"], dir.path());
     assert_eq!(code, Some(0), "{out}");
     let report: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(report["agent"]["started"], true);
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["agent"]["together"], "started");
     assert_eq!(
         report["agent"]["notes"],
         serde_json::json!(["plugin fixture-needs-services allows `fixture_typo`, which no plugin offered (a typo, or offered only in some runs)"])
@@ -881,6 +885,34 @@ fn check_says_what_run_would_refuse() {
         .as_array()
         .unwrap()
         .contains(&serde_json::json!({ "name": "fixture_services", "kind": "allowed" })));
+}
+
+#[test]
+fn check_refuses_what_run_refuses_before_anything_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\nprompt = \"gone.md\"\n",
+    )
+    .unwrap();
+    let (code, out, err) = check(&["agent.toml"], dir.path());
+    assert_eq!(code, Some(1));
+    assert!(out.is_empty(), "{out}");
+    assert!(
+        err.starts_with("yobuild: prompt ") && err.contains("gone.md"),
+        "{err}"
+    );
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\npi = \"./gone.ts\"\n",
+    )
+    .unwrap();
+    let (code, _, err) = check(&["agent.toml"], dir.path());
+    assert_eq!(code, Some(1));
+    assert!(
+        err.starts_with("yobuild: plugin gone: ") && err.contains("does not exist"),
+        "{err}"
+    );
 }
 
 #[test]
