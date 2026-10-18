@@ -77,7 +77,7 @@ async fn try_once(dir: &Path) -> Result<Ended, String> {
 async fn try_once_locked(dir: &Path, locked: bool) -> Result<Ended, String> {
     let manifest = Manifest::load(dir.join("agent.toml")).map_err(|e| e.to_string())?;
     let mut options = Options::new(manifest);
-    options.cache = Some(CACHE.into());
+    options.home = Some(CACHE.into());
     options.locked = locked;
     options.scripted = Some(dir.join("script.json"));
     options.task = Some("echo hi".into());

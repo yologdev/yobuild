@@ -2,11 +2,10 @@
 //! plugins and stdio MCP servers, each ecosystem's an npm project of its
 //! own (a *set*), resolved into the lock beside the manifest (`agent.toml`
 //! → `agent.lock`) and installed with `npm ci` into a cache folder named
-//! after the set's hash,
-//! `<home>/plugins/<set>/<hash>/` (`home`: `YOBUILD_HOME`, else
-//! `~/.yobuild`), shared by every agent whose lock holds the same set.
-//! Never a package script; npm's settings that decide a result passed on
-//! its command line. Unix only.
+//! after the set's hash, `<home>/plugins/<set>/<hash>/` (`home`:
+//! `YOBUILD_HOME`, else `~/.yobuild`), shared by every agent whose lock
+//! holds the same set. Never a package script; npm's settings that decide
+//! a result passed on its command line. Unix only.
 //!
 //! - `pi`: the pi packages and their peers that are not pi's own
 //!   (`legacy-peer-deps`: the pi adapter supplies `@earendil-works/pi-*`
@@ -33,17 +32,11 @@ use crate::manifest::{Manifest, PluginKind, Source, Transport};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// A manifest's lock: beside it, named after it (`agent.toml` →
-/// `agent.lock`), so manifests sharing a folder keep their own.
-pub fn lock_path(manifest: &Manifest) -> PathBuf {
-    let name = manifest.path.file_stem().unwrap_or_default();
-    manifest.dir.join(Path::new(name).with_extension("lock"))
-}
 /// The file an installed set's folder holds, last: its hash.
-pub const STAMP: &str = ".yobuild-installed";
+const STAMP: &str = ".yobuild-installed";
 /// The adapter files the `dsh` set holds at its root, where they resolve
 /// the set's Cordis: the runtime loads them from there.
-pub const DSH_FILES: [&str; 3] = [
+const DSH_FILES: [&str; 3] = [
     "dsh-tools-adapter.ts", "host-dialogs.ts", "probe-services.ts",
 ];
 /// How long one npm call may take.
@@ -51,8 +44,21 @@ const NPM_TIME: Duration = Duration::from_secs(600);
 /// A `.partial-*` folder older than this was left by an install that died.
 const PARTIAL_AGE: Duration = Duration::from_secs(3600);
 
+/// A manifest file's lock: beside it, named after it (`agent.toml` →
+/// `agent.lock`, `a.local.toml` → `a.local.lock`), so manifests sharing a
+/// folder keep their own.
+fn lock_beside(manifest_file: &Path) -> PathBuf {
+    manifest_file.with_extension("lock")
+}
+
+/// A manifest's lock, in its (absolute) folder.
+fn lock_path(manifest: &Manifest) -> PathBuf {
+    let name = manifest.path.file_name().unwrap_or_default();
+    lock_beside(&manifest.dir.join(name))
+}
+
 /// The cache's home: `YOBUILD_HOME`, else `~/.yobuild`.
-pub fn home() -> Result<PathBuf, BoxError> {
+fn home() -> Result<PathBuf, BoxError> {
     match std::env::var_os("YOBUILD_HOME").filter(|v| !v.is_empty()) {
         Some(home) => Ok(PathBuf::from(home)),
         None => match std::env::var_os("HOME").filter(|v| !v.is_empty()) {
@@ -62,17 +68,17 @@ pub fn home() -> Result<PathBuf, BoxError> {
     }
 }
 
-/// One ecosystem's npm project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// One ecosystem's npm project. Ordered as a lock lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Set {
-    Pi,
     Dsh,
     Mcp,
+    Pi,
 }
 
 impl Set {
-    pub const ALL: [Set; 3] = [Set::Pi, Set::Dsh, Set::Mcp];
-
     pub fn name(self) -> &'static str {
         match self {
             Set::Pi => "pi",
@@ -80,63 +86,62 @@ impl Set {
             Set::Mcp => "mcp",
         }
     }
-
-    fn named(name: &str) -> Option<Set> {
-        Set::ALL.into_iter().find(|s| s.name() == name)
-    }
 }
 
-/// `agent.lock`: per set, what the manifest pinned and npm's own lock.
+/// A lock: per set, what the manifest pinned and npm's own lock.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Lock {
-    pub lock_version: u32,
-    pub sets: BTreeMap<String, SetLock>,
+struct Lock {
+    lock_version: u32,
+    sets: BTreeMap<Set, SetLock>,
 }
 
-/// One set in `agent.lock`.
+/// One set in a lock.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SetLock {
+struct SetLock {
     /// For `dsh`: the checksum of the DSH adapter's `package.json` and
     /// lock, the base the set was resolved over.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base: Option<String>,
+    base: Option<String>,
     /// The manifest's pins in this set, name → version.
-    pub requested: BTreeMap<String, String>,
+    requested: BTreeMap<String, String>,
     /// npm's lock (`package-lock.json` v3's `packages`), as npm wrote it.
-    pub packages: Map<String, Json>,
+    packages: Map<String, Json>,
 }
 
 impl Lock {
     const VERSION: u32 = 1;
 
-    /// The lock beside the manifest, if there is one (strictly read).
-    pub fn read(path: &Path) -> Result<Option<Lock>, BoxError> {
+    fn empty() -> Lock {
+        Lock {
+            lock_version: Lock::VERSION,
+            sets: BTreeMap::new(),
+        }
+    }
+
+    /// The lock at `path`, if there is one. Its version is read first (a
+    /// later version may have another shape), then the rest strictly.
+    fn read(path: &Path) -> Result<Option<Lock>, BoxError> {
+        let failed = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("{}: {e}", path.display()).into()),
+            Err(e) => return Err(failed(&e).into()),
         };
-        let lock: Lock =
-            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        if lock.lock_version != Lock::VERSION {
-            return Err(format!(
-                "{}: lockVersion {}, which this yobuild does not read (it writes {})",
-                path.display(),
-                lock.lock_version,
-                Lock::VERSION
-            )
-            .into());
+        let value: Json = serde_json::from_str(&text).map_err(|e| failed(&e))?;
+        match value["lockVersion"].as_u64() {
+            Some(v) if v == u64::from(Lock::VERSION) => {}
+            Some(v) => {
+                return Err(failed(&format!(
+                    "lockVersion {v}, which this yobuild does not read (it writes {})",
+                    Lock::VERSION
+                ))
+                .into())
+            }
+            None => return Err(failed(&"no lockVersion: not a yobuild lock").into()),
         }
-        if let Some(name) = lock.sets.keys().find(|n| Set::named(n).is_none()) {
-            return Err(format!(
-                "{}: no set is named {name:?} (pi, dsh, mcp)",
-                path.display()
-            )
-            .into());
-        }
-        Ok(Some(lock))
+        Ok(Some(serde_json::from_value(value).map_err(|e| failed(&e))?))
     }
 
     /// Written whole: to a temp file beside it, then renamed into place, so
@@ -161,20 +166,29 @@ impl Lock {
 
 /// Where each set is installed, and what was said about the lock.
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct Installed {
-    pub pi: Option<PathBuf>,
-    pub dsh: Option<PathBuf>,
-    pub mcp: Option<PathBuf>,
-    /// What changed in `agent.lock` (an Info notice each).
-    pub said: Vec<String>,
+    dirs: BTreeMap<Set, PathBuf>,
+    said: Vec<String>,
 }
 
 impl Installed {
+    /// The folder `set` is installed in, if the manifest pins any of it.
     pub fn get(&self, set: Set) -> Option<&Path> {
-        match set {
-            Set::Pi => self.pi.as_deref(),
-            Set::Dsh => self.dsh.as_deref(),
-            Set::Mcp => self.mcp.as_deref(),
+        self.dirs.get(&set).map(PathBuf::as_path)
+    }
+
+    /// What changed in the lock (an Info notice each).
+    pub fn said(&self) -> &[String] {
+        &self.said
+    }
+
+    /// For tests: `set` said to be installed in `dir`.
+    #[cfg(test)]
+    pub(crate) fn with(set: Set, dir: &Path) -> Installed {
+        Installed {
+            dirs: [(set, dir.to_path_buf())].into(),
+            said: Vec::new(),
         }
     }
 }
@@ -281,6 +295,10 @@ fn read(path: &Path) -> Result<Vec<u8>, BoxError> {
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()).into())
 }
 
+fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<(), BoxError> {
+    std::fs::write(path, contents).map_err(|e| format!("{}: {e}", path.display()).into())
+}
+
 /// The DSH base's checksum: its `package.json` and lock.
 fn base_checksum(adapters: &Path) -> Result<String, BoxError> {
     let dsh = adapters.join("dsh");
@@ -293,7 +311,7 @@ fn base_checksum(adapters: &Path) -> Result<String, BoxError> {
 /// One canonical text of a JSON value: compact, object keys sorted by code
 /// point at every level (this crate's `serde_json` keeps insertion order,
 /// so sorting is explicit).
-pub fn canonical(value: &Json) -> String {
+fn canonical(value: &Json) -> String {
     match value {
         Json::Object(fields) => {
             let mut keys: Vec<&String> = fields.keys().collect();
@@ -312,10 +330,10 @@ pub fn canonical(value: &Json) -> String {
     }
 }
 
-/// A set's folder name: the first 16 hex digits of a sha256 over its lock
-/// entry's `base` and `packages` (canonical) and, for `dsh`, the adapter
-/// files it copies.
-pub fn hash(set: Set, entry: &SetLock, adapters: &Path) -> Result<String, BoxError> {
+/// A set's folder name: the first 16 hex digits of a sha256 over the set's
+/// name, its lock entry's `base` and `packages` (canonical) and, for `dsh`,
+/// the adapter files it copies.
+fn hash(set: Set, entry: &SetLock, adapters: &Path) -> Result<String, BoxError> {
     // What decides the folder's content: npm's packages and the base, not
     // which of them the manifest asked for (two agents pinning the DSH
     // base's own packages share one folder).
@@ -338,22 +356,10 @@ pub fn hash(set: Set, entry: &SetLock, adapters: &Path) -> Result<String, BoxErr
     Ok(hex)
 }
 
-/// A set's folder in the cache.
-pub fn folder(
-    home: &Path,
-    set: Set,
-    entry: &SetLock,
-    adapters: &Path,
-) -> Result<PathBuf, BoxError> {
-    Ok(home
-        .join("plugins")
-        .join(set.name())
-        .join(hash(set, entry, adapters)?))
-}
-
 /// The settings that decide npm's result, on its command line (they win
-/// over every config file and variable). Not `--omit=`: npm warns that it
-/// is invalid; `include` wins over an `omit` set anywhere.
+/// over every config file and variable), and its output's. Not `--omit=`:
+/// npm warns that it is invalid; `include` wins over an `omit` set
+/// anywhere.
 fn npm_flags(set: Set) -> Vec<String> {
     let legacy = set == Set::Pi;
     vec![
@@ -372,7 +378,8 @@ fn npm_flags(set: Set) -> Vec<String> {
     ]
 }
 
-/// The same settings, for anyone running npm in the folder by hand.
+/// The deciding settings again, for anyone running npm in the folder by
+/// hand.
 fn npmrc(set: Set) -> String {
     format!(
         "# Written by yobuild: the settings it installs this set with.\n\
@@ -400,7 +407,8 @@ fn npm_variable_kept(key: &str) -> bool {
     }
 }
 
-/// Runs npm in `dir`; its stdout. A failure carries the end of its stderr.
+/// Runs npm in `dir`; its stdout. A failure carries npm's message
+/// (`npm_error`).
 fn npm(dir: &Path, args: &[String]) -> Result<String, BoxError> {
     let failed = |e: &dyn std::fmt::Display| format!("npm {} in {}: {e}", args[0], dir.display());
     let mut command = std::process::Command::new("npm");
@@ -411,18 +419,15 @@ fn npm(dir: &Path, args: &[String]) -> Result<String, BoxError> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     for (key, _) in std::env::vars_os() {
-        if let Some(key) = key.to_str() {
-            if !npm_variable_kept(key) {
-                command.env_remove(key);
-            }
+        if !npm_variable_kept(&key.to_string_lossy()) {
+            command.env_remove(&key);
         }
     }
     let mut child = command.spawn().map_err(|e| failed(&e))?;
     let drain = |mut from: Box<dyn Read + Send>| {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            let _ = from.read_to_end(&mut bytes);
-            bytes
+            from.read_to_end(&mut bytes).map(|_| bytes)
         })
     };
     let stdout = drain(Box::new(child.stdout.take().expect("piped")));
@@ -439,8 +444,15 @@ fn npm(dir: &Path, args: &[String]) -> Result<String, BoxError> {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let stdout = String::from_utf8_lossy(&stdout.join().unwrap_or_default()).into_owned();
-    let stderr = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
+    let output = |thread: std::thread::JoinHandle<std::io::Result<Vec<u8>>>, which: &str| {
+        match thread.join() {
+            Ok(Ok(bytes)) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+            Ok(Err(e)) => Err(failed(&format!("reading its {which}: {e}"))),
+            Err(_) => Err(failed(&format!("reading its {which} failed"))),
+        }
+    };
+    let stdout = output(stdout, "output")?;
+    let stderr = output(stderr, "errors")?;
     if !status.success() {
         return Err(failed(&npm_error(&stderr)).into());
     }
@@ -451,8 +463,8 @@ fn npm(dir: &Path, args: &[String]) -> Result<String, BoxError> {
 }
 
 /// What npm said went wrong: its message up to the usage text it prints
-/// after a misuse (`npm error Usage:` and the option list), at most 20 lines;
-/// the whole log stays in npm's own log file, which it names last.
+/// after a misuse (`npm error Usage:` and the option list), at most 20
+/// lines, then the line naming npm's own log, which holds the rest.
 fn npm_error(stderr: &str) -> String {
     let lines: Vec<&str> = stderr.trim().lines().collect();
     let usage = lines
@@ -502,32 +514,50 @@ fn pi_dependencies(
     for (name, version) in pins {
         let spec = format!("{name}@{version}");
         let view = npm(dir, &["view".into(), spec.clone(), "--json".into()])?;
+        // npm says nothing, and succeeds, for a version it does not have.
+        if view.trim().is_empty() {
+            return Err(
+                format!("{spec} is not on the registry (npm view found no such version)").into(),
+            );
+        }
         let view: Json =
             serde_json::from_str(&view).map_err(|e| format!("npm view {spec}: {e}"))?;
-        let declared = match &view["peerDependencies"] {
-            Json::Null => continue,
-            Json::Object(declared) => declared,
-            other => return Err(format!("npm view {spec}: peerDependencies is {other}").into()),
-        };
-        for (peer, range) in declared {
-            let range = range
-                .as_str()
-                .ok_or_else(|| format!("npm view {spec}: peer {peer}'s range is {range}"))?;
-            if pis_own(peer) || pins.contains_key(peer) {
-                continue;
-            }
-            let joined = match peers.get(peer) {
-                Some(other) => intersect(other, range),
-                None => range.to_owned(),
-            };
-            peers.insert(peer.clone(), joined);
-        }
+        peers_of(&spec, &view, pins, &mut peers)?;
     }
     let mut deps = Map::new();
     for (name, version) in pins.iter().chain(peers.iter()) {
         deps.insert(name.clone(), json!(version));
     }
     Ok(deps)
+}
+
+/// Adds to `peers` the peers `view` (`npm view <spec> --json`) declares
+/// that are neither pi's own nor pinned, a range already there intersected.
+fn peers_of(
+    spec: &str,
+    view: &Json,
+    pins: &BTreeMap<String, String>,
+    peers: &mut BTreeMap<String, String>,
+) -> Result<(), BoxError> {
+    let declared = match &view["peerDependencies"] {
+        Json::Null => return Ok(()),
+        Json::Object(declared) => declared,
+        other => return Err(format!("npm view {spec}: peerDependencies is {other}").into()),
+    };
+    for (peer, range) in declared {
+        let range = range
+            .as_str()
+            .ok_or_else(|| format!("npm view {spec}: peer {peer}'s range is {range}"))?;
+        if pis_own(peer) || pins.contains_key(peer) {
+            continue;
+        }
+        let joined = match peers.get(peer) {
+            Some(other) => intersect(other, range),
+            None => range.to_owned(),
+        };
+        peers.insert(peer.clone(), joined);
+    }
+    Ok(())
 }
 
 /// A set's `package.json`: fixed fields (for `dsh`, the adapter's: its
@@ -554,7 +584,7 @@ fn package_json(
 fn write_json(path: &Path, value: &Json) -> Result<(), BoxError> {
     let mut text = serde_json::to_string_pretty(value)?;
     text.push('\n');
-    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()).into())
+    write(path, text)
 }
 
 /// Resolves a set anew in a temp folder: its lock entry (nothing unpacked).
@@ -563,8 +593,8 @@ fn resolve(
     pins: &BTreeMap<String, String>,
     adapters: &Path,
 ) -> Result<SetLock, BoxError> {
-    let dir = tempfile::tempdir()?;
-    std::fs::write(dir.path().join(".npmrc"), npmrc(set))?;
+    let dir = tempfile::tempdir().map_err(|e| format!("a temp folder to resolve in: {e}"))?;
+    write(&dir.path().join(".npmrc"), npmrc(set))?;
     let (dependencies, base) = match set {
         Set::Pi => (pi_dependencies(dir.path(), pins)?, None),
         Set::Mcp => (
@@ -573,11 +603,9 @@ fn resolve(
         ),
         Set::Dsh => {
             // The base's lock as the start: DSH's packages stay as pinned.
-            std::fs::copy(
-                adapters.join("dsh/package-lock.json"),
-                dir.path().join("package-lock.json"),
-            )
-            .map_err(|e| format!("{}: {e}", adapters.join("dsh/package-lock.json").display()))?;
+            let lock = adapters.join("dsh/package-lock.json");
+            std::fs::copy(&lock, dir.path().join("package-lock.json"))
+                .map_err(|e| format!("{}: {e}", lock.display()))?;
             let mut deps = base_dependencies(adapters)?;
             for (name, version) in pins {
                 deps.insert(name.clone(), json!(version));
@@ -601,10 +629,12 @@ fn resolve(
     };
     let missing = missing(&packages);
     if !missing.is_empty() {
-        let version = npm(dir.path(), &["--version".to_owned()]).unwrap_or_default();
+        let version = match npm(dir.path(), &["--version".to_owned()]) {
+            Ok(version) => version.trim().to_owned(),
+            Err(e) => format!("(version unknown: {e})"),
+        };
         return Err(format!(
-            "npm {} wrote an incomplete lock for the `{}` set (another npm would refuse to install it): {}; upgrade npm (11.19 resolves it whole)",
-            version.trim(),
+            "npm {version} wrote an incomplete lock for the `{}` set (another npm would refuse to install it): {}; upgrade npm (11.19 resolves it whole)",
             set.name(),
             missing.join(", ")
         )
@@ -662,6 +692,41 @@ fn missing(packages: &Map<String, Json>) -> Vec<String> {
     out
 }
 
+/// What is wrong with a lock entry read from a file, if anything: each pin
+/// must be a root dependency at its version and installed at the top at it,
+/// and nothing may be missing (a lock edited by hand, or merged, can
+/// disagree with itself; deleting the cache would not help).
+fn unsound(entry: &SetLock) -> Option<String> {
+    let root = entry.packages.get("").map(|r| &r["dependencies"]);
+    for (name, version) in &entry.requested {
+        let at_root = root.and_then(|deps| deps[name].as_str());
+        let installed = entry
+            .packages
+            .get(&format!("node_modules/{name}"))
+            .and_then(|p| p["version"].as_str());
+        if at_root != Some(version.as_str()) || installed != Some(version.as_str()) {
+            return Some(format!("it does not hold {name}@{version}"));
+        }
+    }
+    let missing = missing(&entry.packages);
+    (!missing.is_empty()).then(|| format!("it lacks {}", missing.join(", ")))
+}
+
+/// Why a set in the lock cannot be used for `wanted`, if it cannot.
+fn stale(
+    entry: Option<&SetLock>,
+    wanted: &BTreeMap<String, String>,
+    base: Option<&String>,
+) -> Option<String> {
+    let Some(entry) = entry else {
+        return Some("is missing".into());
+    };
+    if entry.requested != *wanted || entry.base.as_ref() != base {
+        return Some("is not current: the manifest's pins or the DSH base changed".into());
+    }
+    unsound(entry).map(|why| format!("does not agree with itself: {why}"))
+}
+
 /// The package name and version of each entry in npm's `packages`.
 fn versions(packages: &Map<String, Json>) -> BTreeSet<(String, String)> {
     packages
@@ -708,6 +773,26 @@ fn changes(old: Option<&SetLock>, new: &SetLock) -> String {
     text
 }
 
+/// Whether `dir` holds a set installed whole: its stamp names `hash`. No
+/// stamp (or no folder) is `false`; a stamp that cannot be read is an error.
+fn stamped(dir: &Path, hash: &str) -> Result<bool, BoxError> {
+    let path = dir.join(STAMP);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(text.trim() == hash),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("{}: {e}", path.display()).into()),
+    }
+}
+
+/// Removes a folder, logging (not failing on) what it cannot.
+fn remove_quietly(dir: &Path, why: &str) {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("removing {} ({why}): {e}", dir.display());
+        }
+    }
+}
+
 /// A set's folder, installed from its lock entry if it is not yet.
 fn install_set(
     home: &Path,
@@ -718,33 +803,48 @@ fn install_set(
     let hash = hash(set, entry, adapters)?;
     let parent = home.join("plugins").join(set.name());
     let dir = parent.join(&hash);
-    let stamped =
-        |dir: &Path| std::fs::read_to_string(dir.join(STAMP)).is_ok_and(|s| s.trim() == hash);
-    if stamped(&dir) {
+    if stamped(&dir, &hash)? {
         return Ok(dir);
     }
     std::fs::create_dir_all(&parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     remove_old_partials(&parent);
-    if dir.exists() {
-        // Changed by hand (or not ours): made again.
+    let partial = |what: &str| {
+        parent.join(format!(
+            "{hash}.partial-{what}{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    };
+    // A folder there without its stamp (or with another): changed by hand.
+    // Looked at again, since another yobuild may have just made it; then
+    // moved aside whole (a rename), so nobody ever runs from half of it.
+    if dir.exists() && !stamped(&dir, &hash)? {
         tracing::warn!(
             "{}: no stamp or another hash; installing it again",
             dir.display()
         );
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let aside = partial("old-");
+        match std::fs::rename(&dir, &aside) {
+            Ok(()) => remove_quietly(&aside, "a cache folder changed by hand"),
+            // Another yobuild moved it first.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{}: {e}", dir.display()).into()),
+        }
     }
-    let partial = parent.join(format!("{hash}.partial-{}", uuid::Uuid::new_v4().simple()));
-    let made = make(&partial, set, entry, adapters, &hash);
-    if let Err(e) = made {
-        let _ = std::fs::remove_dir_all(&partial);
+    if stamped(&dir, &hash)? {
+        return Ok(dir);
+    }
+    let fresh = partial("");
+    if let Err(e) = make(&fresh, set, entry, adapters, &hash) {
+        remove_quietly(&fresh, "an install that failed");
         return Err(e);
     }
-    if let Err(e) = std::fs::rename(&partial, &dir) {
-        let _ = std::fs::remove_dir_all(&partial);
+    if let Err(e) = std::fs::rename(&fresh, &dir) {
+        remove_quietly(&fresh, "an install another yobuild finished first");
         // Another yobuild made it first: the same lock, the same content.
-        if !stamped(&dir) {
+        if !stamped(&dir, &hash)? {
             return Err(format!("{}: {e}", dir.display()).into());
         }
+        tracing::debug!("{}: made by another yobuild meanwhile", dir.display());
     }
     Ok(dir)
 }
@@ -780,7 +880,7 @@ fn make(
             "packages": entry.packages,
         }),
     )?;
-    std::fs::write(dir.join(".npmrc"), npmrc(set))?;
+    write(&dir.join(".npmrc"), npmrc(set))?;
     if set == Set::Dsh {
         for name in DSH_FILES {
             let from = adapters.join("dsh").join(name);
@@ -790,24 +890,39 @@ fn make(
     let mut args = vec!["ci".to_owned(), "--prefer-offline".to_owned()];
     args.extend(npm_flags(set));
     npm(dir, &args)?;
-    std::fs::write(dir.join(STAMP), format!("{hash}\n"))?;
-    Ok(())
+    write(&dir.join(STAMP), format!("{hash}\n"))
 }
 
-/// Removes `.partial-*` folders an install that died left (an hour old).
+/// Removes `.partial-*` folders an install that died left (an hour old);
+/// what it cannot read or remove is logged.
 fn remove_old_partials(parent: &Path) {
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return;
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("{}: {e}", parent.display());
+            return;
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::warn!("{}: {e}", parent.display());
+                continue;
+            }
+        };
+        if !entry.file_name().to_string_lossy().contains(".partial-") {
+            continue;
+        }
+        // A time in the future (a clock set back) counts as new.
         let old = entry
             .metadata()
             .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age > PARTIAL_AGE);
-        if old && entry.file_name().to_string_lossy().contains(".partial-") {
-            let _ = std::fs::remove_dir_all(entry.path());
+            .map(|t| t.elapsed().is_ok_and(|age| age > PARTIAL_AGE));
+        match old {
+            Ok(true) => remove_quietly(&entry.path(), "an install that died"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("{}: {e}", entry.path().display()),
         }
     }
 }
@@ -819,9 +934,11 @@ fn file_name(path: &Path) -> String {
     )
 }
 
-/// Installs the manifest's pinned packages: `agent.lock` read, a missing or
-/// stale set resolved again (refused with `locked`) and the lock rewritten,
-/// then each set installed into the cache under `home` (`None`: [`home()`],
+/// Installs the manifest's pinned packages: the lock beside it read; a set
+/// it no longer needs dropped, and a missing or stale one (or one that
+/// disagrees with itself) resolved again — each refused instead with
+/// `locked`; the lock written if that changed it; then each set installed
+/// into the cache under `home` (`None`: `YOBUILD_HOME`, else `~/.yobuild`,
 /// looked up only when there is something to install).
 pub fn install(
     manifest: &Manifest,
@@ -837,94 +954,81 @@ pub fn install(
     };
     let path = lock_path(manifest);
     let old = Lock::read(&path)?;
-    let mut lock = old.clone().unwrap_or(Lock {
-        lock_version: Lock::VERSION,
-        sets: BTreeMap::new(),
-    });
+    let mut lock = old.clone().unwrap_or_else(Lock::empty);
     let mut installed = Installed::default();
     let base = match pins.contains_key(&Set::Dsh) {
         true => Some(base_checksum(adapters)?),
         false => None,
     };
-    // Sets the manifest no longer needs.
-    let unneeded: Vec<String> = lock
+    let unneeded: Vec<Set> = lock
         .sets
         .keys()
-        .filter(|name| Set::named(name).is_none_or(|s| !pins.contains_key(&s)))
-        .cloned()
+        .filter(|set| !pins.contains_key(set))
+        .copied()
         .collect();
-    for name in unneeded {
+    for set in unneeded {
         if locked {
             return Err(format!(
-                "{}: its `{name}` set is no longer needed (--locked: run without it to update the lock)",
-                path.display()
+                "{}: its `{}` set is no longer needed (--locked: run without it to update the lock)",
+                path.display(),
+                set.name()
             )
             .into());
         }
-        lock.sets.remove(&name);
+        lock.sets.remove(&set);
         installed.said.push(format!(
-            "{}: `{name}` removed (no pins left)",
-            file_name(&path)
+            "{}: `{}` removed (no pins left)",
+            file_name(&path),
+            set.name()
         ));
     }
     for (set, wanted) in &pins {
-        let current = lock
-            .sets
-            .get(set.name())
-            .filter(|entry| entry.requested == *wanted && (*set != Set::Dsh || entry.base == base));
-        if current.is_none() {
-            if locked {
-                let why = match lock.sets.contains_key(set.name()) {
-                    true => "is not current: the manifest's pins or the DSH base changed",
-                    false => "is missing",
-                };
-                return Err(format!(
-                    "{}: its `{}` set {why} (--locked: run without it to resolve the set again)",
-                    path.display(),
-                    set.name()
-                )
-                .into());
-            }
-            let entry = resolve(*set, wanted, adapters)
-                .map_err(|e| format!("resolving the `{}` set: {e}", set.name()))?;
-            let previous = lock.sets.get(set.name());
-            let verb = match previous {
-                Some(_) => "resolved again",
-                None => "resolved",
-            };
-            installed.said.push(format!(
-                "{}: `{}` {verb}: {}",
-                file_name(&path),
-                set.name(),
-                changes(previous, &entry)
-            ));
-            lock.sets.insert(set.name().to_owned(), entry);
+        let previous = lock.sets.get(set);
+        let base = (*set == Set::Dsh).then_some(base.as_ref()).flatten();
+        let Some(why) = stale(previous, wanted, base) else {
+            continue;
+        };
+        if locked {
+            return Err(format!(
+                "{}: its `{}` set {why} (--locked: run without it to resolve the set again)",
+                path.display(),
+                set.name()
+            )
+            .into());
         }
+        let entry = resolve(*set, wanted, adapters)
+            .map_err(|e| format!("resolving the `{}` set: {e}", set.name()))?;
+        let verb = match previous {
+            Some(_) => "resolved again",
+            None => "resolved",
+        };
+        installed.said.push(format!(
+            "{}: `{}` {verb}: {}",
+            file_name(&path),
+            set.name(),
+            changes(previous, &entry)
+        ));
+        lock.sets.insert(*set, entry);
     }
     if old.as_ref() != Some(&lock) && !(old.is_none() && lock.sets.is_empty()) {
         lock.write(&path)?;
     }
     for set in pins.keys() {
-        let entry = &lock.sets[set.name()];
-        let dir = install_set(&home, *set, entry, adapters)
+        let dir = install_set(&home, *set, &lock.sets[set], adapters)
             .map_err(|e| format!("installing the `{}` set: {e}", set.name()))?;
-        match set {
-            Set::Pi => installed.pi = Some(dir),
-            Set::Dsh => installed.dsh = Some(dir),
-            Set::Mcp => installed.mcp = Some(dir),
-        }
+        installed.dirs.insert(*set, dir);
     }
     Ok(installed)
 }
 
-/// For tests: a set installed by hand, with a lock beside `manifest_path`
+/// For tests: a set installed by hand, with a lock beside `manifest_file`
 /// that holds it (through the same hash, so a run finds it current and
 /// installed, and never calls npm). `packages`: each package's name,
 /// version and the folder copied into `node_modules/`. Not for `dsh`.
 #[doc(hidden)]
 pub fn seed(
     home: &Path,
-    manifest_path: &Path,
+    manifest_file: &Path,
     set: Set,
     packages: &[(&str, &str, &Path)],
 ) -> Result<PathBuf, BoxError> {
@@ -949,20 +1053,15 @@ pub fn seed(
         requested,
         packages: lock_packages,
     };
-    let dir = folder(home, set, &entry, Path::new(""))?;
+    let hash = hash(set, &entry, Path::new(""))?;
+    let dir = home.join("plugins").join(set.name()).join(&hash);
     for (name, _, from) in packages {
         copy_tree(from, &dir.join("node_modules").join(name))?;
     }
-    std::fs::write(
-        dir.join(STAMP),
-        format!("{}\n", hash(set, &entry, Path::new(""))?),
-    )?;
-    let lock_path = manifest_path.with_extension("lock");
-    let mut lock = Lock::read(&lock_path)?.unwrap_or(Lock {
-        lock_version: Lock::VERSION,
-        sets: BTreeMap::new(),
-    });
-    lock.sets.insert(set.name().to_owned(), entry);
+    write(&dir.join(STAMP), format!("{hash}\n"))?;
+    let lock_path = lock_beside(manifest_file);
+    let mut lock = Lock::read(&lock_path)?.unwrap_or_else(Lock::empty);
+    lock.sets.insert(set, entry);
     lock.write(&lock_path)?;
     Ok(dir)
 }
@@ -1120,6 +1219,17 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("lockVersion 2"));
+        // A later version is said as such, whatever its shape.
+        std::fs::write(&path, r#"{"lockVersion":2,"sets":{},"signed":true}"#).unwrap();
+        assert!(Lock::read(&path)
+            .unwrap_err()
+            .to_string()
+            .ends_with("lockVersion 2, which this yobuild does not read (it writes 1)"));
+        std::fs::write(&path, r#"{"sets":{}}"#).unwrap();
+        assert!(Lock::read(&path)
+            .unwrap_err()
+            .to_string()
+            .ends_with("no lockVersion: not a yobuild lock"));
         std::fs::write(
             &path,
             r#"{"lockVersion":1,"sets":{"go":{"requested":{},"packages":{}}}}"#,
@@ -1128,9 +1238,45 @@ mod tests {
         assert!(Lock::read(&path)
             .unwrap_err()
             .to_string()
-            .contains("\"go\""));
+            .contains("unknown variant `go`"));
         std::fs::write(&path, r#"{"lockVersion":1,"sets":{},"extra":1}"#).unwrap();
         assert!(Lock::read(&path).is_err());
+    }
+
+    #[test]
+    fn a_lock_lists_its_sets_in_a_fixed_order() {
+        let entry = SetLock {
+            base: None,
+            requested: BTreeMap::new(),
+            packages: Map::new(),
+        };
+        let mut lock = Lock::empty();
+        for set in [Set::Pi, Set::Mcp, Set::Dsh] {
+            lock.sets.insert(set, entry.clone());
+        }
+        let text = serde_json::to_string(&lock).unwrap();
+        let at = |name: &str| text.find(&format!("\"{name}\":")).unwrap();
+        assert!(at("dsh") < at("mcp") && at("mcp") < at("pi"), "{text}");
+    }
+
+    #[test]
+    fn a_lock_is_named_after_its_manifest() {
+        assert_eq!(
+            lock_beside(Path::new("/a/agent.toml")),
+            Path::new("/a/agent.lock")
+        );
+        assert_eq!(
+            lock_beside(Path::new("/a/handoff.local.toml")),
+            Path::new("/a/handoff.local.lock")
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let m = Manifest::parse(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n",
+            Path::new("handoff.local.toml"),
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(lock_path(&m), dir.path().join("handoff.local.lock"));
     }
 
     fn manifest(dir: &Path, plugins: &str) -> Manifest {
@@ -1195,7 +1341,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let none = manifest(dir.path(), "");
         let installed = install(&none, Path::new("/nowhere"), None, true).unwrap();
-        assert!(installed.said.is_empty() && installed.pi.is_none());
+        assert!(installed.said().is_empty() && installed.get(Set::Pi).is_none());
         assert!(!dir.path().join("agent.lock").exists());
     }
 
@@ -1217,7 +1363,10 @@ mod tests {
         );
         // Without --locked, the set goes, and with it the file.
         let installed = install(&none, Path::new("/nowhere"), None, false).unwrap();
-        assert_eq!(installed.said, ["agent.lock: `pi` removed (no pins left)"]);
+        assert_eq!(
+            installed.said(),
+            ["agent.lock: `pi` removed (no pins left)"]
+        );
         assert!(!dir.path().join("agent.lock").exists());
     }
 
@@ -1226,12 +1375,266 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("agent.lock");
         std::fs::write(&path, "{}").unwrap();
-        Lock {
-            lock_version: 1,
-            sets: BTreeMap::new(),
-        }
-        .write(&path)
-        .unwrap();
+        Lock::empty().write(&path).unwrap();
         assert!(!path.exists());
+    }
+
+    /// A set entry with these pins, installed at the top at their versions.
+    fn entry_with(pins: &[(&str, &str)]) -> SetLock {
+        let requested: BTreeMap<String, String> = pins
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect();
+        let mut packages = Map::new();
+        packages.insert(String::new(), json!({ "dependencies": requested }));
+        for (name, version) in pins {
+            packages.insert(
+                format!("node_modules/{name}"),
+                json!({ "version": version }),
+            );
+        }
+        SetLock {
+            base: None,
+            requested,
+            packages,
+        }
+    }
+
+    #[test]
+    fn a_set_is_stale_when_its_pins_base_or_contents_disagree() {
+        let wanted: BTreeMap<String, String> = [("x".to_owned(), "1.0.0".to_owned())].into();
+        let entry = entry_with(&[("x", "1.0.0")]);
+        assert_eq!(stale(Some(&entry), &wanted, None), None);
+        assert_eq!(stale(None, &wanted, None).as_deref(), Some("is missing"));
+        let other: BTreeMap<String, String> = [("x".to_owned(), "1.0.1".to_owned())].into();
+        assert!(stale(Some(&entry), &other, None)
+            .unwrap()
+            .starts_with("is not current"));
+        // The DSH base: another checksum makes it stale; the same does not.
+        let mut dsh = entry.clone();
+        dsh.base = Some("aaa".into());
+        assert_eq!(stale(Some(&dsh), &wanted, Some(&"aaa".to_owned())), None);
+        assert!(stale(Some(&dsh), &wanted, Some(&"bbb".to_owned()))
+            .unwrap()
+            .starts_with("is not current"));
+        // A lock edited by hand: its pin not installed at its version.
+        let mut edited = entry.clone();
+        edited
+            .packages
+            .insert("node_modules/x".into(), json!({ "version": "0.9.0" }));
+        assert_eq!(
+            stale(Some(&edited), &wanted, None).as_deref(),
+            Some("does not agree with itself: it does not hold x@1.0.0")
+        );
+        let mut lacking = entry.clone();
+        lacking.packages.insert(
+            "node_modules/x".into(),
+            json!({ "version": "1.0.0", "dependencies": { "y": "1" } }),
+        );
+        assert_eq!(
+            stale(Some(&lacking), &wanted, None).as_deref(),
+            Some("does not agree with itself: it lacks y of x")
+        );
+    }
+
+    #[test]
+    fn locked_refuses_a_missing_set_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let m = manifest(dir.path(), "[[plugin]]\npi = \"x@1.0.0\"\n");
+        let e = install(&m, Path::new("/nowhere"), Some(home.path()), true).unwrap_err();
+        assert!(
+            e.to_string()
+                .ends_with("agent.lock: its `pi` set is missing (--locked: run without it to resolve the set again)"),
+            "{e}"
+        );
+        assert!(!dir.path().join("agent.lock").exists());
+    }
+
+    #[test]
+    fn a_current_lock_is_left_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let package = dir.path().join("x");
+        std::fs::create_dir(&package).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"x","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let manifest_file = dir.path().join("agent.toml");
+        let seeded = seed(
+            home.path(),
+            &manifest_file,
+            Set::Pi,
+            &[("x", "1.0.0", &package)],
+        )
+        .unwrap();
+        // The same lock in another layout: read as the same, never rewritten.
+        let lock = dir.path().join("agent.lock");
+        let compact: Json = serde_json::from_str(&std::fs::read_to_string(&lock).unwrap()).unwrap();
+        std::fs::write(&lock, compact.to_string()).unwrap();
+        let before = std::fs::read(&lock).unwrap();
+        let m = manifest(dir.path(), "[[plugin]]\npi = \"x@1.0.0\"\n");
+        let installed = install(&m, Path::new("/nowhere"), Some(home.path()), false).unwrap();
+        assert_eq!(installed.get(Set::Pi), Some(seeded.as_path()));
+        assert!(installed.said().is_empty());
+        assert_eq!(std::fs::read(&lock).unwrap(), before);
+    }
+
+    #[test]
+    fn a_dsh_hash_covers_the_adapter_files_and_not_the_pins() {
+        let adapters = tempfile::tempdir().unwrap();
+        std::fs::create_dir(adapters.path().join("dsh")).unwrap();
+        for name in DSH_FILES {
+            std::fs::write(adapters.path().join("dsh").join(name), name).unwrap();
+        }
+        let entry = entry_with(&[("x", "1.0.0")]);
+        let first = hash(Set::Dsh, &entry, adapters.path()).unwrap();
+        let mut asked_otherwise = entry.clone();
+        asked_otherwise.requested.clear();
+        assert_eq!(
+            hash(Set::Dsh, &asked_otherwise, adapters.path()).unwrap(),
+            first
+        );
+        std::fs::write(adapters.path().join("dsh/host-dialogs.ts"), "edited").unwrap();
+        assert_ne!(hash(Set::Dsh, &entry, adapters.path()).unwrap(), first);
+    }
+
+    #[test]
+    fn old_partial_folders_go_and_new_ones_stay() {
+        let parent = tempfile::tempdir().unwrap();
+        let make = |name: &str, age: u64| {
+            let dir = parent.path().join(name);
+            std::fs::create_dir(&dir).unwrap();
+            let then = std::time::SystemTime::now() - Duration::from_secs(age);
+            std::fs::File::open(&dir)
+                .unwrap()
+                .set_modified(then)
+                .unwrap();
+            dir
+        };
+        let old = make("abc.partial-1", 2 * 3600);
+        let new = make("abc.partial-2", 60);
+        let kept = make("abc", 2 * 3600);
+        remove_old_partials(parent.path());
+        assert!(!old.exists() && new.exists() && kept.exists());
+    }
+
+    #[test]
+    fn a_stamp_that_cannot_be_read_is_an_error_not_a_reinstall() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!stamped(dir.path(), "h").unwrap());
+        std::fs::write(dir.path().join(STAMP), "h\n").unwrap();
+        assert!(stamped(dir.path(), "h").unwrap());
+        assert!(!stamped(dir.path(), "other").unwrap());
+        std::fs::remove_file(dir.path().join(STAMP)).unwrap();
+        std::fs::create_dir(dir.path().join(STAMP)).unwrap();
+        assert!(stamped(dir.path(), "h").is_err());
+    }
+
+    #[test]
+    fn peers_skip_pis_own_and_the_pins_and_intersect() {
+        let pins: BTreeMap<String, String> = [
+            ("a".to_owned(), "1.0.0".to_owned()),
+            ("b".to_owned(), "2.0.0".to_owned()),
+        ]
+        .into();
+        let mut peers = BTreeMap::new();
+        let view = json!({ "peerDependencies": { "@earendil-works/pi-tui": "*", "typebox": "*", "b": "^1", "c": "^1 || ^2" } });
+        peers_of("a@1.0.0", &view, &pins, &mut peers).unwrap();
+        peers_of(
+            "b@2.0.0",
+            &json!({ "peerDependencies": { "c": "^2.1.0" } }),
+            &pins,
+            &mut peers,
+        )
+        .unwrap();
+        assert_eq!(
+            peers,
+            BTreeMap::from([("c".to_owned(), "^1 ^2.1.0 || ^2 ^2.1.0".to_owned())])
+        );
+        assert!(peers_of(
+            "x@1.0.0",
+            &json!({ "peerDependencies": [] }),
+            &pins,
+            &mut peers
+        )
+        .is_err());
+    }
+
+    /// Whether npm is here (`install_set` runs it; CI has it).
+    fn npm_here() -> bool {
+        std::process::Command::new("npm")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// An `mcp` set with nothing in it: `npm ci` installs it offline.
+    fn nothing() -> SetLock {
+        SetLock {
+            base: None,
+            requested: BTreeMap::new(),
+            packages: serde_json::from_str(r#"{"":{"name":"yobuild-mcp"}}"#).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_folder_without_its_stamp_is_installed_again_and_a_stamped_one_kept() {
+        if !npm_here() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let entry = nothing();
+        let hash = hash(Set::Mcp, &entry, Path::new("")).unwrap();
+        let dir = home.path().join("plugins/mcp").join(&hash);
+        // Changed by hand: no stamp, or another hash.
+        for stamp in [None, Some("another")] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("junk"), "x").unwrap();
+            if let Some(stamp) = stamp {
+                std::fs::write(dir.join(STAMP), stamp).unwrap();
+            }
+            assert_eq!(
+                install_set(home.path(), Set::Mcp, &entry, Path::new("")).unwrap(),
+                dir
+            );
+            assert!(!dir.join("junk").exists(), "{stamp:?}");
+            assert_eq!(
+                std::fs::read_to_string(dir.join(STAMP)).unwrap().trim(),
+                hash
+            );
+            assert!(dir.join("package.json").is_file() && dir.join(".npmrc").is_file());
+        }
+        // Stamped: kept as it is (npm not run again).
+        std::fs::write(dir.join("junk"), "x").unwrap();
+        install_set(home.path(), Set::Mcp, &entry, Path::new("")).unwrap();
+        assert!(dir.join("junk").exists());
+        let leftovers: Vec<_> = std::fs::read_dir(home.path().join("plugins/mcp"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, [std::ffi::OsString::from(&hash)]);
+    }
+
+    #[test]
+    fn a_failed_install_leaves_nothing_behind() {
+        let home = tempfile::tempdir().unwrap();
+        // Root dependencies that are not an object: the install fails once
+        // its folder is made.
+        let mut entry = nothing();
+        entry.packages.insert(
+            String::new(),
+            json!({ "name": "yobuild-mcp", "dependencies": 5 }),
+        );
+        let e = install_set(home.path(), Set::Mcp, &entry, Path::new(""))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("root dependencies are not an object"), "{e}");
+        let left: Vec<_> = std::fs::read_dir(home.path().join("plugins/mcp"))
+            .unwrap()
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 }

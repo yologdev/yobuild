@@ -36,7 +36,8 @@ use crate::builtins::Report;
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Manifest {
-    /// The manifest's file, as given (its lock is beside it, `<stem>.lock`).
+    /// The manifest's file as given (perhaps relative): for its name, which
+    /// names its lock (`agent.toml` → `agent.lock` in `dir`).
     pub path: PathBuf,
     /// The manifest's folder (absolute when read by [`Manifest::load`]):
     /// what its paths are relative to.

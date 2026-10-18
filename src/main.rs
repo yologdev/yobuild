@@ -12,9 +12,11 @@
 //! - `--measure`: after each run, say each plugin's hook time and each
 //!   plugin runtime's memory to every frontend (with `--once` always; else
 //!   in the log, at info).
-//! - `--locked`: refuse when `agent.lock` is missing a set or one is stale
-//!   (CI; an agent someone checked), instead of resolving it again. Pinned
-//!   packages are installed into `YOBUILD_HOME` (default `~/.yobuild`).
+//! - `--locked`: refuse a lock (beside the manifest, `<stem>.lock`) with a
+//!   set that is missing, stale, disagrees with itself or is no longer
+//!   needed (CI; an agent someone checked), instead of resolving it again.
+//!   Pinned packages are installed into `YOBUILD_HOME` (default
+//!   `~/.yobuild`).
 //! - `--web ADDR`: where the web frontend listens, for a manifest whose
 //!   frontend is the web page (default 127.0.0.1:8787; 0.0.0.0:8787 with
 //!   `phone`).

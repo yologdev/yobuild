@@ -6,9 +6,9 @@
 //! whole); then the runtimes, servers and tools (refusing two tools of one
 //! name); then the frontend.
 //!
-//! Pinned plugins and servers are installed first (`crate::install`: locked
-//! in `agent.lock`, into the cache); a rutis plugin's runtime must be
-//! installed in its own package.
+//! Pinned plugins and servers are installed before anything starts
+//! (`crate::install`: locked beside the manifest, into the cache); a rutis
+//! plugin's runtime must be installed in its own package.
 //!
 //! The agent works in the process's working folder: yoagent's file tools
 //! read relative paths from there, so the gate, facts and bash do too.
@@ -91,12 +91,13 @@ pub struct Options {
     /// (default `127.0.0.1:8787`; with `phone`, `0.0.0.0:8787`).
     pub addr: Option<SocketAddr>,
     pub layout: Layout,
-    /// Refuse a missing or stale set in `agent.lock` instead of resolving
-    /// it again (CI; an agent someone checked).
+    /// Refuse a lock (beside the manifest, `<stem>.lock`) with a set that
+    /// is missing, stale, disagrees with itself or is no longer needed,
+    /// instead of resolving it again (CI; an agent someone checked).
     pub locked: bool,
-    /// Where pinned packages are installed (`None`: `YOBUILD_HOME`, else
-    /// `~/.yobuild`).
-    pub cache: Option<PathBuf>,
+    /// yobuild's home, where pinned packages are installed (under
+    /// `plugins/`; `None`: `YOBUILD_HOME`, else `~/.yobuild`).
+    pub home: Option<PathBuf>,
 }
 
 impl Options {
@@ -110,7 +111,7 @@ impl Options {
             addr: None,
             layout: Layout::default(),
             locked: false,
-            cache: None,
+            home: None,
         }
     }
 }
@@ -155,7 +156,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         session.notice(NoticeLevel::Warning, note.clone());
     }
     // What changed in `agent.lock`.
-    for said in &checked.installed.said {
+    for said in checked.installed.said() {
         tracing::info!("{said}");
         session.notice(NoticeLevel::Info, said.clone());
     }
@@ -738,7 +739,7 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
     let installed = install::install(
         manifest,
         &options.layout.adapters,
-        options.cache.as_deref(),
+        options.home.as_deref(),
         options.locked,
     )?;
     let plan = plugins::plan(manifest, &options.layout, &installed, cwd, &lookup)?;

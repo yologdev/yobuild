@@ -107,7 +107,7 @@ pub(crate) fn in_set(sets: &Installed, set: Set, package: &Package) -> Result<Pa
         )
     })?;
     let fix = format!(
-        "the cache folder {} is not what agent.lock says: delete it and run again",
+        "the cache folder {} is not what the lock says: delete it and run again",
         dir.display()
     );
     installed(package, &dir.join("node_modules"), &fix)
@@ -460,7 +460,7 @@ fn dsh_rows_of(
     };
     let modules = base.join("node_modules");
     let fix = format!(
-        "the cache folder {} is not what agent.lock says: delete it and run again",
+        "the cache folder {} is not what the lock says: delete it and run again",
         base.display()
     );
     let dir = installed(p, &modules, &fix)?;
@@ -753,6 +753,35 @@ mod tests {
             .unwrap()
             .notes;
         assert_eq!(notes, ["[dsh] host_services has no effect: no DSH plugin"]);
+    }
+
+    #[test]
+    fn the_dsh_runtime_runs_in_the_dsh_set_for_packages_and_adapters_dsh_for_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("dsh.ts"), "").unwrap();
+        let file = plan_of(dir.path(), "[[plugin]]\ndsh = \"./dsh.ts\"\n").unwrap();
+        let adapters = Layout::default().adapters.join("dsh");
+        assert_eq!(file.dsh_dir, adapters);
+        let adapter_row = file.rows.iter().find(|r| r.id() == "dsh").unwrap();
+        assert!(Path::new(adapter_row.name()).starts_with(&adapters));
+        // A package is looked for in the set's folder (an empty one here).
+        let set = tempfile::tempdir().unwrap();
+        let e = plan(
+            &manifest(dir.path(), "[[plugin]]\ndsh = \"dsh-free-search@0.8.1\"\n"),
+            &Layout::default(),
+            &Installed::with(Set::Dsh, set.path()),
+            dir.path(),
+            &|_: &str| None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains(&format!(
+                "is not installed in {}",
+                set.path().join("node_modules").display()
+            )) && e.contains("the cache folder"),
+            "{e}"
+        );
     }
 
     fn inspected(value: Json) -> Helper {

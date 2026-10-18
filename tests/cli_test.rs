@@ -749,6 +749,18 @@ fn a_stale_lock_is_refused_with_locked_and_resolved_again_without() {
             .is_some_and(|i| i.starts_with("sha512-")),
         "{written}"
     );
+    // The optional peer that is not pi's own is in the set; pi's own
+    // packages (the adapter's) are not.
+    let packages = written["sets"]["pi"]["packages"].as_object().unwrap();
+    assert!(
+        packages.contains_key("node_modules/@juicesharp/rpiv-i18n"),
+        "{written}"
+    );
+    assert!(
+        !packages.keys().any(|k| k.starts_with("node_modules/@earendil-works/pi-")
+            || k == "node_modules/typebox"),
+        "{written}"
+    );
     // Now current: --locked runs.
     let out = go(true);
     assert!(out.status.success(), "{}", text(&out.stderr));
