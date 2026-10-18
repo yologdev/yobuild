@@ -35,14 +35,14 @@ jobs:
           # The adapters' locks come with the yoagent-rutis version Cargo.lock pins.
           cache-dependency-path: |
             frontend/plugins/package-lock.json
-            examples/package-lock.json
             Cargo.lock
+      - name: Node and npm versions
+        run: node --version && npm --version
       - name: Copy the adapters of the yoagent-rutis crate (adapters/)
         run: scripts/copy-adapters.sh
       - name: Install the npm packages
         run: |
           npm ci --prefix frontend/plugins
-          npm ci --prefix examples
           npm ci --prefix adapters/pi
           npm ci --prefix adapters/dsh
       - name: Format
@@ -52,7 +52,11 @@ jobs:
       - name: Docs
         run: RUSTDOCFLAGS="-Dwarnings" cargo doc --locked --no-deps
       - name: Test (pi's and DSH's dialogs through the session need the runtimes)
-        run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked
+        # The tests' package cache starts empty, so every install really runs
+        # (the build cache may bring target/tmp back).
+        run: |
+          rm -rf target/tmp/yobuild-home
+          YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked
       - name: Page logic and the approval gate (node --test)
         run: node --test frontend/web/lib.test.js frontend/plugins/pi-extensions/confirm-dangerous.test.mjs
       - name: Example (scripted, headless; a pi dialog reaches the terminal UI)
@@ -93,4 +97,4 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/pty-coding" && cd "$RUNNER_TEMP/pty-coding"
           python3 "$GITHUB_WORKSPACE/tests/terminal_pty.py" "$GITHUB_WORKSPACE/target/debug/yobuild" \
-            run "$GITHUB_WORKSPACE/examples/coding.toml" --scripted "$GITHUB_WORKSPACE/examples/scripts/coding.json"
+            run "$GITHUB_WORKSPACE/examples/coding.toml" --scripted "$GITHUB_WORKSPACE/examples/scripts/coding.json" --locked

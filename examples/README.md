@@ -9,7 +9,7 @@ Three agents, each a manifest (`yobuild run <manifest>`) and a prompt file (`pro
 | [`minimal.toml`](minimal.toml) | the smallest: reading tools only, confined to its folder, in the browser; no plugins, no Node |
 
 ```bash
-path/to/yobuild/scripts/try-coding-agent.sh --setup-only    # once: the adapters, and npm ci here (the pi packages the manifests pin)
+path/to/yobuild/scripts/try-coding-agent.sh --setup-only    # once: the adapters (yobuild run installs the pinned packages, from handoff.lock / coding.lock)
 mkdir research && cd research && git init
 DEEPSEEK_API_KEY=… path/to/yobuild/scripts/try-handoff.sh --live            # then open the printed URL
 DEEPSEEK_API_KEY=… path/to/yobuild/scripts/try-handoff.sh --live --phone    # open it on your phone too (same Wi-Fi)

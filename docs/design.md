@@ -354,18 +354,15 @@ tool does: without waiting.
 
 ## 4. Plugins: resolve, install, vet
 
-Until M2b, `yobuild run` installs nothing. A pinned package must already
-be installed at exactly its version, or the run is refused, naming the
-`npm install` to do. pi packages and stdio MCP servers go in
-`node_modules/` beside the manifest, DSH plugins in `adapters/dsh`
-(`--no-save`), and a rutis plugin's runtime in its own package. Before
-starting, `run` checks what it can: a DSH package's bundle patch and
-imports, and its peers installed. Once the DSH runtime runs, it checks the
-services the plugin's rows inject; a missing one is refused, not left
-waiting.
+Before M2b, `yobuild run` installed nothing: a pinned package had to be
+installed by hand beside the manifest (DSH plugins in `adapters/dsh`).
+Before starting, `run` checks what it can: a DSH package's bundle patch
+and imports, and its peers installed. Once the DSH runtime runs, it
+checks the services the plugin's rows inject; a missing one is refused,
+not left waiting.
 
-M2b (below) installs pinned packages into a cache, records what was
-installed in `agent.lock`, and adds `yobuild check`. Unix only, as the
+M2b (below) installs pinned packages into a cache (done: #30), records
+what was installed in `agent.lock`, and adds `yobuild check` (next). Unix only, as the
 terminal UI and `--measure` are (Windows: open question 7).
 
 ### Install: sets, the cache, `agent.lock` (M2b, decided 2026-10-18)
@@ -411,8 +408,10 @@ version at the top. Sets are separate projects: a pi pin and an
 `[[mcp]]` pin of one package do not meet. A pi peer that is also pinned
 in the `pi` set takes the pin. A set with no pins is not made.
 
-**`agent.lock`** sits beside the manifest. yobuild writes it, and it is
-meant to be checked in:
+**`agent.lock`** sits beside the manifest, named after it (`agent.toml`
+→ `agent.lock`, `handoff.toml` → `handoff.lock`), so manifests sharing a
+folder keep their own. yobuild writes it, and it is meant to be checked
+in:
 
 ```json
 {
@@ -472,7 +471,11 @@ the adapter's. A missing or stale set is resolved again in a temp folder:
      `@juicesharp/rpiv-i18n`, declared `*`), then fixed by the lock.
 2. Run `npm install --package-lock-only`. Nothing is unpacked; it fetches
    package metadata, so it needs the network.
-3. Take the lock's `packages`. An install writes the `package.json`
+3. Take the lock's `packages`, checked whole: every package's
+   dependencies and optional dependencies are in it (npm 11.5 drops a
+   peer-only package's optional platform packages, and a newer `npm ci`
+   refuses such a lock; it is refused here, naming the npm version). An
+   install writes the `package.json`
    again from fixed fields — for `dsh` the adapter's (`"type": "module"`
    among them: the runtime's own files are ESM `.ts`), for `pi` and
    `mcp` `name`, `"private": true`, `"type": "module"` — plus the
@@ -499,8 +502,8 @@ the command line, which wins over every npm config file and variable:
 `--install-links=false`, `--include=dev --include=optional
 --include=peer` (nothing omitted; `include` wins over an `omit` set
 anywhere, and an empty `--omit=` is warned about as invalid), plus
-`--no-audit --no-fund`. The set's `.npmrc` repeats them, for anyone
-running npm there by hand. The child's environment drops every
+`--no-audit --no-fund --loglevel=error`. The set's `.npmrc` repeats the
+deciding ones, for anyone running npm there by hand. The child's environment drops every
 `npm_config_*` variable, matched without regard to case as npm reads
 them, except the registry and its login (`npm_config_registry`,
 `npm_config_//…:_authToken` and the like). Dropped on purpose: the
@@ -523,10 +526,13 @@ same set shares the folder.
 
 `<hash>` is the first 16 hex digits of a sha256 over:
 
-- the set's entry in the lock, in one canonical form: compact JSON with
-  object keys sorted by code point at every level, written by one
-  function with a fixed test vector (the crate's `serde_json` keeps
-  insertion order, so sorting is explicit);
+- the set's name;
+- the set's `base` and `packages` in the lock (what decides the folder's
+  content: not `requested`, so two agents whose pins resolve alike, such
+  as two pinning the DSH base's own packages, share a folder), in one
+  canonical form: compact JSON with object keys sorted by code point at
+  every level, written by one function with a fixed test vector (the
+  crate's `serde_json` keeps insertion order, so sorting is explicit);
 - for `dsh`, the checksum of the adapter files the set copies (below), so
   an adapter edited under the same version gets a folder of its own.
 
@@ -584,10 +590,10 @@ tests.
 
 **Tests.** A test cannot fetch a package that is not on npm (the
 fixtures `fake-pi`, and `srv`, the MCP server for the `bin` test). Such
-tests seed a cache instead: a helper writes a set's folder with its stamp
-(the fixture copied into `node_modules/`) and a matching `agent.lock`,
-through the same hash function, in a temp `YOBUILD_HOME`; these tests
-run with a current lock, so nothing is resolved. The "wrong version
+tests seed a cache instead: a helper (`install::seed`) writes a set's
+folder with its stamp (the fixture copied into `node_modules/`) and a
+matching lock, through the same hash function, in the tests' cache;
+these tests run with a current lock, so nothing is resolved. The "wrong version
 refused" tests become two, on a real package from npm
 (`@juicesharp/rpiv-todo`, which the handoff example pins), whose lock is
 seeded at another version:
@@ -598,8 +604,9 @@ seeded at another version:
 
 Tests that install real packages — the handoff and coding demos, the DSH
 package tests in `run_test` (their `dsh` set holds the whole DSH base) —
-share one `YOBUILD_HOME` per test binary, made once, so each set is
-installed from npm once per run of the suite; CI has the network.
+share one cache, `CARGO_TARGET_TMPDIR/yobuild-home`, kept across runs,
+so each set is installed from npm once; CI empties it first, so every
+install runs there, and has the network.
 
 ### Vet: `yobuild check agent.toml` (M2b, decided 2026-10-18)
 
