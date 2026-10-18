@@ -107,7 +107,7 @@ push). The yoagent-rutis PR above continues alongside M2a (decided
 **Done when** `yobuild run handoff.toml --scripted` reproduces today's
 demo, plus the new per-plugin hook time and per-runtime memory lines.
 
-## M2b — Install, lock, check (design §4; decided 2026-10-18; install and lock #30, check #31)
+## M2b — Install, lock, check (done: design #29, install and lock #30, check #31)
 
 - Resolve and install pinned plugins and stdio MCP servers per ecosystem
   into the cache, in up to three sets (`pi`, `dsh` over the DSH adapter's
@@ -134,11 +134,18 @@ demo, plus the new per-plugin hook time and per-runtime memory lines.
 empty `YOBUILD_HOME`) and runs, and `yobuild check` reports the same as
 the compatibility matrix for the plugins it uses.
 
-## M3 — The skill and a gallery
+## M3 — The skill and a gallery (design §11, proposed)
 
-- `SKILL.md` ("build an agent with yobuild"): pick parts by capability
-  (from the measured compatibility list), `yobuild check`, write the
-  manifest, run scripted, then live; what to do when a plugin is refused.
+- `skill/yobuild/SKILL.md` ("build an agent with yobuild"): ask, pick
+  parts by capability (from the measured compatibility list), write the
+  manifest, `yobuild check`, run scripted, then live; with
+  `reference/manifest.md`, `parts.md` and `failures.md`.
+- What to do when a run fails: every failure `check` and `run` give —
+  above all the built-ins' (the gate, a policy plugin, the report, limits
+  and budgets, loops, `ask_owner`, facts, scratch) — what it means and the
+  fix, in `failures.md` and in yobuild itself (`run/hints.rs`: `run` says
+  `what to do: …` after a run that did not complete, and in a Notice;
+  `check` gives each problem its `fix`).
 - Example manifests from plugins that load today:
 
   | Agent | Parts |

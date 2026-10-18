@@ -988,3 +988,133 @@ Two tools for a running agent: `find_plugin` (search + vet) and
 owner's approval (`ask_owner`) and the fail-closed rules. This is what
 rutis was built for — software that adds its own plugins while it runs —
 and the riskiest part of the plan, so it comes last.
+
+## 11. The skill, and what to do when a run fails (M3, proposed)
+
+### The skill
+
+A coding agent (Claude Code first; the files are plain Markdown, so others
+can read them) builds an agent for a person with yobuild. The skill
+teaches it the method. That method is the product's main way in: a person
+describes an agent, and the coding agent picks the parts, vets them,
+writes the manifest, runs it scripted, then live.
+
+**Where it lives.** `skill/yobuild/` in this repository, in Claude Code's
+skill layout:
+
+- `SKILL.md`: short — when to use it, the method, the rules. Its
+  frontmatter `description` names what triggers it ("build an agent",
+  "an agent that …", "run plugins from pi or DSH as an agent").
+- `reference/manifest.md`: every manifest key, with the example manifests
+  as patterns.
+- `reference/parts.md`: capabilities → parts — the built-ins first, then
+  plugins that load (from the compatibility matrix, each pinned at a
+  version `yobuild check` passed), then MCP servers.
+- `reference/failures.md`: every failure `check` and `run` can give, what
+  it means and what to do (below).
+
+`SKILL.md` links the references, so a coding agent reads them only when
+it needs them. Installed by copying the folder into `~/.claude/skills/`
+or a project's `.claude/skills/` (the README says how); `yobuild skill
+install` is M4's, with the rest of running without the repository.
+
+**The method `SKILL.md` teaches:**
+
+1. **Ask** what the agent is for: its task; who answers its questions and
+   where (the web page, a phone, the terminal); what it must never do;
+   how much it may spend; where it works (a folder, a git repository).
+2. **Pick parts by capability**, fewest first: the built-ins (`ask_owner`
+   for questions without waiting, `report` for a required ending, `facts`
+   for what changed, the gate, a scratch folder, `tools = "read-only"`),
+   then a plugin from `reference/parts.md`, then an MCP server. Nothing
+   that `parts.md` does not list as loading, unless `check` passes it.
+3. **Write** the manifest and its prompt file. Pin exact versions (`npm
+   view <package> version`); `allow` only tools that read or plan; never
+   a secret in the file (`${NAME}` from the environment); a budget.
+4. **Check**: `yobuild check agent.toml --json`, until `ok` is true. Each
+   problem has a fix (`reference/failures.md`, and the `fix` the report
+   gives); each note is read and decided on.
+5. **Run scripted**: a reply file (`--scripted`) that calls the tools the
+   task needs; `yobuild run agent.toml --scripted script.json --once
+   "<task>"`. Expect every tool call ✓ (or ✗ where the gate should ask)
+   and `Completed`.
+6. **Run live**, after asking the person (it costs money): the provider's
+   key in the environment; `yobuild run agent.toml`; tell the person how
+   to answer the agent's questions. Commit the manifest, its lock and the
+   prompt.
+7. **When a run fails**, read how it ended (the last lines, or the
+   outcome), find it in `reference/failures.md`, change the manifest or
+   the prompt, and run again — scripted first.
+
+**The rules:** never `gate = "off"` unless the agent runs in a sandbox;
+never write a secret into a file; never install into `adapters/` or edit
+a lock by hand (yobuild resolves it); never skip `check`; ask before a
+live run.
+
+### When a run fails: what each part says and what to do
+
+A failure is one of three kinds. **Refused before anything starts**: an
+error, exit 1, nothing ran — the message names the file, the entry, or
+the setting. **Refused at start**: a plugin `run` could not start — the
+same in `check`. **Stopped or refused during a run**: a run ended other
+than `Completed`, or a tool call was refused — the agent and the owner
+see it, and `run` exits 1 if the last run did not complete.
+
+The built-ins, in the third kind, are the ones a person meets most:
+
+| Part | What it says | What it means | What to do |
+|---|---|---|---|
+| gate | `Tool call denied: the owner blocked it` | the owner answered Block | nothing, if meant; else answer Allow next time |
+| gate | `not allowed: the owner declined, or nobody answered` | no frontend, or the question timed out; with `--once` nobody is ever there | open the page and answer; for a tool that only reads or plans, `allow` it on its entry; `[builtins] scratch` frees what the agent makes there |
+| policy plugin | `no plugin policy is loaded to judge this call` | `policy = true`, and the plugin judging calls is not up | `yobuild check`; its runtime may have stopped ("A plugin stopped: …") |
+| policy plugin | `plugin handler … is no longer available` | the policy plugin's runtime died mid-session | the log names why; restart the agent |
+| report | `the answer was still not accepted after 3 continues` | the model never ended with the required sections | name the sections in the prompt; fewer or plainer section names (`report = ["Done", "Next"]`); or `report` off |
+| limits | `Stopped: Max turns reached (80/80)` (also tokens, duration) | the run hit `[limits] max_turns` (`max_tokens`, `max_minutes`) | send "continue" (a new run, the same limits); or raise the limit |
+| budget | `Stopped: budget of $1.00 spent ($1.0012)` | the run's `budget_usd` | as limits |
+| session budget | `Stopped: session budget of $2.00 spent (…)` | every run of the session together | a new session (restart); or raise `session_budget_usd` |
+| loop | `Not executed: the run was stopped for repeating …` | yoagent stopped a tool called over and over | change the prompt or the tool; send "continue" |
+| ask_owner | a question left open (facts: `1 question(s) waiting on you`) | the owner has not answered | answer it in the page; the answer arrives as the next run's steer |
+| ask_owner (a plugin asking) | `[builtins] ask_owner is off` | a plugin asked through the service | `ask_owner = true` |
+| facts | `changes unknown (git: …)`, `not a git repository` | facts cannot tell what changed | informational; `git init` the folder for facts |
+| scratch | `cannot make the scratch folder …` | the temp folder is not writable | fix `TMPDIR`, or `scratch = false` |
+| terminal UI | `the terminal UI stopped: …` | its runtime died | the log file it names |
+
+`reference/failures.md` has this table and the other two kinds: every
+manifest error's form (`file:line:col: message`), a missing key, an
+unpriced budget, the prompt, the lock (`--locked`, an incomplete lock
+from an old npm, a version not on the registry), a plugin `plan` refuses
+(not installed, a DSH base pin, DSH files beside packages), DSH services
+nobody provides (`[dsh] host_services`), a policy's judge that never
+registers (does it inject `yoagent`?), an MCP server with no tools or an
+`allow` it does not list.
+
+### Making failures actionable in yobuild itself
+
+The table is useful only where the failure is seen. So yobuild says the
+fix too:
+
+- **One table in code**, `run/hints.rs`: a message's pattern → what to
+  do. `reference/failures.md` is checked against it by a test (each hint
+  appears there), so the two cannot drift.
+- **`run`**: when the last run did not complete, the line that says so
+  (`yobuild: the last run ended Stopped: Max turns reached (80/80)`, and
+  `--once`'s outcome) is followed by `  what to do: …`. A run stopped by
+  a built-in also gets a Notice with the fix, so the page shows it (facts
+  already says `Send "continue"`; the rest follow).
+- **`check`**: each problem with a hint gets it: `fix` in `--json`, a
+  `  fix: …` line in the text. Errors before anything starts keep their
+  own wording, which already names the fix in most cases ("needs its key
+  in DEEPSEEK_API_KEY", "run without --locked to resolve the set again");
+  the few that do not gain one.
+
+### The gallery
+
+Agents built through the skill by a coding agent (M3's "done when": three
+of them), each in `gallery/<name>/`: the manifest, its prompt, its lock, a
+scripted reply file, and a README (what it does, how to run it). Each is
+`yobuild check --locked` and run scripted in CI, as the examples are.
+First three, from parts known to load: **research brief**
+(`dsh-free-search` + `rpiv-todo`, report), **your MCP server** (an
+`[[mcp]]` entry, e.g. the filesystem server, + `ask_owner`), and one
+from a plugin new to yobuild (the spreadsheet clerk, `dsh-univer-office`,
+if `check` passes it; else the next from the roadmap's list).
