@@ -55,4 +55,19 @@ yobuild run path/to/gallery/web-research/agent.toml \
 
 ## A live run
 
-Not recorded yet.
+2026-10-19, `deepseek/deepseek-flash`, `--once`, the task "When does
+Node.js 22 reach end of life?": one search (`domain_search`, endoflife.date,
+0.2 s), then:
+
+> **Short answer:** Node.js 22 ("Jod") reaches end of life on 2027-04-30.
+> It is in maintenance LTS (since 2025-10-28): critical fixes only, until
+> April 2027. High confidence, from the endoflife.date dataset, which
+> tracks the official release schedule; not cross-checked against a
+> second source.
+>
+> **Sources used:** endoflife.date, Node.js (https://endoflife.date/nodejs)
+>
+> **Waiting on you:** none
+
+`Completed`. Its cost is not recorded: `--once` does not print it (the
+web page shows each run's).
