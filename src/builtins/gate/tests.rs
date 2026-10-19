@@ -2187,6 +2187,12 @@ fn an_argv_is_judged_as_its_words_where_it_runs() {
     // Nothing expands, and a newline stays inside its word.
     free(&["ls", "~/x"], &project);
     free(&["ls", "a\nrm -rf x"], &project);
+    // A folder whose name is not text would be judged as another one.
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = project.join(std::ffi::OsStr::from_bytes(b"x\xff"));
+        asks(&["ls"], &odd);
+    }
 }
 
 #[test]
@@ -2202,6 +2208,11 @@ fn an_assignment_or_a_keyword_is_one_only_unquoted() {
             ("RUST_LOG=\"debug\" ls", "x\\=1"),
             ("if true; then ls; fi", "'fi'"),
             ("{ ls; }", "\\}"),
+            // A wrapper (but `env`) runs its next word as a program.
+            ("nohup ls", "nohup x=./evil"),
+            ("timeout 5 ls", "timeout 5 fi"),
+            ("env RUST_LOG=1 ls", "nice x=1"),
+            ("time RUST_LOG=1 ls", "exec }"),
         ],
     );
 }

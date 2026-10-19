@@ -800,7 +800,7 @@ fn services_on(
             session.clone(),
             manifest,
             cwd,
-            super::gate(manifest, session, cwd, None, None),
+            super::gate(manifest, session, cwd, None),
             false,
         ),
     )?;

@@ -501,7 +501,7 @@ pub(super) fn double_bracket(args: &[Word], _: &mut Ctx) -> Verdict {
     };
     ok_if(
         args.last()
-            .is_some_and(|w| w.text == "]]" && w.known && !w.quoted),
+            .is_some_and(|w| w.text == "]]" && w.known && !w.quoted()),
     )?;
     for (at, w) in args.iter().enumerate() {
         if w.known && ARITHMETIC.contains(&w.text.as_str()) {

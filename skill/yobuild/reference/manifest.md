@@ -137,16 +137,16 @@ And optionally:
   (`trusted()` says yes: the plugin may run the project's code —
   honour-system, nothing enforces it), `model = "info"`
   (`host_session.model()`: provider, id, limits), `wake = true`
-  (`host_session.wake(text)`, one line: it reaches the agent as `[plugin
+  (`host_session.wake(text)`, one line, no control character: it reaches the agent as `[plugin
   name] text` — steering a run going on, else a run of its own, never
   before the owner's first run, at most 3 a session for all plugins; under
   `--once`, only while the task's run goes on; one not delivered is a
   Warning notice). Every plugin may use `host_session.info()` (the
-  session's id, its reset generation) and `host_approval` (`judge(argv,
-  cwd?)`: the agent's gate's verdict on one command's words, `{ free:
-  true, judged: false }` with `gate = "off"`; `ask(question, details?)`:
-  Allow/Block put to the owner, naming the plugin, answered `"allow"`,
-  `"block"` or `"unanswered"`).
+  session's id, its reset generation) and `host_approval.judge(argv,
+  cwd?)` (the agent's gate's verdict on one command's words, `{ free:
+  true, judged: false }` with `gate = "off"`); a rutis plugin also
+  `host_approval.ask(question, details?)` (Allow/Block put to the owner,
+  naming the plugin, answered `"allow"`, `"block"` or `"unanswered"`).
 - `config = { ... }`: a table; every string in it may hold `${NAME}`
   references, and a key named like a secret (`token`, `key`, `password`,
   `auth`, …) must hold only references, plus at most a scheme word

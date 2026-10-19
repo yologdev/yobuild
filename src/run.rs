@@ -173,6 +173,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
 
     // A terminal UI ends the session when it quits, as does a `once` run.
     let (session, driver) = Session::new(terminal || once);
+    // The runs plugins' wakes may start (design §12): none under `--once`.
+    session.allow_wakes(if once { 0 } else { host::IDLE_WAKES });
     // What loads only in part: a warning every frontend gets (kept in the
     // session's history for those that come later; `--once` prints it).
     for note in &checked.notes {
@@ -261,9 +263,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         adapters,
         own,
     );
-    // The host's gate, so `host_approval.judge` knows the files the agent
-    // made (clones share them); plugins' tools allowed when they offer them.
-    if let Some(gate) = judge.map(|g| g.with_tools_allowed_if(allowed(&manifest).1, offered)) {
+    if let Some(gate) = judge.map(|g| agent_gate(g, &manifest, offered)) {
         agent = agent.with_extension(gate);
         // A plugin's allowed tools, checked once its tools are offered.
         let names: Vec<(String, String)> = manifest
@@ -449,25 +449,21 @@ enum End {
     UiGone,
 }
 
-/// The gate the manifest asks for: free in the scratch folder; for
-/// `ask_owner` only when the built-in adds yobuild's; for an MCP server's
-/// allowed tools (`<server>__<tool>`); and for a plugin's allowed tools only
-/// when `offered` says that plugin offered the tool that would run.
+/// The gate the manifest asks for, as the host services judge with it: free
+/// in the scratch folder; for `ask_owner` only when the built-in adds
+/// yobuild's; for an MCP server's allowed tools (`<server>__<tool>`). The
+/// agent's is [`agent_gate`] of it.
 fn gate(
     manifest: &Manifest,
     session: &Session,
     cwd: &Path,
     scratch: Option<&Scratch>,
-    offered: Option<OfferedCheck>,
 ) -> Option<Gate> {
     if manifest.builtins.gate != GateMode::AllowList {
         return None;
     }
-    let (servers, plugins) = allowed(manifest);
+    let (servers, _) = allowed(manifest);
     let mut gate = Gate::new(session.clone(), cwd).with_allowed_tools(servers);
-    if let Some(offered) = offered {
-        gate = gate.with_tools_allowed_if(plugins, offered);
-    }
     if let Some(scratch) = scratch {
         gate = gate.with_scratch(scratch);
     }
@@ -475,6 +471,13 @@ fn gate(
         gate = gate.with_allowed_tools([AskOwner::TOOL]);
     }
     Some(gate)
+}
+
+/// The agent's gate: the host's (a clone, sharing the files the agent made,
+/// so `host_approval.judge` knows them) plus a plugin's allowed tools, only
+/// when `offered` says that plugin offered the tool that would run.
+fn agent_gate(judge: Gate, manifest: &Manifest, offered: OfferedCheck) -> Gate {
+    judge.with_tools_allowed_if(allowed(manifest).1, offered)
 }
 
 /// The tools the entries allow, as the model sees them: the MCP servers'
@@ -766,7 +769,7 @@ async fn start(
     let bridge = RutisBridge::install(root)?;
     services::provide(root, session)?;
     // The host services (design §12): granted per plugin, refusing the rest.
-    let judge = gate(manifest, session, cwd, scratch, None);
+    let judge = gate(manifest, session, cwd, scratch);
     host::provide(
         root,
         host::Host::new(session.clone(), manifest, cwd, judge.clone(), once),
@@ -1810,7 +1813,7 @@ mod tests {
                 .is_none()
         };
         let both = manifest(dir.path(), "[builtins]\nscratch = true\nask_owner = true\n");
-        let judge = gate(&both, &session, &project, Some(&scratch), None).unwrap();
+        let judge = gate(&both, &session, &project, Some(&scratch)).unwrap();
         let elsewhere = dir.path().join("elsewhere.md");
         assert!(
             write(&judge, &scratch.path().join("notes.md")),
@@ -1819,7 +1822,7 @@ mod tests {
         assert!(!write(&judge, &elsewhere), "outside both asks");
         assert!(ask(&judge), "ask_owner is allowed with the built-in");
         let neither = manifest(dir.path(), "");
-        let judge = gate(&neither, &session, &project, None, None).unwrap();
+        let judge = gate(&neither, &session, &project, None).unwrap();
         assert!(
             !write(&judge, &scratch.path().join("notes.md")),
             "no scratch: it asks"
@@ -1829,7 +1832,7 @@ mod tests {
             "a tool named ask_owner asks without the built-in"
         );
         let off = manifest(dir.path(), "[builtins]\ngate = \"off\"\n");
-        assert!(gate(&off, &session, &project, None, None).is_none());
+        assert!(gate(&off, &session, &project, None).is_none());
     }
 
     #[test]
@@ -1837,6 +1840,48 @@ mod tests {
         assert!(tool_name("server__echo") && tool_name("a-b_c9"));
         assert!(!tool_name("tools.example.com__x") && !tool_name("a b") && !tool_name(""));
         assert!(tool_name(&"x".repeat(64)) && !tool_name(&"x".repeat(65)));
+    }
+
+    /// The agent's gate is the host's plus the plugins' allowed tools,
+    /// sharing what the agent made: `host_approval.judge` frees removing a
+    /// file the agent wrote, and still asks for one it did not.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_hosts_gate_knows_the_files_the_agent_made() {
+        use yoagent::provider::mock::{MockResponse, MockToolCall};
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().canonicalize().unwrap();
+        std::fs::write(project.join("theirs.txt"), "").unwrap();
+        let m = manifest(&project, "");
+        let (session, _driver) = Session::new(false);
+        let judge = gate(&m, &session, &project, None).unwrap();
+        let check: OfferedCheck = Arc::new(|_run: &str, _tool: &str| false);
+        let made = project.join("made.txt");
+        let mut agent = Agent::from_provider(
+            MockProvider::new(vec![
+                MockResponse::ToolCalls(vec![MockToolCall {
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({ "path": made, "content": "x" }),
+                    provider_metadata: None,
+                }]),
+                MockResponse::Text("done".into()),
+            ]),
+            ModelConfig::mock(),
+        )
+        .with_tools(vec![Box::new(WriteFileTool::new())])
+        .with_extension(agent_gate(judge.clone(), &m, check));
+        let mut events = agent.prompt("go").await;
+        while events.recv().await.is_some() {}
+        agent.finish().await;
+        assert!(made.exists());
+        let free = |file: &str| {
+            matches!(
+                judge.check_argv(&["rm", file], &project),
+                crate::builtins::Check::Free { .. }
+            )
+        };
+        assert!(free("made.txt"));
+        assert!(!free("theirs.txt"));
     }
 
     #[test]
@@ -1857,7 +1902,7 @@ mod tests {
         );
         let (session, _driver) = Session::new(false);
         let check: OfferedCheck = Arc::new(|_run: &str, tool: &str| tool == "todo");
-        let judge = gate(&m, &session, dir.path(), None, Some(check)).unwrap();
+        let judge = agent_gate(gate(&m, &session, dir.path(), None).unwrap(), &m, check);
         let runs = |tool: &str| {
             judge
                 .check(tool, &serde_json::json!({}))

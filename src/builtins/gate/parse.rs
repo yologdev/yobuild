@@ -11,10 +11,9 @@ pub(super) struct Word {
     /// It begins with an expansion, so it could begin with anything (`-o…`);
     /// otherwise its first character is the literal one in `text`.
     pub opens_unknown: bool,
-    /// Some of it was quoted or escaped (`"]]"` is not bash's `]]`).
-    pub quoted: bool,
-    /// Where in `text` the first quoted or escaped part begins: an
-    /// assignment's name and `=` are unquoted (`'x=1'` runs a program).
+    /// Where in `text` the first quoted or escaped part begins (`None`:
+    /// nothing is): an assignment's name and `=` are unquoted (`'x=1'` runs
+    /// a program).
     quoted_from: Option<usize>,
 }
 
@@ -25,7 +24,6 @@ impl Word {
             text: text.into(),
             known: true,
             opens_unknown: false,
-            quoted: false,
             quoted_from: None,
         }
     }
@@ -37,18 +35,20 @@ impl Word {
             text: text.to_owned(),
             known: self.known,
             opens_unknown: !self.known,
-            quoted: self.quoted,
-            // Not an assignment's name: never read as one.
-            quoted_from: self.quoted.then_some(0),
+            // Quoted anywhere, it is never read as an assignment (where the
+            // quoting began is lost).
+            quoted_from: self.quoted_from.map(|_| 0),
         }
+    }
+
+    /// Some of it was quoted or escaped (`"]]"` is not bash's `]]`).
+    pub fn quoted(&self) -> bool {
+        self.quoted_from.is_some()
     }
 
     /// Marks what follows as quoted or escaped.
     fn quote(&mut self) {
-        if !self.quoted {
-            self.quoted_from = Some(self.text.len());
-        }
-        self.quoted = true;
+        self.quoted_from.get_or_insert(self.text.len());
     }
 
     /// Whether bash reads it as an assignment (`NAME=value`, the name and
@@ -401,7 +401,7 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
         () => {
             if let Some(mut w) = word.take() {
                 // A lone `[`, `[[`, `{` or `}` is never expanded: literal.
-                if !w.quoted && matches!(w.text.as_str(), "[" | "[[" | "{" | "}") {
+                if !w.quoted() && matches!(w.text.as_str(), "[" | "[[" | "{" | "}") {
                     w.known = true;
                     w.opens_unknown = false;
                 }

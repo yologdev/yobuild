@@ -86,6 +86,8 @@ struct Inner {
     started: AtomicBool,
     /// The runs plugins' wakes may still start ([`Session::wake`]).
     wakes_left: AtomicU32,
+    /// `allow_wakes` was called (it sets the allowance once).
+    wakes_set: AtomicBool,
 }
 
 /// What the driver reads: a frontend's message, or a plugin's wake.
@@ -137,6 +139,7 @@ impl Session {
                 generation: AtomicU64::new(0),
                 started: AtomicBool::new(false),
                 wakes_left: AtomicU32::new(0),
+                wakes_set: AtomicBool::new(false),
             }),
             commands: tx,
         };
@@ -233,10 +236,16 @@ impl Session {
         self.inner.started.load(Ordering::SeqCst)
     }
 
-    /// How many runs plugins' wakes may still start ([`Session::wake`]);
-    /// none until set.
-    pub fn allow_wakes(&self, runs: u32) {
+    /// Sets how many runs plugins' wakes may start in this session
+    /// ([`Session::wake`]): once — a later call changes nothing and returns
+    /// `false` (the cap is the session's, not refilled). None until set.
+    pub fn allow_wakes(&self, runs: u32) -> bool {
+        if self.inner.wakes_set.swap(true, Ordering::SeqCst) {
+            tracing::warn!("the session's wake allowance was set already: kept");
+            return false;
+        }
         self.inner.wakes_left.store(runs, Ordering::SeqCst);
+        true
     }
 
     /// The runs plugins' wakes may still start.
@@ -246,11 +255,13 @@ impl Session {
 
     /// A plugin's words for the agent (`text` already tagged as the
     /// plugin's). The driver decides what they become: steering, read by a
-    /// run going on; else a run of their own, counted against
-    /// [`Session::allow_wakes`] — whether the agent was idle or the run ended
-    /// before reading them — and only once a run has started (the owner's
-    /// first). One that cannot be delivered is said as a Warning notice, as
-    /// is one a run aborted before reading. `false` once the session ended.
+    /// run going on; else a run of their own — only once a run has started
+    /// (the owner's first), and counted against [`Session::allow_wakes`]
+    /// whether the agent was idle or the run ended before reading them
+    /// (unless the owner's own late steering starts that run anyway, which
+    /// they join). One that cannot be delivered is said as a Warning notice,
+    /// as is one a run stopped (aborted, reset, or failed) before reading.
+    /// `false` once the session ended.
     pub fn wake(&self, text: String) -> bool {
         !self.is_closed() && self.commands.send(Command::Wake { text }).is_ok()
     }
@@ -639,7 +650,7 @@ impl Driver {
                             | ClientMessage::FollowUp { text },
                         )) => text,
                         Some(Command::Wake { text }) => {
-                            if run == 0 {
+                            if !inner.started.load(Ordering::SeqCst) {
                                 inner.wake_dropped(&text, "the owner's task has not started");
                                 continue;
                             }
@@ -667,7 +678,9 @@ impl Driver {
                 run,
                 prompt: prompt.clone(),
             });
-            let mut events = agent.prompt(prompt).await;
+            // Where this run's messages begin (what it read is told from them).
+            let before = agent.messages().len();
+            let mut events = agent.prompt(prompt.clone()).await;
             let mut text = Coalesced::default();
             let mut end: Option<(SessionStats, Option<(RunOutcome, String)>)> = None;
             let mut rejected = None;
@@ -677,6 +690,9 @@ impl Driver {
             // The wakes this run was given as steering, to tell them from
             // the owner's among what it never read.
             let mut woke: Vec<String> = Vec::new();
+            // The owner's steering this run, to keep what a stopped run's
+            // loop took but never read.
+            let mut steered: Vec<String> = Vec::new();
             let mut tick = tokio::time::interval(COALESCE);
             loop {
                 tokio::select! {
@@ -712,7 +728,10 @@ impl Driver {
                         }
                         Command::Client(command) => match command {
                         ClientMessage::Prompt { text } => queue.push_back(text),
-                        ClientMessage::Steer { text } => agent.steer(user(text)),
+                        ClientMessage::Steer { text } => {
+                            steered.push(text.clone());
+                            agent.steer(user(text));
+                        }
                         ClientMessage::FollowUp { text } => agent.follow_up(user(text)),
                         ClientMessage::Abort => {
                             agent.abort();
@@ -743,20 +762,63 @@ impl Driver {
                 });
             }
             agent.finish().await;
-            if reset || aborted {
-                // A plugin's wake that never reached the conversation
-                // (still queued, or taken by a loop already stopping) is
-                // dropped, said; the owner's steering is left as it was (a
-                // reset clears it).
+            // A run whose task failed (no `AgentEnd`) is one that stopped:
+            // what it never read is told the same way.
+            if reset || aborted || end.is_none() {
+                // What the run never read: still queued, or taken by a loop
+                // already stopping (yoagent's takes steering even then) and
+                // not among this run's messages. A plugin's wake is dropped,
+                // said; the owner's steering is kept for the next run (a
+                // reset clears it). Counted as multisets: one text may come
+                // more than once.
+                let mut unread_wakes = woke;
+                let mut unread_owner = steered;
+                let mut queued_owner = Vec::new();
                 for message in agent.take_steering_queue() {
-                    let wake = text_of(&message).is_some_and(|t| woke.contains(&t));
-                    if !wake && !reset {
-                        agent.steer(message);
+                    let text = text_of(&message);
+                    let wake = text
+                        .as_ref()
+                        .and_then(|t| unread_wakes.iter().position(|w| w == t));
+                    if let Some(i) = wake {
+                        let text = unread_wakes.swap_remove(i);
+                        inner.wake_dropped(&text, "the run was stopped before reading it");
+                        continue;
+                    }
+                    if let Some(i) = text
+                        .as_ref()
+                        .and_then(|t| unread_owner.iter().position(|o| o == t))
+                    {
+                        unread_owner.remove(i);
+                    }
+                    queued_owner.push(message);
+                }
+                // The rest were taken by the loop: read only if among this
+                // run's messages (the prompt aside). Compaction may have
+                // shortened the history: then all of it is looked at.
+                let messages = agent.messages();
+                let from = if before <= messages.len() { before } else { 0 };
+                let mut read: Vec<String> = messages[from..].iter().filter_map(text_of).collect();
+                let mut was_read = |text: &str| match read.iter().position(|r| r == text) {
+                    Some(i) => {
+                        read.swap_remove(i);
+                        true
+                    }
+                    None => false,
+                };
+                was_read(&prompt);
+                for text in unread_wakes {
+                    if !was_read(&text) {
+                        inner.wake_dropped(&text, "the run was stopped before reading it");
                     }
                 }
-                let read: HashSet<String> = agent.messages().iter().filter_map(text_of).collect();
-                for text in woke.iter().filter(|w| !read.contains(*w)) {
-                    inner.wake_dropped(text, "the run was stopped before reading it");
+                let lost: Vec<String> = unread_owner.into_iter().filter(|t| !was_read(t)).collect();
+                if !reset {
+                    for text in lost {
+                        agent.steer(user(text));
+                    }
+                    for message in queued_owner {
+                        agent.steer(message);
+                    }
                 }
                 if reset {
                     inner.reset(&mut agent);
@@ -828,6 +890,13 @@ impl Driver {
                 break 'session;
             }
         }
+        // Wakes still in the channel are not delivered: the session is
+        // ending, so a notice would reach nobody; the log says so.
+        while let Ok(command) = self.commands.try_recv() {
+            if let Command::Wake { text } = command {
+                tracing::warn!("a plugin's wake was not delivered (the session ended): {text}");
+            }
+        }
         drop(self);
         agent
     }
@@ -837,7 +906,6 @@ fn user(text: String) -> AgentMessage {
     AgentMessage::Llm(Message::user(text))
 }
 
-/// A queued user message's text (the session only queues text).
 /// A text's first line, at most `max` characters, `…` when cut.
 fn first_line(text: &str, max: usize) -> String {
     let line = text.lines().next().unwrap_or("");
@@ -848,6 +916,7 @@ fn first_line(text: &str, max: usize) -> String {
     }
 }
 
+/// A queued user message's text (the session only queues text).
 fn text_of(message: &AgentMessage) -> Option<String> {
     let AgentMessage::Llm(Message::User { content, .. }) = message else {
         return None;

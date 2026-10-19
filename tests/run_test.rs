@@ -1530,7 +1530,9 @@ async fn a_rutis_plugin_gets_its_granted_host_services_by_its_row() {
     hosted_plugin(dir.path(), &out);
     std::fs::write(
         dir.path().join("script.json"),
-        r#"[{ "tools": [{ "name": "nudge", "arguments": {} }] }, { "text": "done" }]"#,
+        // A spare reply: a wake that reaches the driver only after the
+        // loop's look past the tool is read at its last look instead.
+        r#"[{ "tools": [{ "name": "nudge", "arguments": {} }] }, { "text": "done" }, { "text": "done" }]"#,
     )
     .unwrap();
     let ended = run_once(dir.path()).await;

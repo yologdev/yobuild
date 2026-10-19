@@ -213,8 +213,9 @@ impl Gate {
     /// and its arguments, no shell (a plugin's `exec`, design §12) — run in
     /// `cwd`: judged as `bash` would judge `cd <cwd> && <words>`, each word
     /// single-quoted, so it reads as exactly those words (no expansion, no
-    /// operator). The files a free command makes are not recorded as the
-    /// agent's own: it does not run through the gate's `after_tool`.
+    /// operator); a `cwd` that is not UTF-8 asks. The files a free command
+    /// makes are not recorded as the agent's own: it does not run through
+    /// the gate's `after_tool`.
     pub fn check_argv<S: AsRef<str>>(&self, argv: &[S], cwd: &Path) -> Check {
         if argv.is_empty() {
             return Check::Ask {
@@ -224,11 +225,14 @@ impl Gate {
         }
         let quote = |word: &str| format!("'{}'", word.replace('\'', "'\\''"));
         let words: Vec<String> = argv.iter().map(|w| quote(w.as_ref())).collect();
-        let line = format!(
-            "cd {} && {}",
-            quote(&cwd.to_string_lossy()),
-            words.join(" ")
-        );
+        // A folder that is not text would be judged as another one.
+        let Some(here) = cwd.to_str() else {
+            return Check::Ask {
+                question: "Run a command in a folder whose name is not text?".into(),
+                details: format!("in {}: {}", cwd.display(), words.join(" ")),
+            };
+        };
+        let line = format!("cd {} && {}", quote(here), words.join(" "));
         self.check("bash", &serde_json::json!({ "command": line }))
     }
 }
