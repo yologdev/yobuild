@@ -784,8 +784,9 @@ async fn shut(root: &Ctx) -> Option<String> {
     }
 }
 
-/// A root of its own with yobuild's services on it (`run`'s), for a host
-/// started apart.
+/// A root of its own with yobuild's services on it (`run`'s, with no
+/// scratch — `check` makes none — and not `--once`), for a host started
+/// apart.
 fn services_on(
     root: &Ctx,
     session: &Session,

@@ -13,6 +13,9 @@ pub(super) struct Word {
     pub opens_unknown: bool,
     /// Some of it was quoted or escaped (`"]]"` is not bash's `]]`).
     pub quoted: bool,
+    /// Where in `text` the first quoted or escaped part begins: an
+    /// assignment's name and `=` are unquoted (`'x=1'` runs a program).
+    quoted_from: Option<usize>,
 }
 
 impl Word {
@@ -23,6 +26,7 @@ impl Word {
             known: true,
             opens_unknown: false,
             quoted: false,
+            quoted_from: None,
         }
     }
 
@@ -34,7 +38,26 @@ impl Word {
             known: self.known,
             opens_unknown: !self.known,
             quoted: self.quoted,
+            // Not an assignment's name: never read as one.
+            quoted_from: self.quoted.then_some(0),
         }
+    }
+
+    /// Marks what follows as quoted or escaped.
+    fn quote(&mut self) {
+        if !self.quoted {
+            self.quoted_from = Some(self.text.len());
+        }
+        self.quoted = true;
+    }
+
+    /// Whether bash reads it as an assignment (`NAME=value`, the name and
+    /// `=` unquoted; the value may be quoted).
+    pub fn assigns(&self) -> bool {
+        is_assignment(&self.text)
+            && self
+                .quoted_from
+                .is_none_or(|from| self.text.find('=').is_some_and(|at| at < from))
     }
 
     fn empty() -> Self {
@@ -93,7 +116,7 @@ fn is_word_char(c: char) -> bool {
 }
 
 /// `NAME=…` (an assignment before a command).
-pub(super) fn is_assignment(text: &str) -> bool {
+fn is_assignment(text: &str) -> bool {
     match text.find('=') {
         Some(at) if at > 0 => text[..at].chars().all(is_word_char),
         _ => false,
@@ -426,7 +449,7 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
             '\'' => {
                 let end = find(&s, '\'', i + 1)?;
                 let w = word.get_or_insert_with(Word::empty);
-                w.quoted = true;
+                w.quote();
                 w.text.push_str(&text(&s, i + 1, end));
                 i = end;
             }
@@ -435,7 +458,7 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
                 let body = &s[i + 1..end];
                 cur.runs.extend(substitutions(body)?);
                 let w = word.get_or_insert_with(Word::empty);
-                w.quoted = true;
+                w.quote();
                 let opens = w.text.is_empty() && matches!(body.first(), Some('$' | '`'));
                 // Inside double quotes a backslash-newline joins lines too.
                 w.text
@@ -450,7 +473,7 @@ pub(super) fn parse(line: &str) -> Option<Vec<Item>> {
             '\\' if s.get(i + 1) == Some(&'\n') => i += 1,
             '\\' => {
                 let w = word.get_or_insert_with(Word::empty);
-                w.quoted = true;
+                w.quote();
                 if let Some(next) = s.get(i + 1) {
                     w.text.push(*next);
                 }

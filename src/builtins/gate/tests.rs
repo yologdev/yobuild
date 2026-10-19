@@ -2171,5 +2171,37 @@ fn an_argv_is_judged_as_its_words_where_it_runs() {
     // Where it runs counts: a build runs only inside the project.
     free(&["make"], &project);
     asks(&["make"], Path::new("/"));
+    let quoted = project.join("it's");
+    std::fs::create_dir(&quoted).unwrap();
+    free(&["make"], &quoted);
     asks(&[], &project);
+    // The first word is the program, whatever it looks like to bash
+    // unquoted: never an assignment or a keyword.
+    asks(&["x=./evil"], &project);
+    asks(&["RUST_LOG=1", "rm", "-rf", "x"], &project);
+    asks(&["fi"], &project);
+    asks(&["}"], &project);
+    asks(&["!", "rm", "-rf", "x"], &project);
+    asks(&["{", "rm", "-rf", "x"], &project);
+    asks(&["env", "rm", "-rf", "x"], &project);
+    // Nothing expands, and a newline stays inside its word.
+    free(&["ls", "~/x"], &project);
+    free(&["ls", "a\nrm -rf x"], &project);
+}
+
+#[test]
+fn an_assignment_or_a_keyword_is_one_only_unquoted() {
+    let p = Project::new();
+    // The name and `=` unquoted: an assignment; its value may be quoted.
+    // Quoted or escaped there, the word is a program's name.
+    pairs(
+        &p,
+        &[
+            ("x=1", "'x=./evil'"),
+            ("x='a b'", "\"x\"=1"),
+            ("RUST_LOG=\"debug\" ls", "x\\=1"),
+            ("if true; then ls; fi", "'fi'"),
+            ("{ ls; }", "\\}"),
+        ],
+    );
 }

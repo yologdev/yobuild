@@ -194,6 +194,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         host,
         ask_owner,
         runtimes,
+        gate: judge,
         dsh_home: _dsh_home,
     } = start(
         root,
@@ -260,7 +261,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         adapters,
         own,
     );
-    if let Some(gate) = gate(&manifest, &session, &cwd, scratch.as_ref(), Some(offered)) {
+    // The host's gate, so `host_approval.judge` knows the files the agent
+    // made (clones share them); plugins' tools allowed when they offer them.
+    if let Some(gate) = judge.map(|g| g.with_tools_allowed_if(allowed(&manifest).1, offered)) {
         agent = agent.with_extension(gate);
         // A plugin's allowed tools, checked once its tools are offered.
         let names: Vec<(String, String)> = manifest
@@ -735,6 +738,9 @@ struct Started {
     ask_owner: Option<AskOwner>,
     /// Each runtime and its folder (`--measure`).
     runtimes: Vec<(String, PathBuf)>,
+    /// The gate `host_approval` judges with (`None` with `gate = "off"`): the
+    /// agent's is a clone, sharing the files the agent made.
+    gate: Option<Gate>,
     /// DSH's home with its host services, while the `dsh` runtime uses it
     /// (a private one is removed when dropped).
     dsh_home: Option<DshHome>,
@@ -760,15 +766,10 @@ async fn start(
     let bridge = RutisBridge::install(root)?;
     services::provide(root, session)?;
     // The host services (design §12): granted per plugin, refusing the rest.
+    let judge = gate(manifest, session, cwd, scratch, None);
     host::provide(
         root,
-        host::Host::new(
-            session.clone(),
-            manifest,
-            cwd,
-            gate(manifest, session, cwd, scratch, None),
-            once,
-        ),
+        host::Host::new(session.clone(), manifest, cwd, judge.clone(), once),
     )?;
     // `ask_owner`, the tool and (for plugins) the host service: one
     // numbering. Before the plugins start: one may use it as it loads. The
@@ -855,6 +856,7 @@ async fn start(
         host,
         ask_owner,
         runtimes,
+        gate: judge,
         dsh_home,
     })
 }

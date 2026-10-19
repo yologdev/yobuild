@@ -288,7 +288,8 @@ pub struct Plugin {
     /// judges no calls).
     pub policy: bool,
     /// What its host gives it beyond what every plugin has (`grants`;
-    /// design §12): all off unless the manifest grants them.
+    /// design §12): all off unless the manifest grants them — always, for a
+    /// pi or DSH plugin, until their hosts come (M3b).
     pub grants: Grants,
 }
 
@@ -299,15 +300,16 @@ pub struct Plugin {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Grants {
-    /// The agent's folder (the `workspace` service's `cwd`).
+    /// The agent's folder (`host_workspace.cwd()`).
     pub workspace: bool,
-    /// The project counts as trusted (`workspace`'s `trusted`): the plugin
+    /// The project counts as trusted (`host_workspace.trusted()`): the plugin
     /// may run the project's code — an honour-system grant.
     pub trust: bool,
     /// What it may know of the model: `"info"` (provider, id, limits).
     pub model: Option<ModelGrant>,
-    /// It may wake the agent (`session.wake`): its text reaches the agent
-    /// tagged as its own, mid-run as steering, idle as a new run (capped).
+    /// It may wake the agent (`host_session.wake`): its text reaches the
+    /// agent tagged as its own, mid-run as steering, else as a run of its
+    /// own (capped).
     pub wake: bool,
 }
 
@@ -335,7 +337,7 @@ impl Grants {
 
     /// Nothing granted.
     pub fn is_empty(&self) -> bool {
-        self.names().is_empty()
+        *self == Self::default()
     }
 }
 

@@ -1475,65 +1475,62 @@ async fn check_allows_a_servers_tool_its_entry_allows() {
     assert!(echo.parameters.is_some(), "{echo:?}");
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_rutis_plugin_gets_its_granted_host_services_by_its_row() {
-    // A rutis plugin granted `workspace` and `wake` (design §12): as it
-    // loads it reads the host services and records what they answered; its
-    // tool `nudge` wakes the agent mid-run, which reaches the agent as
-    // steering tagged as the plugin's.
-    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins/node_modules");
-    if !runtime.join("@arcships/rutis-runtime").is_dir() {
-        if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
-            panic!("the rutis runtime is required: npm ci in frontend/plugins");
-        }
-        eprintln!("SKIPPED: npm ci in frontend/plugins");
-        return;
-    }
-    let dir = tempfile::tempdir().unwrap();
-    std::os::unix::fs::symlink(&runtime, dir.path().join("node_modules")).unwrap();
-    std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
-    let out = dir.path().join("hosted.json");
+/// A rutis plugin granted `workspace` and `wake` (design §12) in `dir`
+/// (a rutis package), writing what the host services answered to `out`:
+/// it wakes the agent as it loads (refused: the owner's task first), and
+/// its tool `nudge` reads the services, records them, then wakes the agent
+/// mid-run.
+fn hosted_plugin(dir: &Path, out: &Path) {
     std::fs::write(
-        dir.path().join("hosted.ts"),
+        dir.join("hosted.ts"),
         "import { writeFileSync } from 'node:fs'\n\
          import { definePlugin } from '@arcships/rutis'\n\
          export default definePlugin({\n\
            inject: ['yoagent', 'host_workspace', 'host_session', 'host_approval'],\n\
            apply(ctx: any, config: { out: string }) {\n\
              const session = ctx.use('host_session')\n\
+             const tried = async (f: () => any) => { try { return await f() } catch (e) { return 'refused: ' + (e as Error).message } }\n\
+             const early = tried(() => session.wake('too early'))\n\
              ctx.effect(ctx.use('yoagent').register('hosted', {\n\
                async tools() { return [{ name: 'nudge', description: 'Nudge', parameters: { type: 'object', properties: {} } }] },\n\
-               async call_tool() { return { text: String(await session.wake('look again')) } },\n\
+               async call_tool() {\n\
+                 const got = {\n\
+                   early: await early,\n\
+                   cwd: await tried(() => ctx.use('host_workspace').cwd()),\n\
+                   trusted: await tried(() => ctx.use('host_workspace').trusted()),\n\
+                   info: await tried(() => session.info()),\n\
+                   model: await tried(() => session.model()),\n\
+                   ls: await tried(() => ctx.use('host_approval').judge(['ls', '-la'])),\n\
+                   rm: await tried(() => ctx.use('host_approval').judge(['rm', '-rf', 'x'])),\n\
+                 }\n\
+                 writeFileSync(config.out, JSON.stringify(got))\n\
+                 return { text: String(await session.wake('look again')) }\n\
+               },\n\
              }))\n\
-             const tried = async (f: () => any) => { try { return await f() } catch (e) { return 'refused: ' + (e as Error).message } }\n\
-             void (async () => {\n\
-               const got = {\n\
-                 cwd: await tried(() => ctx.use('host_workspace').cwd()),\n\
-                 trusted: await tried(() => ctx.use('host_workspace').trusted()),\n\
-                 info: await tried(() => session.info()),\n\
-                 model: await tried(() => session.model()),\n\
-                 ls: await tried(() => ctx.use('host_approval').judge(['ls', '-la'])),\n\
-                 rm: await tried(() => ctx.use('host_approval').judge(['rm', '-rf', 'x'])),\n\
-               }\n\
-               writeFileSync(config.out, JSON.stringify(got))\n\
-             })()\n\
            },\n\
          })\n",
     )
     .unwrap();
     std::fs::write(
-        dir.path().join("script.json"),
-        r#"[{ "tools": [{ "name": "nudge", "arguments": {} }] }, { "text": "done" }]"#,
-    )
-    .unwrap();
-    std::fs::write(
-        dir.path().join("agent.toml"),
+        dir.join("agent.toml"),
         format!(
             "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
              [[plugin]]\nrutis = \"./hosted.ts\"\nruntime = \"node\"\nallow = [\"nudge\"]\n\
              config = {{ out = \"{}\" }}\ngrants = {{ workspace = true, wake = true }}\n",
             out.display()
         ),
+    )
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rutis_plugin_gets_its_granted_host_services_by_its_row() {
+    let Some(dir) = rutis_package() else { return };
+    let out = dir.path().join("hosted.json");
+    hosted_plugin(dir.path(), &out);
+    std::fs::write(
+        dir.path().join("script.json"),
+        r#"[{ "tools": [{ "name": "nudge", "arguments": {} }] }, { "text": "done" }]"#,
     )
     .unwrap();
     let ended = run_once(dir.path()).await;
@@ -1545,6 +1542,11 @@ async fn a_rutis_plugin_gets_its_granted_host_services_by_its_row() {
     );
     let got: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let early = got["early"].as_str().unwrap_or_default();
+    assert!(
+        early.starts_with("refused: ") && early.contains("has not started the owner's task"),
+        "{got}"
+    );
     // The agent's folder is the process's (`run` works in it).
     let cwd = std::env::current_dir().unwrap();
     assert_eq!(got["cwd"], cwd.display().to_string(), "{got}");
@@ -1555,13 +1557,13 @@ async fn a_rutis_plugin_gets_its_granted_host_services_by_its_row() {
     );
     let model = got["model"].as_str().unwrap_or_default();
     assert!(
-        model.starts_with("refused: ") && model.contains("not granted"),
+        model.starts_with("refused: ") && model.contains("not granted to plugin hosted"),
         "{got}"
     );
     assert_eq!(got["ls"], serde_json::json!({ "free": true }), "{got}");
     assert_eq!(got["rm"]["free"], false, "{got}");
     // The wake, mid-run: steering the run, tagged as the plugin's.
-    assert_eq!(results(&ended), [("steered".to_string(), false)]);
+    assert_eq!(results(&ended), [("sent".to_string(), false)]);
     let steered = ended
         .agent
         .as_ref()
@@ -1575,4 +1577,22 @@ async fn a_rutis_plugin_gets_its_granted_host_services_by_its_row() {
             _ => false,
         });
     assert!(steered, "{:?}", ended.agent.as_ref().unwrap().messages());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_runs_a_plugin_that_injects_the_host_services() {
+    // `check` provides the host services as `run` does, alone and together:
+    // without them such a plugin would never start.
+    let Some(dir) = rutis_package() else { return };
+    hosted_plugin(dir.path(), &dir.path().join("hosted.json"));
+    let report = check_dir(dir.path()).await;
+    assert!(report.ok, "{}", report.text());
+    let entry = &report.entries[0];
+    let handlers = entry.handlers.as_deref().unwrap_or_default();
+    assert!(handlers.iter().any(|h| h == "hosted"), "{}", report.text());
+    assert_eq!(entry.grants, ["workspace", "wake"]);
+    assert_eq!(
+        kind(&report.agent.tools, "nudge").as_deref(),
+        Some("allowed")
+    );
 }

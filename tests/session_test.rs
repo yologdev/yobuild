@@ -893,3 +893,129 @@ async fn an_observer_is_not_a_frontend_a_question_waits_for() {
     session.disconnect(watching.id);
     assert_eq!(session.frontends(), 0);
 }
+
+fn warnings(seen: &[ServerMessage]) -> Vec<String> {
+    seen.iter()
+        .filter_map(|m| match m {
+            ServerMessage::Notice {
+                level: NoticeLevel::Warning,
+                message,
+            } => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn run_starts(seen: &[ServerMessage]) -> Vec<String> {
+    seen.iter()
+        .filter_map(|m| match m {
+            ServerMessage::RunStart { prompt, .. } => Some(prompt.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A plugin's wake starts a run only after the owner's first, and only as
+/// many as allowed; one that cannot is said.
+#[tokio::test]
+async fn a_wake_starts_a_run_only_after_the_owners_and_as_allowed() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    session.allow_wakes(1);
+    let run = tokio::spawn(driver.run(agent(vec![
+        MockResponse::Text("first".into()),
+        MockResponse::Text("second".into()),
+    ])));
+    assert!(session.wake("[plugin p] early".into()));
+    let seen = until(&mut ui, |m| matches!(m, ServerMessage::Notice { .. })).await;
+    assert!(
+        warnings(&seen)[0].contains("the owner's task has not started"),
+        "{seen:?}"
+    );
+    assert!(!session.has_started());
+    session.send(ClientMessage::Prompt { text: "hi".into() });
+    until_run_end(&mut ui).await;
+    assert!(session.has_started());
+    assert!(session.wake("[plugin p] again".into()));
+    let seen = until_run_end(&mut ui).await;
+    assert_eq!(run_starts(&seen), ["[plugin p] again"]);
+    assert_eq!(session.wakes_left(), 0);
+    assert!(session.wake("[plugin p] more".into()));
+    let seen = until(&mut ui, |m| matches!(m, ServerMessage::Notice { .. })).await;
+    assert!(
+        warnings(&seen)[0].contains("plugins may start no more runs"),
+        "{seen:?}"
+    );
+    session.send(ClientMessage::Quit);
+    let rest = until(&mut ui, |m| matches!(m, ServerMessage::Closed)).await;
+    assert!(run_starts(&rest).is_empty(), "{rest:?}");
+    finished(run).await;
+}
+
+/// A wake sent as a run ends (from an extension's `finish`, where the loop
+/// no longer reads steering) is a run of its own: counted, so a plugin
+/// waking at every run's end cannot keep the agent going.
+#[tokio::test]
+async fn a_wake_as_a_run_ends_is_counted_like_an_idle_one() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    session.allow_wakes(1);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(Semaphore::new(0));
+    let agent = agent(vec![
+        MockResponse::Text("first".into()),
+        MockResponse::Text("second".into()),
+        MockResponse::Text("third".into()),
+    ])
+    .with_extension(HoldFinish {
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    let run = tokio::spawn(driver.run(agent));
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    for _ in 0..2 {
+        tokio::time::timeout(WAIT, entered.notified())
+            .await
+            .expect("finish starts");
+        assert!(session.is_running());
+        assert!(session.wake("[plugin p] again".into()));
+        release.add_permits(1);
+    }
+    let seen = until(&mut ui, |m| matches!(m, ServerMessage::Notice { .. })).await;
+    assert_eq!(run_starts(&seen), ["go", "[plugin p] again"], "{seen:?}");
+    assert!(
+        warnings(&seen)[0].contains("plugins may start no more runs"),
+        "{seen:?}"
+    );
+    session.send(ClientMessage::Quit);
+    let rest = until(&mut ui, |m| matches!(m, ServerMessage::Closed)).await;
+    assert!(run_starts(&rest).is_empty(), "{rest:?}");
+    finished(run).await;
+}
+
+/// A wake given to a run as steering that the run never read, because it
+/// was aborted, is said; the run is not followed by another.
+#[tokio::test]
+async fn a_wake_an_aborted_run_never_read_is_said() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    session.allow_wakes(3);
+    let (agent, _gate) = gated(vec![MockResponse::Text("never".into())]);
+    let run = tokio::spawn(driver.run(agent));
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    until_gated(&mut ui).await;
+    assert!(session.wake("[plugin p] look".into()));
+    // Let the driver hand it to the run first.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    session.send(ClientMessage::Abort);
+    let seen = until(&mut ui, |m| matches!(m, ServerMessage::Notice { .. })).await;
+    assert!(
+        warnings(&seen)[0].contains("the run was stopped before reading it"),
+        "{seen:?}"
+    );
+    session.send(ClientMessage::Quit);
+    let rest = until(&mut ui, |m| matches!(m, ServerMessage::Closed)).await;
+    assert!(run_starts(&rest).is_empty(), "{rest:?}");
+    assert_eq!(session.wakes_left(), 3);
+    finished(run).await;
+}

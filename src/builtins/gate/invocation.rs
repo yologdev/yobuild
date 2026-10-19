@@ -4,7 +4,7 @@
 //! [`Unread`]: the gate asks.
 
 use super::args::{parse_until, Spec};
-use super::parse::{is_assignment, Word};
+use super::parse::Word;
 use super::paths::system_binary;
 
 /// A program and its arguments.
@@ -156,7 +156,7 @@ pub(super) fn invocation(words: &[Word]) -> Result<Option<Invocation<'_>>, Unrea
     let mut via_xargs = false;
     let mut assignments: Vec<&Word> = Vec::new();
     loop {
-        while let Some(w) = words.get(i).filter(|w| is_assignment(&w.text)) {
+        while let Some(w) = words.get(i).filter(|w| w.assigns()) {
             assignments.push(w);
             i += 1;
         }
@@ -172,11 +172,12 @@ pub(super) fn invocation(words: &[Word]) -> Result<Option<Invocation<'_>>, Unrea
             return Err(Unread);
         }
         let text = word.text.strip_prefix('\\').unwrap_or(&word.text);
-        if word.known && KEYWORDS.contains(&text) {
+        // Quoted or escaped, a keyword is a program's name (`'fi'`).
+        if word.known && !word.quoted && KEYWORDS.contains(&text) {
             i += 1;
             continue;
         }
-        if word.known && CLOSERS.contains(&text) {
+        if word.known && !word.quoted && CLOSERS.contains(&text) {
             return Ok(None);
         }
         // The program's name is literal (a lone `[`, `[[`, `{` is: parse.rs).

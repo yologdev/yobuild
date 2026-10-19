@@ -7,7 +7,7 @@
 //! frontend fell behind on streamed text.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -77,11 +77,21 @@ struct Inner {
     /// message once: in its replay, or live.
     history: Mutex<VecDeque<ServerMessage>>,
     /// The session's id, made once (a uuid): its identity for plugins'
-    /// hosts (design §12, the `session` service).
+    /// hosts (design §12, `host_session.info()`).
     id: String,
     /// Bumped by each Reset: what a host keeps per conversation (a DSH
     /// stand-in agent) starts again at a new generation.
     generation: AtomicU64,
+    /// A run has started: the owner's first task, or a prompt of theirs.
+    started: AtomicBool,
+    /// The runs plugins' wakes may still start ([`Session::wake`]).
+    wakes_left: AtomicU32,
+}
+
+/// What the driver reads: a frontend's message, or a plugin's wake.
+enum Command {
+    Client(ClientMessage),
+    Wake { text: String },
 }
 
 /// The session handle.
@@ -89,7 +99,7 @@ struct Inner {
 pub struct Session {
     inner: Arc<Inner>,
     /// Only the handles hold it: once they are all gone, the driver ends.
-    commands: mpsc::UnboundedSender<ClientMessage>,
+    commands: mpsc::UnboundedSender<Command>,
 }
 
 /// A frontend's connection: its id and the messages for it. Dropping
@@ -103,7 +113,7 @@ pub struct Connection {
 pub struct Driver {
     /// Closes the session when the driver goes, run or not.
     ending: Ending,
-    commands: mpsc::UnboundedReceiver<ClientMessage>,
+    commands: mpsc::UnboundedReceiver<Command>,
     accept_quit: bool,
 }
 
@@ -125,6 +135,8 @@ impl Session {
                 history: Mutex::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 generation: AtomicU64::new(0),
+                started: AtomicBool::new(false),
+                wakes_left: AtomicU32::new(0),
             }),
             commands: tx,
         };
@@ -215,6 +227,34 @@ impl Session {
         self.inner.generation.load(Ordering::SeqCst)
     }
 
+    /// Whether a run has started in this session (so a plugin's wake may
+    /// start one: never before the owner's own).
+    pub fn has_started(&self) -> bool {
+        self.inner.started.load(Ordering::SeqCst)
+    }
+
+    /// How many runs plugins' wakes may still start ([`Session::wake`]);
+    /// none until set.
+    pub fn allow_wakes(&self, runs: u32) {
+        self.inner.wakes_left.store(runs, Ordering::SeqCst);
+    }
+
+    /// The runs plugins' wakes may still start.
+    pub fn wakes_left(&self) -> u32 {
+        self.inner.wakes_left.load(Ordering::SeqCst)
+    }
+
+    /// A plugin's words for the agent (`text` already tagged as the
+    /// plugin's). The driver decides what they become: steering, read by a
+    /// run going on; else a run of their own, counted against
+    /// [`Session::allow_wakes`] — whether the agent was idle or the run ended
+    /// before reading them — and only once a run has started (the owner's
+    /// first). One that cannot be delivered is said as a Warning notice, as
+    /// is one a run aborted before reading. `false` once the session ended.
+    pub fn wake(&self, text: String) -> bool {
+        !self.is_closed() && self.commands.send(Command::Wake { text }).is_ok()
+    }
+
     /// Whether the session ended: the driver stopped, nothing sent is heard.
     pub fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::SeqCst)
@@ -246,7 +286,7 @@ impl Session {
                 }
                 true
             }
-            other => self.commands.send(other).is_ok(),
+            other => self.commands.send(Command::Client(other)).is_ok(),
         }
     }
 
@@ -488,6 +528,33 @@ impl Session {
 }
 
 impl Inner {
+    /// Forget the conversation (a Reset): a new generation first, so a host
+    /// asking meanwhile never pairs the old generation with a cleared state.
+    fn reset(&self, agent: &mut Agent) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        agent.clear_messages();
+        self.withdraw_held();
+    }
+
+    /// Take one of the runs plugins' wakes may start, if any is left.
+    fn take_wake(&self) -> bool {
+        self.wakes_left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+    }
+
+    /// Say a plugin's wake that reached no run.
+    fn wake_dropped(&self, text: &str, why: &str) {
+        tracing::warn!("a plugin's wake was not delivered ({why}): {text}");
+        self.broadcast(ServerMessage::Notice {
+            level: NoticeLevel::Warning,
+            message: format!(
+                "A plugin's wake was not delivered ({why}): {}",
+                first_line(text, 120)
+            ),
+        });
+    }
+
     /// Withdraw every question asked with [`Session::ask_later`] (a reset).
     fn withdraw_held(&self) {
         let mut ui = self.ui.lock().unwrap();
@@ -555,7 +622,8 @@ impl Driver {
     /// Run the agent until a frontend quits (with `accept_quit`) or every
     /// [`Session`] handle is gone. A prompt sent during a run is queued and
     /// runs next; steering and follow-ups go to the run in progress (or start
-    /// one when idle). Returns the agent with its history.
+    /// one when idle); a plugin's wake as [`Session::wake`] says. Returns the
+    /// agent with its history.
     pub async fn run(mut self, mut agent: Agent) -> Agent {
         let inner = self.ending.inner.clone();
         let mut queue: VecDeque<String> = VecDeque::new();
@@ -563,24 +631,36 @@ impl Driver {
         'session: loop {
             let prompt = match queue.pop_front() {
                 Some(text) => text,
-                None => match self.commands.recv().await {
-                    Some(
-                        ClientMessage::Prompt { text }
-                        | ClientMessage::Steer { text }
-                        | ClientMessage::FollowUp { text },
-                    ) => text,
-                    Some(ClientMessage::Reset) => {
-                        agent.clear_messages();
-                        inner.withdraw_held();
-                        inner.generation.fetch_add(1, Ordering::SeqCst);
-                        continue;
+                None => {
+                    match self.commands.recv().await {
+                        Some(Command::Client(
+                            ClientMessage::Prompt { text }
+                            | ClientMessage::Steer { text }
+                            | ClientMessage::FollowUp { text },
+                        )) => text,
+                        Some(Command::Wake { text }) => {
+                            if run == 0 {
+                                inner.wake_dropped(&text, "the owner's task has not started");
+                                continue;
+                            }
+                            if !inner.take_wake() {
+                                inner.wake_dropped(&text, "the agent is idle and plugins may start no more runs this session");
+                                continue;
+                            }
+                            text
+                        }
+                        Some(Command::Client(ClientMessage::Reset)) => {
+                            inner.reset(&mut agent);
+                            continue;
+                        }
+                        Some(Command::Client(ClientMessage::Quit)) if self.accept_quit => break,
+                        Some(_) => continue,
+                        None => break,
                     }
-                    Some(ClientMessage::Quit) if self.accept_quit => break,
-                    Some(_) => continue,
-                    None => break,
-                },
+                }
             };
             run += 1;
+            inner.started.store(true, Ordering::SeqCst);
             inner.running.store(true, Ordering::SeqCst);
             self.ending.open_run = Some(run);
             inner.broadcast(ServerMessage::RunStart {
@@ -594,6 +674,9 @@ impl Driver {
             let mut aborted = false;
             let mut reset = false;
             let mut quit = false;
+            // The wakes this run was given as steering, to tell them from
+            // the owner's among what it never read.
+            let mut woke: Vec<String> = Vec::new();
             let mut tick = tokio::time::interval(COALESCE);
             loop {
                 tokio::select! {
@@ -623,6 +706,11 @@ impl Driver {
                         }
                     }
                     Some(command) = self.commands.recv() => match command {
+                        Command::Wake { text } => {
+                            woke.push(text.clone());
+                            agent.steer(user(text));
+                        }
+                        Command::Client(command) => match command {
                         ClientMessage::Prompt { text } => queue.push_back(text),
                         ClientMessage::Steer { text } => agent.steer(user(text)),
                         ClientMessage::FollowUp { text } => agent.follow_up(user(text)),
@@ -644,6 +732,7 @@ impl Driver {
                             quit = true;
                         }
                         _ => {}
+                        },
                     },
                 }
             }
@@ -654,22 +743,56 @@ impl Driver {
                 });
             }
             agent.finish().await;
-            if reset {
-                agent.clear_messages();
-                inner.withdraw_held();
-                inner.generation.fetch_add(1, Ordering::SeqCst);
-                agent.clear_steering_queue();
-                agent.clear_follow_up_queue();
-            } else if !aborted {
+            if reset || aborted {
+                // A plugin's wake that never reached the conversation
+                // (still queued, or taken by a loop already stopping) is
+                // dropped, said; the owner's steering is left as it was (a
+                // reset clears it).
+                for message in agent.take_steering_queue() {
+                    let wake = text_of(&message).is_some_and(|t| woke.contains(&t));
+                    if !wake && !reset {
+                        agent.steer(message);
+                    }
+                }
+                let read: HashSet<String> = agent.messages().iter().filter_map(text_of).collect();
+                for text in woke.iter().filter(|w| !read.contains(*w)) {
+                    inner.wake_dropped(text, "the run was stopped before reading it");
+                }
+                if reset {
+                    inner.reset(&mut agent);
+                    agent.clear_follow_up_queue();
+                }
+            } else {
                 // Steering or a follow-up that arrived after the loop's last
                 // look (while the answer streamed, or extensions finished):
-                // the next run's prompt, not left for some later run.
-                let late: Vec<String> = agent
+                // the next run's prompt, not left for some later run. A
+                // plugin's wake among it starts that run only as an idle one
+                // would: counted, or dropped.
+                let mut late: Vec<String> = Vec::new();
+                let mut wakes: Vec<String> = Vec::new();
+                for text in agent
                     .take_steering_queue()
                     .into_iter()
                     .chain(agent.take_follow_up_queue())
                     .filter_map(|m| text_of(&m))
-                    .collect();
+                {
+                    match woke.iter().position(|w| *w == text) {
+                        Some(i) => {
+                            woke.swap_remove(i);
+                            wakes.push(text);
+                        }
+                        None => late.push(text),
+                    }
+                }
+                if !wakes.is_empty() {
+                    if late.is_empty() && !inner.take_wake() {
+                        for text in &wakes {
+                            inner.wake_dropped(text, "the run ended before reading it, and plugins may start no more runs this session");
+                        }
+                    } else {
+                        late.extend(wakes);
+                    }
+                }
                 if !late.is_empty() {
                     queue.push_front(late.join("\n\n"));
                 }
@@ -715,6 +838,16 @@ fn user(text: String) -> AgentMessage {
 }
 
 /// A queued user message's text (the session only queues text).
+/// A text's first line, at most `max` characters, `…` when cut.
+fn first_line(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or("");
+    match line.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None if line.len() < text.trim_end().len() => format!("{line}…"),
+        None => line.to_owned(),
+    }
+}
+
 fn text_of(message: &AgentMessage) -> Option<String> {
     let AgentMessage::Llm(Message::User { content, .. }) = message else {
         return None;

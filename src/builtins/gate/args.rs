@@ -285,11 +285,11 @@ mod tests {
 
     #[test]
     fn an_expansion_where_an_option_could_be_is_not_read() {
-        let unknown = |text: &str, opens_unknown| Word {
-            quoted: false,
-            text: text.into(),
-            known: false,
-            opens_unknown,
+        let unknown = |text: &str, opens_unknown| {
+            let mut word = Word::literal(text);
+            word.known = false;
+            word.opens_unknown = opens_unknown;
+            word
         };
         assert!(parse(&CP, &[unknown("$X", true)]).is_none());
         assert!(parse(&CP, &[unknown("-r$X", false)]).is_none());
