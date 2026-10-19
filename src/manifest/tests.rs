@@ -1001,3 +1001,72 @@ fn tools_a_session_budget_and_a_policy_plugin_are_read() {
         "5:22: session_budget_usd set, but ollama/llama3 has no price"
     );
 }
+
+#[test]
+fn a_model_yoagent_has_a_preset_for_gets_the_preset() {
+    // Every preset's provider is one a manifest can name, and its id gets
+    // that preset: its limits and protocol, not the generic constructor's.
+    for preset in PRESETS {
+        let expected = preset();
+        assert!(
+            PROVIDERS.iter().any(|(p, _)| *p == expected.provider),
+            "{}: provider {} not in PROVIDERS",
+            expected.id,
+            expected.provider
+        );
+        let m = read(&format!(
+            "[agent]\nname = \"a\"\nmodel = \"{}/{}\"\n",
+            expected.provider, expected.id
+        ))
+        .unwrap();
+        let config = m.agent.model.config();
+        // Priced too, so a budget is accepted for it.
+        assert!(
+            config
+                .clone()
+                .with_prices(&PriceTable::builtin())
+                .cost
+                .is_some(),
+            "{} has no price",
+            expected.id
+        );
+        assert_eq!(
+            (
+                config.id.as_str(),
+                config.name.as_str(),
+                config.context_window,
+                config.max_tokens,
+                &config.api,
+            ),
+            (
+                expected.id.as_str(),
+                expected.name.as_str(),
+                expected.context_window,
+                expected.max_tokens,
+                &expected.api,
+            )
+        );
+    }
+    // Grok 4.7: the preset's window, not the generic 131K.
+    let grok = read("[agent]\nname = \"a\"\nmodel = \"xai/grok-4.7\"\n").unwrap();
+    assert!(
+        grok.agent.model.config().context_window
+            > ModelConfig::xai("grok-4.7", "grok-4.7").context_window
+    );
+    // An id with no preset: the generic constructor, as before.
+    let other = read("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-flash\"\n").unwrap();
+    let config = other.agent.model.config();
+    let generic = ModelConfig::deepseek("deepseek-flash", "deepseek-flash");
+    assert_eq!(
+        (
+            config.name.as_str(),
+            config.context_window,
+            config.max_tokens
+        ),
+        (
+            generic.name.as_str(),
+            generic.context_window,
+            generic.max_tokens
+        )
+    );
+}

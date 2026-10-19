@@ -69,9 +69,19 @@ terminal = false                      # the terminal UI instead of the web page
 - `name`: one plain name (no `/`, not `.` or `..`).
 - `model`: `provider/id`, the id as the provider's API names it. Ids with
   a price in yoagent's table (so a budget works): `deepseek/deepseek-flash`
-  (the examples'), `deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-pro`;
-  `anthropic/claude-sonnet-5`, `anthropic/claude-haiku-4-5`,
-  `anthropic/claude-opus-5-5`; `openai/gpt-5.5`. Use the provider whose key
+  (the examples'), `deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-pro`,
+  and every id yoagent has a preset for — the model's real context window
+  and output limit, where another id gets conservative ones (about 128K
+  in, 4K–16K out):
+  `anthropic/claude-fable-5`, `anthropic/claude-fable-5-1`,
+  `anthropic/claude-opus-5-5`, `anthropic/claude-opus-5`,
+  `anthropic/claude-opus-4-8`, `anthropic/claude-sonnet-5-5`,
+  `anthropic/claude-sonnet-5`, `anthropic/claude-haiku-5-5`,
+  `anthropic/claude-haiku-4-5`; `openai/gpt-5.5`, `openai/gpt-6-astra`,
+  `openai/gpt-6-sol`, `openai/gpt-6-luna`, `openai/gpt-6.1-sol`;
+  `google/gemini-4-argon`, `google/gemini-3.8-flash`; `xai/grok-4.7`;
+  `mistral/mistral-large-4`; `zai/glm-5.3`, `zai/glm-5.3-flash`;
+  `qwen/qwen3.8-max`, `qwen/qwen3.8-flash`. Use the provider whose key
   the person has; for DeepSeek, `deepseek/deepseek-flash` unless the
   task needs a stronger model (`deepseek/deepseek-v4-pro`). Providers and their key
   variables: `anthropic` (`ANTHROPIC_API_KEY`), `openai`
