@@ -172,20 +172,30 @@ a coding agent, not by hand, and each is checked and run scripted in CI.
 
 What a plugin's own app gives it — DSH's agent and session, pi's trust and
 model — provided by yobuild as host services, translated by the adapters,
-granted per plugin in the manifest (`host = { … }`, closed by default) and
-named by `check`.
+granted per plugin in the manifest (`grants = { … }`, closed by default;
+per runtime for DSH until a tool's plugin can be told) and named by `check`.
 
-- DSH host: a stand-in agent per session in DSH's own `agents`/`sessions`,
-  turns around runs, approvals and questions through DSH's own services;
-  modsearch's two composition fixes.
-- pi host: trust, model info, wake as grants; observer events; `pi.exec`
-  closed by default, or judged by the gate.
-- The frontend's plugin origin (plugin routes, framed UI plugins).
-- A metered `llm`, once yoagent makes a run's outside spend public.
+- The DSH host: a session id and generation in yobuild; a stand-in agent
+  per generation in DSH's own `agents`/`sessions`, turns around runs, its
+  log in the jsonl backend, approvals and questions through DSH's own
+  services; `grants.workspace`; fixed answers said by `run` and `check`.
+- pi grants: `trust`, `model = "info"`, `wake` (tagged, bounded), `exec`
+  (off by default, or judged by the gate), `observe`.
+- Plugin runtimes without the provider key variables.
 
-**Done when** `dsh-univer-office` and `pi-lens` work in a gallery agent
-(their tools' results checked, not only `✓`), the compatibility matrix is
-re-measured, and `check` names every grant and every fixed answer.
+**Done when** `dsh-univer-office` and `pi-lens` work in a gallery agent,
+their tools' results checked (not only `✓`); the stand-in probe runs inside
+rutis as a test in yoagent-rutis; the compatibility matrix is re-measured;
+and `check` names every grant and every fixed answer.
+
+## M3c — Plugin web output and model calls (design §12, L3 and `llm`)
+
+- The frontend's plugin origin and framed UI plugins.
+- A metered `llm` for plugins, once yoagent makes a run's outside spend
+  public.
+
+**Done when** visualize's chart shows on the page from a sandboxed origin,
+and a plugin's model call is charged to the run's budget.
 
 ## M4 — Share
 
