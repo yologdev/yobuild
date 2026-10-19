@@ -70,20 +70,20 @@ the question waiting); `scripts/answer.json` the run your answer starts.
 ## A live run
 
 2026-10-19, `deepseek/deepseek-flash`, `--once`, the task "When does
-Node.js 20 reach end of life?": six searches (`domain_search`, `research`
-twice, `advanced_search` twice, `platform_search`; 6.9 s of plugin time,
-from yobuild's `Plugin time this run` notice), then:
+Node.js 20 reach end of life?": four searches (`domain_search`,
+`research`, `platform_search`, `advanced_search`; 6.0 s of plugin time,
+from yobuild's `Plugin time this run` notice), **$0.0027** (28,853 tokens
+in, 526 out; 4 turns, from its `Cost:` line), then:
 
-> **Short answer:** Node.js 20 ("Iron") reached end-of-life on 30 April
-> 2026. It entered Maintenance LTS in October 2024; after that date it gets
-> no patches or security fixes, so any 20.x install is now unsupported. The
-> usual upgrade path is Node.js 22 LTS (supported until 30 April 2027) or
-> Node.js 24 (until 30 April 2028).
+> **Short answer:** Node.js 20 ("Iron" LTS) reached end of life on
+> 30 April 2026. It entered Active LTS in October 2023 and Maintenance LTS
+> in October 2024; after 30 April 2026 the line gets no further security
+> patches or bug fixes. If you're still on 20.x, move to Node.js 22 or 24
+> (supported until April 2027 and April 2028).
 >
-> **Sources used:** endoflife.date (Node.js); the nodejs/Release README;
-> nodejs.org's EOL page; two articles on Node 20's end of life.
+> **Sources used:** nodejs.org's releases and EOL pages; the
+> nodejs/Release README; Node.js's announcement that v20 is end-of-life.
 >
 > **Waiting on you:** none
 
-`Completed`. Its cost is not recorded: `--once` does not print it (the
-web page shows each run's).
+`Completed`.

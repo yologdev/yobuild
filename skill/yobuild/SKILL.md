@@ -99,7 +99,9 @@ my-agent/
    (each call is a card there).
 6. **Run live**, after asking the person (it costs money): the provider's
    key in the environment, then `yobuild run agent.toml "<task>"` (or
-   without a task: the person types it in the page). Tell the person:
+   without a task: the person types it in the page). A first live run
+   with `--once` prints its cost (`  Cost: $…`): tell the person, and set
+   the budget from it. Tell the person:
    - **the web page**: open the URL yobuild prints (the task starts when
      it is open); the agent's questions — `ask_owner`'s, and the gate's
      Allow/Block — appear docked above the message box, the page usable

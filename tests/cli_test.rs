@@ -50,6 +50,11 @@ fn a_once_run_prints_its_answer_and_how_it_ended() {
         stderr.contains("  server__echo ✓"),
         "each tool call: {stderr}"
     );
+    // The run's cost when it ends: a scripted model has no price.
+    assert!(
+        stderr.contains("  Cost: not priced (") && stderr.contains(" turns)"),
+        "the cost: {stderr}"
+    );
 }
 
 #[test]

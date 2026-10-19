@@ -986,6 +986,25 @@ fn tools_for(set: ToolSet, cwd: &Path) -> Vec<Box<dyn AgentTool>> {
     }
 }
 
+/// A run's cost, as `--once` says it when the run ends: `Cost: $0.0021
+/// (12345 tokens in, 678 out; 3 turns)` — tokens in counting cache reads and
+/// writes, as facts does — or `not priced` when part of it has no price (a
+/// scripted model has none).
+fn cost(stats: &yoagent::SessionStats, total_usd: Option<f64>) -> String {
+    let usage = &stats.usage;
+    let tokens_in = usage.input + usage.cache_read + usage.cache_write;
+    let price = match total_usd {
+        Some(usd) => format!("${usd:.4}"),
+        None => "not priced".to_owned(),
+    };
+    format!(
+        "Cost: {price} ({tokens_in} tokens in, {} out; {} turn{})",
+        usage.output,
+        stats.turns,
+        if stats.turns == 1 { "" } else { "s" }
+    )
+}
+
 /// What the frontends saw, as an observer sees it (a question asked with
 /// only observers there gets its default answer at once).
 #[derive(Default)]
@@ -1022,8 +1041,17 @@ fn watch(
         let mut said: HashSet<&'static str> = HashSet::new();
         loop {
             match watching.messages.recv().await {
-                Some(ServerMessage::RunEnd { outcome, error, .. }) => {
+                Some(ServerMessage::RunEnd {
+                    outcome,
+                    error,
+                    stats,
+                    total_cost_usd,
+                    ..
+                }) => {
                     said.clear();
+                    if print {
+                        eprintln!("  {}", cost(&stats, total_cost_usd));
+                    }
                     // A run that did not complete: what to do, for every
                     // frontend (design §11).
                     if let Some(fix) = what_to_do(outcome, error.as_deref()) {
@@ -1533,6 +1561,24 @@ fn lan_ip() -> Option<std::net::IpAddr> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_runs_cost_counts_cache_as_tokens_in_and_says_when_unpriced() {
+        let mut stats = yoagent::SessionStats::default();
+        stats.usage.input = 1000;
+        stats.usage.cache_read = 200;
+        stats.usage.cache_write = 34;
+        stats.usage.output = 56;
+        stats.turns = 3;
+        assert_eq!(
+            super::cost(&stats, Some(0.00213)),
+            "Cost: $0.0021 (1234 tokens in, 56 out; 3 turns)"
+        );
+        stats.turns = 1;
+        assert_eq!(
+            super::cost(&stats, None),
+            "Cost: not priced (1234 tokens in, 56 out; 1 turn)"
+        );
+    }
 
     #[test]
     fn what_to_do_is_said_for_stopped_failed_and_rejected_runs_only() {
