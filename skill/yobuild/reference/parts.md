@@ -91,12 +91,13 @@ export default definePlugin({
 
 Any MCP server works: stdio (`npm = "<package>@<version>"`, run from
 yobuild's cache) or HTTP (`url`, and a `name`). `check` lists its tools;
-`allow` the ones that only read. A well-known one:
-`@modelcontextprotocol/server-filesystem` (`name = "files"`,
-`args = ["<folder>"]`): with `yobuild check`, 1.0.0 lists `read_file`,
-`read_text_file`, `read_media_file`, `read_multiple_files`,
-`list_directory`, `list_directory_with_sizes`, `directory_tree`,
-`search_files`, `get_file_info`, `list_allowed_directories` (reading:
-allow these) and `write_file`, `edit_file`, `create_directory`,
-`move_file` (writing: leave them asking). The agent sees them as
-`files__<tool>`.
+`allow` the ones that only read.
+
+| Capability | Package | What yoagent gets |
+|---|---|---|
+| files in a folder | `@modelcontextprotocol/server-filesystem@1.0.0` **CI** | with `name = "files"`, `args = ["."]`: `read_file`, `read_text_file`, `read_media_file`, `read_multiple_files`, `list_directory`, `list_directory_with_sizes`, `directory_tree`, `search_files`, `get_file_info`, `list_allowed_directories` (reading: allow these) and `write_file`, `edit_file`, `create_directory`, `move_file` (writing: leave them asking; no delete), seen as `files__<tool>`. `search_files` matches file names (a glob), not contents: to search inside files, yoagent's `search`. `read_multiple_files` succeeds when some reads inside it fail (`✓` proves nothing about one file: `read_text_file` does). `edit_file` with `dryRun: true` writes nothing, yet asks all the same. 2.0.0 came out on 2026-10-19, unchecked: `check` it before moving |
+
+A stdio server's `args` reach it as written: a relative path (`"."`) is
+the folder `yobuild run` starts in — the server runs there, as the agent
+does — not the manifest's folder. `yobuild check` starts the server too,
+in the folder `check` runs in: run it from a folder the server may touch.

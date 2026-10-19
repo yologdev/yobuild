@@ -1290,18 +1290,20 @@ examples are.
   README says so). Its searches really search
   (Bing) in CI: a search that fails on its own does not fail the test.
   `pi-web-access` stays in `parts.md` untested, for a later agent.
-- **Your MCP server** (`gallery/mcp-server/`):
-  `@modelcontextprotocol/server-filesystem@1.0.0` (its `latest`
-  dist-tag; earlier releases are date-numbered) as `files`, `args =
-  ["."]` (the agent's folder), its read tools allowed, its writers
-  asking; `ask_owner`; `tools = "read-only"`, so the server is the only
-  way to write and the gate asks each time. The README is the pattern for
-  any server: which lines change for another (`npm`/`url`, `args`,
-  `env`/`headers` with `${NAME}`, `allow` from `check`'s list). The demo
-  lists the folder, reads a file the test put there, and tries one write:
-  `files__write_file ✗ Tool call denied: not allowed: the owner declined,
-  or nobody answered`, which the test expects. Unlike §8's other MCP
-  manifests it runs the real server, from npm.
+- **Your MCP server** (`gallery/notes-keeper/`, the coding agent's name
+  for it: the request was a notes folder through the filesystem server):
+  `@modelcontextprotocol/server-filesystem@1.0.0` as `files`, `args =
+  ["."]` (the folder `yobuild run` starts in), its ten read tools allowed,
+  its four writers asking (no delete tool); `tools = "read-only"`, so the
+  server is the only way to write and the gate asks each time; no
+  `ask_owner` (the request did not need one); $0.25 a run, $1 a session.
+  2.0.0 came out on 2026-10-19: kept at the checked 1.0.0. The README is
+  the pattern for any server (which lines change for another). Reply
+  files: `demo` (reads, then an edit, a new file and a rename, each denied
+  under `--once`) and `question` (an answer, and the server's own refusal
+  of a path outside the folder: its `✗`, tolerated as a server's); the
+  test puts the two notes they read in the run's folder. Unlike §8's other
+  MCP manifests it runs the real server, from npm.
 - **The third**: first a DSH plugin yobuild has not used before, since
   the web researcher's `dsh-free-search` is already in
   `examples/handoff.toml`.

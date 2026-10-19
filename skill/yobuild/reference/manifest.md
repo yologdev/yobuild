@@ -38,7 +38,7 @@ name    = "words"                     # optional: else the file's stem
 [[mcp]]                               # a stdio MCP server: the pinned package's bin, run
 name  = "files"                       # its tools are files__<tool>
 npm   = "@modelcontextprotocol/server-filesystem@1.0.0"
-args  = ["."]
+args  = ["."]                         # as written: "." is the folder yobuild run starts in
 allow = ["read_text_file", "list_directory"]   # the server's own names
 
 [[mcp]]                               # an MCP server over HTTP
@@ -204,8 +204,10 @@ listens.
   with `facts`). `budget_usd` is per run, and an answered question starts
   another run, so one job that asks first can cost up to twice it; nothing
   caps one job across its runs. `session_budget_usd` caps everything
-  until yobuild stops: say both to the person. A limit "per question"
-  for an agent that may ask first: `budget_usd` at half of it, and a
+  until yobuild stops: say both to the person. A cap the person gives
+  without saying per what ("cap it at a dollar") is the session's
+  (`session_budget_usd`), with `budget_usd` a fraction of it: say the split.
+  A limit "per question" for an agent that may ask first: `budget_usd` at half of it, and a
   `session_budget_usd` a few questions' worth (say the figure you chose).
   A comment on
   `budget_usd` says "per run", never "per question" or "per task".

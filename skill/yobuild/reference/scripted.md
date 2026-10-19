@@ -47,13 +47,18 @@ a plugin's own names, an MCP server's as `<server>__<tool>`.
 `<name>: ready in 1.2s` on stderr once everything has loaded. Each tool
 call prints `  name ✓` or `  name ✗ <why>` there; notices as
 `  Info: …` / `  Warning: …` — with a budget, a Warning `budget_usd not
-kept: a scripted model has no price` (the script has no price, not the
-model); with plugins, an Info `Plugin time this run: …`; when the run
+kept: a scripted model has no price` (`budget_usd and session_budget_usd
+not kept: …` with both; the script has no price, not the model); with
+plugins, an Info `Plugin time this run: …`; when the run
 ends, `  Cost: not priced (0 tokens in, 0 out; N turns)` (a reply file
 reports no usage; a live run says its dollars and tokens there); then the last answer and how the run ended on
 stdout (`Completed`, `Stopped: …`, `Error: …`). A `✓` says the tool ran,
 not what it found: to see results, run the reply file without `--once`
-and open the page. A reply file's `text` is invented, sources and all
+and open the page — or make the files a run reads such that only the
+right one can succeed (a file only in the folder the run starts in shows
+that a server's `"."` is that folder). A denied call also writes a log
+line (`WARN … tool call denied by middleware …`) beside its `✗`. A reply
+file's `text` is invented, sources and all
 (a placeholder is fine): it shows how the run ends, not what the tools
 found. Nobody is there to answer:
 

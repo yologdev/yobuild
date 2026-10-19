@@ -1,0 +1,6 @@
+[
+  { "tools": [{ "name": "files__search_files", "arguments": { "path": ".", "pattern": "**/*.md" } }] },
+  { "tools": [{ "name": "files__read_text_file", "arguments": { "path": "projects/garden.md" } }] },
+  { "tools": [{ "name": "files__read_text_file", "arguments": { "path": "../notes-keeper/agent.toml" } }] },
+  { "text": "Basil goes next to the tomatoes (projects/garden.md)." }
+]
