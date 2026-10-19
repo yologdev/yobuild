@@ -16,13 +16,14 @@ publish = false
 async-trait = "0.1"
 # DshHome: a private, per-process home for DSH's own services.
 tempfile = "3"
-# Floors: 0.25.7 (DeepSeek priced; an MCP tool prefix applied); 0.6 (rutis
+# Floors: 0.25.9 (DeepSeek priced; an MCP tool prefix applied; every text
+# block of a tool result sent to the model); 0.6 (rutis
 # 0.12; hook timings; which plugin offered a tool, by its row; pi's
 # `nestedCalls`), whose adapters `scripts/copy-adapters.sh` copies (and
 # whose `adapters()` names the crate's own files, read in place:
 # `dsh/host-services.json`). rutis 0.12 throughout: the runtimes
 # (`frontend/plugins`, the adapters') must match.
-yoagent = "0.25.7"
+yoagent = "0.25.9"
 yoagent-rutis = { version = "0.6.1", features = ["node", "loader", "probe"] }
 rutis = "0.12"
 rutis-bridge = { version = "0.12", default-features = false, features = ["node"] }

@@ -160,9 +160,10 @@ async fn a_manifest_runs_an_mcp_servers_tool() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_tool_results_text_blocks_reach_the_model_as_one() {
-    // yoagent 0.25.7's providers send only a result's first text block
-    // (`run/joined.rs`): a server answering in two must arrive whole.
+async fn a_tool_results_text_blocks_all_reach_the_agent() {
+    // A server answering in two text blocks: both kept, in order (yoagent
+    // 0.25.9's providers send the model every one; 0.25.7 sent only the
+    // first, and ESLint's MCP server's findings were lost).
     let dir = project_with("[builtins]\ngate = \"off\"\n", SCRIPT);
     let manifest = std::fs::read_to_string(dir.path().join("agent.toml")).unwrap();
     std::fs::write(
@@ -171,6 +172,12 @@ async fn a_tool_results_text_blocks_reach_the_model_as_one() {
     )
     .unwrap();
     let ended = run_once(dir.path()).await;
+    assert_eq!(
+        ended.outcome,
+        Some(RunOutcome::Completed),
+        "{:?}",
+        ended.error
+    );
     let blocks: Vec<Vec<Content>> = ended
         .agent
         .as_ref()
@@ -184,9 +191,14 @@ async fn a_tool_results_text_blocks_reach_the_model_as_one() {
         .collect();
     assert_eq!(
         blocks,
-        [vec![Content::Text {
-            text: "results:\nechoed hi".into()
-        }]]
+        [vec![
+            Content::Text {
+                text: "results:".into()
+            },
+            Content::Text {
+                text: "echoed hi".into()
+            }
+        ]]
     );
 }
 

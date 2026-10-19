@@ -92,5 +92,5 @@ files unlinted, and more. `Completed`.
 
 The first live run showed none of ESLint's findings. yoagent 0.25.7 sent
 the model only the first of a tool result's text blocks, and ESLint's
-server answers in three: an intro, the findings, a note. yobuild now joins
-them, and yoagent's own fix is yologdev/yoagent#347.
+server answers in three: an intro, the findings, a note. yoagent 0.25.9
+sends every block (yologdev/yoagent#347).
