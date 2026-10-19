@@ -72,7 +72,8 @@ terminal = false                      # the terminal UI instead of the web page
   (the examples'), `deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-pro`;
   `anthropic/claude-sonnet-5`, `anthropic/claude-haiku-4-5`,
   `anthropic/claude-opus-5-5`; `openai/gpt-5.5`. Use the provider whose key
-  the person has. Providers and their key
+  the person has; for DeepSeek, `deepseek/deepseek-flash` unless the
+  task needs a stronger model (`deepseek-v4-pro`). Providers and their key
   variables: `anthropic` (`ANTHROPIC_API_KEY`), `openai`
   (`OPENAI_API_KEY`), `deepseek` (`DEEPSEEK_API_KEY`), `google`
   (`GEMINI_API_KEY` or `GOOGLE_API_KEY`), `groq`, `mistral`, `xai`, `qwen`
@@ -183,10 +184,13 @@ listens.
   the question waiting — the answer starts the next run. A scripted run
   shows only that the question was asked.
 - **Ask before working** (clarify, then do): `ask_owner`, and either no
-  `report`, or `report = "handoff"` — a run that only asks still ends with
-  every section: the question under "Waiting on you", the others "none
-  yet". A `report` without a section for open questions fails such a run
-  (sent back 3 times, then `[Extension failed: report]`).
+  `report`, or a `report` with a section for open questions —
+  `"handoff"` (its "Waiting on you"), or your own list holding one
+  (`["Short answer", "Sources used", "Waiting on you"]`). A run that only
+  asks still ends with every section: the question under the open one,
+  the others "none yet". A `report` without such a section fails that run
+  (sent back 3 times, then `[Extension failed: report]`). Asking and
+  answering are two runs: script them as two reply files (scripted.md).
 - **A coding agent with a policy** (`examples/coding.toml`): a pi
   extension with `policy = true`, `gate = "off"`, the terminal.
 - **A reader** (`examples/minimal.toml`): `tools = "read-only"`, no
@@ -197,4 +201,14 @@ listens.
   git repository".
 - **A budget**: start small (`budget_usd = 0.5` for a short task) and
   raise it once a live run shows the cost (yobuild says each run's tokens
-  with `facts`).
+  with `facts`). `budget_usd` is per run, and an answered question starts
+  another run, so one job that asks first can cost up to twice it; nothing
+  caps one job across its runs. `session_budget_usd` caps everything
+  until yobuild stops: say both to the person.
+- **Turns**: `max_turns` counts model requests in a run (50 by default);
+  a short lookup needs 10–20, a coding task more. A cap stops a run that
+  loops; the budget is what caps the cost.
+- **No local files at all**: not possible — yoagent's tools are always
+  there; `tools = "read-only"` is the least (reading, inside the folder
+  yobuild runs in). Tell the person, and suggest running it in an empty
+  folder.

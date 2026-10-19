@@ -1,0 +1,5 @@
+[
+  { "tools": [{ "name": "research", "arguments": { "question": "When does Node.js 22 reach end of life?", "depth": 2 } }] },
+  { "tools": [{ "name": "domain_search", "arguments": { "engine": "endoflife", "query": "nodejs" } }] },
+  { "text": "## Short answer\nNode.js 22 (LTS \"Jod\") is supported until the end of April 2027, when it reaches end of life. Both sources agree; fairly sure.\n\n## Sources used\n- Node.js release schedule — https://nodejs.org/en/about/previous-releases\n- endoflife.date: Node.js — https://endoflife.date/nodejs\n\n## Waiting on you\nnone" }
+]

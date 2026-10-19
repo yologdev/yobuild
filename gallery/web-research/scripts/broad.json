@@ -1,0 +1,4 @@
+[
+  { "tools": [{ "name": "ask_owner", "arguments": { "question": "Your question \"Is AI good?\" is too broad to answer briefly. Which do you mean?", "why": "Each reading needs different sources; I would rather not guess.", "options": ["Is AI good for jobs (employment effects)?", "Are AI coding assistants good for productivity?", "Is AI safe (risks and safety research)?"] } }] },
+  { "text": "## Short answer\nNot yet: the question is too broad to answer briefly, so I asked you to narrow it (#1).\n\n## Sources used\nnone yet\n\n## Waiting on you\n- #1: which reading of \"Is AI good?\" you mean." }
+]

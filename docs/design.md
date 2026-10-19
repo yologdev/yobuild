@@ -1258,25 +1258,17 @@ agent's PR adds it to CLAUDE.md, as the examples are.
 
 **The three, in detail:**
 
-- **Web research** (`gallery/web-research/`): `pi-web-access@0.41.0`, the
-  version `parts.md` lists (a newer one is offered by updating
-  `parts.md` first, once it passes `check`). Its tools are `web_search`,
-  `fetch_content`, `get_search_content` and `source_check`; it allows the
-  three that search and read back, and leaves `fetch_content` asking —
-  it also reads local files outside the agent's folder (video analysis,
-  sent to Gemini when a key is set) and can use browser cookies when
-  configured. `ask_owner` (to narrow a broad question), `report =
-  ["Answer", "Sources cited", "Open questions"]`, `tools = "read-only"`
-  (its work is its report; no scratch, which read-only tools cannot
-  reach), a budget. Its search needs no key: by default it goes through
-  Exa's hosted MCP endpoint (a third party). It reads its config from
-  `~/.pi/agent/web-search.json` (or `PI_CODING_AGENT_DIR`) and caches
-  fetched pages under that folder; the README says both. The test sets
-  `PI_CODING_AGENT_DIR` to a temp folder, so a developer's own config
-  neither changes the provider nor gets the cache. The demo: one
-  `web_search` (`✓`, or the tool's own `✗` when Exa is unreachable), one
-  `fetch_content` (asked: `✗ Tool call denied: not allowed: the owner
-  declined, or nobody answered` under `--once`), then the report.
+- **Web research** (`gallery/web-research/`): planned on
+  `pi-web-access`; the coding agent, following the skill ("**CI** rows
+  first"), chose `dsh-free-search@0.8.1` — tested, keyless, no third-party
+  search service — and the owner kept that (2026-10-19). Its seven
+  searches allowed, `free_search_test` asking; `ask_owner` (a question
+  too broad is sent back to narrow, not guessed), `report = ["Short
+  answer", "Sources used", "Waiting on you"]`, `tools = "read-only"`, a
+  budget. Two reply files: a question researched, and one too broad
+  (asked, the run ending with it waiting). Its searches really search
+  (Bing) in CI: a search that fails on its own does not fail the test.
+  `pi-web-access` stays in `parts.md` untested, for a later agent.
 - **Your MCP server** (`gallery/mcp-server/`):
   `@modelcontextprotocol/server-filesystem@1.0.0` (its `latest`
   dist-tag; earlier releases are date-numbered) as `files`, `args =
@@ -1289,7 +1281,8 @@ agent's PR adds it to CLAUDE.md, as the examples are.
   `files__write_file ✗ Tool call denied: not allowed: the owner declined,
   or nobody answered`, which the test expects. Unlike §8's other MCP
   manifests it runs the real server, from npm.
-- **The third**: a DSH plugin first, since the other two are pi and MCP.
+- **The third**: a DSH plugin new to yobuild first, since the web
+  researcher's is the examples'.
   `dsh-univer-office@0.3.7` (the spreadsheet clerk), only if `check`
   passes it. Its peers include `@deepseek-ai/dsh-host-webserver` (not in
   yobuild's DSH base) and `@deepseek-ai/dsh-llm` (installed there, not
