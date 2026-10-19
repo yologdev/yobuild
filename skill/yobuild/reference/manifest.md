@@ -134,6 +134,9 @@ And `name`: its tools are named `<name>__<tool>`. The default is the
 package's name without its scope, or the URL's host — whose dots no tool
 name may hold, so give an HTTP server a `name` (letters, digits, `-`,
 `_`; no `__`). And optionally `allow` (the server's own tool names).
+A server may want absolute paths (`check --json` shows its parameters):
+the prompt builds them from `{cwd}`, and the reply files write
+`"{cwd}/…"`.
 
 **Pins.** Every package is `name@1.2.3` (exact; `1.2.3-beta.1` too) or a
 local path (`./`, `../`, `/`). Tags, ranges, `git`, URLs and `file:` are
@@ -214,6 +217,19 @@ listens.
 - **Turns**: `max_turns` counts model requests in a run (50 by default);
   a short lookup needs 10–20, a coding task more. A cap stops a run that
   loops; the budget is what caps the cost.
+- **Run checks, write nothing** (a reviewer): no setting runs a
+  project's type checker or tests without also letting the agent write —
+  `tools = "coding"` brings `write_file`, and a new file in the project
+  is free. Use a server or plugin that runs the check and only reports
+  (ESLint's `@eslint/mcp`), keep `tools = "read-only"`, and say what was
+  not run (`npx tsc --noEmit`) in the report.
+- **`search`'s pattern**: ripgrep's regex when `rg` is installed, else
+  grep's basic one — keep patterns plain (`eval(`, `: any`), one per call,
+  so they mean the same on both.
+- **What to tell the person of a read-only agent**: the gate may still
+  ask Allow/Block for a writer or `bash` the agent does not have (it
+  judges a call before the tool is looked up); Block is the answer, and
+  either answer changes nothing.
 - **No local files at all**: not possible — yoagent's tools are always
   there; `tools = "read-only"` is the least (reading, inside the folder
   yobuild runs in). Tell the person, and suggest running it in an empty

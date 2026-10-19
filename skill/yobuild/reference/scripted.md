@@ -19,7 +19,10 @@ A JSON list. Each reply is exactly one of:
 { "tools": [{ "name": "a_tool", "arguments": { "path": "notes.md" } }] }
 ```
 
-Nothing else: an unknown key is an error. A `tools` reply may call several
+Nothing else: an unknown key is an error. `{cwd}` in an argument's text is
+the folder the run starts in, as in the prompt — for a tool that takes
+absolute paths (`"{cwd}/src/index.ts"`), so the reply file runs in any
+folder. A `tools` reply may call several
 tools at once. Give `arguments` as the tool's schema asks (`check --json`
 lists each tool's `parameters`); `{}` for a tool that takes none — left
 out, it is `null`, which some tools refuse. Each reply is one model turn:
@@ -80,8 +83,14 @@ found. Nobody is there to answer:
 - A tool that runs and fails (a search engine down, a rate limit, a page
   not found) prints `✗ <its own error>` — not `Tool call denied: …`. That
   is the tool's day, not the manifest: run again, or script around it.
-- A tool the agent does not have (one not in `agent.tools`): `✗` (the
-  gate asks about it first, and nobody answers).
+- A tool the agent does not have (one not in `agent.tools`): `✗` —
+  `Tool call denied: …` when the gate asks about it first (nobody
+  answers), or `Tool <name> not found` when the gate would let it run (one
+  of yoagent's writers with `tools = "read-only"`, say).
+- A tool that reports (a linter, diagnostics, a type check) can print
+  `✓` with a false "clean": a tool that cannot do its work may say it
+  found nothing. Give it a file with a known problem and look for that
+  finding — on the page, or in a live run's answer — before relying on it.
 
 ## The traps
 

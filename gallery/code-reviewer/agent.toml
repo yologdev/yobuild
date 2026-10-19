@@ -1,0 +1,31 @@
+# A code-quality reviewer for a TypeScript project: reads the code, runs
+# the project's ESLint config through ESLint's MCP server, and reports what
+# to fix, most important first. It changes nothing: yoagent's tools are
+# read-only and ESLint's server only reports.
+#
+#   cd path/to/your-project
+#   DEEPSEEK_API_KEY=… path/to/yobuild run path/to/code-reviewer/agent.toml
+
+[agent]
+name   = "code-reviewer"
+model  = "deepseek/deepseek-flash"
+prompt = "prompts/agent.md"
+
+[limits]
+max_turns          = 40
+budget_usd         = 0.5   # dollars per run; an answered question starts another run
+session_budget_usd = 2.0   # dollars across everything until yobuild stops
+
+[[mcp]]
+name  = "eslint"
+npm   = "@eslint/mcp@0.3.15"
+allow = ["lint-files"]     # it only reports
+
+[builtins]
+tools     = "read-only"    # read, list, search: no writing, no bash
+ask_owner = true
+report    = ["Fix first", "Fix soon", "Worth a look", "Not checked", "Waiting on you"]
+facts     = true           # after each run: what changed in the repository (it should be nothing)
+
+[frontend]
+web = true

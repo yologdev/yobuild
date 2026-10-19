@@ -1306,21 +1306,36 @@ examples are.
   MCP manifests it runs the real server, from npm.
 - **The third**: first a DSH plugin yobuild has not used before, since
   the web researcher's `dsh-free-search` is already in
-  `examples/handoff.toml`.
-  `dsh-univer-office@0.3.7` (the spreadsheet clerk), only if `check`
-  passes it. Its peers include `@deepseek-ai/dsh-host-webserver` (not in
-  yobuild's DSH base) and `@deepseek-ai/dsh-llm` (installed there, not
-  loaded); neither yobuild's base nor `[dsh] host_services` loads them as
-  plugins, so if it injects services they provide, `check` refuses it
-  ("DSH plugins wait for services nobody provides: …"). `check` decides.
-  Then `@dfy-plugins/dsh-visualize@0.1.5` + search (the roadmap's Visual
-  report; its peers add the web server, DSH's client-UI packages and
-  React, so likely refused as well); then, leaving DSH, the roadmap's
-  table in its order: **Code-quality reviewer** (`pi-lens` +
-  `@plannotator/pi-extension`), **Docs maintainer** (`openwiki`).
-  A refused candidate is `check`ed once by hand, not in CI (each DSH pin
-  installs another copy of the DSH base into the cache), and recorded in
-  `parts.md` with `check`'s message, so the skill stops offering it.
+  `examples/handoff.toml`. Checked by hand on 2026-10-19, neither DSH
+  candidate works: `dsh-univer-office@0.3.7` passes `check` (its 14 tools
+  listed) but every call fails `Error [SESSION_SCOPE_UNAVAILABLE]: Univer
+  tools require a calling agent with a workspace` — DSH's own agent
+  sessions, which yobuild's DSH adapter does not give, with host services
+  or without; `@dfy-plugins/dsh-visualize@0.1.5` does not install (its
+  peers conflict with the DSH base: npm `ERESOLVE`). Both are recorded in
+  `parts.md` as not usable. So the third is the roadmap's **Code-quality
+  reviewer** (`gallery/code-reviewer/`). The coding agent picked
+  `pi-lens@4.4.3` from the skill and found it unusable too: it treats
+  the project as untrusted under yobuild, starts no language server, and
+  reports every file clean (its own log said so). It took ESLint's MCP
+  server instead, `@eslint/mcp@0.3.15` (`lint-files`, absolute paths, the
+  project's config), with `tools = "read-only"`, `ask_owner`, `report =
+  ["Fix first", "Fix soon", "Worth a look", "Not checked", "Waiting on
+  you"]`, `facts`; $0.50 a run, $2 a session. No part runs `tsc` without
+  letting the agent write, so type errors are found by reading and the
+  report says what was not run. Reply files: `demo` (`{cwd}/src/…` for
+  `lint-files`: reply files fill `{cwd}`, as prompts do, since
+  2026-10-19) and `no-writes` (every write, edit, command and read outside
+  refused: the test's `refusing`). Its first live run showed ESLint's
+  findings missing: yoagent 0.25.7's providers send the model only the
+  first text block of a tool result, and ESLint answers in three. yobuild
+  joins them (`run/joined.rs`, an `after_tool` extension) until it depends
+  on a yoagent with the fix (yologdev/yoagent#347, all five providers);
+  the second live run reported all three of ESLint's errors. Lessons:
+  `check` loads plugins and lists their tools, it does not call them, and
+  a `✓` says a tool ran, not that it worked — two of four candidates
+  passed `check` and did not work. A gallery demo calls every tool its task
+  needs, and a live run reads what came back.
 
 **Order of PRs**: this design; then one PR per agent (web research, your
 MCP server, the third), each with the skill fixes its build found.

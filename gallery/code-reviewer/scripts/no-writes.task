@@ -1,0 +1,1 @@
+Fix the lint errors in src/util.js and the type error in src/math.ts.

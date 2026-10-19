@@ -29,6 +29,7 @@ while read -r line; do
       echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"echo\",\"description\":\"Echo\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}}}]}}" ;;
     *'"tools/call"'*)
       text=$(printf '%s' "$line" | sed -n 's/.*"text":"\([^"]*\)".*/\1/p')
+      if [ "$MODE" = split ]; then echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"results:\"},{\"type\":\"text\",\"text\":\"echoed $text\"}]}}"; continue; fi
       echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"echoed $text ($MODE, $ARG1)\"}]}}" ;;
   esac
 done
@@ -155,6 +156,37 @@ async fn a_manifest_runs_an_mcp_servers_tool() {
     assert_eq!(
         results(&ended),
         [("echoed hi (loud, first)".to_string(), false)]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_results_text_blocks_reach_the_model_as_one() {
+    // yoagent 0.25.7's providers send only a result's first text block
+    // (`run/joined.rs`): a server answering in two must arrive whole.
+    let dir = project_with("[builtins]\ngate = \"off\"\n", SCRIPT);
+    let manifest = std::fs::read_to_string(dir.path().join("agent.toml")).unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        manifest.replace("MODE = \"loud\"", "MODE = \"split\""),
+    )
+    .unwrap();
+    let ended = run_once(dir.path()).await;
+    let blocks: Vec<Vec<Content>> = ended
+        .agent
+        .as_ref()
+        .unwrap()
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(Message::ToolResult { content, .. }) => Some(content.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        blocks,
+        [vec![Content::Text {
+            text: "results:\nechoed hi".into()
+        }]]
     );
 }
 
