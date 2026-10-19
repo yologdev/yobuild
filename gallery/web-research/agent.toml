@@ -1,0 +1,23 @@
+[agent]
+name   = "web-research"
+model  = "deepseek/deepseek-flash"
+prompt = "prompts/agent.md"
+
+[limits]
+max_turns          = 20
+max_minutes        = 10
+budget_usd         = 0.25     # dollars per run; a question that is narrowed first takes two runs
+session_budget_usd = 2.0      # dollars across everything until yobuild stops
+
+[[plugin]]
+dsh    = "dsh-free-search@0.8.1"
+config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }
+allow  = ["multi_search", "research", "advanced_search", "domain_search", "platform_search", "video_search", "cache_search"]
+
+[builtins]
+ask_owner = true
+report    = ["Short answer", "Sources used", "Waiting on you"]
+tools     = "read-only"
+
+[frontend]
+web = true

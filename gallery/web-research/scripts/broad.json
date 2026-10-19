@@ -1,0 +1,4 @@
+[
+  { "tools": [{ "name": "ask_owner", "arguments": { "question": "Which part of electric cars should I research?", "why": "\"Are electric cars worth it?\" depends on cost, climate impact or driving use, and on the country.", "options": ["Total cost of ownership in the US", "Lifetime CO2 compared with petrol cars", "Range and charging for long trips"] } }] },
+  { "text": "## Short answer\nnone yet\n\n## Sources used\nnone yet\n\n## Waiting on you\n- #1: Which part of electric cars should I research?" }
+]

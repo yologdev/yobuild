@@ -1,0 +1,5 @@
+[
+  { "tools": [{ "name": "research", "arguments": { "question": "When does Node.js 20 reach end of life?", "depth": 2 } }] },
+  { "tools": [{ "name": "domain_search", "arguments": { "engine": "endoflife", "query": "nodejs" } }] },
+  { "text": "## Short answer\nNode.js 20 reaches end of life on 30 April 2026 (placeholder: a scripted reply).\n\n## Sources used\n- endoflife.date — Node.js: https://endoflife.date/nodejs\n- Node.js release schedule: https://github.com/nodejs/release\n\n## Waiting on you\nnone" }
+]

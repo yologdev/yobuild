@@ -145,8 +145,41 @@ fn manifest_md_names_every_provider_and_key() {
     }
 }
 
+/// The packages the gallery's agents pin (pi, DSH, stdio servers), read as
+/// `run` reads their manifests.
+fn gallery_pins() -> Vec<String> {
+    use yobuild::manifest::{Manifest, PluginKind, Source, Transport};
+    let gallery = Path::new(env!("CARGO_MANIFEST_DIR")).join("gallery");
+    let mut pins = Vec::new();
+    for entry in std::fs::read_dir(gallery).unwrap() {
+        let manifest = entry.unwrap().path().join("agent.toml");
+        if !manifest.is_file() {
+            continue;
+        }
+        let manifest = Manifest::load(&manifest).unwrap();
+        for plugin in &manifest.plugins {
+            if let PluginKind::Pi(Source::Package(p)) | PluginKind::Dsh(Source::Package(p)) =
+                &plugin.kind
+            {
+                pins.push(p.spec());
+            }
+        }
+        for server in &manifest.mcp {
+            if let Transport::Stdio {
+                source: Source::Package(p),
+                ..
+            } = &server.transport
+            {
+                pins.push(p.spec());
+            }
+        }
+    }
+    assert!(!pins.is_empty(), "no gallery agent pins a package");
+    pins
+}
+
 #[test]
-fn parts_md_ci_pins_are_the_examples_pins() {
+fn parts_md_ci_pins_are_the_examples_and_gallerys_pins() {
     let text = reference("parts.md");
     let examples: String = ["handoff.toml", "coding.toml"]
         .iter()
@@ -159,19 +192,27 @@ fn parts_md_ci_pins_are_the_examples_pins() {
             .unwrap()
         })
         .collect();
-    let mut pins = 0;
+    let gallery = gallery_pins();
+    let mut ci = Vec::new();
     for row in text.lines().filter(|l| l.contains("**CI**")) {
         for (at, _) in row.match_indices('`').step_by(2) {
             let rest = &row[at + 1..];
             let pin = &rest[..rest.find('`').unwrap()];
             if pin.contains('@') && !pin.starts_with('@') || pin[1..].contains('@') {
                 assert!(
-                    examples.contains(pin),
-                    "parts.md marks {pin} CI, but no example pins it"
+                    examples.contains(pin) || gallery.iter().any(|g| g == pin),
+                    "parts.md marks {pin} CI, but no example or gallery agent pins it"
                 );
-                pins += 1;
+                ci.push(pin.to_owned());
             }
         }
     }
-    assert!(pins >= 3, "{pins}");
+    assert!(ci.len() >= 3, "{ci:?}");
+    // The gallery runs in CI: each of its pins is a CI row.
+    for pin in &gallery {
+        assert!(
+            ci.contains(pin),
+            "a gallery agent pins {pin}: parts.md marks it CI"
+        );
+    }
 }

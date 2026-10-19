@@ -44,10 +44,16 @@ a plugin's own names, an MCP server's as `<server>__<tool>`.
 
 ## What to expect under `--once`
 
-Each tool call prints `  name ✓` or `  name ✗ <why>` on stderr; notices as
-`  Info: …` / `  Warning: …`; then the last answer and how the run ended
-on stdout (`Completed`, `Stopped: …`, `Error: …`). Nobody is there to
-answer:
+`<name>: ready in 1.2s` on stderr once everything has loaded. Each tool
+call prints `  name ✓` or `  name ✗ <why>` there; notices as
+`  Info: …` / `  Warning: …` — with a budget, a Warning `budget_usd not
+kept: a scripted model has no price` (the script has no price, not the
+model); with plugins, an Info `Plugin time this run: …`; then the last answer and how the run ended on
+stdout (`Completed`, `Stopped: …`, `Error: …`). A `✓` says the tool ran,
+not what it found: to see results, run the reply file without `--once`
+and open the page. A reply file's `text` is invented, sources and all
+(a placeholder is fine): it shows how the run ends, not what the tools
+found. Nobody is there to answer:
 
 - A call the gate would ask about prints `✗ Tool call denied: not
   allowed: the owner declined, or nobody answered`: a `bash` command it
@@ -55,8 +61,15 @@ answer:
   plugin's or server's tool not allowed. A `bash` command it can read
   (`ls`, `cat`, `git status`, the project's tests), a new file in the
   project, the agent's own files and the scratch folder run: `✓`.
-- `ask_owner` prints `✓` (`Asked the owner as #1 …`): the question stays
-  open and is never answered.
+- `ask_owner` prints `✓`: the question stays open and is never answered.
+  To try what happens once it is answered (name the files by what they
+  show: `scripts/broad.json`, `scripts/answer.json`), run a second reply
+  file with
+  the answer as the task, in the form yobuild sends it — the question as
+  asked, whole, then the answer on a line of its own:
+  `[Owner's answer to #1] <the question>⏎<the answer>`. Unlike a real
+  answer, this run has none of the first run's history: the model sees
+  only that message.
 - A tool that runs and fails (a search engine down, a rate limit, a page
   not found) prints `✗ <its own error>` — not `Tool call denied: …`. That
   is the tool's day, not the manifest: run again, or script around it.

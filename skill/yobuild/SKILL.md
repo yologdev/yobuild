@@ -59,12 +59,15 @@ my-agent/
    only tools that read or plan (never `bash` or the writers: the gate
    judges those call by call); never a secret in a file (`${NAME}` from
    the environment); set a budget.
-4. **Check**: `yobuild check agent.toml --json` — it installs and loads
+4. **Check**: `yobuild check agent.toml --json` (read the JSON from
+   stdout; do not save it into the agent's folder) — it installs and loads
    every plugin and server (it runs their code, and needs the network the
    first time), without a model.
    - Nothing on stdout: an error stopped it before anything started.
      Read stderr: `yobuild: …` names the file, the entry or the setting,
-     and `  what to do: …` follows when yobuild knows the fix.
+     and `  what to do: …` follows when yobuild knows the fix. (Plugins'
+     own warnings — Node's `ExperimentalWarning`, say — reach stderr
+     too; they are not errors: when stdout has the JSON, ignore them.)
    - Else read `ok`. Problems are at `entries[].problems` and
      `agent.problems`, each `{ "message", "fix" }` (`fix` when yobuild
      knows one): do the fix. Read each note (`entries[].notes`,
@@ -73,15 +76,27 @@ my-agent/
      `judged`, `allowed`, `asks`, `runs`), its `description` and its
      `parameters` (the arguments' JSON Schema): use these names and
      arguments in the prompt and the scripted replies.
+   - `installScripts` (per entry, and `agent.installScripts` for the DSH
+     base): packages with install scripts, which yobuild did **not** run
+     (it installs with scripts off). Nothing to do when `check` is `ok`:
+     the plugins loaded without them. Mention them to the person only if
+     a plugin later fails for want of a native part.
    - `check` does not look at the model's key. A budget for a model with
      no price is refused already (the manifest is), so a clean `check`
-     means the budget is accepted.
+     means the budget is accepted (a scripted run says `budget_usd not
+     kept: a scripted model has no price` — the script has no price, not
+     the model).
 5. **Run scripted** — [reference/scripted.md](reference/scripted.md): a
    reply file that calls the tools the task needs, then
    `yobuild run agent.toml --scripted scripts/demo.json --once "<task>"`.
    Only the model is scripted: plugins and servers run for real (a search
-   really searches). Expect each call `✓` — `✗` only where the gate would
-   ask, since under `--once` nobody answers — and a last line `Completed`.
+   really searches). Expect each call `✓`; `✗ Tool call denied: …` where
+   the gate would ask (under `--once` nobody answers); a `✗` with the
+   tool's own error only for a third party's day (scripted.md); and a last
+   line `Completed`.
+   `--once` shows that a tool ran, not what it returned: to see the
+   results, run the same reply file without `--once` and open the page
+   (each call is a card there).
 6. **Run live**, after asking the person (it costs money): the provider's
    key in the environment, then `yobuild run agent.toml "<task>"` (or
    without a task: the person types it in the page). Tell the person:
@@ -93,7 +108,8 @@ my-agent/
      network: open it on a phone on the same Wi-Fi;
    - **the terminal UI**: questions are answered in its editor.
 
-   Commit `agent.toml`, `agent.lock`, the prompt and the reply file.
+   Keep `agent.toml`, `agent.lock`, the prompt and the reply files
+   together (commit them, in a repository).
    Once the lock is committed, `--locked` (on `check` and `run`, as in CI)
    refuses a lock that no longer matches the manifest instead of
    resolving it again.
