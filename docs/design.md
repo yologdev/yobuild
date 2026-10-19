@@ -1389,7 +1389,7 @@ the `provide_ask_owner(None)` pattern:
 | `workspace` | the agent's folder; whether the project is trusted | `run`'s cwd; the `trust` grant |
 | `session` | `{ id, generation }`: an id yobuild mints per session, its generation bumped by each Reset; run boundaries; wake (a granted plugin's text, tagged as its own) | `Session` (new: an id, a generation); yoagent's `RunContext` (`run_id`, `depth`, `parent_run_id`), seen by plugins as yoagent-rutis's `RunInfo`; `Session` steering |
 | `approval` | judge one command, or ask the owner — the question naming the plugin: a rutis plugin by its row; for the `pi`/`dsh` rows, the extension's or plugin's name the shim passes (as `ask_owner`'s `from`: per extension for pi, for DSH once attribution holds) | the gate, through a new public entry — `judge::Ctx` is private and built only from a line — such as `Gate::check_argv(argv, cwd) -> Check` (a `Ctx` at the call's cwd, each argument a literal word); files such a command makes are not recorded as the agent's own; `Session::ask` |
-| `llm` (later) | model info; model calls charged to the run | `Model`; yoagent's provider; the run's spend (yoagent: `RunContext`'s `spend` field is `pub(crate)` in 0.25.7–0.25.8, to be made public) |
+| `llm` (later) | model info; model calls charged to the run | `Model`; yoagent's provider; the run's spend (yoagent: `RunContext`'s `spend` field is `pub(crate)` in 0.25.7–0.25.9, to be made public) |
 
 yobuild also sets `Agent::with_run_label(<session id>)`, for logs only: a
 label is informational in yoagent, not an identity.

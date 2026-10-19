@@ -172,6 +172,12 @@ async fn a_tool_results_text_blocks_all_reach_the_agent() {
     )
     .unwrap();
     let ended = run_once(dir.path()).await;
+    assert_eq!(
+        ended.outcome,
+        Some(RunOutcome::Completed),
+        "{:?}",
+        ended.error
+    );
     let blocks: Vec<Vec<Content>> = ended
         .agent
         .as_ref()
