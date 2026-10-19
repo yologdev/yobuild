@@ -702,6 +702,10 @@ impl Driver {
             // The wakes this run was given as steering, to tell them from
             // the owner's among what it never read.
             let mut woke: Vec<String> = Vec::new();
+            // The owner's steering this run: a task that fails loses what
+            // its loop took (yoagent keeps the history only of a loop that
+            // returns), and that is steered again.
+            let mut steered: Vec<String> = Vec::new();
             let mut tick = tokio::time::interval(COALESCE);
             loop {
                 tokio::select! {
@@ -737,7 +741,10 @@ impl Driver {
                         }
                         Command::Client(command) => match command {
                         ClientMessage::Prompt { text } => queue.push_back(text),
-                        ClientMessage::Steer { text } => agent.steer(user(text)),
+                        ClientMessage::Steer { text } => {
+                            steered.push(text.clone());
+                            agent.steer(user(text));
+                        }
                         ClientMessage::FollowUp { text } => agent.follow_up(user(text)),
                         ClientMessage::Abort => {
                             agent.abort();
@@ -771,29 +778,37 @@ impl Driver {
             // A run whose task failed (no `AgentEnd`) is one that stopped:
             // what it never read is told the same way.
             if reset || aborted || end.is_none() {
-                // What the run never read is still queued: a loop that stops
-                // keeps what it took in the history (yoagent 0.25.10), where
-                // the next run reads it. A plugin's wake still queued is
-                // dropped, said; the owner's steering stays queued for the
-                // next run (a reset clears it). Counted as a multiset: one
-                // text may come more than once.
+                // What is still queued was never read. What a stopping loop
+                // took is kept in the history (yoagent 0.25.10), where the
+                // next run reads it — except before a reset, which wipes the
+                // history, and by a task that failed, which loses it: both
+                // below. A plugin's wake still queued is dropped, said; the
+                // owner's steering stays for the next run (a reset clears
+                // it). Counted as multisets: one text may come more than once.
                 let mut unread = woke;
+                let mut queued_owner = Vec::new();
                 for message in agent.take_steering_queue() {
-                    let wake = text_of(&message).and_then(|t| unread.iter().position(|w| *w == t));
-                    match wake {
-                        Some(i) => {
-                            let text = unread.swap_remove(i);
-                            inner.wake_dropped(&text, "the run was stopped before reading it");
-                        }
-                        None if !reset => agent.steer(message),
-                        None => {}
+                    let text = text_of(&message);
+                    let wake = text
+                        .as_ref()
+                        .and_then(|t| unread.iter().position(|w| w == t));
+                    if let Some(i) = wake {
+                        let text = unread.swap_remove(i);
+                        inner.wake_dropped(&text, "the run was stopped before reading it");
+                        continue;
                     }
+                    if let Some(i) = text
+                        .as_ref()
+                        .and_then(|t| steered.iter().position(|o| o == t))
+                    {
+                        steered.remove(i);
+                    }
+                    queued_owner.push(message);
                 }
-                // A task that failed may have lost what it took: a wake not
-                // among this run's messages (the prompt aside) is said too;
-                // before a reset, which wipes the history, only one the
-                // model answered was read. Compaction may have shortened the
-                // history: then all of it is looked at.
+                // Taken by the loop: read if among this run's messages (the
+                // prompt aside) — before a reset, only if the model answered
+                // after it. A failed task's are not there. Compaction may
+                // have shortened the history: then all of it is looked at.
                 let messages = agent.messages();
                 let from = if before <= messages.len() { before } else { 0 };
                 let mut seen = &messages[from..];
@@ -805,15 +820,29 @@ impl Driver {
                     seen = &seen[..answered];
                 }
                 let mut read: Vec<String> = seen.iter().filter_map(text_of).collect();
-                if let Some(i) = read.iter().position(|r| *r == prompt) {
-                    read.swap_remove(i);
-                }
+                let mut was_read = |text: &str| match read.iter().position(|r| r == text) {
+                    Some(i) => {
+                        read.swap_remove(i);
+                        true
+                    }
+                    None => false,
+                };
+                was_read(&prompt);
                 for text in unread {
-                    match read.iter().position(|r| *r == text) {
-                        Some(i) => {
-                            read.swap_remove(i);
+                    if !was_read(&text) {
+                        inner.wake_dropped(&text, "the run was stopped before reading it");
+                    }
+                }
+                if !reset {
+                    // The owner's that a failed task lost, first (taken
+                    // before what is still queued).
+                    for text in steered {
+                        if !was_read(&text) {
+                            agent.steer(user(text));
                         }
-                        None => inner.wake_dropped(&text, "the run was stopped before reading it"),
+                    }
+                    for message in queued_owner {
+                        agent.steer(message);
                     }
                 }
                 if reset {

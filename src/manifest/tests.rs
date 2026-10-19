@@ -1110,6 +1110,25 @@ fn a_models_limits_are_known_from_a_preset_or_a_provider_that_carries_them() {
     assert!(known("deepseek/deepseek-flash") && known("meta/muse-spark-1.2"));
     assert!(!known("xai/grok-4.7-fast") && !known("openai/gpt-4o"));
     assert!(!known("ollama/llama3"));
+    // Every model yoagent prices under a provider a manifest names has known
+    // limits: a yoagent bump adding a priced model without a preset (and not
+    // DeepSeek's or Meta's) fails here, before every agent using it is noted.
+    for (provider, id, _) in PriceTable::builtin().iter() {
+        if PROVIDERS.iter().any(|(p, _)| *p == provider) {
+            assert!(known(&format!("{provider}/{id}")), "{provider}/{id}");
+        }
+    }
+    // Every provider a manifest names is one yoagent's generic constructor
+    // knows: its own endpoint, never an empty one.
+    for (provider, _) in PROVIDERS {
+        let config = config_of(&format!("{provider}/some-model"));
+        assert_eq!(config.provider, provider);
+        assert!(
+            config.base_url.starts_with("https://"),
+            "{provider}: {}",
+            config.base_url
+        );
+    }
     // Without a preset, yoagent's generic choice: an OpenAI reasoning model
     // on the Responses API.
     assert_eq!(

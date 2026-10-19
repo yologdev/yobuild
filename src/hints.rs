@@ -265,7 +265,7 @@ mod tests {
                 "report",
             ),
             (Scope::Fail, crate::frontend::session::TASK_FAILED.to_owned(), "task-failed"),
-            // yoagent-rutis 0.6.1 host.rs `NOT_RUNNING`, extension.rs
+            // yoagent-rutis 0.7.0 host.rs `NOT_RUNNING`, extension.rs
             // `input rejected: {NOT_RUNNING}`.
             (
                 Scope::Fail,
@@ -282,7 +282,7 @@ mod tests {
                 ProviderError::RateLimited { retry_after_ms: Some(1500) }.to_string(),
                 "rate-limited",
             ),
-            // yoagent-rutis 0.6.1 extension.rs: `UNJUDGED`, the handler
+            // yoagent-rutis 0.7.0 extension.rs: `UNJUDGED`, the handler
             // gone (348), the wait (376), a failed handler (632).
             (Scope::Call, "no plugin policy is loaded to judge this call".into(), "no-policy"),
             (

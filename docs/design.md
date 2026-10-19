@@ -256,7 +256,7 @@ by yobuild and passed to the agent: without one, yoagent would fall back to
 | Provider | Constructor | Protocol, base URL | Key from |
 |---|---|---|---|
 | `anthropic` | `ModelConfig::anthropic` | Anthropic Messages, `api.anthropic.com/v1` | `ANTHROPIC_API_KEY` |
-| `openai` | `ModelConfig::openai` | OpenAI Chat Completions, `api.openai.com/v1` | `OPENAI_API_KEY` |
+| `openai` | `ModelConfig::generic`: `openai_responses` for a reasoning id, else `ModelConfig::openai` | OpenAI Responses API (reasoning ids: not `gpt-3*`, `gpt-4*`, `chatgpt-*`, `*-chat*`) or Chat Completions, `api.openai.com/v1` | `OPENAI_API_KEY` |
 | `deepseek` | `ModelConfig::deepseek` | OpenAI-compatible, `api.deepseek.com`, `OpenAiCompat::deepseek()` | `DEEPSEEK_API_KEY` |
 | `google` | `ModelConfig::google` | Google Generative AI | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` |
 | `groq`, `mistral`, `xai`, `zai`, `minimax` | the constructor of the same name | OpenAI-compatible, the provider's base URL and compat flags | `<PROVIDER>_API_KEY` |
