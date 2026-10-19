@@ -1203,3 +1203,77 @@ not:
   yobuild) + `ask_owner` + `report`, if `check` passes it; else the next
   from the roadmap's list. (The choice of these three was left to the
 design, 2026-10-19.)
+
+#### How a gallery agent is made and kept (designed 2026-10-19)
+
+**Made through the skill, by a coding agent.** For each agent, a fresh
+Claude Code agent is given only the skill (`skill/yobuild/`, as if
+installed), a working `yobuild` and the person's request in a sentence or
+two — not this design, not the examples' files. It follows the method
+(ask → parts → write → `check --json` → scripted `--once`), and its
+questions are answered as the person would. What it wrote is committed as
+it wrote it; what it got wrong goes back into the skill (or `hints.rs`),
+not hand-fixed in the agent — then the agent is built again. The PR says,
+per agent, where the coding agent stumbled and what changed in the skill.
+A live run (DeepSeek, by hand) is recorded in each agent's README.
+
+**The folder** — `gallery/<name>/`, the skill's layout:
+
+```text
+gallery/web-research/
+  agent.toml          the manifest (model deepseek/deepseek-flash, a budget)
+  agent.lock          written by `yobuild check`, committed
+  prompts/agent.md    the prompt
+  scripts/demo.json   the scripted replies CI runs
+  README.md           what it does, what it needs (keys, network), how to run it,
+                      a live run's result and cost
+```
+
+The agent works in the folder `yobuild run` starts in, never in its own
+gallery folder: the README says `cd` into the work, then
+`yobuild run path/to/gallery/<name>/agent.toml`.
+
+**Kept by CI** — one test per agent in `tests/gallery_test.rs` (the
+binary, the shared `YOBUILD_HOME`, as `cli_test`): `yobuild check
+--locked --json` → `ok`, then `run --scripted scripts/demo.json --once
+--locked` in a temp folder → `Completed`, every tool call `✓` but those
+the demo means to be asked about, and what the agent should have made
+(a file, a question). A gallery agent whose plugin cannot load any more
+fails CI, as an example's does. `skill_test` counts the gallery's pins as
+**CI** rows in `parts.md` too.
+
+**The three, in detail:**
+
+- **Web research** (`gallery/web-research/`): `pi-web-access` at the
+  version `check` passes (the matrix tested 0.41.0; 0.42.0 is out), its
+  read-only tools allowed (`web_search`, `fetch_content`, … as `check`
+  lists them); `ask_owner` (to narrow a broad question), `report =
+  ["Answer", "Sources cited", "Open questions"]`, `scratch` (its notes),
+  `tools = "read-only"`, a budget. Its search needs no key (Exa's MCP by
+  default, DuckDuckGo keyless). It reads `~/.pi/agent/web-search.json`
+  when there: the README says so. The scripted demo fetches a fixed,
+  stable page (`fetch_content` of a page CI can rely on) rather than
+  depending on a search engine's day, then one `web_search`, then the
+  report.
+- **Your MCP server** (`gallery/mcp-server/`): `@modelcontextprotocol/
+  server-filesystem@1.0.0` as `files`, `args = ["."]`, its read tools
+  allowed, its writers asking; `ask_owner`; `tools = "read-only"` so the
+  server is the only way to write (and the gate asks). The README is the
+  pattern for any server: which lines change for another (`npm`/`url`,
+  `args`, `env`/`headers` with `${NAME}`, `allow` from `check`'s list).
+  The demo lists the folder, reads a file, and tries one write — asked,
+  and with nobody there under `--once`, `✗ … nobody answered`, which the
+  test expects.
+- **Spreadsheet clerk** (`gallery/spreadsheet-clerk/`):
+  `dsh-univer-office@0.3.7`, only if `check` passes it. Its peers include
+  `@deepseek-ai/dsh-host-webserver` and `dsh-llm`, which neither yobuild's
+  DSH base nor `[dsh] host_services` provides, so it is likely refused
+  ("DSH plugins wait for services nobody provides"). Then, in order: the
+  roadmap's other DSH agent (`@dfy-plugins/dsh-visualize`, which needs the
+  web server too, so likely refused as well), then **Code-quality
+  reviewer** (`pi-lens` + `@plannotator/pi-extension`), then **Docs
+  maintainer** (`openwiki`). Whatever is refused is recorded in
+  `parts.md` with `check`'s message, so the skill stops offering it.
+
+**Order of PRs**: this design; then one PR per agent (web research, your
+MCP server, the third), each with the skill fixes its build found.
