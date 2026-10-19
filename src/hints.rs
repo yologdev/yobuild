@@ -178,6 +178,12 @@ pub(crate) const HINTS: &[Hint] = &[
         fix: "the plugin threw while it loaded: its error says why",
     },
     Hint {
+        id: "row-failed",
+        scope: Scope::Start,
+        pattern: " (failed): plugin failed: ",
+        fix: "the plugin threw while it loaded: its error says why",
+    },
+    Hint {
         id: "terminal-ui",
         scope: Scope::Start,
         pattern: "the terminal UI stopped",
@@ -336,6 +342,13 @@ mod tests {
                 Scope::Start,
                 "plugins failed to load: [Failure { id: \"plugin:late\", error: \"plugin failed: Error: boom\" }]".into(),
                 "load-failed",
+            ),
+            // yoagent-rutis 0.7.0 rows.rs `RowsNotRunning`: a row that
+            // failed while `load` waited (`{id} ({state}): {error}`).
+            (
+                Scope::Start,
+                "plugin rows not running: plugin:late (failed): plugin failed: Error: boom".into(),
+                "row-failed",
             ),
             (
                 Scope::Start,
