@@ -82,7 +82,9 @@ terminal = false                      # the terminal UI instead of the web page
   `openai/gpt-6-sol`, `openai/gpt-6-luna`, `openai/gpt-6.1-sol`;
   `google/gemini-4-argon`, `google/gemini-3.8-flash`; `xai/grok-4.7`;
   `mistral/mistral-large-4`; `zai/glm-5.3`, `zai/glm-5.3-flash`;
-  `qwen/qwen3.8-max`, `qwen/qwen3.8-flash`. Use the provider whose key
+  `qwen/qwen3.8-max`, `qwen/qwen3.8-flash`. Any other id (but DeepSeek's
+  and Meta's) gets the provider's default limits, and `check` notes it:
+  prefer a listed one. Use the provider whose key
   the person has; for DeepSeek, `deepseek/deepseek-flash` unless the
   task needs a stronger model (`deepseek/deepseek-v4-pro`). Providers and their key
   variables: `anthropic` (`ANTHROPIC_API_KEY`), `openai`

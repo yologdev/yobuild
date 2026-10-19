@@ -998,20 +998,44 @@ async fn a_wake_as_a_run_ends_is_counted_like_an_idle_one() {
     finished(run).await;
 }
 
-/// A wake given to a run as steering that the run never read, because it
-/// was aborted, is said; the run is not followed by another.
+/// An agent whose first response calls the gate, then `rest`, holding each
+/// run's `finish` until released: what is sent meanwhile stays queued.
+fn gated_held(
+    rest: Vec<MockResponse>,
+) -> (
+    Agent,
+    Arc<Semaphore>,
+    Arc<tokio::sync::Notify>,
+    Arc<Semaphore>,
+) {
+    let (agent, gate) = gated(rest);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(Semaphore::new(0));
+    let agent = agent.with_extension(HoldFinish {
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    (agent, gate, entered, release)
+}
+
+/// A wake an aborted run never took (sent while it finished) is said; the
+/// run is not followed by another.
 #[tokio::test]
 async fn a_wake_an_aborted_run_never_read_is_said() {
     let (session, driver) = Session::new(true);
     let mut ui = session.connect();
     session.allow_wakes(3);
-    let (agent, _gate) = gated(vec![MockResponse::Text("never".into())]);
+    let (agent, _gate, entered, release) = gated_held(vec![]);
     let run = tokio::spawn(driver.run(agent));
     session.send(ClientMessage::Prompt { text: "go".into() });
     until_gated(&mut ui).await;
-    assert!(session.wake("[plugin p] look".into()));
     session.send(ClientMessage::Abort);
-    let seen = until(&mut ui, |m| matches!(m, ServerMessage::Notice { .. })).await;
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("finish starts");
+    assert!(session.wake("[plugin p] look".into()));
+    release.add_permits(1);
+    let seen = until_run_end(&mut ui).await;
     assert!(
         warnings(&seen)[0].contains("the run was stopped before reading it"),
         "{seen:?}"
@@ -1071,7 +1095,7 @@ async fn an_aborted_run_says_each_unread_wake_and_keeps_the_owners_steer() {
     let (session, driver) = Session::new(true);
     let mut ui = session.connect();
     session.allow_wakes(3);
-    let (agent, _gate) = gated(vec![
+    let (agent, _gate, entered, release) = gated_held(vec![
         MockResponse::Text("next".into()),
         MockResponse::Text("then".into()),
     ]);
@@ -1082,12 +1106,16 @@ async fn an_aborted_run_says_each_unread_wake_and_keeps_the_owners_steer() {
         text: "[plugin p] look".into(),
     });
     until_gated(&mut ui).await;
+    session.send(ClientMessage::Abort);
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("finish starts");
     session.send(ClientMessage::Steer {
         text: "owner: also this".into(),
     });
     assert!(session.wake("[plugin p] look".into()));
     assert!(session.wake("[plugin p] look".into()));
-    session.send(ClientMessage::Abort);
+    release.add_permits(2);
     let seen = until_run_end(&mut ui).await;
     let said = warnings(&seen)
         .iter()
@@ -1107,8 +1135,32 @@ async fn an_aborted_run_says_each_unread_wake_and_keeps_the_owners_steer() {
     assert_eq!(session.wakes_left(), 3);
 }
 
-/// A reset with a wake queued: the wake is said once, nothing runs after,
-/// and the conversation starts again at a new generation.
+/// A wake an aborted run took as it stopped stays in the conversation
+/// (yoagent keeps it): the next run reads it, nothing is said.
+#[tokio::test]
+async fn a_wake_an_aborted_run_took_is_kept_for_the_next() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    session.allow_wakes(3);
+    let (agent, _gate) = gated(vec![MockResponse::Text("next".into())]);
+    let run = tokio::spawn(driver.run(agent));
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    until_gated(&mut ui).await;
+    assert!(session.wake("[plugin p] look".into()));
+    session.send(ClientMessage::Abort);
+    let seen = until_run_end(&mut ui).await;
+    // Taken by the stopping loop (kept), or still queued (said): one or
+    // the other, never lost unsaid.
+    let said = warnings(&seen).len();
+    session.send(ClientMessage::Quit);
+    let agent = finished(run).await;
+    let kept = format!("{:?}", agent.messages()).contains("[plugin p] look");
+    assert!(kept != (said == 1), "kept {kept}, said {said}: {seen:?}");
+}
+
+/// A reset with a wake given: the wake is said once — queued, or taken
+/// into a history the reset wipes before the model answered it — nothing
+/// runs after, and the conversation starts again at a new generation.
 #[tokio::test]
 async fn a_reset_says_the_wake_it_drops() {
     let (session, driver) = Session::new(true);

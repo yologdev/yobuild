@@ -122,8 +122,7 @@ fn manifest_md_names_every_provider_and_key() {
         assert!(text.contains(var));
     }
     // Every model yoagent has a preset for (priced, its real limits).
-    for preset in yobuild::manifest::PRESETS {
-        let config = preset();
+    for config in yoagent::provider::ModelConfig::presets() {
         let id = format!("`{}/{}`", config.provider, config.id);
         assert!(text.contains(&id), "manifest.md lacks {id}");
     }

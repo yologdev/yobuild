@@ -72,36 +72,10 @@ pub struct Model {
     key_env: Vec<String>,
 }
 
-/// yoagent's model presets (0.25.9): each sets its model's real context
-/// window and output limit, and its protocol, where a generic constructor
-/// often assumes smaller ones. [`Model::config`] uses the one whose
-/// provider and id match the manifest's. Kept by hand: on each yoagent
-/// bump, add its new presets here (a test compares this list with the
-/// models yoagent prices, which include every preset).
-pub const PRESETS: [fn() -> ModelConfig; 22] = [
-    ModelConfig::claude_fable_5,
-    ModelConfig::claude_fable_5_1,
-    ModelConfig::claude_opus_5_5,
-    ModelConfig::claude_opus_5,
-    ModelConfig::claude_opus_4_8,
-    ModelConfig::claude_sonnet_5,
-    ModelConfig::claude_haiku_4_5,
-    ModelConfig::claude_sonnet_5_5,
-    ModelConfig::claude_haiku_5_5,
-    ModelConfig::gpt_5_5,
-    ModelConfig::gpt_6_astra,
-    ModelConfig::gpt_6_sol,
-    ModelConfig::gpt_6_luna,
-    ModelConfig::gpt_6_1_sol,
-    ModelConfig::gemini_4_argon,
-    ModelConfig::gemini_3_8_flash,
-    ModelConfig::grok_4_7,
-    ModelConfig::mistral_large_4,
-    ModelConfig::glm_5_3,
-    ModelConfig::glm_5_3_flash,
-    ModelConfig::qwen_3_8_max,
-    ModelConfig::qwen_3_8_flash,
-];
+/// Providers whose generic constructor carries their models' own limits
+/// (their models share one context window and output limit): no preset is
+/// needed there.
+const OWN_LIMITS: [&str; 2] = ["deepseek", "meta"];
 
 /// The providers yoagent has a constructor for, and the variables its key
 /// is read from, first set first (yoagent 0.25's `resolve_api_key`).
@@ -153,36 +127,35 @@ impl Model {
     }
 
     /// The yoagent model configuration: yoagent's preset for this provider
-    /// and id when it has one ([`PRESETS`]: the model's real context
-    /// window, output limit and protocol), else the provider's generic
-    /// constructor, whose limits are often smaller (about 128K in and 4K
-    /// out for many providers; DeepSeek's and Meta's carry their models'
-    /// own). It carries a price only once the process enabled yoagent's
-    /// price table (`yoagent::provider::prices::enable_bundled`, done by
-    /// `yobuild run`).
+    /// and id when it has one (`ModelConfig::preset`: the model's real
+    /// context window, output limit and protocol), else the provider's
+    /// generic constructor, whose limits are often smaller (about 128K in
+    /// and 4K out for many providers; DeepSeek's and Meta's carry their
+    /// models' own) — [`limits_known`](Self::limits_known) says which. It
+    /// carries a price only once the process enabled yoagent's price table
+    /// (`yoagent::provider::prices::enable_bundled`, done by `yobuild run`).
     pub fn config(&self) -> ModelConfig {
-        PRESETS
-            .iter()
-            .map(|preset| preset())
-            .find(|c| c.provider == self.provider && c.id == self.id)
-            .unwrap_or_else(|| self.generic())
+        ModelConfig::preset(&self.provider, &self.id).unwrap_or_else(|| self.generic())
+    }
+
+    /// Whether [`config`](Self::config)'s context window and output limit are
+    /// this model's: a preset, or a provider whose generic constructor
+    /// carries its models' limits (DeepSeek, Meta). Otherwise they are the
+    /// provider's defaults, a guess.
+    pub fn limits_known(&self) -> bool {
+        OWN_LIMITS.contains(&self.provider.as_str())
+            || ModelConfig::preset(&self.provider, &self.id).is_some()
     }
 
     /// The provider's generic constructor for this id (no preset).
     pub(crate) fn generic(&self) -> ModelConfig {
-        let (id, name) = (self.id.clone(), self.id.clone());
+        // A provider yoagent knows: its own choice (an OpenAI reasoning
+        // model on the Responses API).
+        if let Some(config) = ModelConfig::generic(&self.provider, &self.id) {
+            return config;
+        }
+        let id = self.id.clone();
         match self.provider.as_str() {
-            "anthropic" => ModelConfig::anthropic(id, name),
-            "openai" => ModelConfig::openai(id, name),
-            "deepseek" => ModelConfig::deepseek(id, name),
-            "google" => ModelConfig::google(id, name),
-            "groq" => ModelConfig::groq(id, name),
-            "mistral" => ModelConfig::mistral(id, name),
-            "xai" => ModelConfig::xai(id, name),
-            "qwen" => ModelConfig::qwen(id, name),
-            "zai" => ModelConfig::zai(id, name),
-            "minimax" => ModelConfig::minimax(id, name),
-            "meta" => ModelConfig::meta(id, name),
             "ollama" => ModelConfig::ollama(self.base_url.as_deref().unwrap_or(OLLAMA), id),
             "local" => ModelConfig::local(self.base_url.clone().unwrap_or_default(), id),
             provider => ModelConfig::openai_compat(
