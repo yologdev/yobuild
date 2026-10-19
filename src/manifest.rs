@@ -72,6 +72,37 @@ pub struct Model {
     key_env: Vec<String>,
 }
 
+/// yoagent's model presets (0.25.9): each sets its model's real context
+/// window and output limit, and its protocol, where a generic constructor
+/// often assumes smaller ones. [`Model::config`] uses the one whose
+/// provider and id match the manifest's. Kept by hand: on each yoagent
+/// bump, add its new presets here (a test compares this list with the
+/// models yoagent prices, which include every preset).
+pub const PRESETS: [fn() -> ModelConfig; 22] = [
+    ModelConfig::claude_fable_5,
+    ModelConfig::claude_fable_5_1,
+    ModelConfig::claude_opus_5_5,
+    ModelConfig::claude_opus_5,
+    ModelConfig::claude_opus_4_8,
+    ModelConfig::claude_sonnet_5,
+    ModelConfig::claude_haiku_4_5,
+    ModelConfig::claude_sonnet_5_5,
+    ModelConfig::claude_haiku_5_5,
+    ModelConfig::gpt_5_5,
+    ModelConfig::gpt_6_astra,
+    ModelConfig::gpt_6_sol,
+    ModelConfig::gpt_6_luna,
+    ModelConfig::gpt_6_1_sol,
+    ModelConfig::gemini_4_argon,
+    ModelConfig::gemini_3_8_flash,
+    ModelConfig::grok_4_7,
+    ModelConfig::mistral_large_4,
+    ModelConfig::glm_5_3,
+    ModelConfig::glm_5_3_flash,
+    ModelConfig::qwen_3_8_max,
+    ModelConfig::qwen_3_8_flash,
+];
+
 /// The providers yoagent has a constructor for, and the variables its key
 /// is read from, first set first (yoagent 0.25's `resolve_api_key`).
 pub const PROVIDERS: [(&str, &[&str]); 11] = [
@@ -121,10 +152,24 @@ impl Model {
         !self.key_env.is_empty()
     }
 
-    /// The yoagent model configuration. It carries a price only once the
-    /// process enabled yoagent's price table
-    /// (`yoagent::provider::prices::enable_bundled`, done by `yobuild run`).
+    /// The yoagent model configuration: yoagent's preset for this provider
+    /// and id when it has one ([`PRESETS`]: the model's real context
+    /// window, output limit and protocol), else the provider's generic
+    /// constructor, whose limits are often smaller (about 128K in and 4K
+    /// out for many providers; DeepSeek's and Meta's carry their models'
+    /// own). It carries a price only once the process enabled yoagent's
+    /// price table (`yoagent::provider::prices::enable_bundled`, done by
+    /// `yobuild run`).
     pub fn config(&self) -> ModelConfig {
+        PRESETS
+            .iter()
+            .map(|preset| preset())
+            .find(|c| c.provider == self.provider && c.id == self.id)
+            .unwrap_or_else(|| self.generic())
+    }
+
+    /// The provider's generic constructor for this id (no preset).
+    pub(crate) fn generic(&self) -> ModelConfig {
         let (id, name) = (self.id.clone(), self.id.clone());
         match self.provider.as_str() {
             "anthropic" => ModelConfig::anthropic(id, name),

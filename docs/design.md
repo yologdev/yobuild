@@ -240,8 +240,13 @@ Rules:
 
 ### Models
 
-`model = "<provider>/<id>"` maps to a yoagent `ModelConfig` constructor;
-`<id>` (everything after the first `/`) is passed as the model id. The API
+`model = "<provider>/<id>"` maps to a yoagent `ModelConfig`: the preset
+whose provider and id match, when yoagent has one (`manifest::PRESETS`, its
+22 in 0.25.9: the model's real context window, output limit and protocol —
+a generic constructor's are often smaller — about 128K in and 4K out for
+many providers, DeepSeek's and Meta's excepted — which cuts replies short
+and compacts early; added 2026-10-19), else the provider's constructor
+below; `<id>` (everything after the first `/`) is passed as the model id. The API
 key comes from the provider's environment variables (the first set), read
 by yobuild and passed to the agent: without one, yoagent would fall back to
 `YOAGENT_API_KEY` / `API_KEY`, so `yobuild run` refuses to start instead.

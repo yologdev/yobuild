@@ -1001,3 +1001,128 @@ fn tools_a_session_budget_and_a_policy_plugin_are_read() {
         "5:22: session_budget_usd set, but ollama/llama3 has no price"
     );
 }
+
+/// A model configuration as JSON: the whole of it compared (it has no
+/// `PartialEq`).
+fn json(config: &ModelConfig) -> serde_json::Value {
+    serde_json::to_value(config).unwrap()
+}
+
+fn config_of(model: &str) -> ModelConfig {
+    read(&format!("[agent]\nname = \"a\"\nmodel = \"{model}\"\n"))
+        .unwrap()
+        .agent
+        .model
+        .config()
+}
+
+#[test]
+fn a_model_yoagent_has_a_preset_for_gets_the_preset() {
+    for preset in PRESETS {
+        let expected = preset();
+        // Its provider is one a manifest can name.
+        assert!(
+            PROVIDERS.iter().any(|(p, _)| *p == expected.provider),
+            "{}: provider {} not in PROVIDERS",
+            expected.id,
+            expected.provider
+        );
+        let m = read(&format!(
+            "[agent]\nname = \"a\"\nmodel = \"{}/{}\"\n[limits]\nbudget_usd = 1.0\n",
+            expected.provider, expected.id
+        ))
+        .unwrap_or_else(|e| panic!("{}: {e} (a budget refused?)", expected.id));
+        let config = m.agent.model.config();
+        // The whole preset, compat flags and all.
+        assert_eq!(
+            json(&config),
+            json(&expected),
+            "{}: not the preset",
+            expected.id
+        );
+        // And it adds something over the generic constructor.
+        let generic = m.agent.model.generic();
+        assert!(
+            (
+                generic.name.as_str(),
+                generic.context_window,
+                generic.max_tokens
+            ) != (
+                expected.name.as_str(),
+                expected.context_window,
+                expected.max_tokens
+            ),
+            "{}: the preset is the generic config",
+            expected.id
+        );
+    }
+}
+
+#[test]
+fn an_id_without_a_preset_or_another_providers_gets_the_generic_config() {
+    // No preset for this id: the generic constructor, whole.
+    let m = read("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-flash\"\n").unwrap();
+    assert_eq!(
+        json(&m.agent.model.config()),
+        json(&m.agent.model.generic())
+    );
+    // A near miss on a provider with presets: exact ids only.
+    for model in [
+        "xai/grok-4.7-fast",
+        "anthropic/claude-opus-5-5-20261001",
+        "openai/GPT-5.5",
+    ] {
+        let config = config_of(model);
+        assert_eq!(config.name, config.id, "{model} took a preset");
+    }
+    // A preset's id under another provider is that provider's: its
+    // endpoint, never the vendor's (its key would go there).
+    let m = read("[agent]\nname = \"a\"\nmodel = \"acme/gpt-5.5\"\nbase_url = \"https://acme.example/v1\"\napi_key_env = \"ACME_KEY\"\n").unwrap();
+    let config = m.agent.model.config();
+    assert_eq!(
+        (
+            config.provider.as_str(),
+            config.base_url.as_str(),
+            config.name.as_str()
+        ),
+        ("acme", "https://acme.example/v1", "gpt-5.5")
+    );
+    let config = config_of("ollama/grok-4.7");
+    assert_eq!(
+        (config.provider.as_str(), config.base_url.as_str()),
+        ("ollama", OLLAMA)
+    );
+}
+
+#[test]
+fn every_model_yoagent_prices_is_a_preset_or_known_to_have_none() {
+    // yoagent's price table lists every preset it has: a model it prices
+    // under a provider a manifest can name is in PRESETS — or here, known
+    // to have none (its generic constructor carries its limits). A yoagent
+    // bump that adds a preset fails here until PRESETS has it.
+    const NO_PRESET: [(&str, &str); 6] = [
+        ("deepseek", "deepseek-flash"),
+        ("deepseek", "deepseek-v4-flash"),
+        ("deepseek", "deepseek-v4-flash-vision-exp"),
+        ("deepseek", "deepseek-v4-pro"),
+        ("meta", "muse-spark-1.1"),
+        ("meta", "muse-spark-1.2"),
+    ];
+    let presets: Vec<(String, String)> = PRESETS
+        .iter()
+        .map(|preset| {
+            let c = preset();
+            (c.provider, c.id)
+        })
+        .collect();
+    for (provider, id, _) in PriceTable::builtin().iter() {
+        if !PROVIDERS.iter().any(|(p, _)| *p == provider) {
+            continue;
+        }
+        assert!(
+            presets.iter().any(|(p, i)| p == provider && i == id)
+                || NO_PRESET.contains(&(provider, id)),
+            "{provider}/{id} is priced by yoagent but neither in PRESETS nor known to have none: add its preset to PRESETS, or list it in NO_PRESET"
+        );
+    }
+}
