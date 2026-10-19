@@ -1,37 +1,101 @@
 //! The gallery (`gallery/<name>/`, design §11): each agent `check`ed
 //! `--locked`, and each of its reply files (`scripts/<x>.json`, with its task
 //! in `scripts/<x>.task`) run scripted under `--once --locked`, in a temp
-//! folder: `Completed`, every call it scripts made, none denied but those
-//! the agent leaves asking. A tool that ran and failed on its own (`✗`, not
-//! `Tool call denied: …`) is a third party's day, not the agent's: it does
-//! not fail the test. Unix (as `cli_test`).
+//! folder, with a temp `HOME` (so a plugin's cache or config there is the
+//! test's own). What holds an agent:
+//! - `check`: `ok`, no note, each name an entry's `allow` lists `allowed`,
+//!   and no tool that writes with `tools = "read-only"`;
+//! - each reply file: `Completed` with its last `text` as the answer, each
+//!   call it scripts made once, no `Error:` notice, every call `✓` —
+//!   but a plugin's or server's own `✗` (a third party's day: a search
+//!   engine down), never one of the bridge's (its plugin unloaded or
+//!   stopped answering), and never a denial;
+//! - every tool `check` says asks, called with nobody there: denied.
+//!
+//! A scripted run cannot tell whether the task fits the replies (the model
+//! is the script): the task is the one a reader would type. Unix (as
+//! `cli_test`).
 #![cfg(unix)]
 
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use serde_json::Value as Json;
+use yobuild::manifest::{Manifest, Tools};
 
 /// The tests' cache of installed packages, shared with `cli_test`.
 const CACHE: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/yobuild-home");
+/// One `yobuild` call at most: a third party that stalls fails the test
+/// instead of hanging it.
+const DEADLINE: Duration = Duration::from_secs(300);
+/// What the bridge says when a plugin, not the tool's work, failed a call
+/// (`hints.rs`' `Call` rows: the run goes on, so only the call shows it).
+const BRIDGE: [&str; 4] = [
+    "is no longer available",
+    "its plugin unloaded",
+    "did not answer",
+    "a required plugin handler failed",
+];
+const DENIED: &str = "Tool call denied: ";
+const NOBODY: &str = "Tool call denied: not allowed: the owner declined, or nobody answered";
 
-fn yobuild(args: &[&str], cwd: &Path, pi_home: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_yobuild"))
+struct Ran {
+    ok: bool,
+    stdout: String,
+    stderr: String,
+}
+
+fn yobuild(args: &[&str], cwd: &Path, home: &Path) -> Ran {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
         .env("YOBUILD_HOME", CACHE)
-        // A pi plugin's config and cache (`~/.pi/agent`): the test's own,
-        // so a developer's config neither changes nor gets anything.
-        .env("PI_CODING_AGENT_DIR", pi_home)
+        .env("HOME", home)
+        .env_remove("RUST_LOG")
         .args(args)
         .current_dir(cwd)
-        .env_remove("RUST_LOG")
-        .output()
-        .unwrap()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let read = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            pipe.read_to_string(&mut text).unwrap();
+            text
+        })
+    };
+    let stdout = read(Box::new(child.stdout.take().unwrap()));
+    let stderr = read(Box::new(child.stderr.take().unwrap()));
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if start.elapsed() > DEADLINE {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let ran = Ran {
+        ok: status.is_some_and(|s| s.success()),
+        stdout: stdout.join().unwrap(),
+        stderr: stderr.join().unwrap(),
+    };
+    assert!(
+        status.is_some(),
+        "yobuild {args:?} still running after {DEADLINE:?}: {}",
+        ran.stderr
+    );
+    ran
 }
 
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
-/// The agent's gallery folder, when the adapters it loads are installed
-/// (required in CI).
+/// The agent's gallery folder, when the adapters are installed (required
+/// in CI).
 fn agent(name: &str) -> Option<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     if ["adapters/pi/node_modules", "adapters/dsh/node_modules"]
@@ -47,89 +111,187 @@ fn agent(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// What a gallery agent is held to.
-struct Expect<'a> {
-    /// Tools the agent leaves asking: under `--once` nobody answers.
-    asks: &'a [&'a str],
-    /// Files put in the agent's folder before each run (path, contents).
-    files: &'a [(&'a str, &'a str)],
+/// The tool calls a run printed under `--once`, in order: (name, mark).
+fn calls(stderr: &str) -> Vec<(&str, &str)> {
+    stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("  ")?.split_once(' '))
+        .filter(|(name, mark)| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && (*mark == "✓" || mark.starts_with("✗ "))
+        })
+        .collect()
 }
 
-/// `check --locked --json` → ok; then every reply file, scripted.
-fn holds(dir: &Path, expect: Expect) {
-    let manifest = dir.join("agent.toml").display().to_string();
-    let pi_home = tempfile::tempdir().unwrap();
-    let work = tempfile::tempdir().unwrap();
-    let out = yobuild(
+/// The `tools` replies' calls of a reply file, in order, and its last `text`.
+fn script(replies: &Json) -> (Vec<String>, String) {
+    let replies = replies.as_array().expect("a reply file is a list");
+    let called = replies
+        .iter()
+        .filter_map(|r| r["tools"].as_array())
+        .flatten()
+        .map(|c| c["name"].as_str().unwrap().to_owned())
+        .collect();
+    let last = replies.last().unwrap()["text"]
+        .as_str()
+        .expect("a reply file ends with a text")
+        .to_owned();
+    (called, last)
+}
+
+/// One reply file's run, held to the rules above. `asks`: the calls that
+/// must be denied (nobody answers); `theirs`: the plugins' and servers'
+/// tools, whose own `✗` is tolerated.
+fn scripted(
+    manifest: &str,
+    file: &Path,
+    task: &str,
+    asks: &HashSet<String>,
+    theirs: &HashSet<String>,
+) {
+    let name = file.file_name().unwrap().to_string_lossy();
+    let replies: Json = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+    let (called, last) = script(&replies);
+    let (work, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let ran = yobuild(
+        &[
+            "run",
+            manifest,
+            "--scripted",
+            &file.display().to_string(),
+            "--once",
+            "--locked",
+            task,
+        ],
+        work.path(),
+        home.path(),
+    );
+    let all = format!("{name}:\n{}{}", ran.stdout, ran.stderr);
+    assert!(ran.ok, "{all}");
+    assert_eq!(ran.stdout, format!("{last}\nCompleted\n"), "{all}");
+    assert!(!ran.stderr.contains("\n  Error: "), "{all}");
+    // Each scripted call made, once (a reply's several calls may end in any
+    // order).
+    let made = calls(&ran.stderr);
+    let mut names: Vec<&str> = made.iter().map(|(n, _)| *n).collect();
+    let mut called: Vec<&str> = called.iter().map(String::as_str).collect();
+    names.sort_unstable();
+    called.sort_unstable();
+    assert_eq!(names, called, "{all}");
+    for (tool, mark) in made {
+        if asks.contains(tool) {
+            assert_eq!(mark, format!("✗ {NOBODY}"), "{tool}: {all}");
+        } else if let Some(why) = mark.strip_prefix("✗ ") {
+            assert!(
+                theirs.contains(tool)
+                    && !why.starts_with(DENIED)
+                    && !BRIDGE.iter().any(|b| why.contains(b)),
+                "{tool} ✗ {why}: {all}"
+            );
+        }
+    }
+}
+
+/// `check` and every reply file of a gallery agent.
+fn holds(dir: &Path) {
+    let path = dir.join("agent.toml");
+    let manifest = path.display().to_string();
+    let parsed = Manifest::load(&path).unwrap();
+    let (work, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let ran = yobuild(
         &["check", &manifest, "--locked", "--json"],
         work.path(),
-        pi_home.path(),
+        home.path(),
     );
-    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("check's JSON ({e}): {}", text(&out.stderr)));
+    let report: Json = serde_json::from_str(&ran.stdout)
+        .unwrap_or_else(|e| panic!("check's JSON ({e}): {}", ran.stderr));
     assert_eq!(report["ok"], true, "{report:#}");
+    let entries = report["entries"].as_array().unwrap();
+    for notes in entries
+        .iter()
+        .chain([&report["agent"]])
+        .map(|e| &e["notes"])
+    {
+        assert!(notes.as_array().is_none_or(|n| n.is_empty()), "{report:#}");
+    }
+    let kinds: HashMap<&str, &str> = report["agent"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["name"].as_str().unwrap(), t["kind"].as_str().unwrap()))
+        .collect();
+    let allowed = parsed.plugins.iter().flat_map(|p| p.allow.clone()).chain(
+        parsed
+            .mcp
+            .iter()
+            .flat_map(|m| m.allow.iter().map(|t| format!("{}__{t}", m.name))),
+    );
+    for tool in allowed {
+        assert_eq!(
+            kinds.get(tool.as_str()),
+            Some(&"allowed"),
+            "{tool}: {kinds:?}"
+        );
+    }
+    if parsed.builtins.tools == Tools::ReadOnly {
+        for tool in ["bash", "write_file", "edit_file"] {
+            assert!(
+                !kinds.contains_key(tool),
+                "read-only, yet {tool}: {kinds:?}"
+            );
+        }
+    }
+    let theirs: HashSet<String> = entries
+        .iter()
+        .flat_map(|e| e["tools"].as_array().unwrap())
+        .map(|t| t["name"].as_str().unwrap().to_owned())
+        .collect();
+    let asks: HashSet<String> = kinds
+        .iter()
+        .filter(|(_, kind)| **kind == "asks")
+        .map(|(name, _)| (*name).to_owned())
+        .collect();
 
-    let mut scripts: Vec<PathBuf> = std::fs::read_dir(dir.join("scripts"))
+    // The reply files and their tasks, in pairs.
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir.join("scripts"))
         .unwrap()
         .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .collect();
-    scripts.sort();
-    assert!(!scripts.is_empty(), "{}: no reply file", dir.display());
-    for script in scripts {
-        let task_file = script.with_extension("task");
-        let task = std::fs::read_to_string(&task_file)
-            .unwrap_or_else(|e| panic!("{}: {e}", task_file.display()));
-        let work = tempfile::tempdir().unwrap();
-        for (path, contents) in expect.files {
-            std::fs::write(work.path().join(path), contents).unwrap();
-        }
-        let out = yobuild(
-            &[
-                "run",
-                &manifest,
-                "--scripted",
-                &script.display().to_string(),
-                "--once",
-                "--locked",
-                task.trim(),
-            ],
-            work.path(),
-            pi_home.path(),
-        );
-        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
-        let name = script.file_name().unwrap().to_string_lossy();
+    files.sort();
+    let mut demo = None;
+    for file in &files {
+        let pair = |x| file.with_extension(x).is_file();
         assert!(
-            out.status.success() && stdout.ends_with("Completed\n"),
-            "{name}: {stdout}{stderr}"
+            pair("json") && pair("task"),
+            "{}: a reply file and its task, in pairs",
+            file.display()
         );
-        let replies: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&script).unwrap()).unwrap();
-        for call in replies
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|r| r["tools"].as_array())
-            .flatten()
-        {
-            let tool = call["name"].as_str().unwrap();
-            let denied = format!("  {tool} ✗ Tool call denied: ");
-            if expect.asks.contains(&tool) {
-                assert!(
-                    stderr.contains(&format!(
-                        "{denied}not allowed: the owner declined, or nobody answered"
-                    )),
-                    "{name}: {tool} should ask: {stderr}"
-                );
-            } else {
-                assert!(
-                    (stderr.contains(&format!("  {tool} ✓"))
-                        || stderr.contains(&format!("  {tool} ✗ ")))
-                        && !stderr.contains(&denied),
-                    "{name}: {tool} should run: {stderr}"
-                );
+        if file.extension().is_some_and(|x| x == "json") {
+            let task = std::fs::read_to_string(file.with_extension("task")).unwrap();
+            scripted(&manifest, file, task.trim(), &HashSet::new(), &theirs);
+            if file.file_stem().is_some_and(|s| s == "demo") {
+                demo = Some(file.clone());
             }
         }
+    }
+
+    // Each tool that asks, called with nobody there, ending as the demo does.
+    let demo = demo.expect("scripts/demo.json");
+    if !asks.is_empty() {
+        let (_, last) =
+            script(&serde_json::from_str(&std::fs::read_to_string(&demo).unwrap()).unwrap());
+        let calls: Vec<Json> = asks
+            .iter()
+            .map(|t| serde_json::json!({ "name": t, "arguments": {} }))
+            .collect();
+        let replies = serde_json::json!([{ "tools": calls }, { "text": last }]);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("asks.json");
+        std::fs::write(&file, replies.to_string()).unwrap();
+        scripted(&manifest, &file, "call each tool that asks", &asks, &theirs);
     }
 }
 
@@ -138,11 +300,5 @@ fn web_research() {
     let Some(dir) = agent("web-research") else {
         return;
     };
-    holds(
-        &dir,
-        Expect {
-            asks: &[],
-            files: &[],
-        },
-    );
+    holds(&dir);
 }

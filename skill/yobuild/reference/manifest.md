@@ -73,7 +73,7 @@ terminal = false                      # the terminal UI instead of the web page
   `anthropic/claude-sonnet-5`, `anthropic/claude-haiku-4-5`,
   `anthropic/claude-opus-5-5`; `openai/gpt-5.5`. Use the provider whose key
   the person has; for DeepSeek, `deepseek/deepseek-flash` unless the
-  task needs a stronger model (`deepseek-v4-pro`). Providers and their key
+  task needs a stronger model (`deepseek/deepseek-v4-pro`). Providers and their key
   variables: `anthropic` (`ANTHROPIC_API_KEY`), `openai`
   (`OPENAI_API_KEY`), `deepseek` (`DEEPSEEK_API_KEY`), `google`
   (`GEMINI_API_KEY` or `GOOGLE_API_KEY`), `groq`, `mistral`, `xai`, `qwen`
@@ -204,7 +204,11 @@ listens.
   with `facts`). `budget_usd` is per run, and an answered question starts
   another run, so one job that asks first can cost up to twice it; nothing
   caps one job across its runs. `session_budget_usd` caps everything
-  until yobuild stops: say both to the person.
+  until yobuild stops: say both to the person. A limit "per question"
+  for an agent that may ask first: `budget_usd` at half of it, and a
+  `session_budget_usd` a few questions' worth (say the figure you chose).
+  A comment on
+  `budget_usd` says "per run", never "per question" or "per task".
 - **Turns**: `max_turns` counts model requests in a run (50 by default);
   a short lookup needs 10–20, a coding task more. A cap stops a run that
   loops; the budget is what caps the cost.

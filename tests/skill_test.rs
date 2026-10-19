@@ -145,30 +145,36 @@ fn manifest_md_names_every_provider_and_key() {
     }
 }
 
-/// The pins (`pi = "…"`, `dsh = "…"`, `npm = "…"`) of the gallery's agents.
+/// The packages the gallery's agents pin (pi, DSH, stdio servers), read as
+/// `run` reads their manifests.
 fn gallery_pins() -> Vec<String> {
+    use yobuild::manifest::{Manifest, PluginKind, Source, Transport};
     let gallery = Path::new(env!("CARGO_MANIFEST_DIR")).join("gallery");
     let mut pins = Vec::new();
     for entry in std::fs::read_dir(gallery).unwrap() {
         let manifest = entry.unwrap().path().join("agent.toml");
-        let text = std::fs::read_to_string(&manifest).unwrap();
-        for line in text.lines() {
-            let line = line.trim_start();
-            for key in ["pi", "dsh", "npm"] {
-                if let Some(value) = line
-                    .strip_prefix(key)
-                    .and_then(|rest| rest.trim_start().strip_prefix('='))
-                    .and_then(|rest| rest.trim().strip_prefix('"'))
-                    .and_then(|rest| rest.split_once('"'))
-                    .map(|(value, _)| value)
-                {
-                    if !value.starts_with('.') && !value.starts_with('/') {
-                        pins.push(value.to_owned());
-                    }
-                }
+        if !manifest.is_file() {
+            continue;
+        }
+        let manifest = Manifest::load(&manifest).unwrap();
+        for plugin in &manifest.plugins {
+            if let PluginKind::Pi(Source::Package(p)) | PluginKind::Dsh(Source::Package(p)) =
+                &plugin.kind
+            {
+                pins.push(p.spec());
+            }
+        }
+        for server in &manifest.mcp {
+            if let Transport::Stdio {
+                source: Source::Package(p),
+                ..
+            } = &server.transport
+            {
+                pins.push(p.spec());
             }
         }
     }
+    assert!(!pins.is_empty(), "no gallery agent pins a package");
     pins
 }
 

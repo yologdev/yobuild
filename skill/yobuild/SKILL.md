@@ -59,15 +59,15 @@ my-agent/
    only tools that read or plan (never `bash` or the writers: the gate
    judges those call by call); never a secret in a file (`${NAME}` from
    the environment); set a budget.
-4. **Check**: `yobuild check agent.toml --json` (read it; no need to keep
-   it in the agent's folder) — it installs and loads
+4. **Check**: `yobuild check agent.toml --json` (read the JSON from
+   stdout; do not save it into the agent's folder) — it installs and loads
    every plugin and server (it runs their code, and needs the network the
    first time), without a model.
    - Nothing on stdout: an error stopped it before anything started.
      Read stderr: `yobuild: …` names the file, the entry or the setting,
      and `  what to do: …` follows when yobuild knows the fix. (Plugins'
      own warnings — Node's `ExperimentalWarning`, say — reach stderr
-     too; with JSON on stdout they mean nothing.)
+     too; they are not errors: when stdout has the JSON, ignore them.)
    - Else read `ok`. Problems are at `entries[].problems` and
      `agent.problems`, each `{ "message", "fix" }` (`fix` when yobuild
      knows one): do the fix. Read each note (`entries[].notes`,
@@ -90,8 +90,10 @@ my-agent/
    reply file that calls the tools the task needs, then
    `yobuild run agent.toml --scripted scripts/demo.json --once "<task>"`.
    Only the model is scripted: plugins and servers run for real (a search
-   really searches). Expect each call `✓` — `✗` only where the gate would
-   ask, since under `--once` nobody answers — and a last line `Completed`.
+   really searches). Expect each call `✓`; `✗ Tool call denied: …` where
+   the gate would ask (under `--once` nobody answers); a `✗` with the
+   tool's own error only for a third party's day (scripted.md); and a last
+   line `Completed`.
    `--once` shows that a tool ran, not what it returned: to see the
    results, run the same reply file without `--once` and open the page
    (each call is a card there).
