@@ -418,6 +418,12 @@ pub(crate) fn row_id(name: &str) -> String {
     format!("plugin:{name}")
 }
 
+/// The manifest plugin a row belongs to: `plugin:<name>` and
+/// `plugin:<name>:<row id>` are `<name>`'s (names hold no `:`); else `None`.
+pub(crate) fn plugin_of(row: &str) -> Option<&str> {
+    row.strip_prefix("plugin:")?.split(':').next()
+}
+
 /// The ids of a DSH plugin's rows in `plan`: `plugin:<name>`, or each
 /// `plugin:<name>:<row id>` (names hold no `:`, so no other plugin's).
 pub(crate) fn dsh_plugin_rows(plan: &Plan, name: &str) -> Vec<String> {

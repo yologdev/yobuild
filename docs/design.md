@@ -1399,6 +1399,51 @@ the `provide_ask_owner(None)` pattern:
 yobuild also sets `Agent::with_run_label(<session id>)`, for logs only: a
 label is informational in yoagent, not an identity.
 
+**Built (M3b step 1, 2026-10-19)** as `run/host.rs`, the services named
+`host_workspace`, `host_session` and `host_approval` — every shared service
+reaches every runtime, and DSH has its own `approval` and `sessions`. Model
+info is `host_session.model()`, not an `llm` service yet. Every method
+refuses arguments past its own:
+
+- `host_workspace.cwd()` (`workspace`), `.trusted()` (`trust`; `false`
+  without it);
+- `host_session.info()` (`{ id, generation }`, any plugin), `.model()`
+  (`model = "info"`: provider, id, context window, output limit — the
+  preset's when there is one; the manifest's model under `--scripted`
+  too), `.wake(text)` (`wake`; one line, no control character, so nothing
+  after it passes for the owner's words): `[plugin <name>] <text>` handed
+  to the session, which
+  decides — steering for a run going on; else a run of its own, never
+  before the owner's first run, at most 3 a session for all plugins
+  together and none under `--once` (the session's allowance, set once). A
+  wake the run never read (sent as it ends) counts as one that starts a
+  run — unless the owner's own late steering starts it anyway, which the
+  wake joins — so a plugin waking at each run's end cannot keep the agent
+  going; one a run stopped (aborted, reset, failed) before reading is
+  dropped, told by this run's messages, each copy of a repeated text
+  counted; each one not delivered is a Warning notice. It answers
+  `"sent"`, and refuses at once what surely cannot be delivered;
+- `host_approval.judge(argv, cwd?)` (any plugin): the agent's own gate (a
+  clone, knowing the files the agent made) through `Gate::check_argv` —
+  each word single-quoted into `cd <cwd> && <words>` and judged as `bash`,
+  so exactly those words, the first never read as an assignment or a
+  keyword (nor a wrapper's next word, `nohup x=./evil`, the line's own
+  rule); `cwd` the agent's folder, or one relative to it (not UTF-8: it
+  asks); `{ free: true,
+  judged: false }` with `gate = "off"` (a `policy` plugin may still judge
+  the agent's own calls);
+- `host_approval.ask(question, details?)` (a rutis plugin's row only — a
+  DSH plugin's own `plugin:<name>…` rows wait for its host): Allow/Block
+  naming the plugin, answered `"allow"`, `"block"` or `"unanswered"`
+  (nobody there — said as a Warning notice — a timeout, or dismissed); an
+  error once the session ended.
+
+Grants are read for rutis plugins only (a refusal to anyone else says no
+grant is theirs yet); a pi extension's and a DSH plugin's are refused when
+the manifest is read (at its `grants` table)
+until their hosts come (steps 2 and 3). `check` lists each entry's grants.
+Fixed answers and the `exec`/`observe` grants come with the pi host.
+
 **Who enforces a grant.** L1 sees only the calling row, and every pi
 extension calls through the one `pi` row, every DSH plugin through the one
 `dsh` row (design §4, "Who a plugin is"). So L1 enforces grants per row —
@@ -1530,7 +1575,7 @@ and only `pi.exec` changes (refused where it ran — said, below).
 reaches the agent tagged as the plugin's (`[pi extension X] …`, `[DSH plugin
 X] …`), never as the owner's; mid-run it steers; with the agent idle it
 starts a run only up to a cap per session (then refused, said), counted by
-the budgets; under `--once` it is dropped once the task's run ended; a run
+the budgets; under `--once` it starts none (refused, or dropped and said); a run
 it starts is a run like any other for the exit status of web and terminal
 modes ("the last run ended …").
 

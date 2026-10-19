@@ -226,6 +226,10 @@ pub struct Entry {
     /// Its installed packages with install scripts, which were not run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub install_scripts: Vec<String>,
+    /// What its host gives it beyond every plugin (the manifest's `grants`;
+    /// design §12), as the manifest names them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<String>,
 }
 
 /// Whether the agent was started together.
@@ -344,6 +348,9 @@ impl Report {
             }
             for note in &entry.notes {
                 out.push_str(&format!("  note: {note}\n"));
+            }
+            if !entry.grants.is_empty() {
+                out.push_str(&format!("  grants: {}\n", entry.grants.join(", ")));
             }
             if !entry.install_scripts.is_empty() {
                 out.push_str(&format!(
@@ -472,6 +479,12 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             handlers: None,
             guidance_chars: None,
             install_scripts: Vec::new(),
+            grants: plugin
+                .grants
+                .names()
+                .into_iter()
+                .map(String::from)
+                .collect(),
         };
         let names = match &plugin.kind {
             PluginKind::Pi(source) => {
@@ -536,7 +549,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                 }
             }
             PluginKind::Rutis { .. } => {
-                match rutis_alone(&manifest, &plan, &session, &plugin.name).await {
+                match rutis_alone(&manifest, &plan, &session, &plugin.name, &cwd).await {
                     Ok(alone) => {
                         entry.handlers = Some(alone.handlers);
                         entry.notes.extend(alone.notes);
@@ -594,6 +607,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             handlers: None,
             guidance_chars: None,
             install_scripts: Vec::new(),
+            grants: Vec::new(),
         };
         if let Transport::Stdio {
             source: Source::Package(p),
@@ -770,10 +784,26 @@ async fn shut(root: &Ctx) -> Option<String> {
     }
 }
 
-/// A root of its own with yobuild's services on it (`run`'s), for a host
-/// started apart.
-fn services_on(root: &Ctx, session: &Session, manifest: &Manifest) -> Result<(), BoxError> {
+/// A root of its own with yobuild's services on it (`run`'s, with no
+/// scratch — `check` makes none — and not `--once`), for a host started
+/// apart.
+fn services_on(
+    root: &Ctx,
+    session: &Session,
+    manifest: &Manifest,
+    cwd: &Path,
+) -> Result<(), BoxError> {
     services::provide(root, session)?;
+    super::host::provide(
+        root,
+        super::host::Host::new(
+            session.clone(),
+            manifest,
+            cwd,
+            super::gate(manifest, session, cwd, None),
+            false,
+        ),
+    )?;
     let ask_owner = manifest
         .builtins
         .ask_owner
@@ -800,6 +830,7 @@ async fn rutis_alone(
     plan: &plugins::Plan,
     session: &Session,
     name: &str,
+    cwd: &Path,
 ) -> Result<Alone, BoxError> {
     let id = plugins::row_id(name);
     let row = plan
@@ -818,15 +849,12 @@ async fn rutis_alone(
     let root = Ctx::root()?;
     let result = async {
         let bridge = RutisBridge::install(&root)?;
-        services_on(&root, session, manifest)?;
-        let mut host = PluginHost::builder()
-            .node(&runtime, dir)
-            .share("yoagent")
-            .share(services::FRONTEND)
-            .share(services::UI)
-            .share(services::ASK_OWNER)
-            .start(&root)
-            .await?;
+        services_on(&root, session, manifest, cwd)?;
+        let mut builder = PluginHost::builder().node(&runtime, dir);
+        for service in super::SHARED {
+            builder = builder.share(service);
+        }
+        let mut host = builder.start(&root).await?;
         host.load([row]).await?;
         let handlers = settled(|| {
             let mut names: Vec<String> = bridge
@@ -922,7 +950,7 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
             host,
             dsh_home: _dsh_home,
             ..
-        } = match start(&root, manifest, plan, layout, session, false).await {
+        } = match start(&root, manifest, plan, layout, session, false, cwd, None, false).await {
             Ok(started) => started,
             Err(e) => {
                 agent.together = Together::Refused;
@@ -1074,6 +1102,7 @@ mod tests {
             handlers: None,
             guidance_chars: None,
             install_scripts: Vec::new(),
+            grants: Vec::new(),
         }
     }
 
@@ -1094,6 +1123,7 @@ mod tests {
         dsh.notes = vec!["a note".into()];
         let mut rutis = entry("r", Ecosystem::Rutis);
         rutis.handlers = Some(vec!["a".into(), "b".into()]);
+        rutis.grants = vec!["workspace".into(), "wake".into()];
         let mut empty = entry("e", Ecosystem::Rutis);
         empty.handlers = Some(Vec::new());
         let agent = Agent {
@@ -1116,12 +1146,20 @@ mod tests {
              \x20 note: a note\n\
              plugin r  rutis ./r.ts  ok\n\
              \x20 handlers: a, b\n\
+             \x20 grants: workspace, wake\n\
              plugin e  rutis ./e.ts  ok\n\
              \x20 handlers: none (it offers no tool)\n\
              agent x: ok\n\
              \x20 tools: read_file (free)\n\
              \x20 install scripts not run (the DSH base): koffi\n"
         );
+        // In the JSON too; an entry with none has no `grants`.
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["entries"][2]["grants"],
+            serde_json::json!(["workspace", "wake"])
+        );
+        assert!(json["entries"][0].get("grants").is_none());
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! [`Unread`]: the gate asks.
 
 use super::args::{parse_until, Spec};
-use super::parse::{is_assignment, Word};
+use super::parse::Word;
 use super::paths::system_binary;
 
 /// A program and its arguments.
@@ -96,6 +96,17 @@ pub(super) fn safe_variable(assignment: &Word) -> bool {
     identifier(name) && (name.chars().any(|c| c.is_ascii_lowercase()) || safe_env(assignment))
 }
 
+/// How the word after a keyword or wrapper is read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reads {
+    /// As bash reads a command: assignments, keywords, then a program.
+    Shell,
+    /// After `env`: assignments, then a program.
+    Env,
+    /// After another wrapper: a program, whatever it looks like.
+    Program,
+}
+
 /// A wrapper: a program that runs the command after its own arguments.
 struct Wrapper {
     spec: Spec,
@@ -155,8 +166,15 @@ pub(super) fn invocation(words: &[Word]) -> Result<Option<Invocation<'_>>, Unrea
     let mut i = 0;
     let mut via_xargs = false;
     let mut assignments: Vec<&Word> = Vec::new();
+    // What the next word may be besides a program: bash reads assignments
+    // and keywords; `env` takes `NAME=value` itself; any other wrapper runs
+    // its next word as a program (`nohup x=./evil`, `timeout 5 fi`).
+    let mut reads = Reads::Shell;
     loop {
-        while let Some(w) = words.get(i).filter(|w| is_assignment(&w.text)) {
+        while let Some(w) = words
+            .get(i)
+            .filter(|w| reads != Reads::Program && w.assigns())
+        {
             assignments.push(w);
             i += 1;
         }
@@ -172,11 +190,13 @@ pub(super) fn invocation(words: &[Word]) -> Result<Option<Invocation<'_>>, Unrea
             return Err(Unread);
         }
         let text = word.text.strip_prefix('\\').unwrap_or(&word.text);
-        if word.known && KEYWORDS.contains(&text) {
+        // Quoted or escaped, a keyword is a program's name (`'fi'`).
+        let keyword = reads == Reads::Shell && word.known && !word.quoted();
+        if keyword && KEYWORDS.contains(&text) {
             i += 1;
             continue;
         }
-        if word.known && CLOSERS.contains(&text) {
+        if keyword && CLOSERS.contains(&text) {
             return Ok(None);
         }
         // The program's name is literal (a lone `[`, `[[`, `{` is: parse.rs).
@@ -218,6 +238,12 @@ pub(super) fn invocation(words: &[Word]) -> Result<Option<Invocation<'_>>, Unrea
         let (_, at) =
             parse_until(&wrapper.spec, &words[i + 1..], wrapper.operands).ok_or(Unread)?;
         via_xargs |= name == "xargs";
+        reads = match name.as_str() {
+            // `time` is bash's own word, before a pipeline.
+            "time" => Reads::Shell,
+            "env" => Reads::Env,
+            _ => Reads::Program,
+        };
         i += 1 + at;
     }
 }
@@ -258,7 +284,7 @@ mod tests {
         for line in [
             "./cat x", "tmp/ls", "$X rm", "env -C sub rm x", "env -S 'rm x'", "xargs -J % rm %",
             "PATH=.:$PATH ls", "LD_PRELOAD=x.so ls", "BASH_ENV=x bash y", "GIT_DIR=/x git status",
-            "PATH=/tmp", "IFS=x",
+            "PATH=/tmp", "IFS=x", "nohup x=./evil", "exec x=./evil",
         ] {
             assert!(read(line).is_err(), "{line}");
         }
@@ -275,6 +301,19 @@ mod tests {
         assert!(read("f=foo").unwrap().is_none());
         assert!(read("x=$(ls)").unwrap().is_none());
         assert!(read("fi").unwrap().is_none());
+        assert_eq!(read("env RUST_LOG=1 ls").unwrap().unwrap().0, "ls");
+        assert_eq!(read("time RUST_LOG=1 ls").unwrap().unwrap().0, "ls");
+        assert_eq!(read("! time if ls").unwrap().unwrap().0, "ls");
+        // A wrapper but `env` runs its next word as a program: not a keyword,
+        // not an assignment.
+        for (line, name) in [
+            ("timeout 5 fi", "fi"),
+            ("nice x=1", "x=1"),
+            ("env fi", "fi"),
+            ("nohup {", "{"),
+        ] {
+            assert_eq!(read(line).unwrap().unwrap().0, name, "{line}");
+        }
         assert_eq!(read("command -v rm").unwrap().unwrap().0, "command");
     }
 }

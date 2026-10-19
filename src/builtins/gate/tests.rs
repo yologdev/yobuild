@@ -2139,3 +2139,80 @@ fn a_tool_allowed_by_its_offerer_runs_only_when_that_one_offers_it() {
         .question()
         .is_some());
 }
+
+#[test]
+fn an_argv_is_judged_as_its_words_where_it_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().canonicalize().unwrap();
+    let (session, _driver) = crate::frontend::session::Session::new(false);
+    let gate = Gate::new(session, &project);
+    let free = |argv: &[&str], cwd: &Path| {
+        assert!(
+            matches!(gate.check_argv(argv, cwd), Check::Free { .. }),
+            "{argv:?} in {} should be free",
+            cwd.display()
+        )
+    };
+    let asks = |argv: &[&str], cwd: &Path| {
+        assert!(
+            matches!(gate.check_argv(argv, cwd), Check::Ask { .. }),
+            "{argv:?} in {} should ask",
+            cwd.display()
+        )
+    };
+    free(&["ls", "-la"], &project);
+    asks(&["rm", "-rf", "x"], &project);
+    // A word is one word: `;`, `$( )` and quotes in it are text, not shell.
+    free(&["ls", "a; rm -rf x"], &project);
+    free(&["ls", "$(rm -rf x)"], &project);
+    free(&["ls", "it's"], &project);
+    // Text a program runs as shell is judged as a line.
+    asks(&["sh", "-c", "rm -rf x"], &project);
+    // Where it runs counts: a build runs only inside the project.
+    free(&["make"], &project);
+    asks(&["make"], Path::new("/"));
+    let quoted = project.join("it's");
+    std::fs::create_dir(&quoted).unwrap();
+    free(&["make"], &quoted);
+    asks(&[], &project);
+    // The first word is the program, whatever it looks like to bash
+    // unquoted: never an assignment or a keyword.
+    asks(&["x=./evil"], &project);
+    asks(&["RUST_LOG=1", "rm", "-rf", "x"], &project);
+    asks(&["fi"], &project);
+    asks(&["}"], &project);
+    asks(&["!", "rm", "-rf", "x"], &project);
+    asks(&["{", "rm", "-rf", "x"], &project);
+    asks(&["env", "rm", "-rf", "x"], &project);
+    // Nothing expands, and a newline stays inside its word.
+    free(&["ls", "~/x"], &project);
+    free(&["ls", "a\nrm -rf x"], &project);
+    // A folder whose name is not text would be judged as another one.
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = project.join(std::ffi::OsStr::from_bytes(b"x\xff"));
+        asks(&["ls"], &odd);
+    }
+}
+
+#[test]
+fn an_assignment_or_a_keyword_is_one_only_unquoted() {
+    let p = Project::new();
+    // The name and `=` unquoted: an assignment; its value may be quoted.
+    // Quoted or escaped there, the word is a program's name.
+    pairs(
+        &p,
+        &[
+            ("x=1", "'x=./evil'"),
+            ("x='a b'", "\"x\"=1"),
+            ("RUST_LOG=\"debug\" ls", "x\\=1"),
+            ("if true; then ls; fi", "'fi'"),
+            ("{ ls; }", "\\}"),
+            // A wrapper (but `env`) runs its next word as a program.
+            ("nohup ls", "nohup x=./evil"),
+            ("timeout 5 ls", "timeout 5 fi"),
+            ("env RUST_LOG=1 ls", "nice x=1"),
+            ("time RUST_LOG=1 ls", "exec }"),
+        ],
+    );
+}
