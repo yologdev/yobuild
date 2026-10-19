@@ -208,6 +208,29 @@ impl Gate {
     pub fn check(&self, tool: &str, args: &Json) -> Check {
         self.rules.check_in(tool, args, None)
     }
+
+    /// What the gate makes of one command given as its words — a program
+    /// and its arguments, no shell (a plugin's `exec`, design §12) — run in
+    /// `cwd`: judged as `bash` would judge `cd <cwd> && <words>`, each word
+    /// single-quoted, so it reads as exactly those words (no expansion, no
+    /// operator). The files a free command makes are not recorded as the
+    /// agent's own: it does not run through the gate's `after_tool`.
+    pub fn check_argv<S: AsRef<str>>(&self, argv: &[S], cwd: &Path) -> Check {
+        if argv.is_empty() {
+            return Check::Ask {
+                question: "Run an empty command?".into(),
+                details: String::new(),
+            };
+        }
+        let quote = |word: &str| format!("'{}'", word.replace('\'', "'\\''"));
+        let words: Vec<String> = argv.iter().map(|w| quote(w.as_ref())).collect();
+        let line = format!(
+            "cd {} && {}",
+            quote(&cwd.to_string_lossy()),
+            words.join(" ")
+        );
+        self.check("bash", &serde_json::json!({ "command": line }))
+    }
 }
 
 /// The gate's reading of one call: it runs freely, or it needs the

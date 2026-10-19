@@ -15,6 +15,7 @@
 
 pub(crate) mod allowed;
 pub mod check;
+pub(crate) mod host;
 pub(crate) mod measure;
 pub(crate) mod plugins;
 pub(crate) mod script;
@@ -194,7 +195,18 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         ask_owner,
         runtimes,
         dsh_home: _dsh_home,
-    } = start(root, &manifest, &checked.plan, &layout, &session, terminal).await?;
+    } = start(
+        root,
+        &manifest,
+        &checked.plan,
+        &layout,
+        &session,
+        terminal,
+        &cwd,
+        scratch.as_ref(),
+        once,
+    )
+    .await?;
     let plan = &checked.plan;
     let mut host = host;
 
@@ -222,6 +234,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         }
     }
     .with_system_prompt(prompt)
+    // The session's id, for logs (a label is informational in yoagent).
+    .with_run_label(session.id())
     .with_tools(tools.list)
     .with_execution_limits(limits(&manifest))
     .with_extension({
@@ -703,6 +717,17 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
     })
 }
 
+/// The services every plugin runtime is given (the loader's catalog).
+const SHARED: [&str; 7] = [
+    "yoagent",
+    services::FRONTEND,
+    services::UI,
+    services::ASK_OWNER,
+    host::WORKSPACE,
+    host::SESSION,
+    host::APPROVAL,
+];
+
 /// The plugins as [`start`] started them.
 struct Started {
     bridge: RutisBridge,
@@ -720,6 +745,7 @@ struct Started {
 /// `plan`, waited for (the adapters' handlers, each policy plugin's judge,
 /// the services DSH plugins inject). `terminal`: the terminal UI's runtime
 /// too (its row is loaded later).
+#[allow(clippy::too_many_arguments)]
 async fn start(
     root: &Ctx,
     manifest: &Manifest,
@@ -727,9 +753,23 @@ async fn start(
     layout: &Layout,
     session: &Session,
     terminal: bool,
+    cwd: &Path,
+    scratch: Option<&Scratch>,
+    once: bool,
 ) -> Result<Started, BoxError> {
     let bridge = RutisBridge::install(root)?;
     services::provide(root, session)?;
+    // The host services (design §12): granted per plugin, refusing the rest.
+    host::provide(
+        root,
+        host::Host::new(
+            session.clone(),
+            manifest,
+            cwd,
+            gate(manifest, session, cwd, scratch, None),
+            once,
+        ),
+    )?;
     // `ask_owner`, the tool and (for plugins) the host service: one
     // numbering. Before the plugins start: one may use it as it loads. The
     // service is there either way (rutis has no optional inject: a plugin
@@ -777,11 +817,9 @@ async fn start(
         builder = builder.node(&name, dir);
         runtimes.push((name, dir.clone()));
     }
-    builder = builder
-        .share("yoagent")
-        .share(services::FRONTEND)
-        .share(services::UI)
-        .share(services::ASK_OWNER);
+    for service in SHARED {
+        builder = builder.share(service);
+    }
     let mut host = builder.start(root).await?;
     if !plan.rows.is_empty() {
         host.load(plan.rows.clone())

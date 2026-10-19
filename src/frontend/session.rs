@@ -76,6 +76,12 @@ struct Inner {
     /// `clients` lock (then this one), so a frontend connecting gets each
     /// message once: in its replay, or live.
     history: Mutex<VecDeque<ServerMessage>>,
+    /// The session's id, made once (a uuid): its identity for plugins'
+    /// hosts (design §12, the `session` service).
+    id: String,
+    /// Bumped by each Reset: what a host keeps per conversation (a DSH
+    /// stand-in agent) starts again at a new generation.
+    generation: AtomicU64,
 }
 
 /// The session handle.
@@ -117,6 +123,8 @@ impl Session {
                 running: AtomicBool::new(false),
                 closed: AtomicBool::new(false),
                 history: Mutex::default(),
+                id: uuid::Uuid::new_v4().to_string(),
+                generation: AtomicU64::new(0),
             }),
             commands: tx,
         };
@@ -195,6 +203,16 @@ impl Session {
     /// Whether a run is in progress (as the driver sees it).
     pub fn is_running(&self) -> bool {
         self.inner.running.load(Ordering::SeqCst)
+    }
+
+    /// The session's id (a uuid, made once).
+    pub fn id(&self) -> &str {
+        &self.inner.id
+    }
+
+    /// How many times the conversation was reset (0 before the first Reset).
+    pub fn generation(&self) -> u64 {
+        self.inner.generation.load(Ordering::SeqCst)
     }
 
     /// Whether the session ended: the driver stopped, nothing sent is heard.
@@ -554,6 +572,7 @@ impl Driver {
                     Some(ClientMessage::Reset) => {
                         agent.clear_messages();
                         inner.withdraw_held();
+                        inner.generation.fetch_add(1, Ordering::SeqCst);
                         continue;
                     }
                     Some(ClientMessage::Quit) if self.accept_quit => break,
@@ -638,6 +657,7 @@ impl Driver {
             if reset {
                 agent.clear_messages();
                 inner.withdraw_held();
+                inner.generation.fetch_add(1, Ordering::SeqCst);
                 agent.clear_steering_queue();
                 agent.clear_follow_up_queue();
             } else if !aborted {

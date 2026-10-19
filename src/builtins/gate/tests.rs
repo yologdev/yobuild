@@ -2139,3 +2139,37 @@ fn a_tool_allowed_by_its_offerer_runs_only_when_that_one_offers_it() {
         .question()
         .is_some());
 }
+
+#[test]
+fn an_argv_is_judged_as_its_words_where_it_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().canonicalize().unwrap();
+    let (session, _driver) = crate::frontend::session::Session::new(false);
+    let gate = Gate::new(session, &project);
+    let free = |argv: &[&str], cwd: &Path| {
+        assert!(
+            matches!(gate.check_argv(argv, cwd), Check::Free { .. }),
+            "{argv:?} in {} should be free",
+            cwd.display()
+        )
+    };
+    let asks = |argv: &[&str], cwd: &Path| {
+        assert!(
+            matches!(gate.check_argv(argv, cwd), Check::Ask { .. }),
+            "{argv:?} in {} should ask",
+            cwd.display()
+        )
+    };
+    free(&["ls", "-la"], &project);
+    asks(&["rm", "-rf", "x"], &project);
+    // A word is one word: `;`, `$( )` and quotes in it are text, not shell.
+    free(&["ls", "a; rm -rf x"], &project);
+    free(&["ls", "$(rm -rf x)"], &project);
+    free(&["ls", "it's"], &project);
+    // Text a program runs as shell is judged as a line.
+    asks(&["sh", "-c", "rm -rf x"], &project);
+    // Where it runs counts: a build runs only inside the project.
+    free(&["make"], &project);
+    asks(&["make"], Path::new("/"));
+    asks(&[], &project);
+}

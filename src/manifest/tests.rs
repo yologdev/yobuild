@@ -111,6 +111,7 @@ phone = true
                 config: None,
                 allow: Vec::new(),
                 policy: true,
+                grants: Grants::default(),
             },
             Plugin {
                 name: "dsh-free-search".into(),
@@ -120,6 +121,7 @@ phone = true
                     .cloned(),
                 allow: Vec::new(),
                 policy: false,
+                grants: Grants::default(),
             },
             Plugin {
                 name: "words".into(),
@@ -130,6 +132,7 @@ phone = true
                 config: None,
                 allow: Vec::new(),
                 policy: false,
+                grants: Grants::default(),
             },
         ]
     );
@@ -339,6 +342,7 @@ fn a_plugin_names_one_ecosystem_and_a_rutis_one_its_runtime() {
             config: serde_json::json!({ "a": 1 }).as_object().cloned(),
             allow: Vec::new(),
             policy: false,
+            grants: Grants::default(),
         }
     );
 }
@@ -1125,4 +1129,53 @@ fn every_model_yoagent_prices_is_a_preset_or_known_to_have_none() {
             "{provider}/{id} is priced by yoagent but neither in PRESETS nor known to have none: add its preset to PRESETS, or list it in NO_PRESET"
         );
     }
+}
+
+#[test]
+fn grants_are_read_for_a_rutis_plugin_and_refused_where_they_do_not_hold() {
+    let rutis = |grants: &str| {
+        format!("{MINIMAL}[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\ngrants = {{ {grants} }}\n")
+    };
+    let m = read(&rutis(
+        "workspace = true, trust = true, model = \"info\", wake = true",
+    ))
+    .unwrap();
+    let grants = &m.plugins[0].grants;
+    assert_eq!(grants.names(), ["workspace", "trust", "model", "wake"]);
+    assert_eq!(grants.model, Some(ModelGrant::Info));
+    // Off unless granted; `false` is off.
+    let m = read(&rutis("workspace = false")).unwrap();
+    assert!(m.plugins[0].grants.is_empty());
+    let m = read(&format!(
+        "{MINIMAL}[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\n"
+    ))
+    .unwrap();
+    assert_eq!(m.plugins[0].grants, Grants::default());
+    // Each refusal at its place.
+    assert_eq!(
+        error(&rutis("exec = \"gate\"")),
+        "7:19: exec is for a pi extension (`pi.exec`)"
+    );
+    assert_eq!(
+        error(&rutis("observe = true")),
+        "7:22: observe is for a pi extension (its observer events)"
+    );
+    assert_eq!(
+        error(&rutis("model = \"call\"")),
+        "7:20: model \"call\": \"info\" (the model's provider, id and limits; model calls are not granted yet)"
+    );
+    assert!(error(&rutis("disk = true")).contains("unknown field `disk`"));
+    // A pi extension's and a DSH plugin's come with their hosts.
+    assert_eq!(
+        error(&format!(
+            "{MINIMAL}[[plugin]]\npi = \"./e.ts\"\ngrants = {{ trust = true }}\n"
+        )),
+        "6:10: a pi extension's grants come with yobuild's pi host (design §12, M3b), not yet"
+    );
+    assert_eq!(
+        error(&format!(
+            "{MINIMAL}[[plugin]]\ndsh = \"./d.ts\"\ngrants = {{ workspace = true }}\n"
+        )),
+        "6:10: a DSH plugin's grants come with yobuild's DSH host (design §12, M3b), not yet"
+    );
 }

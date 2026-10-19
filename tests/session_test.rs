@@ -439,11 +439,15 @@ async fn abort_and_reset_mid_run_are_reported_and_applied() {
         agent.messages().is_empty(),
         "the reset forgot the conversation"
     );
+    // A reset mid-run starts a new generation, the id kept.
+    assert_eq!(session.generation(), 1);
 }
 
 #[tokio::test]
 async fn a_reset_when_idle_forgets_the_conversation() {
     let (session, driver) = Session::new(true);
+    let id = session.id().to_owned();
+    assert_eq!(session.generation(), 0);
     let mut ui = session.connect();
     let run = tokio::spawn(driver.run(agent(vec![MockResponse::Text("hi".into())])));
     session.send(ClientMessage::Prompt { text: "hi".into() });
@@ -451,6 +455,9 @@ async fn a_reset_when_idle_forgets_the_conversation() {
     session.send(ClientMessage::Reset);
     session.send(ClientMessage::Quit);
     assert!(finished(run).await.messages().is_empty());
+    // A new generation; the session's id stays, and another session's differs.
+    assert_eq!((session.id(), session.generation()), (id.as_str(), 1));
+    assert_ne!(Session::new(false).0.id(), id);
 }
 
 fn confirm(title: &str) -> UiRequest {

@@ -287,6 +287,56 @@ pub struct Plugin {
     /// once). A pi or rutis plugin; refused on a DSH plugin (DSH's adapter
     /// judges no calls).
     pub policy: bool,
+    /// What its host gives it beyond what every plugin has (`grants`;
+    /// design §12): all off unless the manifest grants them.
+    pub grants: Grants,
+}
+
+/// What a plugin's host gives it (design §12, "The manifest: `grants`"),
+/// each off unless granted. yobuild enforces a rutis plugin's by its row;
+/// a pi extension's and a DSH plugin's come with their hosts (M3b's later
+/// steps) and are refused until then.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Grants {
+    /// The agent's folder (the `workspace` service's `cwd`).
+    pub workspace: bool,
+    /// The project counts as trusted (`workspace`'s `trusted`): the plugin
+    /// may run the project's code — an honour-system grant.
+    pub trust: bool,
+    /// What it may know of the model: `"info"` (provider, id, limits).
+    pub model: Option<ModelGrant>,
+    /// It may wake the agent (`session.wake`): its text reaches the agent
+    /// tagged as its own, mid-run as steering, idle as a new run (capped).
+    pub wake: bool,
+}
+
+/// [`Grants::model`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ModelGrant {
+    /// The model's provider, id and limits; no calls.
+    Info,
+}
+
+impl Grants {
+    /// The keys granted, as the manifest names them.
+    pub fn names(&self) -> Vec<&'static str> {
+        [
+            (self.workspace, "workspace"),
+            (self.trust, "trust"),
+            (self.model.is_some(), "model"),
+            (self.wake, "wake"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect()
+    }
+
+    /// Nothing granted.
+    pub fn is_empty(&self) -> bool {
+        self.names().is_empty()
+    }
 }
 
 impl Plugin {
@@ -615,6 +665,18 @@ struct RawPlugin {
     allow: Option<Spanned<Vec<Spanned<String>>>>,
     #[serde(default)]
     policy: bool,
+    grants: Option<Spanned<RawGrants>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGrants {
+    workspace: Option<Spanned<bool>>,
+    trust: Option<Spanned<bool>>,
+    model: Option<Spanned<String>>,
+    wake: Option<Spanned<bool>>,
+    exec: Option<Spanned<String>>,
+    observe: Option<Spanned<bool>>,
 }
 
 #[derive(Deserialize)]
@@ -1110,6 +1172,48 @@ fn json(value: toml::Value) -> serde_json::Value {
     }
 }
 
+/// A plugin's `grants`, checked for its ecosystem (design §12's table).
+fn grants(raw: Option<Spanned<RawGrants>>, kind: &PluginKind) -> Result<Grants, Located> {
+    let Some(raw) = raw else {
+        return Ok(Grants::default());
+    };
+    let span = raw.span();
+    let raw = raw.into_inner();
+    let host = match kind {
+        PluginKind::Pi(_) => Some("a pi extension's grants come with yobuild's pi host"),
+        PluginKind::Dsh(_) => Some("a DSH plugin's grants come with yobuild's DSH host"),
+        _ => None,
+    };
+    if let Some(host) = host {
+        return Err((span, format!("{host} (design §12, M3b), not yet")));
+    }
+    if let Some(exec) = &raw.exec {
+        return Err((exec.span(), "exec is for a pi extension (`pi.exec`)".into()));
+    }
+    if let Some(observe) = &raw.observe {
+        let m = "observe is for a pi extension (its observer events)";
+        return Err((observe.span(), m.into()));
+    }
+    let model = match raw.model {
+        None => None,
+        Some(model) if model.get_ref() == "info" => Some(ModelGrant::Info),
+        Some(model) => {
+            let m = format!(
+                "model {:?}: \"info\" (the model's provider, id and limits; model calls are not granted yet)",
+                model.get_ref()
+            );
+            return Err((model.span(), m));
+        }
+    };
+    let on = |b: Option<Spanned<bool>>| b.is_some_and(|b| *b.get_ref());
+    Ok(Grants {
+        workspace: on(raw.workspace),
+        trust: on(raw.trust),
+        model,
+        wake: on(raw.wake),
+    })
+}
+
 fn plugin(
     raw: RawPlugin,
     table: Range<usize>,
@@ -1178,6 +1282,7 @@ fn plugin(
         }
     };
     let allow = allow(raw.allow.as_ref(), true)?;
+    let grants = grants(raw.grants, &kind)?;
     Ok((
         Plugin {
             name,
@@ -1185,6 +1290,7 @@ fn plugin(
             config,
             allow,
             policy: raw.policy,
+            grants,
         },
         name_span,
     ))

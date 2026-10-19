@@ -1399,6 +1399,23 @@ the `provide_ask_owner(None)` pattern:
 yobuild also sets `Agent::with_run_label(<session id>)`, for logs only: a
 label is informational in yoagent, not an identity.
 
+**Built (M3b step 1, 2026-10-19)** as `run/host.rs`, the services named
+`host_workspace`, `host_session` and `host_approval` — every shared service
+reaches every runtime, and DSH has its own `approval` and `sessions`:
+`host_workspace.cwd()` (`workspace`), `.trusted()` (`trust`; `false`
+without it); `host_session.info()` (`{ id, generation }`, any plugin),
+`.model()` (`model = "info"`: provider, id, context window, output limit —
+the preset's when there is one), `.wake(text)` (`wake`: `[plugin <name>]
+<text>` as steering; idle, a new run, at most 3 a session; under `--once`
+only while the task's run goes on); `host_approval.judge(argv, cwd?)` (any
+plugin: `Gate::check_argv` — each word single-quoted into `cd <cwd> &&
+<words>` and judged as `bash`, so exactly those words; free with no gate)
+and `.ask(question, details?)` (Allow/Block naming the plugin; `false`
+with nobody there). Grants are read for rutis plugins only; a pi
+extension's and a DSH plugin's are refused at load until their hosts
+(steps 2 and 3). `check` lists each entry's grants. Fixed answers and
+the `exec`/`observe` grants come with the pi host.
+
 **Who enforces a grant.** L1 sees only the calling row, and every pi
 extension calls through the one `pi` row, every DSH plugin through the one
 `dsh` row (design §4, "Who a plugin is"). So L1 enforces grants per row —
