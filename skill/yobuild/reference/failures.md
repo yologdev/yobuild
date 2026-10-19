@@ -114,6 +114,7 @@ what changed); `[builtins] ask_owner is off` (the error a plugin's own
 | `mcp X: its \`allow\` names "x", which it does not offer (it offers: …)` <!-- hint: mcp-allow --> | use the server's own tool names in its `allow` |
 | `cannot make the scratch folder …` | the temp folder is not writable: fix `TMPDIR`, or `scratch = false` |
 | `plugins failed to load: [Failure { id: "plugin:X", error: "…" }]` <!-- hint: load-failed --> | the plugin threw while it loaded: its error says why |
+| `plugin rows not running: plugin:X (failed): plugin failed: …` <!-- hint: row-failed --> | the plugin threw while it loaded: its error says why |
 | `check`: `its tool \`read_file\` is named like yoagent's built-in: \`run\` refuses it` <!-- hint: shadowed-builtin --> | choose another plugin: this one's tool cannot run beside yoagent's own |
 | `check`: `plugin:X registered its handlers alone, but none with the other plugins` <!-- hint: not-together --> | it conflicts with another plugin: check them in pairs |
 | `check`: `a run would stop at its first request: …` <!-- hint: stops-at-first --> | a plugin stops every run before the model is asked: its reason says why |

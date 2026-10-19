@@ -241,12 +241,14 @@ Rules:
 ### Models
 
 `model = "<provider>/<id>"` maps to a yoagent `ModelConfig`: the preset
-whose provider and id match, when yoagent has one (`manifest::PRESETS`, its
-22 in 0.25.9: the model's real context window, output limit and protocol —
+whose provider and id match, when yoagent has one (`ModelConfig::preset`,
+yoagent 0.25.10: the model's real context window, output limit and protocol —
 a generic constructor's are often smaller — about 128K in and 4K out for
 many providers, DeepSeek's and Meta's excepted — which cuts replies short
 and compacts early; added 2026-10-19), else the provider's constructor
-below; `<id>` (everything after the first `/`) is passed as the model id. The API
+below (yoagent's `ModelConfig::generic`; a model with neither a preset nor
+a provider whose constructor carries its models' limits — DeepSeek, Meta —
+is noted, by `check` and as a Warning in `run`: its limits are guesses); `<id>` (everything after the first `/`) is passed as the model id. The API
 key comes from the provider's environment variables (the first set), read
 by yobuild and passed to the agent: without one, yoagent would fall back to
 `YOAGENT_API_KEY` / `API_KEY`, so `yobuild run` refuses to start instead.
@@ -254,7 +256,7 @@ by yobuild and passed to the agent: without one, yoagent would fall back to
 | Provider | Constructor | Protocol, base URL | Key from |
 |---|---|---|---|
 | `anthropic` | `ModelConfig::anthropic` | Anthropic Messages, `api.anthropic.com/v1` | `ANTHROPIC_API_KEY` |
-| `openai` | `ModelConfig::openai` | OpenAI Chat Completions, `api.openai.com/v1` | `OPENAI_API_KEY` |
+| `openai` | `ModelConfig::generic`: `openai_responses` for a reasoning id, else `ModelConfig::openai` | OpenAI Responses API (reasoning ids: not `gpt-3*`, `gpt-4*`, `chatgpt-*`, `*-chat*`) or Chat Completions, `api.openai.com/v1` | `OPENAI_API_KEY` |
 | `deepseek` | `ModelConfig::deepseek` | OpenAI-compatible, `api.deepseek.com`, `OpenAiCompat::deepseek()` | `DEEPSEEK_API_KEY` |
 | `google` | `ModelConfig::google` | Google Generative AI | `GEMINI_API_KEY`, then `GOOGLE_API_KEY` |
 | `groq`, `mistral`, `xai`, `zai`, `minimax` | the constructor of the same name | OpenAI-compatible, the provider's base URL and compat flags | `<PROVIDER>_API_KEY` |
@@ -1394,7 +1396,7 @@ the `provide_ask_owner(None)` pattern:
 | `workspace` | the agent's folder; whether the project is trusted | `run`'s cwd; the `trust` grant |
 | `session` | `{ id, generation }`: an id yobuild mints per session, its generation bumped by each Reset; run boundaries; wake (a granted plugin's text, tagged as its own) | `Session` (new: an id, a generation); yoagent's `RunContext` (`run_id`, `depth`, `parent_run_id`), seen by plugins as yoagent-rutis's `RunInfo`; `Session` steering |
 | `approval` | judge one command, or ask the owner — the question naming the plugin: a rutis plugin by its row; for the `pi`/`dsh` rows, the extension's or plugin's name the shim passes (as `ask_owner`'s `from`: per extension for pi, for DSH once attribution holds) | the gate, through a new public entry — `judge::Ctx` is private and built only from a line — such as `Gate::check_argv(argv, cwd) -> Check` (a `Ctx` at the call's cwd, each argument a literal word); files such a command makes are not recorded as the agent's own; `Session::ask` |
-| `llm` (later) | model info; model calls charged to the run | `Model`; yoagent's provider; the run's spend (yoagent: `RunContext`'s `spend` field is `pub(crate)` in 0.25.7–0.25.9, to be made public) |
+| `llm` (later) | model info; model calls charged to the run | `Model`; yoagent's provider; the run's spend (yoagent 0.25.10: `RunContext::spend_handle()`, a `SpendHandle` whose `add(&usage, &model)` the run's budget counts at its next request and its stats keep under `extensions`) |
 
 yobuild also sets `Agent::with_run_label(<session id>)`, for logs only: a
 label is informational in yoagent, not an identity.

@@ -1598,3 +1598,49 @@ async fn check_runs_a_plugin_that_injects_the_host_services() {
         Some("allowed")
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn check_notes_a_model_whose_limits_are_guesses() {
+    // No preset, not DeepSeek or Meta: the provider's default limits, said
+    // for the agent — a note, not a problem.
+    let dir = tempfile::tempdir().unwrap();
+    let write = |model: &str| {
+        std::fs::write(
+            dir.path().join("agent.toml"),
+            format!("[agent]\nname = \"a\"\nmodel = \"{model}\"\n"),
+        )
+        .unwrap()
+    };
+    write("openai/gpt-4o");
+    let report = check_dir(dir.path()).await;
+    assert!(report.ok, "{}", report.text());
+    let config = Manifest::load(dir.path().join("agent.toml"))
+        .unwrap()
+        .agent
+        .model
+        .config();
+    let noted: Vec<&String> = report
+        .agent
+        .notes
+        .iter()
+        .filter(|n| n.contains("no preset"))
+        .collect();
+    assert_eq!(noted.len(), 1, "{}", report.text());
+    for part in [
+        "openai/gpt-4o",
+        &config.context_window.to_string(),
+        &config.max_tokens.to_string(),
+        "`openai` provider",
+    ] {
+        assert!(noted[0].contains(part), "{part}: {}", noted[0]);
+    }
+    for model in ["xai/grok-4.7", "deepseek/deepseek-flash"] {
+        write(model);
+        let report = check_dir(dir.path()).await;
+        assert!(
+            !report.agent.notes.iter().any(|n| n.contains("no preset")),
+            "{model}: {}",
+            report.text()
+        );
+    }
+}

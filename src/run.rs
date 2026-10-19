@@ -891,6 +891,20 @@ fn prepare(
                 .into(),
         );
     }
+    // A model yoagent has no preset for: its limits are guesses (a window
+    // too small cuts the conversation early; too large, a request fails).
+    let model = &manifest.agent.model;
+    if !model.limits_known() {
+        let config = model.config();
+        notes.push(format!(
+            "model {}/{}: yoagent has no preset for it, so its context window ({} tokens) and output limit ({}) are the `{}` provider's defaults, not necessarily the model's",
+            model.provider(),
+            model.id(),
+            config.context_window,
+            config.max_tokens,
+            model.provider()
+        ));
+    }
     let installed = install::install(manifest, &layout.adapters, home, locked)?;
     let plan = plugins::plan(manifest, layout, &installed, cwd, &lookup)?;
     notes.extend(plan.notes.iter().cloned());

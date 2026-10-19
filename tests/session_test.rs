@@ -11,8 +11,8 @@ use yoagent::provider::{
     MockProvider, ModelConfig, ProviderError, StreamConfig, StreamEvent, StreamProvider,
 };
 use yoagent::{
-    Agent, AgentEvent, AgentTool, FilterResult, InputFilter, Message, ToolContext, ToolError,
-    ToolResult, Usage,
+    Agent, AgentEvent, AgentMessage, AgentTool, FilterResult, InputFilter, Message, ToolContext,
+    ToolError, ToolResult, Usage,
 };
 use yobuild::frontend::{
     ClientMessage, Connection, NoticeLevel, ResolveReason, RunOutcome, ServerMessage, Session,
@@ -998,24 +998,47 @@ async fn a_wake_as_a_run_ends_is_counted_like_an_idle_one() {
     finished(run).await;
 }
 
-/// A wake given to a run as steering that the run never read, because it
-/// was aborted, is said; the run is not followed by another.
+/// An agent whose first response calls the gate, then `rest`, holding each
+/// run's `finish` until released: what is sent meanwhile stays queued.
+fn gated_held(
+    rest: Vec<MockResponse>,
+) -> (
+    Agent,
+    Arc<Semaphore>,
+    Arc<tokio::sync::Notify>,
+    Arc<Semaphore>,
+) {
+    let (agent, gate) = gated(rest);
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(Semaphore::new(0));
+    let agent = agent.with_extension(HoldFinish {
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    (agent, gate, entered, release)
+}
+
+/// A wake an aborted run never took (sent while it finished) is said; the
+/// run is not followed by another.
 #[tokio::test]
 async fn a_wake_an_aborted_run_never_read_is_said() {
     let (session, driver) = Session::new(true);
     let mut ui = session.connect();
     session.allow_wakes(3);
-    let (agent, _gate) = gated(vec![MockResponse::Text("never".into())]);
+    let (agent, _gate, entered, release) = gated_held(vec![]);
     let run = tokio::spawn(driver.run(agent));
     session.send(ClientMessage::Prompt { text: "go".into() });
     until_gated(&mut ui).await;
-    assert!(session.wake("[plugin p] look".into()));
     session.send(ClientMessage::Abort);
-    let seen = until(&mut ui, |m| matches!(m, ServerMessage::Notice { .. })).await;
-    assert!(
-        warnings(&seen)[0].contains("the run was stopped before reading it"),
-        "{seen:?}"
-    );
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("finish starts");
+    assert!(session.wake("[plugin p] look".into()));
+    release.add_permits(1);
+    let seen = until_run_end(&mut ui).await;
+    let said = warnings(&seen);
+    assert_eq!(said.len(), 1, "{seen:?}");
+    assert!(said[0].contains("the run was stopped before reading it"));
     session.send(ClientMessage::Quit);
     let rest = until(&mut ui, |m| matches!(m, ServerMessage::Closed)).await;
     assert!(run_starts(&rest).is_empty(), "{rest:?}");
@@ -1071,7 +1094,7 @@ async fn an_aborted_run_says_each_unread_wake_and_keeps_the_owners_steer() {
     let (session, driver) = Session::new(true);
     let mut ui = session.connect();
     session.allow_wakes(3);
-    let (agent, _gate) = gated(vec![
+    let (agent, _gate, entered, release) = gated_held(vec![
         MockResponse::Text("next".into()),
         MockResponse::Text("then".into()),
     ]);
@@ -1082,12 +1105,16 @@ async fn an_aborted_run_says_each_unread_wake_and_keeps_the_owners_steer() {
         text: "[plugin p] look".into(),
     });
     until_gated(&mut ui).await;
+    session.send(ClientMessage::Abort);
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("finish starts");
     session.send(ClientMessage::Steer {
         text: "owner: also this".into(),
     });
     assert!(session.wake("[plugin p] look".into()));
     assert!(session.wake("[plugin p] look".into()));
-    session.send(ClientMessage::Abort);
+    release.add_permits(2);
     let seen = until_run_end(&mut ui).await;
     let said = warnings(&seen)
         .iter()
@@ -1107,8 +1134,151 @@ async fn an_aborted_run_says_each_unread_wake_and_keeps_the_owners_steer() {
     assert_eq!(session.wakes_left(), 3);
 }
 
-/// A reset with a wake queued: the wake is said once, nothing runs after,
-/// and the conversation starts again at a new generation.
+/// What an aborted run's loop took as it stopped — a wake sent while a
+/// tool ran — stays in the conversation (yoagent keeps it): nothing is
+/// said. The loop takes one message at a time, so the owner's steering sent
+/// after it is still queued, and the next run reads it; nothing repeated.
+#[tokio::test]
+async fn what_an_aborted_run_took_is_kept_for_the_next() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    session.allow_wakes(3);
+    let (agent, _gate) = gated(vec![MockResponse::Text("next".into())]);
+    let run = tokio::spawn(driver.run(agent));
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    until_gated(&mut ui).await;
+    // Handled in order: both are steering before the abort cancels the
+    // tool, and the loop takes the first as it stops.
+    assert!(session.wake("[plugin p] look".into()));
+    session.send(ClientMessage::Steer {
+        text: "owner: also this".into(),
+    });
+    session.send(ClientMessage::Abort);
+    let seen = until_run_end(&mut ui).await;
+    assert!(warnings(&seen).is_empty(), "{seen:?}");
+    session.send(ClientMessage::Prompt {
+        text: "next".into(),
+    });
+    let seen = until_run_end(&mut ui).await;
+    assert_eq!(run_starts(&seen), ["next"], "{seen:?}");
+    assert!(warnings(&seen).is_empty(), "{seen:?}");
+    session.send(ClientMessage::Quit);
+    let agent = finished(run).await;
+    let texts: Vec<String> = agent
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(Message::User { content, .. }) => {
+                content.iter().find_map(|c| match c {
+                    yoagent::Content::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    let at = |text: &str| {
+        let all: Vec<usize> = (0..texts.len()).filter(|&i| texts[i] == text).collect();
+        assert_eq!(all.len(), 1, "{text} once: {texts:?}");
+        all[0]
+    };
+    assert!(at("[plugin p] look") < at("next"), "{texts:?}");
+    assert!(at("next") < at("owner: also this"), "{texts:?}");
+    assert_eq!(session.wakes_left(), 3);
+}
+
+/// Before a reset, a wake the model already answered was read: nothing is
+/// said (the reset wipes it with the rest).
+#[tokio::test]
+async fn a_reset_after_a_wake_was_answered_says_nothing() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    session.allow_wakes(3);
+    let (agent, gate) = gated(vec![gate_call()]);
+    let run = tokio::spawn(driver.run(agent));
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    until_gated(&mut ui).await;
+    assert!(session.wake("[plugin p] look".into()));
+    // Let the driver steer it before the tool ends: the loop then takes it
+    // after the tool, and the model answers it with a second call.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    gate.add_permits(1);
+    until_gated(&mut ui).await;
+    session.send(ClientMessage::Reset);
+    let seen = until_run_end(&mut ui).await;
+    assert!(warnings(&seen).is_empty(), "{seen:?}");
+    session.send(ClientMessage::Quit);
+    finished(run).await;
+    assert_eq!(session.generation(), 1);
+}
+
+/// A provider that answers once from `first`, then panics: the agent's task
+/// fails after its loop took the steering sent meanwhile.
+struct PanicsSecond {
+    first: MockProvider,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl StreamProvider for PanicsSecond {
+    async fn stream(
+        &self,
+        config: StreamConfig,
+        tx: mpsc::UnboundedSender<StreamEvent>,
+        cancel: CancellationToken,
+    ) -> Result<Message, ProviderError> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+            panic!("the provider panicked")
+        }
+        self.first.stream(config, tx, cancel).await
+    }
+}
+
+/// A task that fails loses what its loop took: a wake is said, the owner's
+/// steering is steered again for the next run, and no wake is spent.
+#[tokio::test]
+async fn a_failed_task_says_its_wake_and_keeps_the_owners_steer() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    session.allow_wakes(3);
+    let gate = Arc::new(Semaphore::new(0));
+    let provider = PanicsSecond {
+        first: MockProvider::new(vec![gate_call()]),
+        calls: Default::default(),
+    };
+    let agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![Box::new(Gate(gate.clone()))]);
+    let run = tokio::spawn(driver.run(agent));
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    until_gated(&mut ui).await;
+    session.send(ClientMessage::Steer {
+        text: "owner: also this".into(),
+    });
+    assert!(session.wake("[plugin p] look".into()));
+    // Let the driver steer both before the tool ends, so the loop takes
+    // them and its task then fails (the assertions hold either way).
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    gate.add_permits(1);
+    let seen = until_run_end(&mut ui).await;
+    assert_eq!(outcome(seen.last()).0, RunOutcome::Error);
+    let said = warnings(&seen);
+    assert_eq!(said.len(), 1, "{seen:?}");
+    assert!(said[0].contains("[plugin p] look"), "{said:?}");
+    session.send(ClientMessage::Quit);
+    let agent = finished(run).await;
+    let queued: Vec<String> = agent
+        .take_steering_queue()
+        .iter()
+        .map(|m| format!("{m:?}"))
+        .collect();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    assert!(queued[0].contains("owner: also this"), "{queued:?}");
+    assert_eq!(session.wakes_left(), 3);
+}
+
+/// A reset with a wake given: the wake is said once — queued, or taken
+/// into a history the reset wipes before the model answered it — nothing
+/// runs after, and the conversation starts again at a new generation.
 #[tokio::test]
 async fn a_reset_says_the_wake_it_drops() {
     let (session, driver) = Session::new(true);
