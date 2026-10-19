@@ -987,13 +987,28 @@ fn tools_for(set: ToolSet, cwd: &Path) -> Vec<Box<dyn AgentTool>> {
 }
 
 /// A run's cost, as `--once` says it when the run ends: `Cost: $0.0021
-/// (12345 tokens in, 678 out; 3 turns)` — tokens in counting cache reads and
-/// writes, as facts does — or `not priced` when part of it has no price (a
-/// scripted model has none).
-fn cost(stats: &yoagent::SessionStats, total_usd: Option<f64>) -> String {
-    let usage = &stats.usage;
+/// (12345 tokens in, 678 out; 3 turns)`. The dollars are yoagent's
+/// `total_cost_usd` (the run, its sub-agents, compaction and decision
+/// models); the tokens its `total_usage` (all but decision models'), tokens
+/// in counted as facts counts them (input + cache reads + cache writes);
+/// turns the agent's own. A run with no turn: `unknown` when it was aborted
+/// or failed (its figures are lost with it — after Ctrl+C, say — not zero),
+/// else `nothing spent`. Otherwise no dollars is `not priced` (part of it
+/// has no price: a scripted model has none), and less than a hundredth of a
+/// cent `<$0.0001`.
+fn cost(outcome: RunOutcome, stats: &yoagent::SessionStats, total_usd: Option<f64>) -> String {
+    if stats.turns == 0 {
+        return match outcome {
+            RunOutcome::Aborted | RunOutcome::Error => {
+                "Cost: unknown (the run's figures were lost with it)".to_owned()
+            }
+            _ => "Cost: nothing spent".to_owned(),
+        };
+    }
+    let usage = stats.total_usage();
     let tokens_in = usage.input + usage.cache_read + usage.cache_write;
     let price = match total_usd {
+        Some(usd) if usd > 0.0 && usd < 0.00005 => "<$0.0001".to_owned(),
         Some(usd) => format!("${usd:.4}"),
         None => "not priced".to_owned(),
     };
@@ -1050,7 +1065,7 @@ fn watch(
                 }) => {
                     said.clear();
                     if print {
-                        eprintln!("  {}", cost(&stats, total_cost_usd));
+                        eprintln!("  {}", cost(outcome, &stats, total_cost_usd));
                     }
                     // A run that did not complete: what to do, for every
                     // frontend (design §11).
@@ -1562,21 +1577,49 @@ fn lan_ip() -> Option<std::net::IpAddr> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn a_runs_cost_counts_cache_as_tokens_in_and_says_when_unpriced() {
+    fn a_runs_cost_counts_cache_as_tokens_in_and_tells_lost_from_unpriced() {
+        use super::{cost, RunOutcome};
         let mut stats = yoagent::SessionStats::default();
+        // No turn: nothing spent, unless the run's figures went with it.
+        assert_eq!(
+            cost(RunOutcome::Completed, &stats, None),
+            "Cost: nothing spent"
+        );
+        assert_eq!(
+            cost(RunOutcome::Rejected, &stats, None),
+            "Cost: nothing spent"
+        );
+        for lost in [RunOutcome::Aborted, RunOutcome::Error] {
+            assert_eq!(
+                cost(lost, &stats, None),
+                "Cost: unknown (the run's figures were lost with it)"
+            );
+        }
         stats.usage.input = 1000;
         stats.usage.cache_read = 200;
         stats.usage.cache_write = 34;
         stats.usage.output = 56;
         stats.turns = 3;
+        let done = RunOutcome::Completed;
         assert_eq!(
-            super::cost(&stats, Some(0.00213)),
+            cost(done, &stats, Some(0.00213)),
             "Cost: $0.0021 (1234 tokens in, 56 out; 3 turns)"
         );
+        assert_eq!(
+            cost(done, &stats, Some(0.00215)),
+            "Cost: $0.0022 (1234 tokens in, 56 out; 3 turns)"
+        );
+        assert_eq!(
+            cost(done, &stats, Some(0.00001)),
+            "Cost: <$0.0001 (1234 tokens in, 56 out; 3 turns)"
+        );
+        // Sub-agents' and compaction's tokens count, as their dollars do.
+        stats.sub_agents.usage.input = 100;
+        stats.compaction.usage.output = 4;
         stats.turns = 1;
         assert_eq!(
-            super::cost(&stats, None),
-            "Cost: not priced (1234 tokens in, 56 out; 1 turn)"
+            cost(RunOutcome::Stopped, &stats, None),
+            "Cost: not priced (1334 tokens in, 60 out; 1 turn)"
         );
     }
 

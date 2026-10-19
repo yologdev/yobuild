@@ -49,8 +49,8 @@ call prints `  name ✓` or `  name ✗ <why>` there; notices as
 `  Info: …` / `  Warning: …` — with a budget, a Warning `budget_usd not
 kept: a scripted model has no price` (the script has no price, not the
 model); with plugins, an Info `Plugin time this run: …`; when the run
-ends, `  Cost: not priced (… tokens in, … out; N turns)` (a live run
-says its dollars there); then the last answer and how the run ended on
+ends, `  Cost: not priced (0 tokens in, 0 out; N turns)` (a reply file
+reports no usage; a live run says its dollars and tokens there); then the last answer and how the run ended on
 stdout (`Completed`, `Stopped: …`, `Error: …`). A `✓` says the tool ran,
 not what it found: to see results, run the reply file without `--once`
 and open the page. A reply file's `text` is invented, sources and all

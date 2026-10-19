@@ -72,8 +72,8 @@ the question waiting); `scripts/answer.json` the run your answer starts.
 2026-10-19, `deepseek/deepseek-flash`, `--once`, the task "When does
 Node.js 20 reach end of life?": four searches (`domain_search`,
 `research`, `platform_search`, `advanced_search`; 6.0 s of plugin time,
-from yobuild's `Plugin time this run` notice), **$0.0027** (28,853 tokens
-in, 526 out; 4 turns, from its `Cost:` line), then:
+from yobuild's `Plugin time this run` notice), `Cost: $0.0027 (28853
+tokens in, 526 out; 4 turns)`, then:
 
 > **Short answer:** Node.js 20 ("Iron" LTS) reached end of life on
 > 30 April 2026. It entered Active LTS in October 2023 and Maintenance LTS

@@ -50,9 +50,14 @@ fn a_once_run_prints_its_answer_and_how_it_ended() {
         stderr.contains("  server__echo ✓"),
         "each tool call: {stderr}"
     );
-    // The run's cost when it ends: a scripted model has no price.
-    assert!(
-        stderr.contains("  Cost: not priced (") && stderr.contains(" turns)"),
+    // The run's cost when it ends, once: a scripted model has no price, and
+    // its replies report no usage.
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|l| l.starts_with("  Cost: "))
+            .collect::<Vec<_>>(),
+        ["  Cost: not priced (0 tokens in, 0 out; 2 turns)"],
         "the cost: {stderr}"
     );
 }
@@ -592,6 +597,12 @@ fn ctrl_c_stops_a_once_run_as_aborted() {
     assert_eq!(
         text(&out.stdout).lines().last(),
         Some("Aborted: stopped with Ctrl+C")
+    );
+    // Its figures went with it: not zero, unknown.
+    assert!(
+        text(&out.stderr).contains("\n  Cost: unknown (the run's figures were lost with it)\n"),
+        "{}",
+        text(&out.stderr)
     );
 }
 

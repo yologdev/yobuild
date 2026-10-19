@@ -1245,10 +1245,13 @@ path/to/gallery/<name>/agent.toml`.
 The cost a README records is the one `--once` prints on stderr when each
 run ends (decided 2026-10-19, after the first gallery agent's live run
 had none to record): `  Cost: $0.0021 (12345 tokens in, 678 out; 3
-turns)` — tokens in counting cache reads and writes, as facts does — or
-`not priced` when part of the run has no price (a scripted model). The
-web page already shows each run's cost; stdout stays the answer and the
-outcome.
+turns)` — yoagent's `total_cost_usd` and the tokens of the same scope
+(`total_usage`), in counted as facts counts them (input + cache reads +
+cache writes). `not priced` when part of the run has no price (a scripted
+model); with no turn, `unknown` for a run aborted or failed (its figures
+are lost with it: Ctrl+C), else `nothing spent` — never a zero that is
+not one. The web page already shows each run's cost; stdout stays the
+answer and the outcome.
 
 **Kept by CI** — one test per agent in `tests/gallery_test.rs` (the
 binary, the shared `YOBUILD_HOME`, as `cli_test`; each `yobuild` in a
