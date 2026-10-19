@@ -549,9 +549,21 @@ impl Inner {
 
     /// Take one of the runs plugins' wakes may start, if any is left.
     fn take_wake(&self) -> bool {
-        self.wakes_left
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok()
+        // A compare-exchange loop (`fetch_update` is deprecated on newer
+        // toolchains, `try_update` absent on older ones).
+        let mut left = self.wakes_left.load(Ordering::SeqCst);
+        while left > 0 {
+            match self.wakes_left.compare_exchange_weak(
+                left,
+                left - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return true,
+                Err(now) => left = now,
+            }
+        }
+        false
     }
 
     /// Say a plugin's wake that reached no run.
