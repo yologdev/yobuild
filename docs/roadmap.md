@@ -134,7 +134,7 @@ demo, plus the new per-plugin hook time and per-runtime memory lines.
 empty `YOBUILD_HOME`) and runs, and `yobuild check` reports the same as
 the compatibility matrix for the plugins it uses.
 
-## M3 — The skill and a gallery (design §11; decided 2026-10-19; hints #33, the skill #34; the gallery designed in §11 "How a gallery agent is made and kept")
+## M3 — The skill and a gallery (design §11; decided 2026-10-19; hints #33, the skill #34, the gallery's design #35)
 
 - `skill/yobuild/SKILL.md` ("build an agent with yobuild"): ask, pick
   parts by capability (from the measured compatibility list), write the
