@@ -1339,3 +1339,144 @@ examples are.
 
 **Order of PRs**: this design; then one PR per agent (web research, your
 MCP server, the third), each with the skill fixes its build found.
+
+## 12. The host layer: what a plugin's own app gives it (proposed 2026-10-19)
+
+The gallery's third agent found it twice in a day: a plugin that loads,
+lists its tools and passes `check`, and then does nothing useful, because
+it expects something its own app gives it and our adapters answer with a
+fixed stub. `dsh-univer-office` reads its workspace from the DSH agent
+making the call (`exec.agent.session.header.cwd`), and the DSH adapter
+calls tools with no agent: every call fails `SESSION_SCOPE_UNAVAILABLE`.
+`pi-lens` asks pi whether the project is trusted, the pi adapter answers a
+fixed `false`, and it starts no language server and calls every file clean.
+Neither is a missing frontend: they are the **host** — the agent, session,
+model and trust a plugin's own app provides at run time. Surveyed on
+2026-10-19 (29 DSH plugin packages, pi's whole `ExtensionAPI`/`ExtensionContext`):
+
+- **DSH**: 16 of 29 plugins read `exec.agent.session.header.cwd`, 10 the
+  session's id, 11 the agent's id; the base's `sessionPersistence` is an
+  abstract service (no `locate`/`list`); approvals need an open turn
+  (`turn/start` in the session log); `dsh-user-questions` accepts only an
+  agent that is a live root in `agents`.
+- **pi**: fixed answers for `isProjectTrusted` (`false`, where real pi
+  trusts an ordinary repository), `model`/`modelRegistry` (none),
+  `sessionManager` (a private empty one); `sendMessage`/`sendUserMessage`
+  recorded or refused; observer events (`turn_end`, `message_*`,
+  `tool_execution_*`) never fired — and `pi.exec` runs any command
+  **ungated** today.
+
+The fix is generic, in three levels, each where the project's rule puts it
+(the loop's in yoagent, an ecosystem's vocabulary in its adapter, policy and
+UI in yobuild):
+
+**L1 — host services (yobuild, Rust; ecosystem-neutral).** Offered to every
+plugin runtime through the bridge beside `frontend`, `ask_owner` and `ui`,
+always provided (rutis starts no plugin whose injected service is missing)
+and answering `Err` when the manifest did not grant them — the
+`provide_ask_owner(None)` pattern:
+
+| Service | What it gives | Backed by |
+|---|---|---|
+| `workspace` | the agent's folder; whether the project is trusted | `run`'s cwd; the grant |
+| `session` | a stable identity per yobuild session; run boundaries; wake/steer, tagged as the plugin's | yoagent's `RunInfo` (`label`, `run_id`, `depth`, `parent_run_id`); `Session` steering (as `ask_owner`'s answers) |
+| `approval` | judge a command or ask the owner | the gate's bash judge; `Session::ask` |
+| `llm` (later) | model info; model calls charged to the run | `Model`; yoagent's provider and `Budget` |
+| `web` (later) | mount a plugin's HTTP routes | the frontend's plugin origin (L3) |
+
+**L2 — ecosystem shims (yoagent-rutis adapters).** They translate L1 into
+each ecosystem's contract, as `host-dialogs.ts` and `host-ui.ts` already do
+for questions:
+
+- **DSH host.** One stand-in DSH `Agent` per yobuild session (`RunInfo.label`),
+  registered as a root in DSH's own `agents` (`@deepseek-ai/dsh-agent`), its
+  `Session` from DSH's own `sessions` (`dsh-session`, `meta.cwd` from
+  `workspace`), stored by `dsh-session-persistence-jsonl` in the private
+  `DshHome`; `turn/start` at a run's first hook and `turn/end` at `finish`;
+  a sub-agent run a child agent (`enter(child, parent)`); every
+  `tools.execute` and `tools.schemas` given that agent. Approvals and
+  questions through DSH's own `approval`/`userQuestions`, answered by the
+  `ui` service (replacing `host-dialogs.ts`' agentless override). Later: a
+  model-info-only `llm` adapter, a read-only `settings`. Its transcript stays
+  empty (no conversation mirrored); `create`/`resume` stay unavailable (no
+  factory); `loader` stays refused.
+- **pi host.** Each fixed answer becomes a capability: `isProjectTrusted`
+  from the `trust` grant; `model`/`modelRegistry` read-only from the
+  manifest's model; `sendMessage`/`sendUserMessage` → `session` wake;
+  `pi.exec` → off, or judged by the gate like a `bash` line; observer events
+  from yoagent-rutis's existing `on_event` (no grant: they only observe).
+
+**L3 — the frontend (`yobuild::frontend`).** Only what is shown: a plugin
+origin — a second listener, another origin than the page (whose `/ws`
+token drives the agent), plugin routes reverse-proxied there with forced
+`CSP: sandbox allow-scripts`, a cookie bound to host and port, Host/Origin
+checks, no CORS — and framed UI plugins (`renderTool` in a sandboxed
+iframe over `postMessage`). DSH's full web client is not hosted.
+
+**The manifest: grants, closed by default.**
+
+```toml
+[[plugin]]
+dsh  = "dsh-univer-office@0.3.7"
+host = { workspace = true }            # a stand-in agent with the agent's folder
+
+[[plugin]]
+pi   = "pi-lens@4.4.3"
+host = { trust = true, model = "info" } # it may run project code (its language servers)
+```
+
+`check` names each grant, and each fixed answer an adapter gave in its
+place ("pi-lens asked whether the project is trusted: answered no
+(`trust` not granted)") — so a plugin that does nothing says why.
+
+**What a grant hands a plugin**, said by `check` and in §6:
+
+- `trust`, network, installs — honour-system: the plugin already has
+  Node's whole power; a grant changes how honest code behaves (pi-lens
+  installs language servers into `~/.pi-lens` and runs the project's code),
+  nothing enforces it. `exec` and model calls cross the host boundary and
+  are enforced: `exec` judged by the gate, `llm` charged to the budget
+  (needs yoagent to make a run's outside spend public: `RunContext::spend`
+  is crate-private in 0.25.7).
+- Never granted: provider routing and payload rewriting, context
+  rewriting, DSH's `loader` (plugins loading plugins past the lock),
+  plugins' own model adapters reaching yoagent, DSH's app plugins
+  (agent-teams, dsh-im, pet, model-proxy: yoagent is the loop).
+
+**What it unlocks** (from the survey; to be measured, as the matrix is):
+univer's file tools (13 of 14), modsearch (two composition fixes: `{}` for
+a missing config, a bundle's config-only patch on a base row), about ten DSH
+tool plugins outside the top 20 whose only DSH-specific reads are the agent
+and session; pi-lens; pi observers (langfuse, langsmith); likely
+pi-background-tasks (model info) — and, with L3, visualize's and univer's
+views. DSH's top-20 usable count moves by about three; the long tail more.
+
+**Probed on 2026-10-19** (a plain Node Cordis root with the DSH base's
+packages at 0.2.0-rc.2; not yet inside rutis): with `dsh-session`,
+`dsh-agent`, `dsh-user-approval` and the stand-in registered as a root,
+`dsh-univer-office@0.3.7` created a file, a worktree, imported a CSV,
+inspected it, exported a valid `.xlsx`, and merged — its `ask` reaching DSH's
+own `approval/request`, answered `allowed-once` (and `rejected` refused it);
+`ask_user_question` with the agent passed `assertLiveRoot` and its
+`user-questions/request` was answered. None of DSH's app was needed (no
+typert, invariants, app boot; services nobody provided were optional
+injects or sub-plugins left waiting — univer's web viewer, its settings).
+What the shim must do, learned there: the stand-in's `id` is its session's
+id (`enter()` checks); approvals fail outside a turn ("approval.request()
+outside an open turn"), so `turn/start`/`turn/end` around each run;
+`host-dialogs.ts` answers DSH's `approval/request` and the agent-scoped
+`user-questions/request` instead of stepping aside when an agent is set;
+`sessions.create` persists nothing (DSH's agent loop attaches the writer),
+so the shim writes `session/event`s to `dsh-session-persistence-jsonl`
+itself, and that backend replaces the abstract `dsh-session-persistence`
+(both register `sessionPersistence`); `schemas(agent)` equals `schemas()`
+here. univer's native bindings load without install scripts; its Gateway
+(a child on 127.0.0.1) starts on the first call and exits with the plugin;
+with `telemetry = false` it still writes a state file under `DSH_HOME` —
+the private `DshHome`.
+
+**Order**: (1) DSH L1+L2 — workspace and session, dialogs through DSH's own
+services, the composition fixes — with yobuild's `host` key and `check`;
+(2) pi capabilities and observer events, `exec` closed by default; (3) the
+plugin origin; (4) the metered `llm`, after yoagent exposes run spend.
+Each is a design-checked PR pair (yoagent-rutis, then yobuild).

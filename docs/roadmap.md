@@ -168,6 +168,25 @@ the compatibility matrix for the plugins it uses.
 **Done when** three agents in the gallery were built through the skill by
 a coding agent, not by hand, and each is checked and run scripted in CI.
 
+## M3b — The host layer (design §12; proposed 2026-10-19)
+
+What a plugin's own app gives it — DSH's agent and session, pi's trust and
+model — provided by yobuild as host services, translated by the adapters,
+granted per plugin in the manifest (`host = { … }`, closed by default) and
+named by `check`.
+
+- DSH host: a stand-in agent per session in DSH's own `agents`/`sessions`,
+  turns around runs, approvals and questions through DSH's own services;
+  modsearch's two composition fixes.
+- pi host: trust, model info, wake as grants; observer events; `pi.exec`
+  closed by default, or judged by the gate.
+- The frontend's plugin origin (plugin routes, framed UI plugins).
+- A metered `llm`, once yoagent makes a run's outside spend public.
+
+**Done when** `dsh-univer-office` and `pi-lens` work in a gallery agent
+(their tools' results checked, not only `✓`), the compatibility matrix is
+re-measured, and `check` names every grant and every fixed answer.
+
 ## M4 — Share
 
 - `yobuild new <name>` (a manifest and a prompt to edit), `cargo install
