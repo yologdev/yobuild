@@ -1339,3 +1339,280 @@ examples are.
 
 **Order of PRs**: this design; then one PR per agent (web research, your
 MCP server, the third), each with the skill fixes its build found.
+
+## 12. The host layer: what a plugin's own app gives it (proposed 2026-10-19)
+
+The gallery's third agent found it twice in a day: a plugin that loads,
+lists its tools and passes `check`, then does nothing useful, because it
+expects something its own app gives it and our adapters answer with a fixed
+stub. `dsh-univer-office@0.3.7` reads its workspace from the DSH agent making
+the call (`exec.agent.session.header.cwd`), and the DSH adapter calls tools
+with no agent: every file tool (13 of its 14) fails
+`SESSION_SCOPE_UNAVAILABLE`. `pi-lens@4.4.3` asks pi whether the project is
+trusted, the pi adapter answers a fixed `false`, and it starts no language
+server and calls every file clean. Neither is a missing frontend: they are
+the **host** — the agent, session, model and trust a plugin's own app
+provides at run time. Surveyed on 2026-10-19 (text matches in the published
+bundles of 29 DSH plugin packages; pi 1.1.0's `ExtensionAPI` and
+`ExtensionContext` against the adapter):
+
+- **DSH**: 16 of the 29 read `exec.agent.session.header.cwd`, 11 the
+  session's id, 11 the agent's id — among them univer, visualize, the two
+  image generators, dsh-ops, dsh-palimpsest, dsh-remote, dsh-tiddlywiki,
+  dsh-mnemosyne, dsh-mcp-connector (the 29 include DSH's app plugins, which
+  this layer will not cover, below). The base's `sessionPersistence` is an
+  abstract service definition with no backend (no `create`, `open`,
+  `list`); approvals need an open turn (`turn/start` in the session log);
+  `dsh-user-questions` accepts only an agent that is a live root in `agents`.
+- **pi**: fixed answers for `isProjectTrusted` (`false`, where pi trusts any
+  folder without project-level pi resources such as a `.pi` config),
+  `model`/`modelRegistry` (none), `sessionManager` (an in-memory one without
+  the conversation); `sendMessage` recorded, `sendUserMessage` refused;
+  observer events `turn_*`, `agent_end`, `message_start`/`message_update`
+  and `tool_execution_*` never fired (`message_end`, `context`,
+  `session_start`, `session_shutdown` are, the first two as read-only
+  checks) — and `pi.exec` runs any command **ungated** today.
+
+The fix is generic, in three levels, each where the project's rule puts it
+(the loop's in yoagent, an ecosystem's vocabulary in its adapter, policy and
+UI in yobuild).
+
+### L1 — host services (yobuild, Rust; ecosystem-neutral)
+
+Offered to every plugin runtime through the bridge beside `frontend`,
+`ask_owner` and `ui`, always provided (rutis starts no plugin whose injected
+service is missing) and answering `Err` for what the manifest did not grant —
+the `provide_ask_owner(None)` pattern:
+
+| Service | What it gives | Backed by |
+|---|---|---|
+| `workspace` | the agent's folder; whether the project is trusted | `run`'s cwd; the `trust` grant |
+| `session` | `{ id, generation }`: an id yobuild mints per session, its generation bumped by each Reset; run boundaries; wake (a granted plugin's text, tagged as its own) | `Session` (new: an id, a generation); yoagent's `RunContext` (`run_id`, `depth`, `parent_run_id`), seen by plugins as yoagent-rutis's `RunInfo`; `Session` steering |
+| `approval` | judge one command, or ask the owner — the question naming the plugin: a rutis plugin by its row; for the `pi`/`dsh` rows, the extension's or plugin's name the shim passes (as `ask_owner`'s `from`: per extension for pi, for DSH once attribution holds) | the gate, through a new public entry — `judge::Ctx` is private and built only from a line — such as `Gate::check_argv(argv, cwd) -> Check` (a `Ctx` at the call's cwd, each argument a literal word); files such a command makes are not recorded as the agent's own; `Session::ask` |
+| `llm` (later) | model info; model calls charged to the run | `Model`; yoagent's provider; the run's spend (yoagent: `RunContext`'s `spend` field is `pub(crate)` in 0.25.7–0.25.8, to be made public) |
+
+yobuild also sets `Agent::with_run_label(<session id>)`, for logs only: a
+label is informational in yoagent, not an identity.
+
+**Who enforces a grant.** L1 sees only the calling row, and every pi
+extension calls through the one `pi` row, every DSH plugin through the one
+`dsh` row (design §4, "Who a plugin is"). So L1 enforces grants per row —
+which is per plugin for a rutis plugin — and the **shims** enforce them for
+pi and DSH:
+
+- **pi**: per extension, by the extension's source file. The adapter knows
+  it for a tool call (`sourceIn`), and can give each extension its own
+  `ctx` for events (today one shared `context()`). But `pi.exec`,
+  `sendMessage` and `sendUserMessage` live on the `pi` API object, not on
+  `ctx`: pi's loader calls its own `execCommand` directly, and messages go
+  to the shared runtime with no extension's name. So the adapter loads each
+  extension through a factory wrapper of its own — importing the module
+  and calling pi's `loadExtensionFromFactory((api) => factory(wrapped(api,
+  path)), …)`, where `wrapped` overrides `exec`, `sendMessage` and
+  `sendUserMessage` for that extension — to be confirmed in the first pi
+  PR, as DSH's attribution is.
+- **DSH**: per plugin only if the adapter can tell which plugin registered a
+  tool — DSH's `tools` registry keeps no owner, but `tools.register` runs in
+  the registering plugin's Cordis context, which names its fiber: confirmed
+  or refuted in the first implementation PR. Until then a DSH grant applies
+  to **every DSH plugin in the runtime**, and `check` says so ("granted to
+  every DSH plugin: `workspace`").
+
+### L2 — ecosystem shims (yoagent-rutis adapters)
+
+They translate L1 into each ecosystem's contract, as `host-dialogs.ts` and
+`host-ui.ts` already do for questions.
+
+**DSH host** (loaded only when a DSH grant asks for it; the agentless path
+stays for the rest):
+
+- One stand-in DSH `Agent` per yobuild session **generation**: a Reset ends
+  it (its turn closed, its session left) and the next run makes a new one,
+  so a plugin's state (univer's worktrees, approvals DSH remembers) does not
+  carry over a Reset. It is registered as a root in DSH's own `agents`
+  (`@deepseek-ai/dsh-agent`, `agents.register`); its `id` is its session's
+  id (`enter()` checks); its `Session` comes from DSH's own `sessions`
+  (`dsh-session`, `meta.cwd` from `workspace`); its `ctx` is
+  `createScope(root, agent)` (`@deepseek-ai/dsh-scope`); its `steer` and
+  `followup` route to `session` wake (with `wake` granted; else refused);
+  its `inbox` is empty (`nextTurn`/`nextStep` none). Continued questions
+  (`dsh-user-questions` answering a timed question later with
+  `agent.steer`, released on a session `user/message` it waits for) are out
+  of scope: it tracks them only after a `request/header` event, which an
+  empty transcript never has, so its `answer()` declines — a question
+  waits for its answer in the call, as today. `cancel`, `whenIdle`,
+  `runMaintenance` are no-ops it reports;
+  `create`/`resume` stay unavailable (no factory).
+- **Turns**: opened lazily, at a run's first DSH call (`turn/start`), closed
+  at `finish` (`turn/end`); an open turn left by a run whose `finish` never
+  came (Ctrl+C, a Reset, a runtime that died, `finish`'s 5 s limit) is
+  closed before the next `turn/start`, and at the generation's end.
+- **The session log**: `sessions.create` persists nothing (DSH's agent loop
+  attaches the writer), so the shim writes the session's `SessionEvent`s to
+  `@deepseek-ai/dsh-session-persistence-jsonl`, rooted in the private
+  `DshHome` (with `YOAGENT_DSH_HOME` set, the user's own DSH home: said by
+  `check`). The stand-in's rows — `dsh-session`, `dsh-agent`,
+  `dsh-user-approval`, the jsonl backend — load with a DSH grant, whatever
+  `[dsh] host_services` says; `host-services.json` drops its abstract
+  `dsh-session-persistence` row (and `check`'s probe base with it), since
+  both register `sessionPersistence` and a second provider fails — DSH
+  plugins that inject `sessionPersistence` get it from the jsonl backend,
+  so they need a grant too. Its transcript stays empty: no conversation is
+  mirrored into it.
+- **Dialogs**: `host-dialogs.ts` today wraps `tools/pre-execute` for
+  agentless `yoagent:` calls and steps aside on agent-scoped
+  `user-questions/request`. It gains an `approval/request` answerer (DSH's
+  own `dsh-user-approval` loaded) and answers the agent-scoped
+  `user-questions/request` for the stand-in, both through the `ui` service;
+  the agentless path stays for ungranted plugins. (In the probe the probe
+  script answered them.)
+- **Sub-agents**: when yobuild delegates (it has no delegation tool today):
+  a child agent with its own session (`enter(child, parent)`, then
+  `announce`); DSH refuses questions from a child (`DELEGATED_CALLER`).
+- Later: a model-info-only `llm` adapter, a read-only `settings`.
+
+**pi host**: each fixed answer becomes a grant, applied per extension:
+`isProjectTrusted` from `trust`; `model`/`modelRegistry` read-only from
+`model = "info"`; `sendMessage`/`sendUserMessage` from `wake`; `pi.exec`
+from `exec` — `"off"` (the default: refused, said as a Warning naming the
+extension, once a session), `"gate"` (its argv judged as one command's
+words through `Gate::check_argv`, not as a shell line), or `"free"`; the observer
+events from yoagent-rutis's existing `on_event`, with `observe` (they carry
+the whole conversation and every tool's arguments and results, a `.env`
+read included; langfuse and langsmith send them off the machine).
+
+### L3 — the frontend (later; its own milestone)
+
+Only what is shown: a plugin origin — a second listener, another origin than
+the page (whose `/ws` token drives the agent), plugin routes reverse-proxied
+there with forced `CSP: sandbox allow-scripts`, a cookie bound to host and
+port, Host/Origin checks, no CORS, off in phone mode unless every request
+carries the cookie — and framed UI plugins (`renderTool` in a sandboxed
+iframe over `postMessage`), which changes the contract of today's trusted UI
+plugins (`search-links`, `todo-plan`). DSH's full web client is not hosted.
+
+### The manifest: `grants`, closed by default
+
+```toml
+[[plugin]]
+dsh    = "dsh-univer-office@0.3.7"
+config = { telemetry = false }
+grants = { workspace = true }               # a stand-in DSH agent with the agent's folder
+
+[[plugin]]
+pi     = "pi-lens@4.4.3"
+grants = { trust = true, model = "info" }   # it may run project code (its language servers)
+```
+
+`grants` (named so, not `host`: `[dsh] host_services` is another thing), a
+table read with `deny_unknown_fields`, every key off when absent:
+
+| Key | Values | pi | DSH | rutis | Turns on |
+|---|---|---|---|---|---|
+| `workspace` | bool | — (pi has `cwd`) | yes | yes | the stand-in agent (DSH); `workspace` (rutis) |
+| `trust` | bool | yes | — | yes | `isProjectTrusted`; `workspace`'s trust |
+| `model` | `"info"` (later `"call"`) | yes | later (a model-info `llm`) | yes | `ctx.model`/`modelRegistry`; for rutis, `llm`'s model info |
+| `wake` | bool | yes | yes (the stand-in's `steer`/`followup`) | yes | `session` wake |
+| `exec` | `"off"` / `"gate"` / `"free"` | yes | — | — | `pi.exec` |
+| `observe` | bool | yes | — | — | pi's observer events |
+
+A key an ecosystem does not take is refused with its place; it goes in
+`src/manifest/tests.rs` and `skill/yobuild/reference/manifest.md` (whose
+test names every key). Existing manifests keep working: nothing is granted,
+and only `pi.exec` changes (refused where it ran — said, below).
+
+**Wake** is prompt injection and unattended spend, so it is bounded: the text
+reaches the agent tagged as the plugin's (`[pi extension X] …`, `[DSH plugin
+X] …`), never as the owner's; mid-run it steers; with the agent idle it
+starts a run only up to a cap per session (then refused, said), counted by
+the budgets; under `--once` it is dropped once the task's run ended; a run
+it starts is a run like any other for the exit status of web and terminal
+modes ("the last run ended …").
+
+### Fixed answers, said
+
+The adapters record each fixed answer they give in a grant's place (what
+was asked, what was answered, which grant would change it) and report it
+through `yoagent.log` with a fixed tag. `run` turns each into a Warning
+notice once a session ("pi-lens asked whether the project is trusted:
+answered no — grant `trust`"); `probe::pi`/`probe::dsh` return those seen
+while loading, and `check` lists them per entry, or says "not exercised by
+the probe" for those asked only in a tool call. A `hints` row and its
+`failures.md` entry point at the grant.
+
+### What a grant hands a plugin
+
+- **Honour-system** — `trust`, network, installs, and also what goes around
+  `exec` and `llm`: a plugin already has Node's whole power; it can spawn
+  through `child_process`, or call a provider with the keys every runtime
+  inherits (§6). A grant changes how honest code behaves (pi-lens installs
+  language servers into `~/.pi-lens` and runs the project's code); nothing
+  enforces it. Said by `check` and in §6.
+- **Mediated** — calls through the host: `pi.exec` judged by the gate,
+  `llm` charged to the budget, wake bounded, approvals naming the plugin.
+  Metering holds only once plugin runtimes lose the provider key variables:
+  a step of its own (`PluginHost::env` can add variables, not yet remove
+  them), worth doing apart from this layer.
+- **Never granted**: provider routing and payload rewriting, context
+  rewriting, DSH's `loader` (plugins loading plugins past the lock),
+  plugins' own model adapters reaching yoagent, DSH's app plugins
+  (agent-teams, dsh-im, dsh-pet, model-proxy: yoagent is the loop).
+
+### Probed on 2026-10-19
+
+A plain Node Cordis root — the DSH base at 0.2.0-rc.2 plus `dsh-agent`,
+`dsh-scope`, `dsh-session`, `dsh-user-approval`,
+`dsh-session-persistence-jsonl` and `dsh-univer-office@0.3.7`; not yet
+inside rutis, which the first implementation PR repeats (rutis's row-level
+`inject` and wait rules, §4, apply there). With the stand-in registered as a
+root, univer created a file, a worktree, imported a CSV, inspected it,
+exported a valid `.xlsx`, and merged — its `ask` reaching DSH's own
+`approval/request`, answered `allowed-once` (`rejected` refused it);
+`ask_user_question` with the agent passed `assertLiveRoot`. Without the
+agent, its file tools failed as in yobuild. None of DSH's app was needed
+(no typert, invariants, app boot); univer's parts that inject what was not
+there — its web viewer (`webServer`, `sessions`, `connection`), its skills,
+its settings — wait, as read in its source (no warning was logged).
+Learned there: the stand-in's `id` is its session's id; approvals fail
+outside a turn ("approval.request() outside an open turn"); `sessions.create`
+persists nothing; the two `sessionPersistence` providers collide;
+`schemas(agent)` equals `schemas()`; univer's native bindings
+(`@univerjs-pro/*-binding`) have no install scripts — but
+`dsh-session-persistence-jsonl` depends on `koffi`, which has one, so the
+base's `check` list grows; its Gateway (a child on 127.0.0.1) starts lazily
+on the first call that needs it and exits with the plugin; with
+`telemetry = false` it still writes a state file under `DSH_HOME`. The probe
+script becomes a test in yoagent-rutis with the first implementation PR, so
+this can be re-run on each DSH bump (0.2.1-rc.2 is out, with an 825-line
+change to `dsh-tools`' types).
+
+### What it unlocks, and the migration
+
+Expected (measured afterwards, as the matrix is): univer's 13 file tools;
+the DSH tool plugins whose only DSH-specific reads are the agent and session
+(dsh-ops, dsh-remote, dsh-tiddlywiki, dsh-mnemosyne, and the cwd reads of
+dsh-palimpsest, dsh-mcp-connector, browser-skill and the image generators —
+each still needing what else it injects); pi-lens; pi's observers (langfuse,
+langsmith); likely pi-background-tasks (model info); with L3, visualize's and
+univer's views.
+
+Migration, in the PRs that make each change: the DSH base gains `dsh-agent`,
+`dsh-session`, `dsh-scope`, `dsh-user-approval` and the jsonl backend, which
+changes the `dsh` set's `base` hash — the examples' locks (`handoff.lock`,
+`coding.lock`) and the gallery's are regenerated in the same PR, or
+`--locked` fails CI; `DSH_PROBE_BASE` follows `host-services.json`;
+`pi.exec` closed by default is said as a Warning naming the extension.
+modsearch's two composition fixes are not part of this layer: `{}` for a
+missing config is a bug fix of its own, and letting a bundle patch a base
+row's config is a security change (a plugin reconfiguring DSH's files or
+credentials services) for its own PR, limited to named keys.
+
+**Order** (M3b; L3 and the metered `llm` are M3c): (1) the L1 services
+(`workspace`, `session` with its id and generation, `approval` with
+`Gate::check_argv`) and `grants` read and said, with rutis's grants
+enforced per row; (2) the DSH host — the stand-in, turns, the jsonl log,
+dialogs through DSH's own services, `workspace` and `wake`, fixed answers
+said; (3) pi grants — the factory wrapper, `trust`, `model = "info"`,
+`wake`, `exec`, `observe`; (4) removing provider keys from plugin
+runtimes. Each a PR pair (yoagent-rutis,
+then yobuild), each design-checked.

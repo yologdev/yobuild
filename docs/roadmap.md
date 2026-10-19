@@ -168,6 +168,38 @@ the compatibility matrix for the plugins it uses.
 **Done when** three agents in the gallery were built through the skill by
 a coding agent, not by hand, and each is checked and run scripted in CI.
 
+## M3b — The host layer (design §12; proposed 2026-10-19)
+
+What a plugin's own app gives it — DSH's agent and session, pi's trust and
+model — provided by yobuild as host services, translated by the adapters,
+granted per plugin in the manifest (`grants = { … }`, closed by default;
+per runtime for DSH until a tool's plugin can be told) and named by `check`.
+
+- The L1 services (`workspace`, `session` with an id and generation,
+  `approval`), `grants` read and named by `check`, rutis's grants per row.
+- The DSH host: a stand-in agent per generation in DSH's own
+  `agents`/`sessions`, turns around runs, its log in the jsonl backend,
+  approvals and questions through DSH's own services; `workspace`, `wake`;
+  fixed answers said by `run` and `check`.
+- pi grants, each extension loaded through a factory wrapper of its own:
+  `trust`, `model = "info"`, `wake` (tagged, bounded), `exec` (off by
+  default, or judged by the gate), `observe`.
+- Plugin runtimes without the provider key variables.
+
+**Done when** `dsh-univer-office` and `pi-lens` work in a gallery agent,
+their tools' results checked (not only `✓`); the stand-in probe runs inside
+rutis as a test in yoagent-rutis; the compatibility matrix is re-measured;
+and `check` names every grant and every fixed answer.
+
+## M3c — Plugin web output and model calls (design §12, L3 and `llm`)
+
+- The frontend's plugin origin and framed UI plugins.
+- A metered `llm` for plugins, once yoagent makes a run's outside spend
+  public.
+
+**Done when** visualize's chart shows on the page from a sandboxed origin,
+and a plugin's model call is charged to the run's budget.
+
 ## M4 — Share
 
 - `yobuild new <name>` (a manifest and a prompt to edit), `cargo install
