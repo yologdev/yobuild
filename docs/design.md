@@ -1388,7 +1388,7 @@ the `provide_ask_owner(None)` pattern:
 |---|---|---|
 | `workspace` | the agent's folder; whether the project is trusted | `run`'s cwd; the `trust` grant |
 | `session` | `{ id, generation }`: an id yobuild mints per session, its generation bumped by each Reset; run boundaries; wake (a granted plugin's text, tagged as its own) | `Session` (new: an id, a generation); yoagent's `RunContext` (`run_id`, `depth`, `parent_run_id`), seen by plugins as yoagent-rutis's `RunInfo`; `Session` steering |
-| `approval` | judge one command, or ask the owner — the question naming the plugin (from its row, as `ask_owner`'s `asked by`) | the gate's command judge (`Ctx::command`); `Session::ask` |
+| `approval` | judge one command, or ask the owner — the question naming the plugin: a rutis plugin by its row; for the `pi`/`dsh` rows, the extension's or plugin's name the shim passes (as `ask_owner`'s `from`: per extension for pi, for DSH once attribution holds) | the gate, through a new public entry — `judge::Ctx` is private and built only from a line — such as `Gate::check_argv(argv, cwd) -> Check` (a `Ctx` at the call's cwd, each argument a literal word); files such a command makes are not recorded as the agent's own; `Session::ask` |
 | `llm` (later) | model info; model calls charged to the run | `Model`; yoagent's provider; the run's spend (yoagent: `RunContext`'s `spend` field is `pub(crate)` in 0.25.7–0.25.8, to be made public) |
 
 yobuild also sets `Agent::with_run_label(<session id>)`, for logs only: a
@@ -1400,9 +1400,17 @@ extension calls through the one `pi` row, every DSH plugin through the one
 which is per plugin for a rutis plugin — and the **shims** enforce them for
 pi and DSH:
 
-- **pi**: per extension, by the extension's source file — the adapter knows
-  it for a tool call (its `sourceIn` check) and gives each extension its own
-  context for events, instead of the shared one it gives today.
+- **pi**: per extension, by the extension's source file. The adapter knows
+  it for a tool call (`sourceIn`), and can give each extension its own
+  `ctx` for events (today one shared `context()`). But `pi.exec`,
+  `sendMessage` and `sendUserMessage` live on the `pi` API object, not on
+  `ctx`: pi's loader calls its own `execCommand` directly, and messages go
+  to the shared runtime with no extension's name. So the adapter loads each
+  extension through a factory wrapper of its own — importing the module
+  and calling pi's `loadExtensionFromFactory((api) => factory(wrapped(api,
+  path)), …)`, where `wrapped` overrides `exec`, `sendMessage` and
+  `sendUserMessage` for that extension — to be confirmed in the first pi
+  PR, as DSH's attribution is.
 - **DSH**: per plugin only if the adapter can tell which plugin registered a
   tool — DSH's `tools` registry keeps no owner, but `tools.register` runs in
   the registering plugin's Cordis context, which names its fiber: confirmed
@@ -1425,10 +1433,15 @@ stays for the rest):
   (`@deepseek-ai/dsh-agent`, `agents.register`); its `id` is its session's
   id (`enter()` checks); its `Session` comes from DSH's own `sessions`
   (`dsh-session`, `meta.cwd` from `workspace`); its `ctx` is
-  `createScope(root, agent)` (`@deepseek-ai/dsh-scope`); its `inbox`,
-  `steer` and `followup` route to `session` wake — `dsh-user-questions`
-  sends a continued question's reply to `agent.inbox` (not exercised by the
-  probe); `cancel`, `whenIdle`, `runMaintenance` are no-ops it reports;
+  `createScope(root, agent)` (`@deepseek-ai/dsh-scope`); its `steer` and
+  `followup` route to `session` wake (with `wake` granted; else refused);
+  its `inbox` is empty (`nextTurn`/`nextStep` none). Continued questions
+  (`dsh-user-questions` answering a timed question later with
+  `agent.steer`, released on a session `user/message` it waits for) are out
+  of scope: it tracks them only after a `request/header` event, which an
+  empty transcript never has, so its `answer()` declines — a question
+  waits for its answer in the call, as today. `cancel`, `whenIdle`,
+  `runMaintenance` are no-ops it reports;
   `create`/`resume` stay unavailable (no factory).
 - **Turns**: opened lazily, at a run's first DSH call (`turn/start`), closed
   at `finish` (`turn/end`); an open turn left by a run whose `finish` never
@@ -1438,10 +1451,14 @@ stays for the rest):
   attaches the writer), so the shim writes the session's `SessionEvent`s to
   `@deepseek-ai/dsh-session-persistence-jsonl`, rooted in the private
   `DshHome` (with `YOAGENT_DSH_HOME` set, the user's own DSH home: said by
-  `check`). It replaces the abstract `dsh-session-persistence` row in
-  `host-services.json` and in `check`'s probe base — both register
-  `sessionPersistence`, and a second provider fails. Its transcript stays
-  empty: no conversation is mirrored into it.
+  `check`). The stand-in's rows — `dsh-session`, `dsh-agent`,
+  `dsh-user-approval`, the jsonl backend — load with a DSH grant, whatever
+  `[dsh] host_services` says; `host-services.json` drops its abstract
+  `dsh-session-persistence` row (and `check`'s probe base with it), since
+  both register `sessionPersistence` and a second provider fails — DSH
+  plugins that inject `sessionPersistence` get it from the jsonl backend,
+  so they need a grant too. Its transcript stays empty: no conversation is
+  mirrored into it.
 - **Dialogs**: `host-dialogs.ts` today wraps `tools/pre-execute` for
   agentless `yoagent:` calls and steps aside on agent-scoped
   `user-questions/request`. It gains an `approval/request` answerer (DSH's
@@ -1459,7 +1476,7 @@ stays for the rest):
 `model = "info"`; `sendMessage`/`sendUserMessage` from `wake`; `pi.exec`
 from `exec` — `"off"` (the default: refused, said as a Warning naming the
 extension, once a session), `"gate"` (its argv judged as one command's
-words by `Ctx::command`, not as a shell line), or `"free"`; the observer
+words through `Gate::check_argv`, not as a shell line), or `"free"`; the observer
 events from yoagent-rutis's existing `on_event`, with `observe` (they carry
 the whole conversation and every tool's arguments and results, a `.env`
 read included; langfuse and langsmith send them off the machine).
@@ -1494,8 +1511,8 @@ table read with `deny_unknown_fields`, every key off when absent:
 |---|---|---|---|---|---|
 | `workspace` | bool | — (pi has `cwd`) | yes | yes | the stand-in agent (DSH); `workspace` (rutis) |
 | `trust` | bool | yes | — | yes | `isProjectTrusted`; `workspace`'s trust |
-| `model` | `"info"` (later `"call"`) | yes | yes | yes | `ctx.model`/`modelRegistry`; DSH's model-info `llm` |
-| `wake` | bool | yes | yes (via the stand-in's inbox) | yes | `session` wake |
+| `model` | `"info"` (later `"call"`) | yes | later (a model-info `llm`) | yes | `ctx.model`/`modelRegistry`; for rutis, `llm`'s model info |
+| `wake` | bool | yes | yes (the stand-in's `steer`/`followup`) | yes | `session` wake |
 | `exec` | `"off"` / `"gate"` / `"free"` | yes | — | — | `pi.exec` |
 | `observe` | bool | yes | — | — | pi's observer events |
 
@@ -1590,9 +1607,12 @@ missing config is a bug fix of its own, and letting a bundle patch a base
 row's config is a security change (a plugin reconfiguring DSH's files or
 credentials services) for its own PR, limited to named keys.
 
-**Order** (M3b; L3 and the metered `llm` are M3c): (1) the DSH host —
-session id and generation, the stand-in, turns, the jsonl log, dialogs
-through DSH's own services, `grants` with `workspace`, fixed answers said;
-(2) pi grants — `trust`, `model = "info"`, `wake`, `exec`, `observe`; (3)
-removing provider keys from plugin runtimes. Each a PR pair (yoagent-rutis,
+**Order** (M3b; L3 and the metered `llm` are M3c): (1) the L1 services
+(`workspace`, `session` with its id and generation, `approval` with
+`Gate::check_argv`) and `grants` read and said, with rutis's grants
+enforced per row; (2) the DSH host — the stand-in, turns, the jsonl log,
+dialogs through DSH's own services, `workspace` and `wake`, fixed answers
+said; (3) pi grants — the factory wrapper, `trust`, `model = "info"`,
+`wake`, `exec`, `observe`; (4) removing provider keys from plugin
+runtimes. Each a PR pair (yoagent-rutis,
 then yobuild), each design-checked.

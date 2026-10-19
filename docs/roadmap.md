@@ -175,12 +175,15 @@ model — provided by yobuild as host services, translated by the adapters,
 granted per plugin in the manifest (`grants = { … }`, closed by default;
 per runtime for DSH until a tool's plugin can be told) and named by `check`.
 
-- The DSH host: a session id and generation in yobuild; a stand-in agent
-  per generation in DSH's own `agents`/`sessions`, turns around runs, its
-  log in the jsonl backend, approvals and questions through DSH's own
-  services; `grants.workspace`; fixed answers said by `run` and `check`.
-- pi grants: `trust`, `model = "info"`, `wake` (tagged, bounded), `exec`
-  (off by default, or judged by the gate), `observe`.
+- The L1 services (`workspace`, `session` with an id and generation,
+  `approval`), `grants` read and named by `check`, rutis's grants per row.
+- The DSH host: a stand-in agent per generation in DSH's own
+  `agents`/`sessions`, turns around runs, its log in the jsonl backend,
+  approvals and questions through DSH's own services; `workspace`, `wake`;
+  fixed answers said by `run` and `check`.
+- pi grants, each extension loaded through a factory wrapper of its own:
+  `trust`, `model = "info"`, `wake` (tagged, bounded), `exec` (off by
+  default, or judged by the gate), `observe`.
 - Plugin runtimes without the provider key variables.
 
 **Done when** `dsh-univer-office` and `pi-lens` work in a gallery agent,
