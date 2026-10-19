@@ -57,6 +57,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_skills_examples_are_replies() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/skill/yobuild/reference/scripted.md"
+        ))
+        .unwrap();
+        let mut seen = 0;
+        for (at, _) in text.match_indices("```json\n") {
+            let rest = &text[at + "```json\n".len()..];
+            let block = &rest[..rest.find("```").unwrap()];
+            let parsed: Result<Vec<Reply>, _> = serde_json::from_str(block);
+            let one: Result<Reply, _> = serde_json::from_str(block);
+            assert!(parsed.is_ok() || one.is_ok(), "{block}");
+            seen += 1;
+        }
+        assert!(seen >= 3, "{seen}");
+    }
+
+    #[test]
     fn replies_are_read_strictly() {
         let dir = tempfile::tempdir().unwrap();
         let good = dir.path().join("good.json");

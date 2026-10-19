@@ -1,0 +1,83 @@
+# The scripted reply file (`--scripted`)
+
+`yobuild run agent.toml --scripted scripts/demo.json --once "<task>"` runs
+the agent with a model that answers from the file, in order — no provider,
+no key, no model cost. Use it to see that the manifest works before a live
+run. Only the model is scripted: plugins and servers run for real (a
+search tool really searches, a server really starts), so it may need the
+network.
+
+## The format
+
+A JSON list. Each reply is exactly one of:
+
+```json
+{ "text": "the model's answer" }
+```
+
+```json
+{ "tools": [{ "name": "a_tool", "arguments": { "path": "notes.md" } }] }
+```
+
+Nothing else: an unknown key is an error. A `tools` reply may call several
+tools at once. Give `arguments` as the tool's schema asks (`check --json`
+lists each tool's `parameters`); `{}` for a tool that takes none — left
+out, it is `null`, which some tools refuse. Each reply is one model turn:
+after a `tools` reply the tools run and the next reply is read; a `text`
+reply ends the run.
+
+An example, for a manifest with `ask_owner = true` and `report = ["Done",
+"Next"]`:
+
+```json
+[
+  { "tools": [{ "name": "list_files", "arguments": { "path": "." } }] },
+  { "tools": [{ "name": "ask_owner", "arguments": { "question": "Which file first?", "why": "Both look current.", "options": ["a.md", "b.md"] } }] },
+  { "text": "## Done\n- Listed the folder; asked which file first (#1).\n## Next\n- Read the one the owner picks." }
+]
+```
+
+Tool names are as the agent sees them (`check --json`'s `agent.tools`):
+yoagent's (`bash`, `read_file`, `write_file`, `edit_file`, `list_files`,
+`search`; with `tools = "read-only"` only the three that read), `ask_owner`,
+a plugin's own names, an MCP server's as `<server>__<tool>`.
+
+## What to expect under `--once`
+
+Each tool call prints `  name ✓` or `  name ✗ <why>` on stderr; notices as
+`  Info: …` / `  Warning: …`; then the last answer and how the run ended
+on stdout (`Completed`, `Stopped: …`, `Error: …`). Nobody is there to
+answer:
+
+- A call the gate would ask about prints `✗ Tool call denied: not
+  allowed: the owner declined, or nobody answered`: a `bash` command it
+  cannot read, a write over the owner's files or outside the project, a
+  plugin's or server's tool not allowed. A `bash` command it can read
+  (`ls`, `cat`, `git status`, the project's tests), a new file in the
+  project, the agent's own files and the scratch folder run: `✓`.
+- `ask_owner` prints `✓` (`Asked the owner as #1 …`): the question stays
+  open and is never answered.
+- A tool that runs and fails (a search engine down, a rate limit, a page
+  not found) prints `✗ <its own error>` — not `Tool call denied: …`. That
+  is the tool's day, not the manifest: run again, or script around it.
+- A tool the agent does not have (one not in `agent.tools`): `✗` (the
+  gate asks about it first, and nobody answers).
+
+## The traps
+
+- **With `[builtins] report`**, the last `text` reply must name every
+  section (anywhere, any case: `## Done` …; `report = "handoff"` needs
+  Done, Waiting on you, Decisions, Next). Else yobuild sends the model
+  back, the model answers `(no more mock responses)` each time, and after
+  3 continues the run ends `Error: [Extension failed: report] …`.
+- **Running out of replies** without `report`: the model answers
+  `(no more mock responses)` and the run ends `Completed` with that
+  answer — check the last answer, not only the outcome.
+- **The same call over and over** (same tool, same arguments): after 3
+  in a row yoagent asks the agent to change approach, then stops the run
+  (`Stopped: [Agent stopped: repeated tool call — …]`). Vary the replies.
+- **Limits count**: more `tools` replies than `[limits] max_turns` (50
+  by default) stop the run (`Stopped: [Agent stopped: Max turns reached
+  …]`).
+- **The agent's folder** is the one `yobuild run` starts in: paths in
+  `arguments` are relative to it.
