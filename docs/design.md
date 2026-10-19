@@ -936,7 +936,8 @@ in a pty is not yet.
   when").
 - The gallery's agents (§11): each `yobuild check --locked` and run
   scripted in CI.
-- Manifests with an `[[mcp]]` entry run scripted against a small stdio test
+- Manifests with an `[[mcp]]` entry (the gallery's MCP agent aside: it runs
+  the pinned filesystem server) run scripted against a small stdio test
   server, copied from the bash-scripted servers in yoagent's
   `tests/mcp_stdio_test.rs`.
 - The terminal UI on a pseudo-terminal (the check that caught rutis 0.9's
@@ -1200,6 +1201,109 @@ not:
 - **Your MCP server** — an `[[mcp]]` entry (the filesystem server, its
   read tools allowed) + `ask_owner`: the pattern for any server.
 - **Spreadsheet clerk** — `dsh-univer-office` (a DSH package new to
-  yobuild) + `ask_owner` + `report`, if `check` passes it; else the next
-  from the roadmap's list. (The choice of these three was left to the
+  yobuild) + `ask_owner` + `report`, if `check` passes it; else the
+  fallbacks below. (The choice of these three was left to the
 design, 2026-10-19.)
+
+#### How a gallery agent is made and kept (designed 2026-10-19)
+
+**Made through the skill, by a coding agent.** For each agent, a fresh
+Claude Code agent gets the skill (`skill/yobuild/`, as if installed, and
+what it links to — the examples among them), a working `yobuild` (the
+checkout's, called by path) and the person's request in a sentence or
+two. It works in a new folder outside the checkout, as the skill says,
+and is told not to read `docs/` (this design). It follows the method
+(ask → parts → write → `check --json` → scripted `--once`); its questions
+are answered as the person would. Its folder — manifest, lock (named
+after the manifest, so it moves with it), prompt, reply file — is then
+copied unchanged into `gallery/<name>/`. What it got wrong goes back into
+the skill (or `hints.rs`), not hand-fixed in the agent, and the agent is
+built again. The PR says, per agent, where the coding agent stumbled and
+what changed in the skill. Two files are added by hand: `README.md`,
+after a live run, and `scripts/demo.task` (the task CI gives `--once`).
+
+**The folder:**
+
+```text
+gallery/web-research/
+  agent.toml          the manifest (model deepseek/deepseek-flash, a budget)  ┐
+  agent.lock          written by its first `check` or `run`                   │ the coding
+  prompts/agent.md    the prompt                                              │ agent's
+  scripts/demo.json   the scripted replies                                    ┘
+  scripts/demo.task   the task for the scripted run, one line                 ┐ by hand
+  README.md           what it does; what it needs (keys, network, files it    │
+                      reads or writes outside its folder); how to run it; one │
+                      live run's result: date, model, cost                    ┘
+```
+
+The agent works in the folder `yobuild run` starts in, never in its
+gallery folder: the README says to `cd` into the work, then `yobuild run
+path/to/gallery/<name>/agent.toml`.
+
+**Kept by CI** — one test per agent in `tests/gallery_test.rs` (the
+binary, the shared `YOBUILD_HOME`, as `cli_test`), in a temp folder with
+the files the demo reads put there by the test: `yobuild check --locked
+--json` → `ok`; then `run --scripted scripts/demo.json --once --locked
+"<demo.task>"` → `Completed`, the calls the demo expects made, none
+denied but those the demo means to be asked about, and what the agent
+should have left (its last answer's sections, a question). A tool that
+ran and failed on its own (`✗` not `Tool call denied: …`: a third party's
+day, `scripted.md`) does not fail the test; a denial or another outcome
+does. A gallery agent whose plugin cannot load any more fails CI, as an
+example's does. `skill_test`'s **CI** pins read `gallery/*/agent.toml`
+as well as the examples: a **CI** row may name a gallery agent's pin, and
+every gallery agent's pin is a **CI** row in `parts.md` (the filesystem
+server's entry becomes a table row, its pin and mark on one line). Each
+agent's PR adds it to CLAUDE.md, as the examples are.
+
+**The three, in detail:**
+
+- **Web research** (`gallery/web-research/`): `pi-web-access@0.41.0`, the
+  version `parts.md` lists (a newer one is offered by updating
+  `parts.md` first, once it passes `check`). Its tools are `web_search`,
+  `fetch_content`, `get_search_content` and `source_check`; it allows the
+  three that search and read back, and leaves `fetch_content` asking —
+  it also reads local files outside the agent's folder (video analysis,
+  sent to Gemini when a key is set) and can use browser cookies when
+  configured. `ask_owner` (to narrow a broad question), `report =
+  ["Answer", "Sources cited", "Open questions"]`, `tools = "read-only"`
+  (its work is its report; no scratch, which read-only tools cannot
+  reach), a budget. Its search needs no key: by default it goes through
+  Exa's hosted MCP endpoint (a third party). It reads its config from
+  `~/.pi/agent/web-search.json` (or `PI_CODING_AGENT_DIR`) and caches
+  fetched pages under that folder; the README says both. The test sets
+  `PI_CODING_AGENT_DIR` to a temp folder, so a developer's own config
+  neither changes the provider nor gets the cache. The demo: one
+  `web_search` (`✓`, or the tool's own `✗` when Exa is unreachable), one
+  `fetch_content` (asked: `✗ Tool call denied: not allowed: the owner
+  declined, or nobody answered` under `--once`), then the report.
+- **Your MCP server** (`gallery/mcp-server/`):
+  `@modelcontextprotocol/server-filesystem@1.0.0` (its `latest`
+  dist-tag; earlier releases are date-numbered) as `files`, `args =
+  ["."]` (the agent's folder), its read tools allowed, its writers
+  asking; `ask_owner`; `tools = "read-only"`, so the server is the only
+  way to write and the gate asks each time. The README is the pattern for
+  any server: which lines change for another (`npm`/`url`, `args`,
+  `env`/`headers` with `${NAME}`, `allow` from `check`'s list). The demo
+  lists the folder, reads a file the test put there, and tries one write:
+  `files__write_file ✗ Tool call denied: not allowed: the owner declined,
+  or nobody answered`, which the test expects. Unlike §8's other MCP
+  manifests it runs the real server, from npm.
+- **The third**: a DSH plugin first, since the other two are pi and MCP.
+  `dsh-univer-office@0.3.7` (the spreadsheet clerk), only if `check`
+  passes it. Its peers include `@deepseek-ai/dsh-host-webserver` (not in
+  yobuild's DSH base) and `@deepseek-ai/dsh-llm` (installed there, not
+  loaded); neither yobuild's base nor `[dsh] host_services` loads them as
+  plugins, so if it injects services they provide, `check` refuses it
+  ("DSH plugins wait for services nobody provides: …"). `check` decides.
+  Then `@dfy-plugins/dsh-visualize@0.1.5` + search (the roadmap's Visual
+  report; its peers add the web server, DSH's client-UI packages and
+  React, so likely refused as well); then, leaving DSH, the roadmap's
+  table in its order: **Code-quality reviewer** (`pi-lens` +
+  `@plannotator/pi-extension`), **Docs maintainer** (`openwiki`).
+  A refused candidate is `check`ed once by hand, not in CI (each DSH pin
+  installs another copy of the DSH base into the cache), and recorded in
+  `parts.md` with `check`'s message, so the skill stops offering it.
+
+**Order of PRs**: this design; then one PR per agent (web research, your
+MCP server, the third), each with the skill fixes its build found.
