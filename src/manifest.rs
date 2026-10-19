@@ -73,9 +73,11 @@ pub struct Model {
 }
 
 /// yoagent's model presets (0.25.9): each sets its model's real context
-/// window and output limit, and its protocol, where the generic
-/// constructors assume conservative limits. [`Model::config`] uses the one
-/// whose provider and id match the manifest's.
+/// window and output limit, and its protocol, where a generic constructor
+/// often assumes smaller ones. [`Model::config`] uses the one whose
+/// provider and id match the manifest's. Kept by hand: on each yoagent
+/// bump, add its new presets here (a test compares this list with the
+/// models yoagent prices, which include every preset).
 pub const PRESETS: [fn() -> ModelConfig; 22] = [
     ModelConfig::claude_fable_5,
     ModelConfig::claude_fable_5_1,
@@ -153,17 +155,21 @@ impl Model {
     /// The yoagent model configuration: yoagent's preset for this provider
     /// and id when it has one ([`PRESETS`]: the model's real context
     /// window, output limit and protocol), else the provider's generic
-    /// constructor (conservative limits: about 128K context, 4K–16K out). It
-    /// carries a price only once the process enabled yoagent's price table
-    /// (`yoagent::provider::prices::enable_bundled`, done by `yobuild run`).
+    /// constructor, whose limits are often smaller (about 128K in and 4K
+    /// out for many providers; DeepSeek's and Meta's carry their models'
+    /// own). It carries a price only once the process enabled yoagent's
+    /// price table (`yoagent::provider::prices::enable_bundled`, done by
+    /// `yobuild run`).
     pub fn config(&self) -> ModelConfig {
-        if let Some(preset) = PRESETS
+        PRESETS
             .iter()
             .map(|preset| preset())
             .find(|c| c.provider == self.provider && c.id == self.id)
-        {
-            return preset;
-        }
+            .unwrap_or_else(|| self.generic())
+    }
+
+    /// The provider's generic constructor for this id (no preset).
+    pub(crate) fn generic(&self) -> ModelConfig {
         let (id, name) = (self.id.clone(), self.id.clone());
         match self.provider.as_str() {
             "anthropic" => ModelConfig::anthropic(id, name),

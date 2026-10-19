@@ -71,8 +71,8 @@ terminal = false                      # the terminal UI instead of the web page
   a price in yoagent's table (so a budget works): `deepseek/deepseek-flash`
   (the examples'), `deepseek/deepseek-v4-flash`, `deepseek/deepseek-v4-pro`,
   and every id yoagent has a preset for — the model's real context window
-  and output limit, where another id gets conservative ones (about 128K
-  in, 4K–16K out):
+  and output limit, where another id of those providers often gets
+  smaller ones (about 128K in, 4K out; DeepSeek's ids have their own):
   `anthropic/claude-fable-5`, `anthropic/claude-fable-5-1`,
   `anthropic/claude-opus-5-5`, `anthropic/claude-opus-5`,
   `anthropic/claude-opus-4-8`, `anthropic/claude-sonnet-5-5`,
