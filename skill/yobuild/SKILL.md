@@ -47,7 +47,9 @@ my-agent/
    where (the web page, a phone, the terminal); what it must never do; how
    much it may spend; where it works (a folder, a git repository). Ask
    only what you cannot reasonably assume.
-2. **Pick parts by capability**, fewest first: the built-ins (`ask_owner`
+2. **Pick parts by capability**, fewest first (when no part does what the
+   person asked — a type check without writes, say — tell them before
+   building, and what the agent will do instead): the built-ins (`ask_owner`
    for questions without waiting, `report` for a required ending, `facts`
    for what changed, the gate, a scratch folder, `tools = "read-only"`);
    then a plugin from [reference/parts.md](reference/parts.md) at the
@@ -60,7 +62,7 @@ my-agent/
    judges those call by call); never a secret in a file (`${NAME}` from
    the environment); set a budget.
 4. **Check**: `yobuild check agent.toml --json` (read the JSON from
-   stdout; do not save it into the agent's folder) — it installs and loads
+   stdout, piped; do not save it into the agent's folder) — it installs and loads
    every plugin and server (it runs their code, and needs the network the
    first time), without a model.
    - Nothing on stdout: an error stopped it before anything started.
@@ -79,7 +81,8 @@ my-agent/
    - `installScripts` (per entry, and `agent.installScripts` for the DSH
      base): packages with install scripts, which yobuild did **not** run
      (it installs with scripts off). Nothing to do when `check` is `ok`:
-     the plugins loaded without them. Mention them to the person only if
+     the plugins loaded without them (loaded: whether their tools work,
+     the scripted run shows). Mention them to the person only if
      a plugin later fails for want of a native part.
    - `check` does not look at the model's key. A budget for a model with
      no price is refused already (the manifest is), so a clean `check`

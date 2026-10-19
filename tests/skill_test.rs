@@ -198,7 +198,9 @@ fn parts_md_ci_pins_are_the_examples_and_gallerys_pins() {
         for (at, _) in row.match_indices('`').step_by(2) {
             let rest = &row[at + 1..];
             let pin = &rest[..rest.find('`').unwrap()];
-            if pin.contains('@') && !pin.starts_with('@') || pin[1..].contains('@') {
+            // A pin: `name@1.2.3` or `@scope/name@1.2.3` (an `@` after the
+            // first character), one word.
+            if pin.chars().skip(1).any(|c| c == '@') && !pin.contains(' ') {
                 assert!(
                     examples.contains(pin) || gallery.iter().any(|g| g == pin),
                     "parts.md marks {pin} CI, but no example or gallery agent pins it"

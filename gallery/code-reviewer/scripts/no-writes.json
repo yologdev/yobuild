@@ -1,0 +1,12 @@
+[
+  { "tools": [
+      { "name": "write_file", "arguments": { "path": "src/util.js", "content": "export const x = 1;\n" } },
+      { "name": "edit_file", "arguments": { "path": "src/math.ts", "old_text": "\"2\"", "new_text": "2" } },
+      { "name": "bash", "arguments": { "command": "rm -rf src" } }
+  ] },
+  { "tools": [
+      { "name": "read_file", "arguments": { "path": "../outside.txt" } },
+      { "name": "list_files", "arguments": { "path": "/" } }
+  ] },
+  { "text": "## Fix first\nnone (this run only tried to write).\n## Fix soon\nnone\n## Worth a look\nnone\n## Not checked\nEverything: this run only checked that nothing can be changed.\n## Waiting on you\nnone" }
+]

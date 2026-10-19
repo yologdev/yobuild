@@ -1,0 +1,24 @@
+[
+  { "tools": [
+      { "name": "read_file", "arguments": { "path": "package.json" } },
+      { "name": "read_file", "arguments": { "path": "tsconfig.json" } },
+      { "name": "list_files", "arguments": { "path": "." } }
+  ] },
+  { "tools": [
+      { "name": "read_file", "arguments": { "path": "eslint.config.js" } },
+      { "name": "list_files", "arguments": { "path": "src" } }
+  ] },
+  { "tools": [
+      { "name": "eslint__lint-files", "arguments": { "filePaths": ["{cwd}/src/util.js", "{cwd}/src/math.ts", "{cwd}/src/index.ts"] } }
+  ] },
+  { "tools": [
+      { "name": "read_file", "arguments": { "path": "src/math.ts" } },
+      { "name": "read_file", "arguments": { "path": "src/index.ts" } },
+      { "name": "search", "arguments": { "pattern": "eval(" } },
+      { "name": "search", "arguments": { "pattern": ": any" } }
+  ] },
+  { "tools": [
+      { "name": "ask_owner", "arguments": { "question": "Should the review also cover generated or vendored folders, if any turn up?", "why": "Findings there are usually not yours to fix.", "options": ["Yes, include them", "No, skip them"] } }
+  ] },
+  { "text": "## Fix first\n- src/math.ts:5 — `add(1, \"2\")` passes a string where `number` is expected (found by reading, not by the compiler). Fix: pass `2`.\n- src/util.js:4 — `eval` (ESLint `no-eval`). Fix: return the string directly.\n\n## Fix soon\n- src/util.js:2 — `unused` is never used (ESLint `no-unused-vars`). Fix: remove it.\n\n## Worth a look\n- src/util.js:3 — `== null` is deliberate here but the config's `eqeqeq` may flag it; decide on `eqeqeq: [\"error\", \"always\", { null: \"ignore\" }]`.\n\n## Not checked\n- `npx tsc --noEmit` and the full `npx eslint .` were not run: run them. The ESLint config covers only `.js`, so the `.ts` files were reviewed by reading.\n\n## Waiting on you\n- #1: include generated or vendored folders?" }
+]

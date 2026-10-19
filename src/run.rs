@@ -15,6 +15,7 @@
 
 pub(crate) mod allowed;
 pub mod check;
+mod joined;
 pub(crate) mod measure;
 pub(crate) mod plugins;
 pub(crate) mod script;
@@ -224,6 +225,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     .with_system_prompt(prompt)
     .with_tools(tools.list)
     .with_execution_limits(limits(&manifest))
+    // A tool result's text blocks as one: yoagent 0.25.7 sends the model
+    // only the first (`run/joined.rs`).
+    .with_extension(joined::JoinedText)
     .with_extension({
         // A plugin that is the approval policy: no run goes on unguarded —
         // without a policy plugin up, every call is denied.
@@ -622,7 +626,7 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
     // The model: a missing key fails here.
     let model = &manifest.agent.model;
     let (key, provider) = match &options.scripted {
-        Some(path) => (None, Some(script::provider(path)?)),
+        Some(path) => (None, Some(script::provider(path, cwd)?)),
         None => match model.api_key() {
             Some(key) => (Some(key), None),
             // A local server: an empty key, so yoagent's fallback key is not sent.

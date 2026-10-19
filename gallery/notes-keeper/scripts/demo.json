@@ -1,0 +1,9 @@
+[
+  { "tools": [{ "name": "files__directory_tree", "arguments": { "path": "." } }] },
+  { "tools": [{ "name": "search", "arguments": { "pattern": "tomato" } }] },
+  { "tools": [{ "name": "files__read_multiple_files", "arguments": { "paths": ["groceries.md", "projects/garden.md"] } }] },
+  { "tools": [{ "name": "files__edit_file", "arguments": { "path": "projects/garden.md", "edits": [{ "oldText": "# garden plan", "newText": "# Garden plan" }] } }] },
+  { "tools": [{ "name": "files__write_file", "arguments": { "path": "index.md", "content": "# Index\n\n- [Groceries](groceries.md)\n- [Garden plan](projects/garden.md)\n" } }] },
+  { "tools": [{ "name": "files__move_file", "arguments": { "source": "groceries.md", "destination": "shopping.md" } }] },
+  { "text": "Tomatoes go in after the last frost, mid May (projects/garden.md). I tried to fix the garden note's heading, add an index.md and rename groceries.md to shopping.md; each was not allowed, so nothing changed." }
+]

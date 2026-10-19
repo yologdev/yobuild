@@ -34,10 +34,16 @@ decides. Tool names and arguments: `yobuild check --json` lists them
 | web search and pages | `pi-web-access@0.41.0` | 4 tools (untested by yobuild's CI: `check` first) |
 | delegate to sub-agents | `pi-subagents@0.78.0` | 4 tools, 2 skills (skills are not loaded by yobuild) |
 | a wiki of notes | `openwiki@0.7.2` | 6 tools |
-| code health (lint, types) | `pi-lens@4.4.3` | 8 tools |
 | a plan-review policy | `@plannotator/pi-extension@0.28.22` | tool-call hooks (no tools) |
 | ask the user (pi's way) | `@juicesharp/rpiv-ask-user-question@2.13.8` | 1 tool — prefer `ask_owner` |
 | an MCP bridge | `pi-mcp-adapter@5.3.1` | 1 tool — prefer `[[mcp]]` |
+
+Not usable in yobuild, checked on 2026-10-19: `pi-lens@4.4.3` (code health:
+lint, types) passes `check` and its tools print `✓`, but it treats the
+project as untrusted under yobuild and so never starts a language server:
+its diagnostics report every file clean, a type error included (its own
+log, `~/.pi-lens/latency.log`: `no_clients_none_spawning`). For linting,
+ESLint's MCP server (below).
 
 Refused by yobuild's pi adapter (they hook what yoagent cannot enforce, or
 need pi's app): `billion-context`, `pi-goal-x`, `@companion-ai/feynman`,
@@ -51,8 +57,15 @@ installed: `pi-mcp-extension`, `@langfuse/pi-observability-plugin`,
 |---|---|---|
 | web search | `dsh-free-search@0.8.1` **CI** | with the tested config, `config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }` (keep it): `multi_search`, `research`, `advanced_search`, `domain_search`, `platform_search`, `video_search`, `cache_search` — allow these seven — and `free_search_test` (leave it asking). `research` searches and reads the top pages; `multi_search` compares many; `advanced_search` filters by time; `domain_search` looks up public sources (package registries, end-of-life dates, arXiv, …), not one site — `platform_search` is one site (Wikipedia, GitHub, …). It keeps a cache of the pages it read, outside the agent's folder: `~/.cache/dsh-free-search/research.db` (`RESEARCH_CACHE_DIR` moves it), which `cache_search` reads back across runs — tell the person. It adds prompt guidance (text in the system prompt on using its tools: no need to repeat it). The searches return extracted page text; `check --json` describes each. No `[dsh] host_services` needed. 0.8.1 is the DSH base's own pin: another version is refused |
 | ask the user (DSH's way) | `@deepseek-ai/dsh-tool-ask-user@0.2.0-rc.2` with `@deepseek-ai/dsh-user-questions@0.2.0-rc.2` **CI** | the tool `ask_user_question` — prefer `ask_owner` |
-| spreadsheets and documents | `dsh-univer-office@0.3.7` | 14 tools (the matrix loaded it with DSH's host services: likely needs `[dsh] host_services = true`) |
-| charts and diagrams | `@dfy-plugins/dsh-visualize@0.1.5` | 1 tool (likewise) |
+
+Not usable in yobuild, checked by hand on 2026-10-19 — do not offer them:
+`dsh-univer-office@0.3.7` (spreadsheets and documents) passes `check` and
+lists its 14 tools, but every call fails `Error [SESSION_SCOPE_UNAVAILABLE]:
+Univer tools require a calling agent with a workspace` (DSH's own agent
+sessions), with or without host services; `@dfy-plugins/dsh-visualize@0.1.5`
+(charts) does not install: its peers conflict with yobuild's DSH base
+(npm `ERESOLVE`). A clean `check` shows that a plugin loads, not that its
+tools work: the scripted run calls them.
 
 Most popular DSH plugins need DSH's own app (its web server, model layer,
 agents): `yobuild check` refuses them with "DSH plugins wait for services
@@ -91,12 +104,14 @@ export default definePlugin({
 
 Any MCP server works: stdio (`npm = "<package>@<version>"`, run from
 yobuild's cache) or HTTP (`url`, and a `name`). `check` lists its tools;
-`allow` the ones that only read. A well-known one:
-`@modelcontextprotocol/server-filesystem` (`name = "files"`,
-`args = ["<folder>"]`): with `yobuild check`, 1.0.0 lists `read_file`,
-`read_text_file`, `read_media_file`, `read_multiple_files`,
-`list_directory`, `list_directory_with_sizes`, `directory_tree`,
-`search_files`, `get_file_info`, `list_allowed_directories` (reading:
-allow these) and `write_file`, `edit_file`, `create_directory`,
-`move_file` (writing: leave them asking). The agent sees them as
-`files__<tool>`.
+`allow` the ones that only read.
+
+| Capability | Package | What yoagent gets |
+|---|---|---|
+| lint with the project's ESLint config | `@eslint/mcp@0.3.15` **CI** | with `name = "eslint"`: `lint-files` (`filePaths`, absolute: build them from `{cwd}`) — it only reports, allow it. It runs the project's `eslint.config.*` (that file's code runs) with its own ESLint 10; the plugins a config imports (typescript-eslint) come from the project's `node_modules`, so a project that has not run `npm install` gets an import error; without a config, `✗ Could not find config file.`; a file type the config does not cover, `File ignored because no matching configuration was supplied` (`.ts` needs typescript-eslint). Its results say to ask the user before fixing: a read-only agent cannot fix anyway |
+| files in a folder | `@modelcontextprotocol/server-filesystem@1.0.0` **CI** | with `name = "files"`, `args = ["."]`: `read_file`, `read_text_file`, `read_media_file`, `read_multiple_files`, `list_directory`, `list_directory_with_sizes`, `directory_tree`, `search_files`, `get_file_info`, `list_allowed_directories` (reading: allow these) and `write_file`, `edit_file`, `create_directory`, `move_file` (writing: leave them asking; no delete), seen as `files__<tool>`. `search_files` matches file names (a glob), not contents: to search inside files, yoagent's `search`. `read_multiple_files` succeeds when some reads inside it fail (`✓` proves nothing about one file: `read_text_file` does). `edit_file` with `dryRun: true` writes nothing, yet asks all the same. 2.0.0 came out on 2026-10-19, unchecked: `check` it before moving |
+
+A stdio server's `args` reach it as written: a relative path (`"."`) is
+the folder `yobuild run` starts in — the server runs there, as the agent
+does — not the manifest's folder. `yobuild check` starts the server too,
+in the folder `check` runs in: run it from a folder the server may touch.

@@ -19,7 +19,10 @@ A JSON list. Each reply is exactly one of:
 { "tools": [{ "name": "a_tool", "arguments": { "path": "notes.md" } }] }
 ```
 
-Nothing else: an unknown key is an error. A `tools` reply may call several
+Nothing else: an unknown key is an error. `{cwd}` in an argument's text is
+the folder the run starts in, as in the prompt — for a tool that takes
+absolute paths (`"{cwd}/src/index.ts"`), so the reply file runs in any
+folder. A `tools` reply may call several
 tools at once. Give `arguments` as the tool's schema asks (`check --json`
 lists each tool's `parameters`); `{}` for a tool that takes none — left
 out, it is `null`, which some tools refuse. Each reply is one model turn:
@@ -47,13 +50,18 @@ a plugin's own names, an MCP server's as `<server>__<tool>`.
 `<name>: ready in 1.2s` on stderr once everything has loaded. Each tool
 call prints `  name ✓` or `  name ✗ <why>` there; notices as
 `  Info: …` / `  Warning: …` — with a budget, a Warning `budget_usd not
-kept: a scripted model has no price` (the script has no price, not the
-model); with plugins, an Info `Plugin time this run: …`; when the run
+kept: a scripted model has no price` (`budget_usd and session_budget_usd
+not kept: …` with both; the script has no price, not the model); with
+plugins, an Info `Plugin time this run: …`; when the run
 ends, `  Cost: not priced (0 tokens in, 0 out; N turns)` (a reply file
 reports no usage; a live run says its dollars and tokens there); then the last answer and how the run ended on
 stdout (`Completed`, `Stopped: …`, `Error: …`). A `✓` says the tool ran,
 not what it found: to see results, run the reply file without `--once`
-and open the page. A reply file's `text` is invented, sources and all
+and open the page — or make the files a run reads such that only the
+right one can succeed (a file only in the folder the run starts in shows
+that a server's `"."` is that folder). A denied call also writes a log
+line (`WARN … tool call denied by middleware …`) beside its `✗`. A reply
+file's `text` is invented, sources and all
 (a placeholder is fine): it shows how the run ends, not what the tools
 found. Nobody is there to answer:
 
@@ -75,8 +83,14 @@ found. Nobody is there to answer:
 - A tool that runs and fails (a search engine down, a rate limit, a page
   not found) prints `✗ <its own error>` — not `Tool call denied: …`. That
   is the tool's day, not the manifest: run again, or script around it.
-- A tool the agent does not have (one not in `agent.tools`): `✗` (the
-  gate asks about it first, and nobody answers).
+- A tool the agent does not have (one not in `agent.tools`): `✗` —
+  `Tool call denied: …` when the gate asks about it first (nobody
+  answers), or `Tool <name> not found` when the gate would let it run (one
+  of yoagent's writers with `tools = "read-only"`, say).
+- A tool that reports (a linter, diagnostics, a type check) can print
+  `✓` with a false "clean": a tool that cannot do its work may say it
+  found nothing. Give it a file with a known problem and look for that
+  finding — on the page, or in a live run's answer — before relying on it.
 
 ## The traps
 

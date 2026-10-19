@@ -5,11 +5,14 @@
 //! test's own). What holds an agent:
 //! - `check`: `ok`, no note, each name an entry's `allow` lists `allowed`,
 //!   and no tool that writes with `tools = "read-only"`;
-//! - each reply file: `Completed` with its last `text` as the answer, each
-//!   call it scripts made once, no `Error:` notice, every call `✓` —
+//! - each reply file (its folder holding the files the agent's test puts
+//!   there, unchanged afterwards): `Completed` with its last `text` as the answer, each call it
+//!   scripts made once, no `Error:` notice, every call to a tool that asks
+//!   denied (nobody answers), every other call `✓` —
 //!   but a plugin's or server's own `✗` (a third party's day: a search
 //!   engine down), never one of the bridge's (its plugin unloaded or
 //!   stopped answering), and never a denial;
+//!   A reply file meant to show refusals: every call `✗`;
 //! - every tool `check` says asks, called with nobody there: denied.
 //!
 //! A scripted run cannot tell whether the task fits the replies (the model
@@ -142,20 +145,29 @@ fn script(replies: &Json) -> (Vec<String>, String) {
     (called, last)
 }
 
-/// One reply file's run, held to the rules above. `asks`: the calls that
-/// must be denied (nobody answers); `theirs`: the plugins' and servers'
-/// tools, whose own `✗` is tolerated.
-fn scripted(
-    manifest: &str,
-    file: &Path,
-    task: &str,
-    asks: &HashSet<String>,
-    theirs: &HashSet<String>,
-) {
+/// What a run starts with and is held to: the files put in its folder
+/// first (path, contents), each the same afterwards; the reply files meant
+/// to show refusals (every call `✗`, whatever the reason); the tools that
+/// ask (each call denied: nobody answers); the plugins' and servers' tools,
+/// whose own `✗` is tolerated.
+struct Rules<'a> {
+    files: &'a [(&'a str, &'a str)],
+    refusing: &'a [&'a str],
+    asks: HashSet<String>,
+    theirs: HashSet<String>,
+}
+
+/// One reply file's run, held to the rules above.
+fn scripted(manifest: &str, file: &Path, task: &str, rules: &Rules) {
     let name = file.file_name().unwrap().to_string_lossy();
     let replies: Json = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
     let (called, last) = script(&replies);
     let (work, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    for (path, contents) in rules.files {
+        let path = work.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
     let ran = yobuild(
         &[
             "run",
@@ -181,12 +193,19 @@ fn scripted(
     names.sort_unstable();
     called.sort_unstable();
     assert_eq!(names, called, "{all}");
+    for (path, contents) in rules.files {
+        let now = std::fs::read_to_string(work.path().join(path)).unwrap_or_default();
+        assert_eq!(&now, contents, "{path} changed: {all}");
+    }
+    let refusing = rules.refusing.contains(&name.as_ref());
     for (tool, mark) in made {
-        if asks.contains(tool) {
+        if refusing {
+            assert!(mark.starts_with("✗ "), "{tool} ran: {all}");
+        } else if rules.asks.contains(tool) {
             assert_eq!(mark, format!("✗ {NOBODY}"), "{tool}: {all}");
         } else if let Some(why) = mark.strip_prefix("✗ ") {
             assert!(
-                theirs.contains(tool)
+                rules.theirs.contains(tool)
                     && !why.starts_with(DENIED)
                     && !BRIDGE.iter().any(|b| why.contains(b)),
                 "{tool} ✗ {why}: {all}"
@@ -195,8 +214,10 @@ fn scripted(
     }
 }
 
-/// `check` and every reply file of a gallery agent.
-fn holds(dir: &Path) {
+/// `check` and every reply file of a gallery agent, each run starting with
+/// `files` in its folder; in the reply files `refusing` names, every call
+/// refused.
+fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str]) {
     let path = dir.join("agent.toml");
     let manifest = path.display().to_string();
     let parsed = Manifest::load(&path).unwrap();
@@ -255,6 +276,13 @@ fn holds(dir: &Path) {
         .map(|(name, _)| (*name).to_owned())
         .collect();
 
+    let rules = Rules {
+        files,
+        refusing,
+        asks,
+        theirs,
+    };
+
     // The reply files and their tasks, in pairs.
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir.join("scripts"))
         .unwrap()
@@ -271,7 +299,7 @@ fn holds(dir: &Path) {
         );
         if file.extension().is_some_and(|x| x == "json") {
             let task = std::fs::read_to_string(file.with_extension("task")).unwrap();
-            scripted(&manifest, file, task.trim(), &HashSet::new(), &theirs);
+            scripted(&manifest, file, task.trim(), &rules);
             if file.file_stem().is_some_and(|s| s == "demo") {
                 demo = Some(file.clone());
             }
@@ -280,10 +308,11 @@ fn holds(dir: &Path) {
 
     // Each tool that asks, called with nobody there, ending as the demo does.
     let demo = demo.expect("scripts/demo.json");
-    if !asks.is_empty() {
+    if !rules.asks.is_empty() {
         let (_, last) =
             script(&serde_json::from_str(&std::fs::read_to_string(&demo).unwrap()).unwrap());
-        let calls: Vec<Json> = asks
+        let calls: Vec<Json> = rules
+            .asks
             .iter()
             .map(|t| serde_json::json!({ "name": t, "arguments": {} }))
             .collect();
@@ -291,7 +320,7 @@ fn holds(dir: &Path) {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("asks.json");
         std::fs::write(&file, replies.to_string()).unwrap();
-        scripted(&manifest, &file, "call each tool that asks", &asks, &theirs);
+        scripted(&manifest, &file, "call each tool that asks", &rules);
     }
 }
 
@@ -300,5 +329,49 @@ fn web_research() {
     let Some(dir) = agent("web-research") else {
         return;
     };
-    holds(&dir);
+    holds(&dir, &[], &[]);
+}
+
+#[test]
+fn notes_keeper() {
+    let Some(dir) = agent("notes-keeper") else {
+        return;
+    };
+    // The notes its replies read: `projects/garden.md` only here, so a read
+    // that succeeds shows the server's "." is the run's folder.
+    holds(
+        &dir,
+        &[
+            (
+                "groceries.md",
+                "# Groceries\n\n- oat milk\n- coffee beans\n-  eggs\n",
+            ),
+            (
+                "projects/garden.md",
+                "# garden plan\nPlant tomatoes after the last frost (mid May).\nBasil goes next to the tomatoes.\n",
+            ),
+        ],
+        &[],
+    );
+}
+
+#[test]
+fn code_reviewer() {
+    let Some(dir) = agent("code-reviewer") else {
+        return;
+    };
+    // A tiny TypeScript project: ESLint's config covers `.js` only, so
+    // `src/util.js` has its findings and the `.ts` files are read.
+    holds(
+        &dir,
+        &[
+            ("eslint.config.js", "export default [\n  {\n    files: [\"**/*.js\"],\n    rules: {\n      \"no-unused-vars\": \"error\",\n      \"no-eval\": \"error\",\n      \"eqeqeq\": \"error\"\n    }\n  }\n];\n"),
+            ("package.json", "{\n  \"name\": \"tiny-ts\",\n  \"version\": \"1.0.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": {\n    \"lint\": \"eslint .\",\n    \"typecheck\": \"tsc --noEmit\"\n  },\n  \"devDependencies\": {\n    \"eslint\": \"9.39.1\",\n    \"typescript\": \"5.9.3\"\n  }\n}\n"),
+            ("src/index.ts", "import { add, total } from \"./math\";\n\nconsole.log(add(2, 3), total);\n"),
+            ("src/math.ts", "export function add(a: number, b: number): number {\n  return a + b;\n}\n\nexport const total: number = add(1, \"2\");\n"),
+            ("src/util.js", "export function check(value) {\n  const unused = 42;\n  if (value == null) {\n    return eval(\"'empty'\");\n  }\n  return value;\n}\n"),
+            ("tsconfig.json", "{\n  \"compilerOptions\": {\n    \"target\": \"ES2022\",\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"Bundler\",\n    \"strict\": true,\n    \"noEmit\": true\n  },\n  \"include\": [\"src\"]\n}\n"),
+        ],
+        &["no-writes.json"],
+    );
 }

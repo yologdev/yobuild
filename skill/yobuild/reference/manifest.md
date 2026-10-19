@@ -38,7 +38,7 @@ name    = "words"                     # optional: else the file's stem
 [[mcp]]                               # a stdio MCP server: the pinned package's bin, run
 name  = "files"                       # its tools are files__<tool>
 npm   = "@modelcontextprotocol/server-filesystem@1.0.0"
-args  = ["."]
+args  = ["."]                         # as written: "." is the folder yobuild run starts in
 allow = ["read_text_file", "list_directory"]   # the server's own names
 
 [[mcp]]                               # an MCP server over HTTP
@@ -134,6 +134,9 @@ And `name`: its tools are named `<name>__<tool>`. The default is the
 package's name without its scope, or the URL's host — whose dots no tool
 name may hold, so give an HTTP server a `name` (letters, digits, `-`,
 `_`; no `__`). And optionally `allow` (the server's own tool names).
+A server may want absolute paths (`check --json` shows its parameters):
+the prompt builds them from `{cwd}`, and the reply files write
+`"{cwd}/…"`.
 
 **Pins.** Every package is `name@1.2.3` (exact; `1.2.3-beta.1` too) or a
 local path (`./`, `../`, `/`). Tags, ranges, `git`, URLs and `file:` are
@@ -204,14 +207,29 @@ listens.
   with `facts`). `budget_usd` is per run, and an answered question starts
   another run, so one job that asks first can cost up to twice it; nothing
   caps one job across its runs. `session_budget_usd` caps everything
-  until yobuild stops: say both to the person. A limit "per question"
-  for an agent that may ask first: `budget_usd` at half of it, and a
+  until yobuild stops: say both to the person. A cap the person gives
+  without saying per what ("cap it at a dollar") is the session's
+  (`session_budget_usd`), with `budget_usd` a fraction of it: say the split.
+  A limit "per question" for an agent that may ask first: `budget_usd` at half of it, and a
   `session_budget_usd` a few questions' worth (say the figure you chose).
   A comment on
   `budget_usd` says "per run", never "per question" or "per task".
 - **Turns**: `max_turns` counts model requests in a run (50 by default);
   a short lookup needs 10–20, a coding task more. A cap stops a run that
   loops; the budget is what caps the cost.
+- **Run checks, write nothing** (a reviewer): no setting runs a
+  project's type checker or tests without also letting the agent write —
+  `tools = "coding"` brings `write_file`, and a new file in the project
+  is free. Use a server or plugin that runs the check and only reports
+  (ESLint's `@eslint/mcp`), keep `tools = "read-only"`, and say what was
+  not run (`npx tsc --noEmit`) in the report.
+- **`search`'s pattern**: ripgrep's regex when `rg` is installed, else
+  grep's basic one — keep patterns plain (`eval(`, `: any`), one per call,
+  so they mean the same on both.
+- **What to tell the person of a read-only agent**: the gate may still
+  ask Allow/Block for a writer or `bash` the agent does not have (it
+  judges a call before the tool is looked up); Block is the answer, and
+  either answer changes nothing.
 - **No local files at all**: not possible — yoagent's tools are always
   there; `tools = "read-only"` is the least (reading, inside the folder
   yobuild runs in). Tell the person, and suggest running it in an empty
