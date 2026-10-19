@@ -2657,9 +2657,9 @@ dependencies = [
 
 [[package]]
 name = "yoagent"
-version = "0.25.7"
+version = "0.25.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e02e68ba68e6c06f8f8641b1fb46c0ac09b3b891e80832eadbc9da2ec74f915"
+checksum = "eae75179b09a082d3b2133e7da3cc298dfc90ba564a2e1edfd0a3dca90705b29"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

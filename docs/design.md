@@ -1329,8 +1329,8 @@ examples are.
   refused: the test's `refusing`). Its first live run showed ESLint's
   findings missing: yoagent 0.25.7's providers send the model only the
   first text block of a tool result, and ESLint answers in three. yobuild
-  joins them (`run/joined.rs`, an `after_tool` extension) until it depends
-  on a yoagent with the fix (yologdev/yoagent#347, all five providers);
+  joined them (an `after_tool` extension) until yoagent 0.25.9 sent every
+  block (yologdev/yoagent#347, all five providers);
   the second live run reported all three of ESLint's errors. Lessons:
   `check` loads plugins and lists their tools, it does not call them, and
   a `✓` says a tool ran, not that it worked — two of four candidates
