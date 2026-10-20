@@ -110,7 +110,9 @@ price`").
 - `pi = "<package>@<version>"` or a path (`./ext.ts`, a folder): a pi
   extension or package. No `config`. Its skills are not loaded.
 - `dsh = "<package>@<version>"` or a path: a DeepSeek Harness plugin.
-  `config` is the plugin's own. DSH files and DSH packages cannot be in
+  `config` is the plugin's own. Its skills are not loaded either (`check
+  --json`'s `guidanceChars` is the prompt guidance it does add): put the
+  workflow they teach into the prompt. DSH files and DSH packages cannot be in
   one manifest yet. yobuild's DSH base (the packages its DSH runtime
   carries) pins some DSH packages itself — `dsh-free-search` 0.8.1,
   `@deepseek-ai/dsh-tool-ask-user` and `dsh-user-questions` 0.2.0-rc.2:

@@ -1,0 +1,5 @@
+[
+  { "tools": [{ "name": "list_files", "arguments": { "path": ".", "pattern": "*.csv" } }] },
+  { "tools": [{ "name": "ask_owner", "arguments": { "question": "Which CSV should I total: expenses-2026-08.csv or expenses-2026-09.csv?", "why": "There are two expense exports here and the task does not say which.", "options": ["expenses-2026-08.csv", "expenses-2026-09.csv"] } }] },
+  { "text": "## File read\nNone yet: two CSVs are here.\n\n## File written\nNone.\n\n## Waiting on you\n#1: which CSV to total, expenses-2026-08.csv or expenses-2026-09.csv." }
+]

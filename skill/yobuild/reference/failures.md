@@ -94,9 +94,16 @@ and show as `name ✗` under `--once`. The run goes on.
 | Error `A plugin stopped: plugin \`…\` failed: …` (or `stopped itself`, `cannot load: …`) <!-- hint: plugin-failed --> | a plugin failed after it started | its error says why; the log has more |
 | Error `A plugin stopped: the \`X\` runtime is not running (its plugins wait: …)` <!-- hint: runtime-down --> | a plugin runtime died | the log; restart |
 | Warning `Stopped early: <reason>.` | facts: any `Stopped` run | `What to do: …` follows it |
+| Warning `A DSH plugin's wake was refused: …` / `pi extension X's wake was refused: …` | a plugin's message to the agent was not delivered: its grant is missing, the owner's task has not started, or plugins already started their runs this session | grant `wake` if it should reach the agent; else nothing |
+| Warning `pi extension X asked ctx.isProjectTrusted(): answered false (grant \`trust = true\` to change it)` (or `ctx.model`) | the extension was told the fixed answer, and may do less for it | grant what it names, if the person agrees (`trust` lets it run the project's code) |
+| Warning `pi extension X ran pi.exec("cmd"): refused …` | the extension tried to run a command its grant does not allow, or the gate's question went unanswered | grant `exec = "gate"` (each command judged, the owner asked) if it should run commands |
+| Warning `The DSH host: …` | the stand-in DSH agent's own trouble (its session log, a turn) | the message says which; the log has more |
 | an open question (with `facts`: `; 1 question(s) waiting on you`) | the owner has not answered | answer in the page or the terminal: during a run it steers that run; when idle it starts the next |
 
-Not failures, though they read like one: facts' `not a git repository`,
+Not failures, though they read like one: `check`'s note `probed without
+the DSH host: its grants are not exercised alone` on a DSH plugin with
+`grants` (alone it is probed without them; the scripted run exercises
+them); facts' `not a git repository`,
 `changes unknown: no snapshot at the start (git: …)` and `changes since
 the start unknown (git: …)` (Info: `git init` the folder for facts to tell
 what changed); `[builtins] ask_owner is off` (the error a plugin's own

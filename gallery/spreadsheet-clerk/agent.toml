@@ -1,0 +1,38 @@
+# Turns a monthly expenses CSV exported from the bank (date, description,
+# category, amount) into a spreadsheet with a total per category, saved as
+# an .xlsx next to the CSV. Spreadsheet work through dsh-univer-office.
+# It never overwrites or deletes the owner's files without asking: yoagent's
+# own tools only read, and the tools that write or run code ask first.
+#
+#   cd ~/expenses && DEEPSEEK_API_KEY=… path/to/yobuild run path/to/clerk/agent.toml
+
+[agent]
+name   = "clerk"
+model  = "deepseek/deepseek-flash"
+prompt = "prompts/agent.md"
+
+[limits]
+max_turns          = 40
+budget_usd         = 0.5      # dollars per run
+session_budget_usd = 2.0      # dollars across everything until yobuild stops
+
+[[plugin]]
+dsh    = "dsh-univer-office@0.3.7"
+grants = { workspace = true } # its tools read the calling agent's folder
+# Tools that change none of the owner's files run without asking.
+allow  = [
+  "univer_new", "univer_import", "univer_unit", "univer_status",
+  "univer_inspect", "univer_api", "univer_lint",
+]
+# univer_execute (runs code), univer_export (writes the .xlsx, overwriting
+# one that exists), univer_worktree, univer_print_pdf, univer_compile_svg,
+# univer_screenshot and univer_resources are left out: each call asks.
+
+[builtins]
+ask_owner = true
+report    = ["File read", "File written", "Waiting on you"]
+gate      = "allow-list"      # the default: anything not allowed asks
+tools     = "read-only"       # yoagent's own tools only read, inside the folder
+
+[frontend]
+web = true

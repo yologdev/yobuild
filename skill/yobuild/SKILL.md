@@ -99,7 +99,16 @@ my-agent/
    line `Completed`.
    `--once` shows that a tool ran, not what it returned: to see the
    results, run the same reply file without `--once` and open the page
-   (each call is a card there).
+   (each call is a card there). A tool whose arguments are ids from an
+   earlier result cannot be scripted past that point (scripted.md): stop
+   the reply file there.
+   - A DSH plugin with `grants` gets the note "probed without the DSH
+     host: its grants are not exercised alone": `check` alone proves it
+     loads, not that its granted tools work — the scripted run does.
+   - Allow only tools that read, plan, or make something new that changes
+     none of the person's files; a tool that runs code (`univer_execute`)
+     or can overwrite (`univer_export`) keeps asking, and the prompt asks
+     with `ask_owner` before writing over an existing file.
 6. **Run live**, after asking the person (it costs money): the provider's
    key in the environment, then `yobuild run agent.toml "<task>"` (or
    without a task: the person types it in the page). Each run's cost is
