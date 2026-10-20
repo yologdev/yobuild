@@ -1444,7 +1444,8 @@ Grants are read for rutis plugins only (a refusal to anyone else says no
 grant is theirs yet); a pi extension's and a DSH plugin's are refused when
 the manifest is read (at its `grants` table)
 until their hosts come (steps 2 and 3). `check` lists each entry's grants.
-Fixed answers and the `exec`/`observe` grants come with the pi host.
+Fixed answers and the `exec` grant come with the pi host (`observe`,
+first planned, is dropped: steps 2 and 3, below).
 
 **Who enforces a grant.** L1 sees only the calling row, and every pi
 extension calls through the one `pi` row, every DSH plugin through the one
@@ -1467,8 +1468,8 @@ pi and DSH:
   tool — DSH's `tools` registry keeps no owner, but `tools.register` runs in
   the registering plugin's Cordis context, which names its fiber: confirmed
   or refuted in the first implementation PR. Until then a DSH grant applies
-  to **every DSH plugin in the runtime**, and `check` says so ("granted to
-  every DSH plugin: `workspace`").
+  to **every DSH plugin in the runtime**, so the manifest writes it on
+  every one (the one rule, in steps 2 and 3 below).
 
 ### L2 — ecosystem shims (yoagent-rutis adapters)
 
@@ -1523,15 +1524,17 @@ stays for the rest):
   `announce`); DSH refuses questions from a child (`DELEGATED_CALLER`).
 - Later: a model-info-only `llm` adapter, a read-only `settings`.
 
-**pi host**: each fixed answer becomes a grant, applied per extension:
+**pi host**: each fixed answer becomes a grant, applied per extension
+(`model` runtime-wide: the one rule, below):
 `isProjectTrusted` from `trust`; `model`/`modelRegistry` read-only from
 `model = "info"`; `sendMessage`/`sendUserMessage` from `wake`; `pi.exec`
 from `exec` — `"off"` (the default: refused, said as a Warning naming the
 extension, once a session), `"gate"` (its argv judged as one command's
-words through `Gate::check_argv`, not as a shell line), or `"free"`; the observer
-events from yoagent-rutis's existing `on_event`, with `observe` (they carry
-the whole conversation and every tool's arguments and results, a `.env`
-read included; langfuse and langsmith send them off the machine).
+words through `Gate::check_argv`, not as a shell line), or `"free"`. The
+observer events (they carry the whole conversation and every tool's
+arguments and results, a `.env` read included; langfuse and langsmith send
+them off the machine) were to need an `observe` grant; it is dropped
+(below).
 
 ### L3 — the frontend (later; its own milestone)
 
@@ -1566,7 +1569,6 @@ table read with `deny_unknown_fields`, every key off when absent:
 | `model` | `"info"` (later `"call"`) | yes | later (a model-info `llm`) | yes | `ctx.model`/`modelRegistry`; for rutis, `llm`'s model info |
 | `wake` | bool | yes | yes (the stand-in's `steer`/`followup`) | yes | `session` wake |
 | `exec` | `"off"` / `"gate"` / `"free"` | yes | — | — | `pi.exec` |
-| `observe` | bool | yes | — | — | pi's observer events |
 
 A key an ecosystem does not take is refused with its place; it goes in
 `src/manifest/tests.rs` and `skill/yobuild/reference/manifest.md` (whose
@@ -1676,11 +1678,12 @@ unavailable). yobuild's part:
   would fail — refused at `wake`: "a DSH plugin's `wake` needs `workspace`
   (the stand-in agent)"); `trust`, `model`, `exec`, `observe` stay refused.
   The stand-in is one for the runtime, and DSH's registry keeps no owner,
-  so **a grant holds for every DSH plugin**: `check` lists, on each DSH
-  entry, the grants in force — the union — as "granted to every DSH
-  plugin: workspace, wake".
+  so a grant holds for every DSH plugin — which the manifest must say:
+  **a runtime-wide grant is written on every plugin of that runtime**
+  (below), so each DSH plugin lists the same grants, else the first that
+  differs is refused at its `grants`.
 - **Who is granted**: `Host::caller` gains one row besides a rutis plugin's,
-  the exact id `dsh-host`, granted that union. The DSH plugins' own
+  the exact id `dsh-host`, granted the DSH plugins' grants. Their own
   `plugin:<name>…` rows and the `dsh` row stay refused, so a DSH plugin
   cannot call the host services around its shim.
 - **Wake**: from `dsh-host`, tagged `[DSH plugin] <text>` (the shim cannot
@@ -1697,7 +1700,7 @@ unavailable). yobuild's part:
 - **Done when**: `run_test` — a DSH fixture plugin reading
   `exec.agent.session.header.cwd` (the agent's folder) and waking (reaching
   the agent as `[DSH plugin] …`), refused both without grants; `check`'s
-  union note; and a gallery agent built through the skill with
+  refusal of differing grants; and a gallery agent built through the skill with
   `dsh-univer-office@0.3.7` (`parts.md` moves it from "not usable" to
   **CI**), its scripted replies in CI and one live run, asked for first.
 
@@ -1721,11 +1724,10 @@ Fixed answers are logged as `[pi] fixed answer: …`. So, per grant:
 - **`trust`**: `projectTrusted` is one answer for every extension, and
   `trust` lets a plugin run project code. Asked of yoagent-rutis:
   `projectTrustedFor`, by file, as `execFor`.
-- **`model = "info"`**: one `model` for the row. The default already tells
-  every extension the run's model id, so the grant adds the provider and
-  limits; yobuild sets `model` (from `host_session.model()`'s figures) when
-  any pi plugin grants it, and `check` says "granted to every pi
-  extension". No adapter change.
+- **`model = "info"`**: one `model` for the row, so it is runtime-wide
+  and, by the rule below, written on every pi plugin or none. yobuild sets
+  the row's `model` (from `host_session.model()`'s figures) when they all
+  grant it. No adapter change.
 - **`wake`**: not mapped. Asked of yoagent-rutis: per extension
   (`wakeFor`), `sendUserMessage(text)` and a `sendMessage` with
   `triggerTurn` or `deliverAs` → `host_session.wake(text, file)`; refused
@@ -1734,9 +1736,23 @@ Fixed answers are logged as `[pi] fixed answer: …`. So, per grant:
   made to refuse one. What they carry (the conversation, tool arguments and
   results) every extension already reads through `message_end`, `context`
   and `tool_result`, and sending it anywhere is Node's own power
-  (honour-system, above). **Proposed: drop the `observe` grant**; `check`
-  notes a pi entry that registers observer events, and §6 says every pi
-  extension sees the conversation.
+  (honour-system, above). **Dropped** (decided 2026-10-20): `observe` is no
+  grant (refused as an unknown key); `check` notes a pi entry that
+  registers observer events, and §6 says every pi extension sees the
+  conversation.
+
+**One rule for both ecosystems** (decided 2026-10-20): a grant a shim can
+hold per plugin is per plugin — pi's `exec`, `trust` and `wake`, by
+extension file. A grant it can give only to the whole runtime — every DSH
+grant (one stand-in), pi's `model` (one row config) — is written on
+**every** plugin of that runtime or on none: the manifest then says
+exactly what each plugin gets, and nothing is granted that is not written
+on it. A manifest that writes it on some is refused at the first entry
+that differs: "every DSH plugin shares the DSH host: give each the same
+grants (`a` has workspace, `b` none)" / "every pi extension sees one
+model: grant `model = \"info\"` to each pi plugin or none". Should a shim
+later tell plugins apart, that grant becomes per plugin and the rule stops
+applying to it.
 
 On yobuild's side, `Host::caller` accepts the `pi` row for `wake` and
 `ask` with a second argument naming the calling extension's file; yobuild
@@ -1748,7 +1764,7 @@ in the same runtime, §2). Tagged `[pi extension <plugin>] <text>`.
 So step 3 is a pair again: yoagent-rutis (`execFor` `"gate"`,
 `projectTrustedFor`, `wakeFor`, the file passed to the host), then yobuild
 (the grants mapped onto the row's config, the `pi` row as a caller,
-`observe` dropped, fixed answers said). Step 2 needs nothing more from
+`observe` refused, the one rule, fixed answers said). Step 2 needs nothing more from
 yoagent-rutis.
 
 **Fixed answers said** (both steps): the adapters log `[pi] fixed answer: …`
@@ -1784,8 +1800,8 @@ credentials services) for its own PR, limited to named keys.
 enforced per row; (2) the DSH host — the stand-in, turns, the jsonl log,
 dialogs through DSH's own services, `workspace` and `wake`, fixed answers
 said; (3) pi grants — `trust`, `model = "info"`, `wake`, `exec` (the
-factory wrapper shipped in yoagent-rutis 0.7.0; `observe` proposed
-dropped, above); (4) removing provider keys from plugin
+factory wrapper shipped in yoagent-rutis 0.7.0; `observe` dropped,
+above); (4) removing provider keys from plugin
 runtimes. Each a PR pair (yoagent-rutis,
 then yobuild), each design-checked; step 2's yoagent-rutis half shipped in
 0.7.1.
