@@ -830,6 +830,58 @@ the pi-tui terminal UI, UI plugins, plugin dialogs (pi and DSH questions
 reach the owner), `PluginHost` (rows, routing, reload, `env`, `terminal`),
 `DshHome`. It is application code; yoagent keeps no frontend.
 
+### Answers as Markdown on the page (proposed 2026-10-21)
+
+The model writes its answers in Markdown (the report's `## Sections`,
+lists, tables), and the page shows only part of it: `lib.js`'s
+`markdownParts` reads inline marks (`**bold**`, `` `code` ``, https
+links), so headings, lists and tables arrive as raw text. The page learns
+the block level; the terminal UI follows later (pi-tui's own Markdown
+component), as its own step.
+
+- **What is read** — a subset of CommonMark with GFM tables, enough for
+  what models write:
+  - **Blocks:** ATX headings (`#` to `######`); paragraphs, separated by
+    blank lines, each single line break kept (as chat pages do: a model's
+    lines are meant as lines); bullet lists (`-`, `*`, `+`) and numbered
+    lists (`1.`, `1)`, the first number kept), nested by indentation;
+    fenced code (```` ``` ```` or `~~~`, the language shown as a label, an
+    unclosed fence running to the end — while a reply streams in, its
+    code block is open); block quotes (`>`); rules (`---`, `***`, `___`);
+    GFM tables (a header row, the `|---|:--:|` row with its alignments,
+    then rows; a row with fewer cells padded, more cut).
+  - **Inline:** strong (`**`, `__`), emphasis (`*`, `_`, not inside a
+    word for `_`), code (`` ` ``, any run of backticks), strikethrough
+    (`~~`), links `[text](url)` and bare `https://…`; a backslash escapes
+    a mark.
+  - **Not read, shown as text:** images (the page would fetch whatever URL
+    the model names — a way to send what it read anywhere: never loaded),
+    raw HTML, reference links, footnotes.
+- **Kept as data** — `lib.js` (no DOM, as today): `markdownBlocks(text)`
+  returns blocks — `heading{level, inline}`, `paragraph{inline}`,
+  `list{ordered, start, items: blocks[]}`, `code{lang, text}`,
+  `quote{blocks}`, `rule`, `table{align, header, rows}` — and
+  `markdownParts` the inline parts (`text`, `strong`, `em`, `code`, `del`,
+  `link`, `br`). Nesting deeper than 8 levels is read as text, so a hostile
+  reply cannot make the parser recurse without end; the work is linear in
+  the text.
+- **Drawn as DOM nodes** — `app.js` builds each block with `createElement`
+  and `textContent`, never `innerHTML`: a reply cannot add markup, scripts
+  or styles. Links go through `safeUrl` (http(s) only), open in a new tab,
+  `rel="noreferrer"`. A streaming reply is parsed again as it grows (its
+  deltas come ≤ 30 ms apart, merged): the cost of a few kilobytes.
+  Thinking text and tool cards stay as they are.
+- **Styles** — headings a little larger, not page-sized; tables with
+  borders and their own horizontal scroll; code blocks scrolling, not
+  wrapping; lists indented.
+- **Tool lines** — a line too long for the page (a plugin's card title
+  with an absolute path) is cut at the page's width with an ellipsis, the
+  whole line on hover.
+- **Tests** — `node --test frontend/web/lib.test.js`: each block and
+  inline kind, nesting, a table's alignments and odd rows, an unclosed
+  fence, escapes, images and HTML kept as text, the depth limit, links
+  other than http(s) left as text; `web_test` unchanged (the protocol is).
+
 ## 6. Safety model
 
 Inherited from yoagent and the handoff work, and kept on by default:
