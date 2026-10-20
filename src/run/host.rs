@@ -50,8 +50,8 @@
 //! - `host_approval.ask(question, details?)` (async) — Allow/Block, put to
 //!   the owner naming the plugin (the question one non-empty line; from a
 //!   rutis plugin's row, or as `ask(question, details, file)` for a pi
-//!   extension with `exec = "gate"`, titled "(asked by pi extension
-//!   <name>)"): `"allow"`, `"block"`, or `"unanswered"` (nobody
+//!   extension with `exec = "gate"`, titled `(asked by pi extension
+//!   <name>)`): `"allow"`, `"block"`, or `"unanswered"` (nobody
 //!   there — said as a Warning notice — no answer within `UI_TIMEOUT`, or
 //!   the question dismissed); `Err` once the session ended.
 

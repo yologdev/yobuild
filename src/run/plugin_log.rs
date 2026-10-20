@@ -5,7 +5,7 @@
 //! `tracing` events (target `yoagent_rutis::plugin`), the fixed answers at
 //! info — below `RUST_LOG`'s default — so the binary adds [`layer`] beside
 //! its log, seeing them whatever the filter, and a running session
-//! [`watch`]es: each line a [`Said`] knows becomes a Warning notice, once a
+//! watches (`watch`): each line a `Said` knows becomes a Warning notice, once a
 //! session. A line counts only from the row that writes it — the pi
 //! adapter's (`pi`), the DSH host's (`dsh-host`) — read from the call it is
 //! logged in (`caller_row`): any plugin may call `yoagent.log`, and a line
