@@ -168,23 +168,31 @@ the compatibility matrix for the plugins it uses.
 **Done when** three agents in the gallery were built through the skill by
 a coding agent, not by hand, and each is checked and run scripted in CI.
 
-## M3b — The host layer (design §12; proposed 2026-10-19)
+## M3b — The host layer (design §12; proposed 2026-10-19, steps 1–3 built 2026-10-20)
 
 What a plugin's own app gives it — DSH's agent and session, pi's trust and
 model — provided by yobuild as host services, translated by the adapters,
 granted per plugin in the manifest (`grants = { … }`, closed by default;
-per runtime for DSH until a tool's plugin can be told) and named by `check`.
+a grant a host can give only to the whole runtime is written on every
+plugin of it or none) and named by `check`.
 
-- The L1 services (`workspace`, `session` with an id and generation,
-  `approval`), `grants` read and named by `check`, rutis's grants per row.
-- The DSH host: a stand-in agent per generation in DSH's own
-  `agents`/`sessions`, turns around runs, its log in the jsonl backend,
-  approvals and questions through DSH's own services; `workspace`, `wake`;
-  fixed answers said by `run` and `check`.
-- pi grants, each extension loaded through a factory wrapper of its own:
-  `trust`, `model = "info"`, `wake` (tagged, bounded), `exec` (off by
-  default, or judged by the gate), `observe`.
-- Plugin runtimes without the provider key variables.
+- **Built (step 1, #42):** the L1 services (`workspace`, `session` with an
+  id and generation, `approval`), `grants` read and named by `check`,
+  rutis's grants per row.
+- **Built (step 2, #45, yoagent-rutis 0.7.1):** the DSH host — a stand-in
+  agent per generation in DSH's own `agents`/`sessions`, turns around runs,
+  its log in the jsonl backend, approvals and questions through DSH's own
+  services; `workspace` and `wake`, the same on every DSH plugin (one
+  host); the host's start checked, its services runtime-local.
+- **Built (step 3, #46, yoagent-rutis 0.8.0):** pi grants per extension —
+  `trust`, `wake` (tagged, bounded), `exec` (`"off"` by default, `"gate"`
+  judged by the gate and asked, `"free"`), and `model = "info"` on every pi
+  plugin or none; `observe` dropped (every extension sees the conversation
+  already, design §6); fixed answers and refused `pi.exec` said by `run`.
+- Left: `check` saying fixed answers (no session watches there), and noting
+  a pi extension's observer events (the adapter would have to report its
+  handlers).
+- Plugin runtimes without the provider key variables (step 4).
 
 **Done when** `dsh-univer-office` and `pi-lens` work in a gallery agent,
 their tools' results checked (not only `✓`); the stand-in probe runs inside
