@@ -836,8 +836,8 @@ The model writes its answers in Markdown (the report's `## Sections`,
 lists, tables), and the page showed only part of it: `markdownParts` read
 inline marks (`**bold**`, `` `code` ``, https links), so headings, lists
 and tables arrived as raw text. The page learns the block level; the
-terminal UI follows later (pi-tui's own Markdown component), as its own
-step.
+terminal UI already draws answers with pi-tui's own Markdown component
+(its text cleaned: "Untrusted text in the terminal UI", below).
 
 - **What is read** — a subset of CommonMark with GFM tables, enough for
   what models write:
@@ -920,37 +920,83 @@ step.
 
 ### Untrusted text in the terminal UI (proposed 2026-10-21)
 
-The terminal UI already draws answers as Markdown (pi-tui's `Markdown`
-component), but it prints the session's text as it comes — answers,
-thinking, tool names and arguments, notices, plugins' question titles and
-options, a prompt from another frontend — and a terminal runs the escape
-sequences in it. Checked on 2026-10-21: `ESC]0;…` sets the window title,
-`ESC[2J` clears the screen, `ESC]8;;…` makes a link that shows one thing
-and opens another, and pi-tui turns `[x](javascript:…)` into a clickable
-link; terminals that honour `OSC 52` let text write the clipboard. A
-model's text carries what it read (a web page, a file), so this is a way
-in, not a theory.
+The terminal UI draws answers as Markdown (pi-tui's `Markdown`), but it
+prints the session's text as it comes, and a terminal runs the escape
+sequences in it. Checked on 2026-10-21 with pi-tui 1.1.0's `Text` and
+`Markdown`: `ESC]0;…` (the window title), `ESC[2J` (a screen clear) and
+`ESC]8;;…` (a link that shows one thing and opens another) pass through
+unchanged; terminals that honour `OSC 52` let text write the clipboard.
+Where pi-tui detects hyperlink support (`getCapabilities().hyperlinks`: a
+known terminal, or `PI_HYPERLINKS=1`), it also turns `[x](javascript:…)`
+into a clickable link, and shows only a link's text — so
+`[https://bank.example](https://evil.example)` shows one address and
+opens another; without it, the target is printed after the text when the
+two differ. A model's text carries what it read (a web page, a file), so
+this is a way in, not a theory. pi-tui's other paths stay text: it does
+not decode entities, renders raw HTML and images as text, highlights no
+code here (no `highlightCode`), and builds LaTeX from the text it is
+given.
 
-- **Every untrusted string through one function** — `terminalText(s)` in
-  `lib.js` (tested by `node --test`): escape sequences removed whole (CSI,
-  OSC up to BEL or ST, DCS/APC/PM/SOS up to ST, any other `ESC` and its
-  next character), the other C0 controls but `\n` and `\t` removed, C1
-  controls (U+0080–U+009F, among them the one-byte CSI) removed, and the
-  bidirectional overrides and isolates (U+202A–U+202E, U+2066–U+2069)
-  removed, so text cannot reorder what is shown. `terminal-ui.ts` applies
-  it where text from the session enters — before its own styling, so its
-  colours are the only escapes left.
-- **Links in answers** — after pi-tui renders an answer, each `OSC 8`
-  link in the lines is pi-tui's (the input has none left); one whose
-  target is not https is unlinked, its text kept. pi-tui's fallback (no
-  hyperlink support: the URL printed after the text) stays.
-- **Not changed** — the page (its text is set as text, design §5 "Answers
-  as Markdown"), the protocol, the plugins themselves.
-- **Tests** — `lib.test.js`: each kind of sequence and control removed, a
-  split or unterminated sequence removed to the end, text and Unicode kept;
-  the answer filter given rendered lines; CI's headless terminal check
-  (`tests/terminal_pty.py`) gets an answer with an `ESC]0;` title, a
-  screen clear and a `javascript:` link, and asserts none reaches the pty.
+- **One rule, for display only** — every string drawn that did not
+  originate in `terminal-ui.ts` goes through `terminalText(s)` before
+  pi-tui gets it, at the few points everything passes: `say()`, the
+  tool line's `Text` (and its `setText` when a card title replaces it),
+  the answer's `Markdown` (given the whole accumulated answer each time,
+  not each delta), the editor's prefill (`editor.setText`: pi-tui's
+  `Editor` passes escapes too) and the status line. That covers the
+  answer, a prompt from any frontend, tool names and arguments, a tool
+  card's title (`viewTitle`, a plugin's), notices, a question's title,
+  message and options, a `notify`, a run's end with its `error` (a
+  plugin's stop reason, a provider's error), the `answered:` echo, and the
+  UI's own error lines quoting an exception. The session's messages
+  themselves are left as they came: `parseAnswer` and the `uiResponse`
+  use the request as received (a cleaned option would not be one the
+  session accepts, and the question would never close); an `input`
+  question's prefill is shown cleaned, so an answer typed from it is the
+  cleaned text. Thinking is not printed by the terminal UI.
+- **`terminalText(s)`** — in `lib.js`, tested by `node --test`:
+  - escape sequences removed whole: CSI (`ESC [` … a final byte), OSC
+    (`ESC ]` … BEL or ST), DCS, SOS, PM and APC (`ESC P`, `X`, `^`, `_`
+    … ST), and any other `ESC` with its next character (`ESC ( B`); one
+    left unterminated ends at the next C0 control or after 4096
+    characters, past which only its introducer is removed and the rest
+    shown — injected text cannot hide what follows it;
+  - the other C0 controls but `\n` and `\t` (BEL, BS, CR — which could
+    overwrite a line — and the rest), DEL, and the C1 controls
+    (U+0080–U+009F, the one-byte CSI and OSC among them) removed;
+  - the bidirectional embeddings, overrides and isolates (U+202A–U+202E,
+    U+2066–U+2069) and marks (U+200E, U+200F, U+061C) removed, so text
+    cannot reorder what is shown;
+  - everything else kept, Unicode included. Its result has no control
+    character but `\n` and `\t`, so pieces cleaned apart join clean.
+- **Links in answers** — the answer's `Markdown` is a subclass whose
+  `render(width)` filters the lines pi-tui made, each line on its own
+  (pi-tui reopens a link on every wrapped line): every `OSC 8` there is
+  pi-tui's, as the input has none left. An opening `ESC]8;;<target>`
+  (ended by ST or BEL) whose target is not `https:` (compared without
+  case) is removed with its closing sequence, the text kept, and the
+  target printed after it as pi-tui's fallback does — as the page shows a
+  link it will not open whole, as written; a kept https link whose text
+  differs from its target gets the target printed after it too, so what is
+  shown is where it goes. Autolinks pi-tui makes from `www.…` (`http:`)
+  or an address (`mailto:`) are unlinked the same way, by intent.
+- **Not changed** — the page (its text is set as text, design §5
+  "Answers as Markdown"; UI plugins are trusted code), the protocol, the
+  plugins.
+- **Tests** — `lib.test.js`: each kind of sequence and control removed,
+  an unterminated one bounded, text and Unicode kept, the result's
+  joining; the link filter given rendered lines (wrapped, both
+  terminators, schemes in any case, a differing text). The pty check
+  (`tests/terminal_pty.py`, in its `yobuild run examples/coding.toml`
+  form) is given a scripted fixture of its own (`tests/fixtures/`), its
+  answer holding sentinels — an `OSC 0` title of a unique word, an
+  `ESC[2J` and a `javascript:` link between two text markers — and reads
+  until the answer's last marker: run with `PI_HYPERLINKS=1`, no byte
+  between the markers is ESC, BEL, U+009B or U+009D, the title word never
+  follows `ESC]0;`, and every `ESC]8;;` target in the stream is https;
+  run without it, the fallback shows the `javascript:` target as text
+  only. (pi-tui writes `ESC[2J` itself when it redraws, so the check is
+  the sentinels', not the bytes'.)
 
 ## 6. Safety model
 
@@ -979,7 +1025,11 @@ environment they inherit is visible to them; the gate judges command
 lines and file tools, not what code does once it runs (a build or a test
 runs the project's code, including what the agent edited); and it guards
 the owner's files against being deleted or replaced (not against edits),
-and does not keep their data from being read or sent. A sandbox (container, VM), without secrets the agent should not
+and does not keep their data from being read or sent. What the model read (a
+web page, a file) reaches the owner's screen in its answers: the page sets
+it as text, the terminal UI cleans it of control sequences (§5,
+"Untrusted text in the terminal UI"); what it says is still the owner's to
+judge. A sandbox (container, VM), without secrets the agent should not
 have, is the deployment's job.
 
 ## 7. What moved, what it becomes
