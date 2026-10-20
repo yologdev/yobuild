@@ -151,7 +151,7 @@ pub(crate) const HINTS: &[Hint] = &[
         id: "dsh-host",
         scope: Scope::Start,
         pattern: "the DSH host did not start: ",
-        fix: "the DSH host (loaded for DSH plugins' grants) waits for what it names: reinstall the DSH runtime's folder the error names (a `dsh` set's: delete it; adapters/dsh: `npm ci` there) and run again; else drop the DSH plugins' grants",
+        fix: "the DSH host (loaded for DSH plugins' grants) waits for what it names, or provides no host (its log says why): reinstall the DSH runtime's folder the error names (a `dsh` set's: delete it; adapters/dsh: `npm ci` there) and run again; else drop the DSH plugins' grants",
     },
     Hint {
         id: "nothing-provides",
@@ -330,7 +330,14 @@ mod tests {
             ),
             (
                 Scope::Start,
-                "`run` would refuse it at start: the DSH host did not start: it waits for sessionPersistence (the DSH runtime's folder: /h/plugins/dsh/0123)".into(),
+                format!(
+                    "`run` would refuse it at start: {}",
+                    crate::run::dsh_host_refusal(
+                        &["sessionPersistence".into(), "yoagent-dsh-host".into()],
+                        std::path::Path::new("/h/plugins/dsh/0123"),
+                    )
+                    .unwrap()
+                ),
                 "dsh-host",
             ),
             (

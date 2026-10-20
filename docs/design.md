@@ -1783,9 +1783,18 @@ nothing from `host-services.json` (`dsh-session`, `dsh-agent` and
 `dsh-user-approval` inject `invariants` only in companion plugins of their
 own, which wait without holding the row). `run_test` covers a granted
 plugin's stand-in, its two-line steer, a refused wake said, and no agent
-without grants; the host not starting is unit-shaped only (its message and
-hint), not caused end to end. The gallery agent with `dsh-univer-office`
-is the next PR.
+without grants, and `check` together; the host not starting is
+unit-tested (`dsh_host_refusal`, its hint on that text), not caused end to
+end. The gallery agent with `dsh-univer-office` is the next PR.
+
+Found in review: rutis 0.12's catalog shares every service name across
+runtimes, so a rutis plugin could inject `yoagent-dsh-host` and reach the
+stand-in. The name is now **runtime-local** (`PluginHostBuilder::local`:
+registered for a Rust type nobody provides, so never shared; the DSH
+adapter still finds it in its own runtime's Cordis) — a plugin of another
+runtime injecting it never starts. The session log's row is found by its
+package, as yoagent-rutis finds it, and given its folder at start or the
+run is refused: an empty folder is never written.
 
 #### Step 3, pi grants
 

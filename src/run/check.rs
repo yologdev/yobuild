@@ -434,16 +434,10 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     }
     // The DSH host's session log goes to the DSH home: the user's own when
     // they set one.
-    if plan.dsh_host {
-        if let Some(home) =
-            std::env::var_os("YOAGENT_DSH_HOME").filter(|v| !v.to_string_lossy().trim().is_empty())
-        {
-            agent_notes.push(format!(
-                "the DSH host writes its session log in YOAGENT_DSH_HOME ({}), a DSH home of your own",
-                Path::new(&home).join("sessions").display()
-            ));
-        }
-    }
+    agent_notes.extend(super::dsh_home_note(
+        &plan,
+        std::env::var_os("YOAGENT_DSH_HOME"),
+    ));
     // Install scripts: what the lock says (only said; a lock that cannot
     // be read for it is a note, never a refusal).
     let scripts = match install::install_scripts(&manifest, &layout.adapters) {

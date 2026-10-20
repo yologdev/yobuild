@@ -707,6 +707,16 @@ struct RawFrontend {
 type Located = (Range<usize>, String);
 
 impl Manifest {
+    /// What every DSH plugin is granted — the same on each, which `parse`
+    /// enforces (one DSH host serves them all) — when that is anything.
+    pub fn dsh_grants(&self) -> Option<&Grants> {
+        self.plugins
+            .iter()
+            .find(|p| matches!(p.kind, PluginKind::Dsh(_)))
+            .map(|p| &p.grants)
+            .filter(|g| !g.is_empty())
+    }
+
     /// Reads and checks the manifest at `path`; its folder, made absolute,
     /// is what its paths are relative to.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ManifestError> {

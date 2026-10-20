@@ -121,12 +121,7 @@ impl Host {
             .filter(|p| matches!(p.kind, PluginKind::Rutis { .. }))
             .map(|p| (p.name.clone(), p.grants.clone()))
             .collect();
-        let dsh = manifest
-            .plugins
-            .iter()
-            .find(|p| matches!(p.kind, PluginKind::Dsh(_)))
-            .map(|p| p.grants.clone())
-            .filter(|g| !g.is_empty());
+        let dsh = manifest.dsh_grants().cloned();
         let config = manifest.agent.model.config();
         let model = json!({
             "provider": manifest.agent.model.provider(),
@@ -749,6 +744,13 @@ mod tests {
         assert!(session.allow_wakes(IDLE_WAKES));
         let host = Host::new(session.clone(), &manifest, dir.path(), None, false);
         (host, session, driver, dir)
+    }
+
+    #[test]
+    fn a_flattened_text_is_one_line() {
+        let flat = flatten("a\u{2028}b\tc\r\nd\u{85}e");
+        assert_eq!(flat, "a b c  d e");
+        assert_eq!(one_line(&flat), Some("a b c  d e"));
     }
 
     const DSH_HOST: Option<&str> = Some(DSH_HOST_ROW);

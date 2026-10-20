@@ -215,10 +215,15 @@ pub fn rows_from_json(listed: Json, runtime: &str) -> Result<Vec<Row>, BoxError>
         .collect())
 }
 
+/// The type [`PluginHostBuilder::local`] names its services for: never
+/// provided, so they never cross runtimes.
+struct RuntimeLocal;
+
 #[derive(Default)]
 pub struct PluginHostBuilder {
     runtimes: Vec<(String, PathBuf)>,
     shared: Vec<String>,
+    local: Vec<String>,
     terminal: Option<String>,
     env: Vec<(String, OsString, OsString)>,
 }
@@ -261,6 +266,16 @@ impl PluginHostBuilder {
         self
     }
 
+    /// A service name a row provides for the plugins of its own runtime
+    /// only (such as the DSH adapter's `yoagent-dsh-host`, the stand-in
+    /// agent): not shared by name, so a row of another runtime that injects
+    /// it waits for a provider that never comes, and never starts. rutis
+    /// 0.12 shares every name otherwise.
+    pub fn local(mut self, service: impl Into<String>) -> Self {
+        self.local.push(service.into());
+        self
+    }
+
     /// Start the runtimes and the loader on `root`.
     pub async fn start(self, root: &Ctx) -> Result<PluginHost, BoxError> {
         if let Some((runtime, name, _)) = self
@@ -279,6 +294,11 @@ impl PluginHostBuilder {
         let mut catalog = ServiceCatalog::new();
         for service in &self.shared {
             catalog.register_shared(service);
+        }
+        // Named for a Rust service nobody provides: never shared, left to
+        // the providing runtime's own Cordis.
+        for service in &self.local {
+            catalog.register::<RuntimeLocal>(service);
         }
         let routes: Arc<Mutex<HashMap<String, String>>> = Arc::default();
         let mut resolvers = Vec::new();

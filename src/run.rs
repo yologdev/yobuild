@@ -181,6 +181,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tracing::info!("{note}");
         session.notice(NoticeLevel::Warning, note.clone());
     }
+    if let Some(note) = dsh_home_note(&checked.plan, std::env::var_os("YOAGENT_DSH_HOME")) {
+        tracing::info!("{note}");
+        session.notice(NoticeLevel::Info, note);
+    }
     // What changed in `agent.lock`.
     for said in checked.installed.said() {
         tracing::info!("{said}");
@@ -734,6 +738,10 @@ const SHARED: [&str; 7] = [
     host::APPROVAL,
 ];
 
+/// The services the adapters' own rows provide for their runtime only:
+/// the DSH host (`yoagent-dsh-host`).
+const LOCAL: [&str; 1] = [DSH_HOST_SERVICE];
+
 /// The plugins as [`start`] started them.
 struct Started {
     bridge: RutisBridge,
@@ -825,19 +833,16 @@ async fn start(
     for service in SHARED {
         builder = builder.share(service);
     }
+    // What the adapters' rows provide for their own runtime: the DSH host
+    // (a plugin of another runtime could otherwise get the stand-in, and
+    // wake as a DSH plugin; design §12).
+    for service in LOCAL {
+        builder = builder.local(service);
+    }
     let mut host = builder.start(root).await?;
     if !plan.rows.is_empty() {
-        // The DSH host's session log, in the run's DSH home.
-        let sessions = dsh_home.as_ref().map(|home| home.path().join("sessions"));
-        let rows = plan.rows.iter().map(|row| match (&sessions, row.id()) {
-            (Some(sessions), plugins::DSH_SESSION_LOG)
-                if plan.dsh_host && row.runtime_is("dsh") =>
-            {
-                row.clone().config(serde_json::json!({ "root": sessions }))
-            }
-            _ => row.clone(),
-        });
-        host.load(rows.collect::<Vec<_>>())
+        let rows = with_session_log(plan, dsh_home.as_ref())?;
+        host.load(rows)
             .await
             .map_err(|e| dsh_waiting(e, plan, manifest.dsh.host_services))?;
         // The adapters' handlers, each from its own row; and a rutis plugin
@@ -1277,13 +1282,58 @@ async fn dsh_services(
     Err(dsh_missing(&missing, plan, host_services))
 }
 
+/// Where the DSH host writes its session log, when that is the user's own
+/// DSH home (`YOAGENT_DSH_HOME`, `home`): said by `check` and by `run`.
+pub(crate) fn dsh_home_note(
+    plan: &plugins::Plan,
+    home: Option<std::ffi::OsString>,
+) -> Option<String> {
+    let home = home.filter(|v| !v.to_string_lossy().trim().is_empty())?;
+    plan.dsh_host.then(|| {
+        format!(
+            "the DSH host writes its session log in YOAGENT_DSH_HOME ({}), a DSH home of your own",
+            Path::new(&home).join("sessions").display()
+        )
+    })
+}
+
+/// `plan`'s rows, the DSH host's session log given its folder in the
+/// run's DSH home (`<home>/sessions`): refused when that row is not there
+/// once, so the log is never written where its empty folder would point.
+fn with_session_log(plan: &plugins::Plan, home: Option<&DshHome>) -> Result<Vec<Row>, BoxError> {
+    let Some(id) = plan.dsh_session_log.as_deref() else {
+        return Ok(plan.rows.clone());
+    };
+    let Some(home) = home else {
+        return Err("the DSH host's session log has no DSH home".into());
+    };
+    let sessions = home.path().join("sessions");
+    let mut given = 0;
+    let rows = plan
+        .rows
+        .iter()
+        .map(|row| match row.id() == id && row.runtime_is("dsh") {
+            true => {
+                given += 1;
+                row.clone().config(serde_json::json!({ "root": sessions }))
+            }
+            false => row.clone(),
+        })
+        .collect();
+    match given {
+        1 => Ok(rows),
+        n => Err(
+            format!("the DSH host's session log row `{id}` is planned {n} times, not once").into(),
+        ),
+    }
+}
+
 /// Whether the DSH host (`dsh-host.ts`) started: it provides
 /// `yoagent-dsh-host` once every service it injects exists. Without it the
 /// DSH adapter finds no host and runs every call agentless — the plugins'
 /// grants not honoured, unsaid — so a host that does not start refuses the
 /// run, naming what it waits for. Looked at as `dsh_services` does.
 async fn dsh_host_started(host: &mut PluginHost, plan: &plugins::Plan) -> Result<(), BoxError> {
-    const HOST: &str = "yoagent-dsh-host";
     let module = plan.dsh_dir.join("dsh-host.ts").display().to_string();
     let mut missing = Vec::new();
     for wait in [1000, 3000] {
@@ -1291,29 +1341,43 @@ async fn dsh_host_started(host: &mut PluginHost, plan: &plugins::Plan) -> Result
             host,
             &plan.dsh_dir,
             std::slice::from_ref(&module),
-            &[HOST],
+            &[DSH_HOST_SERVICE],
             wait,
         )
         .await?;
-        if !missing.iter().any(|m| m == HOST) {
+        if dsh_host_refusal(&missing, &plan.dsh_dir).is_none() {
             return Ok(());
         }
+    }
+    Err(dsh_host_refusal(&missing, &plan.dsh_dir)
+        .unwrap_or_default()
+        .into())
+}
+
+/// The DSH host's provider, `dsh-host.ts`'s `yoagent-dsh-host`.
+const DSH_HOST_SERVICE: &str = "yoagent-dsh-host";
+
+/// Why the DSH host did not start, from the services the probe found
+/// `missing` (with `dsh-host.ts`'s own and its provider): `None` when its
+/// provider is there.
+pub(crate) fn dsh_host_refusal(missing: &[String], dir: &Path) -> Option<String> {
+    if !missing.iter().any(|m| m == DSH_HOST_SERVICE) {
+        return None;
     }
     let waits: Vec<&str> = missing
         .iter()
         .map(String::as_str)
-        .filter(|m| *m != HOST)
+        .filter(|m| *m != DSH_HOST_SERVICE)
         .collect();
     let why = match waits.is_empty() {
         true => "it provides no host, though every service it injects exists (its log says why)"
             .to_owned(),
         false => format!("it waits for {}", waits.join(", ")),
     };
-    Err(format!(
+    Some(format!(
         "the DSH host did not start: {why} (the DSH runtime's folder: {})",
-        plan.dsh_dir.display()
-    )
-    .into())
+        dir.display()
+    ))
 }
 
 /// A `load` that failed because DSH plugins wait for services nobody
@@ -1387,6 +1451,9 @@ async fn probe_services(
     let out = tempfile::NamedTempFile::new()?.into_temp_path();
     std::fs::remove_file(&out)?;
     let id = "yobuild:dsh-services";
+    // What had stopped already is another's: only what stops meanwhile
+    // (the probe, or the `dsh` runtime under it) fails it.
+    let before = host.stopped(&[]);
     host.load([Row::new(id, base.join("probe-services.ts").display())
         .runtime("dsh")
         .config(serde_json::json!({
@@ -1399,11 +1466,18 @@ async fn probe_services(
     .await?;
     let deadline = Instant::now() + Duration::from_millis(wait_ms) + Duration::from_secs(15);
     let answer = loop {
+        // `writeFileSync` creates the file before it writes: read again
+        // until it holds whole JSON (the deadline says a broken one).
         if let Ok(text) = std::fs::read_to_string(&out) {
-            // Written whole once: an unreadable answer is a broken one.
-            break Ok(text);
+            if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
+                break Ok(text);
+            }
         }
-        let failures = host.stopped(&[]);
+        let failures: Vec<String> = host
+            .stopped(&[])
+            .into_iter()
+            .filter(|f| !before.contains(f))
+            .collect();
         if !failures.is_empty() {
             break Err(format!(
                 "the DSH service check failed: {}",
@@ -1418,7 +1492,10 @@ async fn probe_services(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    host.unload(id).await?;
+    // A probe that cannot be unloaded is said, not taken for its answer.
+    if let Err(e) = host.unload(id).await {
+        tracing::warn!("unloading the DSH service check: {e}");
+    }
     let text = answer?;
     let broken = || format!("the DSH service check answered {text:?}");
     let found: serde_json::Value = serde_json::from_str(&text).map_err(|_| broken())?;
@@ -1756,6 +1833,69 @@ mod tests {
         assert_eq!(what_to_do_at_start("Auth error: x"), None);
     }
     use super::*;
+
+    #[test]
+    fn the_dsh_host_is_refused_only_without_its_provider_saying_what_it_waits_for() {
+        let dir = Path::new("/h/dsh");
+        let missing =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+        assert_eq!(dsh_host_refusal(&missing(&["other"]), dir), None);
+        assert_eq!(
+            dsh_host_refusal(&missing(&["yoagent-dsh-host", "sessionPersistence"]), dir).unwrap(),
+            "the DSH host did not start: it waits for sessionPersistence (the DSH runtime's folder: /h/dsh)"
+        );
+        assert!(dsh_host_refusal(&missing(&["yoagent-dsh-host"]), dir)
+            .unwrap()
+            .contains("it provides no host, though every service it injects exists"));
+    }
+
+    #[test]
+    fn the_session_log_gets_its_folder_in_the_dsh_home_or_the_run_is_refused() {
+        let plan = |rows: Vec<Row>, log: Option<&str>| plugins::Plan {
+            rows,
+            dsh_host: log.is_some(),
+            dsh_session_log: log.map(str::to_owned),
+            ..plugins::Plan::default()
+        };
+        let row = |id: &str| Row::new(id, "x").runtime("dsh");
+        let home = DshHome::new().unwrap();
+        let rows =
+            with_session_log(&plan(vec![row("a"), row("log")], Some("log")), Some(&home)).unwrap();
+        assert_eq!(rows[0].config_json(), &serde_json::json!({}));
+        assert_eq!(
+            rows[1].config_json(),
+            &serde_json::json!({ "root": home.path().join("sessions") })
+        );
+        // Not there, there twice, no home: refused, never an empty folder.
+        let e = with_session_log(&plan(vec![row("a")], Some("log")), Some(&home)).unwrap_err();
+        assert!(e.to_string().contains("planned 0 times"), "{e}");
+        let e = with_session_log(
+            &plan(vec![row("log"), row("log")], Some("log")),
+            Some(&home),
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("planned 2 times"), "{e}");
+        assert!(with_session_log(&plan(vec![row("log")], Some("log")), None).is_err());
+        // No host: the rows as planned.
+        let rows = with_session_log(&plan(vec![row("log")], None), None).unwrap();
+        assert_eq!(rows[0].config_json(), &serde_json::json!({}));
+    }
+
+    #[test]
+    fn the_dsh_home_is_said_only_with_the_dsh_host_and_a_home_of_ones_own() {
+        let host = plugins::Plan {
+            dsh_host: true,
+            ..plugins::Plan::default()
+        };
+        let note = dsh_home_note(&host, Some("/me/.dsh".into())).unwrap();
+        assert!(note.contains("/me/.dsh/sessions"), "{note}");
+        assert_eq!(dsh_home_note(&host, None), None);
+        assert_eq!(dsh_home_note(&host, Some(" ".into())), None);
+        assert_eq!(
+            dsh_home_note(&plugins::Plan::default(), Some("/me/.dsh".into())),
+            None
+        );
+    }
 
     #[test]
     fn read_only_is_reading_listing_and_searching_only() {
