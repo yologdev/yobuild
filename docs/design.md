@@ -830,57 +830,93 @@ the pi-tui terminal UI, UI plugins, plugin dialogs (pi and DSH questions
 reach the owner), `PluginHost` (rows, routing, reload, `env`, `terminal`),
 `DshHome`. It is application code; yoagent keeps no frontend.
 
-### Answers as Markdown on the page (proposed 2026-10-21)
+### Answers as Markdown on the page (built 2026-10-21)
 
 The model writes its answers in Markdown (the report's `## Sections`,
-lists, tables), and the page shows only part of it: `lib.js`'s
-`markdownParts` reads inline marks (`**bold**`, `` `code` ``, https
-links), so headings, lists and tables arrive as raw text. The page learns
-the block level; the terminal UI follows later (pi-tui's own Markdown
-component), as its own step.
+lists, tables), and the page showed only part of it: `markdownParts` read
+inline marks (`**bold**`, `` `code` ``, https links), so headings, lists
+and tables arrived as raw text. The page learns the block level; the
+terminal UI follows later (pi-tui's own Markdown component), as its own
+step.
 
 - **What is read** — a subset of CommonMark with GFM tables, enough for
   what models write:
-  - **Blocks:** ATX headings (`#` to `######`); paragraphs, separated by
-    blank lines, each single line break kept (as chat pages do: a model's
-    lines are meant as lines); bullet lists (`-`, `*`, `+`) and numbered
-    lists (`1.`, `1)`, the first number kept), nested by indentation;
-    fenced code (```` ``` ```` or `~~~`, the language shown as a label, an
-    unclosed fence running to the end — while a reply streams in, its
-    code block is open); block quotes (`>`); rules (`---`, `***`, `___`);
-    GFM tables (a header row, the `|---|:--:|` row with its alignments,
-    then rows; a row with fewer cells padded, more cut).
-  - **Inline:** strong (`**`, `__`), emphasis (`*`, `_`, not inside a
-    word for `_`), code (`` ` ``, any run of backticks), strikethrough
-    (`~~`), links `[text](url)` and bare `https://…`; a backslash escapes
-    a mark.
+  - **Blocks:** ATX headings (`#` to `######`, a closing run of `#`
+    dropped); paragraphs, separated by blank lines, each single line break
+    kept (as chat pages do: a model's lines are meant as lines); bullet
+    lists (`-`, `*`, `+`) and numbered lists (`1.`, `1)`, the first number
+    kept), nested by indentation (a leading tab counts four), a numbered
+    one interrupting a paragraph only from 1 (`2024.` on a paragraph's
+    next line is the paragraph's); fenced code (```` ``` ```` or `~~~`,
+    the language shown as a label, a backtick fence's info holding no
+    backtick — a one-line ```` ```js``` ```` is code in a paragraph, not a
+    fence swallowing the answer — an unclosed fence running to the end,
+    as while a reply streams in, and a fence in a list item taking no lazy
+    line); block quotes (`>`); rules (`---`, `***`, `___`, spaced or
+    not); GFM tables (a header row, the `|---|:--:|` row with its
+    alignments, then rows — ending at a blank line, a line without `|`,
+    or, for piped rows, one not starting with `|`; a row with fewer cells
+    padded, more kept in its last cell; a `|` inside a code span or
+    escaped is the cell's).
+  - **Inline**, in passes, as CommonMark orders them: code spans (any run
+    of backticks closing at the next run of exactly as many; backslashes
+    literal inside), then links and images (balanced brackets; a
+    destination with balanced parentheses and an optional title; the link
+    text read for marks, with no link in it), then emphasis by
+    CommonMark's delimiter rules (`*`, `_` — not inside a word — and `~~`;
+    emphasis around strong and strong around emphasis), so a mark inside
+    code or a URL closes nothing; bare `https://…` (a sentence's stop and
+    a closing parenthesis it did not open left out); a backslash escapes
+    punctuation.
   - **Not read, shown as text:** images (the page would fetch whatever URL
-    the model names — a way to send what it read anywhere: never loaded),
-    raw HTML, reference links, footnotes.
-- **Kept as data** — `lib.js` (no DOM, as today): `markdownBlocks(text)`
-  returns blocks — `heading{level, inline}`, `paragraph{inline}`,
-  `list{ordered, start, items: blocks[]}`, `code{lang, text}`,
-  `quote{blocks}`, `rule`, `table{align, header, rows}` — and
-  `markdownParts` the inline parts (`text`, `strong`, `em`, `code`, `del`,
-  `link`, `br`). Nesting deeper than 8 levels is read as text, so a hostile
-  reply cannot make the parser recurse without end; the work is linear in
-  the text.
-- **Drawn as DOM nodes** — `app.js` builds each block with `createElement`
-  and `textContent`, never `innerHTML`: a reply cannot add markup, scripts
-  or styles. Links go through `safeUrl` (http(s) only), open in a new tab,
-  `rel="noreferrer"`. A streaming reply is parsed again as it grows (its
-  deltas come ≤ 30 ms apart, merged): the cost of a few kilobytes.
+    the model names — a way to send what it read anywhere: never loaded,
+    nor offered as a link, inside a link too; one not yet whole, or with a
+    space in its URL, keeps its URL as text), links other than https or
+    to a URL the page would not open (whole, as written), raw HTML,
+    reference links, footnotes. An empty link text shows the URL.
+- **Kept as data** — `lib.js`: `markdownBlocks(text)` returns blocks —
+  `heading{level, inline}`, `paragraph{inline}`, `list{ordered, start,
+  items: blocks[]}`, `code{lang, text}`, `quote{blocks}`, `rule`,
+  `table{align, header, rows}` — and `markdownParts` the inline parts
+  (`text`, `br`, `code`, `link{parts, url}`, `strong`/`em`/`del{parts}`).
+  Blocks and the marks within them nest together at most `MAX_DEPTH` (8)
+  deep; past it the rest is text, kept. Every step is linear in the text:
+  no backtracking regex (headings, rules and table separators read by
+  hand), code spans and brackets found through indexes, emphasis matched
+  over a linked list with CommonMark's floor per kind — the page reads the
+  answer again with each delta.
+- **Drawn node by node** — `drawMarkdown(doc, element, text)` in `lib.js`
+  (the document passed in, so a test draws into a fake one): every node
+  made with `createElement`, its text set as text, never `innerHTML` — a
+  reply cannot add markup, scripts or styles; a table's alignment set on
+  `style.textAlign` from `left`/`center`/`right` only; links https only
+  (as before), checked again by `safeUrl`, opening in a new tab,
+  `rel="noreferrer"`. A kind it does not know is drawn as its text, never
+  dropped; if drawing throws, the raw text is shown. A streaming reply is
+  drawn again as it grows (its deltas come ≤ 30 ms apart, merged).
   Thinking text and tool cards stay as they are.
 - **Styles** — headings a little larger, not page-sized; tables with
   borders and their own horizontal scroll; code blocks scrolling, not
   wrapping; lists indented.
 - **Tool lines** — a line too long for the page (a plugin's card title
-  with an absolute path) is cut at the page's width with an ellipsis, the
-  whole line on hover.
+  with an absolute path) is cut at the page's width with an ellipsis, its
+  ✓/✗ kept; on hover, the tool and its arguments (up to 400 characters).
+  A tool call with no arguments (or a big integer in them) still gets its
+  line.
+- **Tried** in headless Chrome on a report like the gallery's: headings,
+  nested lists, the table's right-aligned column, a code block with its
+  language, a quote, a rule, a long tool line cut.
 - **Tests** — `node --test frontend/web/lib.test.js`: each block and
-  inline kind, nesting, a table's alignments and odd rows, an unclosed
-  fence, escapes, images and HTML kept as text, the depth limit, links
-  other than http(s) left as text; `web_test` unchanged (the protocol is).
+  inline kind, nesting both ways, links (marks in their text, balanced
+  parentheses, titles, empty text), tables (alignments, odd rows, pipes in
+  code, their end), fences (in list items, one line, unclosed), CRLF,
+  tabs, what interrupts a paragraph, images and HTML and other schemes
+  kept as text exactly, the depth limit (the text kept), hostile inputs
+  each under a second, every prefix of a streaming answer read without a
+  throw or an unsafe link, the drawing into a fake document (list starts,
+  tight and loose items, alignment, the language, the link's attributes,
+  HTML as text, no image), and `app.js` holding no HTML sink; `web_test`
+  unchanged (the protocol is).
 
 ## 6. Safety model
 

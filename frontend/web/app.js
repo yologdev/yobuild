@@ -9,7 +9,7 @@
 // A tool no plugin draws, whose result carries `details.view`, gets a card
 // (and its line the view's title).
 
-import { diffRows, markdownParts, Questions, runEndLine, safeUrl, toolView, viewTitle } from './lib.js'
+import { diffRows, drawMarkdown, jsonText, Questions, runEndLine, safeUrl, toolView, viewTitle } from './lib.js'
 
 const log = document.getElementById('log')
 const panels = document.getElementById('panels')
@@ -47,27 +47,13 @@ const add = (className, text) => {
   scroll()
   return el
 }
-// Answers as DOM nodes built from markdownParts — never HTML from the model.
-function markdown(text, element) {
-  element.replaceChildren()
-  for (const part of markdownParts(text)) {
-    if (part.kind === 'text') {
-      element.append(part.text)
-      continue
-    }
-    const node = document.createElement(part.kind === 'link' ? 'a' : part.kind)
-    node.textContent = part.text
-    if (part.kind === 'link') {
-      node.href = part.url
-      node.target = '_blank'
-      node.rel = 'noreferrer'
-    }
-    element.append(node)
-  }
-}
+// Answers as Markdown, drawn node by node (`drawMarkdown`) — never HTML
+// from the model.
+const markdown = (text, element) => drawMarkdown(document, element, text)
 
 const short = (value, max = 80) => {
-  const text = typeof value === 'string' ? value : JSON.stringify(value)
+  // Any value: no arguments, a big integer.
+  const text = typeof value === 'string' ? value : (jsonText(value) ?? '')
   return text.length > max ? `${text.slice(0, max)}…` : text
 }
 
@@ -249,7 +235,13 @@ function onEvent(event) {
       return
     case 'toolExecutionStart': {
       const line = add('tool')
-      line.append(document.createTextNode(`▶ ${event.toolName} ${short(event.args)}`))
+      const label = document.createElement('span')
+      label.className = 'label'
+      label.textContent = `▶ ${event.toolName} ${short(event.args)}`
+      line.append(label)
+      // Cut at the page's width: the tool and its arguments (up to 400
+      // characters) on hover.
+      line.title = `${event.toolName} ${short(event.args, 400)}`
       tools.set(event.toolCallId, { line, args: event.args })
       return
     }
