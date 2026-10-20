@@ -52,6 +52,18 @@ fn dsh_host_rows(dsh: &Path, services: bool) -> Result<Vec<Row>, BoxError> {
         .map_err(|e| format!("{}: {e}", dsh.join("dsh-host.json").display()).into())
 }
 
+impl Plan {
+    /// Each pi plugin's extension files, canonical and as planned: what
+    /// names a pi extension's plugin when the adapter calls or logs.
+    pub(crate) fn pi_names(&self) -> Vec<(String, Vec<PathBuf>)> {
+        self.pi_files
+            .iter()
+            .chain(&self.pi_spelled)
+            .map(|(name, files)| (name.clone(), files.clone()))
+            .collect()
+    }
+}
+
 /// The rows to load, the runtimes they need, and the handlers to wait for.
 #[derive(Debug, Default)]
 pub(crate) struct Plan {
@@ -97,6 +109,9 @@ pub(crate) struct Plan {
     /// Each pi plugin's extension files, canonical: a tool it allows runs
     /// without asking only when one of them registered it.
     pub pi_files: Vec<(String, Vec<PathBuf>)>,
+    /// The same files as `extensions` spells them, which the pi adapter
+    /// names back to the host services.
+    pub pi_spelled: Vec<(String, Vec<PathBuf>)>,
 }
 
 /// The folder of an installed package, at exactly `package`'s version;
@@ -273,7 +288,6 @@ pub(crate) fn plan(
     let mut exec_for = serde_json::Map::new();
     let mut trusted_for = serde_json::Map::new();
     let mut wake_for = serde_json::Map::new();
-    let mut model = false;
     let mut dsh_rows: Vec<Row> = Vec::new();
     for plugin in &manifest.plugins {
         let failed = |e: BoxError| -> BoxError { format!("plugin {}: {e}", plugin.name).into() };
@@ -284,13 +298,25 @@ pub(crate) fn plan(
                     return Err(failed("a pi extension takes no config".into()));
                 }
                 let found = pi_extensions(layout, sets, plugin, source).map_err(failed)?;
-                let files = found
-                    .extensions
-                    .iter()
-                    .filter_map(|e| e.as_str())
-                    .map(|e| std::fs::canonicalize(e).unwrap_or_else(|_| PathBuf::from(e)))
-                    .collect();
+                // Each file as planned (how the adapter names it back) and
+                // canonical (how a tool's source is compared); one file is
+                // one plugin's: two would have the adapter and yobuild apply
+                // different grants.
+                let (mut files, mut spelled) = (Vec::new(), Vec::new());
+                for e in found.extensions.iter().filter_map(Json::as_str) {
+                    let canonical = std::fs::canonicalize(e)
+                        .map_err(|why| failed(format!("its extension {e}: {why}").into()))?;
+                    let other = plan.pi_files.iter().find(|(_, fs)| fs.contains(&canonical));
+                    if let Some((other, _)) = other {
+                        return Err(failed(
+                            format!("its extension {e} is plugin {other}'s too").into(),
+                        ));
+                    }
+                    spelled.push(PathBuf::from(e));
+                    files.push(canonical);
+                }
                 plan.pi_files.push((plugin.name.clone(), files));
+                plan.pi_spelled.push((plugin.name.clone(), spelled));
                 // Its grants, by each extension file as `extensions` spells
                 // it (the adapter's keys resolve as its entries do).
                 let g = &plugin.grants;
@@ -307,8 +333,6 @@ pub(crate) fn plan(
                         wake_for.insert(file.to_owned(), json!(true));
                     }
                 }
-                // One model for every extension (the manifest's one rule).
-                model |= g.model.is_some();
                 extensions.extend(found.extensions);
                 plan.notes.extend(found.notes);
             }
@@ -370,7 +394,8 @@ pub(crate) fn plan(
                 config[key] = Json::Object(map);
             }
         }
-        if model {
+        // One model for every extension (the manifest's one rule).
+        if manifest.pi_model() {
             config["model"] = super::host::model_info(manifest);
         }
         plan.rows.push(
@@ -1155,6 +1180,8 @@ mod tests {
         let plan = plan_of(&link, "[[plugin]]\npi = \"./p.ts\"\n").unwrap();
         let canonical = std::fs::canonicalize(real.path().join("p.ts")).unwrap();
         assert_eq!(plan.pi_files, [("p".to_owned(), vec![canonical])]);
+        // And as planned, which the adapter names back.
+        assert_eq!(plan.pi_spelled, [("p".to_owned(), vec![link.join("p.ts")])]);
     }
 
     #[test]
@@ -1234,6 +1261,91 @@ mod tests {
         assert!(!has(&plan, "dsh-host") && services.iter().all(|id| has(&plan, id)));
         let plan = loaded("", false);
         assert!(!has(&plan, "dsh-host") && !services.iter().any(|id| has(&plan, id)));
+    }
+
+    /// The pi plugins' grants become the adapter's settings, by each
+    /// extension file as `extensions` spells it; the rows re-providing the
+    /// host services load only when a grant uses them.
+    #[test]
+    fn a_pi_plugins_grants_become_the_adapters_settings_by_file() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["a.ts", "b.ts", "c.ts"] {
+            std::fs::write(dir.path().join(f), "").unwrap();
+        }
+        let file = |f: &str| dir.path().join(f).display().to_string();
+        let pi = |plan: &Plan| -> Json {
+            plan.rows
+                .iter()
+                .find(|r| r.id() == "pi")
+                .unwrap()
+                .config_json()
+                .clone()
+        };
+        let ids =
+            |plan: &Plan| -> Vec<String> { plan.rows.iter().map(|r| r.id().to_owned()).collect() };
+        let plan = plan_of(
+            dir.path(),
+            "[[plugin]]\npi = \"./a.ts\"\ngrants = { exec = \"gate\", wake = true }\n\
+             [[plugin]]\npi = \"./b.ts\"\ngrants = { exec = \"free\", trust = true }\n\
+             [[plugin]]\npi = \"./c.ts\"\n",
+        )
+        .unwrap();
+        let config = pi(&plan);
+        assert_eq!(
+            config["execFor"],
+            json!({ file("a.ts"): "gate", file("b.ts"): true })
+        );
+        assert_eq!(config["projectTrustedFor"], json!({ file("b.ts"): true }));
+        assert_eq!(config["wakeFor"], json!({ file("a.ts"): true }));
+        assert!(config.get("model").is_none(), "{config}");
+        let ids_ = ids(&plan);
+        assert!(
+            ids_.contains(&PI_HOST_APPROVAL.to_owned())
+                && ids_.contains(&PI_HOST_SESSION.to_owned())
+        );
+        // `model` on all: the manifest's model, for every extension.
+        let plan = plan_of(
+            dir.path(),
+            "[[plugin]]\npi = \"./a.ts\"\ngrants = { model = \"info\" }\n\
+             [[plugin]]\npi = \"./b.ts\"\ngrants = { model = \"info\" }\n",
+        )
+        .unwrap();
+        let m = manifest(dir.path(), "");
+        assert_eq!(pi(&plan)["model"], crate::run::host::model_info(&m));
+        // The re-providing rows only for what uses them.
+        for (grants, approval, session) in [
+            ("", false, false),
+            ("exec = \"free\"", false, false),
+            ("exec = \"gate\"", true, false),
+            ("wake = true", false, true),
+        ] {
+            let plan = plan_of(
+                dir.path(),
+                &format!("[[plugin]]\npi = \"./a.ts\"\ngrants = {{ {grants} }}\n"),
+            )
+            .unwrap();
+            let ids = ids(&plan);
+            assert_eq!(
+                ids.contains(&PI_HOST_APPROVAL.to_owned()),
+                approval,
+                "{grants}: {ids:?}"
+            );
+            assert_eq!(
+                ids.contains(&PI_HOST_SESSION.to_owned()),
+                session,
+                "{grants}: {ids:?}"
+            );
+        }
+        // One file, one plugin.
+        let e = plan_of(
+            dir.path(),
+            "[[plugin]]\npi = \"./a.ts\"\n[[plugin]]\nname = \"again\"\npi = \"./a.ts\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("plugin again: its extension") && e.contains("is plugin a's too"),
+            "{e}"
+        );
     }
 
     fn copy_dir(from: &Path, to: &Path) {

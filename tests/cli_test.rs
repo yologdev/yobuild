@@ -1314,4 +1314,7 @@ fn what_a_pi_extension_was_answered_for_want_of_a_grant_is_said() {
         stderr.contains("pi extension lens ran pi.exec(\"git\"): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)"),
         "{stderr}"
     );
+    // Said as notices, not leaked as raw log lines (the log stays at `warn`).
+    assert!(!stderr.contains("[pi] fixed answer ("), "{stderr}");
+    assert!(!stderr.contains(" INFO "), "{stderr}");
 }

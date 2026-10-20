@@ -42,7 +42,9 @@ Not usable in yobuild, checked on 2026-10-19: `pi-lens@4.4.3` (code health:
 lint, types) passes `check` and its tools print `✓`, but it treats the
 project as untrusted under yobuild and so never starts a language server:
 its diagnostics report every file clean, a type error included (its own
-log, `~/.pi-lens/latency.log`: `no_clients_none_spawning`). For linting,
+log, `~/.pi-lens/latency.log`: `no_clients_none_spawning`) — checked
+before pi grants existed: with `grants = { trust = true }` it is told the
+project is trusted, not yet re-checked. For linting,
 ESLint's MCP server (below).
 
 Refused by yobuild's pi adapter (they hook what yoagent cannot enforce, or

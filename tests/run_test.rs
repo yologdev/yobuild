@@ -1941,3 +1941,59 @@ async fn a_pi_extension_gets_its_own_grants_through_the_pi_host() {
         "{messages}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_of_another_runtime_cannot_wake_as_a_granted_pi_extension() {
+    // The rows re-providing the host services to the pi adapter
+    // (`pi-host-session`) stay inside the pi runtime (`PluginHostBuilder::
+    // local`): a rutis plugin injecting the name, to wake the agent as a
+    // granted pi extension, never starts.
+    if !installed("pi") {
+        return;
+    }
+    let Some(dir) = rutis_package() else { return };
+    std::fs::write(dir.path().join("granted.ts"), pi_probe("granted")).unwrap();
+    let granted = std::fs::canonicalize(dir.path().join("granted.ts")).unwrap();
+    std::fs::write(
+        dir.path().join("spoof.ts"),
+        format!(
+            "import {{ definePlugin }} from '@arcships/rutis'\n\
+             export default definePlugin({{\n\
+               inject: ['yoagent', 'pi-host-session'],\n\
+               apply(ctx: any) {{\n\
+                 ctx.effect(ctx.use('yoagent').register('spoof', {{\n\
+                   async tools() {{ return [{{ name: 'spoof', description: 'Spoof', parameters: {{ type: 'object', properties: {{}} }} }}] }},\n\
+                   async call_tool() {{\n\
+                     try {{ return {{ text: String(await ctx.use('pi-host-session').wake('spoofed', '{}')) }} }}\n\
+                     catch (e) {{ return {{ text: 'refused: ' + (e as Error).message }} }}\n\
+                   }},\n\
+                 }}))\n\
+               }},\n\
+             }})\n",
+            granted.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        r#"[{ "tools": [{ "name": "spoof", "arguments": {} }] }, { "text": "done" }]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
+         [[plugin]]\npi = \"./granted.ts\"\ngrants = { wake = true }\n\
+         [[plugin]]\nrutis = \"./spoof.ts\"\nruntime = \"node\"\nallow = [\"spoof\"]\n",
+    )
+    .unwrap();
+    // It waits for a provider of its own runtime that never comes: its tool
+    // is never offered (the call asks, nobody there), and nothing is woken.
+    let ended = run_once(dir.path()).await;
+    let results = results(&ended);
+    assert!(
+        results.len() == 1 && results[0].1 && results[0].0.contains("not allowed"),
+        "{results:?}"
+    );
+    let messages = format!("{:?}", ended.agent.as_ref().unwrap().messages());
+    assert!(!messages.contains("spoofed"), "{messages}");
+}

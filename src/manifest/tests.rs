@@ -1187,6 +1187,7 @@ fn a_pi_extension_takes_trust_model_wake_and_exec_and_one_model_for_all() {
     let grants = &m.plugins[0].grants;
     assert_eq!(grants.names(), ["trust", "model", "wake", "exec"]);
     assert_eq!(grants.exec, ExecGrant::Gate);
+    assert_eq!(grants.said(), ["trust", "model", "wake", "exec = \"gate\""]);
     for (value, exec) in [("off", ExecGrant::Off), ("free", ExecGrant::Free)] {
         let m = read(&format!(
             "{MINIMAL}{}",
@@ -1194,6 +1195,11 @@ fn a_pi_extension_takes_trust_model_wake_and_exec_and_one_model_for_all() {
         ))
         .unwrap();
         assert_eq!(m.plugins[0].grants.exec, exec);
+        // `"off"` is nothing granted.
+        assert_eq!(
+            m.plugins[0].grants.names().is_empty(),
+            exec == ExecGrant::Off
+        );
     }
     assert_eq!(
         error(&format!("{MINIMAL}{}", pi("e", "exec = \"any\""))),

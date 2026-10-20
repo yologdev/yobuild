@@ -261,25 +261,27 @@ pub struct Plugin {
     /// judges no calls).
     pub policy: bool,
     /// What its host gives it beyond what every plugin has (`grants`;
-    /// design §12): all off unless the manifest grants them — always, for a
-    /// pi plugin, until its host comes (M3b step 3). A DSH plugin takes
-    /// `workspace` and `wake`, the same on every DSH plugin (one DSH host
-    /// serves them all).
+    /// design §12): all off unless the manifest grants them. A pi plugin
+    /// takes `trust`, `model`, `wake` and `exec` (`model` on every pi plugin
+    /// or none); a DSH plugin `workspace` and `wake`, the same on every DSH
+    /// plugin (one DSH host serves them all).
     pub grants: Grants,
 }
 
 /// What a plugin's host gives it (design §12, "The manifest: `grants`"),
 /// each off unless granted. yobuild enforces a rutis plugin's by its row,
-/// the DSH plugins' by the DSH host's row (`dsh-host`, for all of them); a
-/// pi extension's come with its host (M3b step 3) and are refused until
-/// then.
+/// the DSH plugins' by the DSH host's row (`dsh-host`, for all of them), a
+/// pi extension's through the pi adapter's settings (`execFor`,
+/// `projectTrustedFor`, `wakeFor`, `model`) and the extension's file the
+/// adapter names when it calls.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Grants {
     /// The agent's folder (`host_workspace.cwd()`).
     pub workspace: bool,
-    /// The project counts as trusted (`host_workspace.trusted()`): the plugin
-    /// may run the project's code — an honour-system grant.
+    /// The project counts as trusted (`host_workspace.trusted()`; for a pi
+    /// extension, `ctx.isProjectTrusted()`): the plugin may run the
+    /// project's code — an honour-system grant.
     pub trust: bool,
     /// What it may know of the model: `"info"` (provider, id, limits).
     pub model: Option<ModelGrant>,
@@ -326,6 +328,19 @@ impl Grants {
         .into_iter()
         .filter_map(|(on, name)| on.then_some(name))
         .collect()
+    }
+
+    /// The grants as `check` says them: the keys, `exec` with its value
+    /// (`"gate"` and `"free"` are worlds apart).
+    pub fn said(&self) -> Vec<String> {
+        self.names()
+            .into_iter()
+            .map(|name| match (name, self.exec) {
+                ("exec", ExecGrant::Gate) => "exec = \"gate\"".to_owned(),
+                ("exec", ExecGrant::Free) => "exec = \"free\"".to_owned(),
+                (name, _) => name.to_owned(),
+            })
+            .collect()
     }
 
     /// Nothing granted.
@@ -723,6 +738,15 @@ struct RawFrontend {
 type Located = (Range<usize>, String);
 
 impl Manifest {
+    /// Whether the pi plugins are told the model (`model = "info"`): on
+    /// every pi plugin or none, which `parse` enforces (the pi adapter has
+    /// one model for all its extensions).
+    pub fn pi_model(&self) -> bool {
+        self.plugins
+            .iter()
+            .any(|p| matches!(p.kind, PluginKind::Pi(_)) && p.grants.model.is_some())
+    }
+
     /// What every DSH plugin is granted — the same on each, which `parse`
     /// enforces (one DSH host serves them all) — when that is anything.
     pub fn dsh_grants(&self) -> Option<&Grants> {
