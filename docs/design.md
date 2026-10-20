@@ -918,6 +918,40 @@ step.
   HTML as text, no image), and `app.js` holding no HTML sink; `web_test`
   unchanged (the protocol is).
 
+### Untrusted text in the terminal UI (proposed 2026-10-21)
+
+The terminal UI already draws answers as Markdown (pi-tui's `Markdown`
+component), but it prints the session's text as it comes — answers,
+thinking, tool names and arguments, notices, plugins' question titles and
+options, a prompt from another frontend — and a terminal runs the escape
+sequences in it. Checked on 2026-10-21: `ESC]0;…` sets the window title,
+`ESC[2J` clears the screen, `ESC]8;;…` makes a link that shows one thing
+and opens another, and pi-tui turns `[x](javascript:…)` into a clickable
+link; terminals that honour `OSC 52` let text write the clipboard. A
+model's text carries what it read (a web page, a file), so this is a way
+in, not a theory.
+
+- **Every untrusted string through one function** — `terminalText(s)` in
+  `lib.js` (tested by `node --test`): escape sequences removed whole (CSI,
+  OSC up to BEL or ST, DCS/APC/PM/SOS up to ST, any other `ESC` and its
+  next character), the other C0 controls but `\n` and `\t` removed, C1
+  controls (U+0080–U+009F, among them the one-byte CSI) removed, and the
+  bidirectional overrides and isolates (U+202A–U+202E, U+2066–U+2069)
+  removed, so text cannot reorder what is shown. `terminal-ui.ts` applies
+  it where text from the session enters — before its own styling, so its
+  colours are the only escapes left.
+- **Links in answers** — after pi-tui renders an answer, each `OSC 8`
+  link in the lines is pi-tui's (the input has none left); one whose
+  target is not https is unlinked, its text kept. pi-tui's fallback (no
+  hyperlink support: the URL printed after the text) stays.
+- **Not changed** — the page (its text is set as text, design §5 "Answers
+  as Markdown"), the protocol, the plugins themselves.
+- **Tests** — `lib.test.js`: each kind of sequence and control removed, a
+  split or unterminated sequence removed to the end, text and Unicode kept;
+  the answer filter given rendered lines; CI's headless terminal check
+  (`tests/terminal_pty.py`) gets an answer with an `ESC]0;` title, a
+  screen clear and a `javascript:` link, and asserts none reaches the pty.
+
 ## 6. Safety model
 
 Inherited from yoagent and the handoff work, and kept on by default:
