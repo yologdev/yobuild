@@ -109,4 +109,16 @@ found. Nobody is there to answer:
   by default) stop the run (`Stopped: [Agent stopped: Max turns reached
   …]`).
 - **The agent's folder** is the one `yobuild run` starts in: paths in
-  `arguments` are relative to it.
+  `arguments` are relative to it. To keep the person's sample files apart
+  from the agent's own, run from a work folder beside it: `cd work`, then
+  `yobuild run ../agent.toml --scripted ../scripts/demo.json --once
+  "<task>"`.
+- **Ids from earlier results** (a tool that returns `wt-…` or `u-…` that
+  the next call needs) cannot be written in a reply file: the replies are
+  fixed before the run. Call such tools only up to the first one that
+  needs an id, or that asks (nobody answers under `--once`), and end
+  there; the rest of the flow is shown by the live run. Do not reach into
+  a plugin's own files for ids to make a reply file pass.
+- **A run that leaves files behind** (a new `.univer`, a cache) changes
+  the next run's start: a tool that refuses to overwrite fails the second
+  time. Start each scripted run from the same files.

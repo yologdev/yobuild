@@ -231,12 +231,16 @@ fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str]) {
         .unwrap_or_else(|e| panic!("check's JSON ({e}): {}", ran.stderr));
     assert_eq!(report["ok"], true, "{report:#}");
     let entries = report["entries"].as_array().unwrap();
+    // No note, but the one a DSH plugin with grants always gets (alone it
+    // is probed without the DSH host; the scripted runs exercise it).
+    const GRANTED_DSH: &str = "probed without the DSH host: its grants are not exercised alone";
     for notes in entries
         .iter()
         .chain([&report["agent"]])
         .map(|e| &e["notes"])
     {
-        assert!(notes.as_array().is_none_or(|n| n.is_empty()), "{report:#}");
+        let notes = notes.as_array().map(Vec::as_slice).unwrap_or_default();
+        assert!(notes.iter().all(|n| n == GRANTED_DSH), "{report:#}");
     }
     let kinds: HashMap<&str, &str> = report["agent"]["tools"]
         .as_array()
@@ -373,5 +377,23 @@ fn code_reviewer() {
             ("tsconfig.json", "{\n  \"compilerOptions\": {\n    \"target\": \"ES2022\",\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"Bundler\",\n    \"strict\": true,\n    \"noEmit\": true\n  },\n  \"include\": [\"src\"]\n}\n"),
         ],
         &["no-writes.json"],
+    );
+}
+
+#[test]
+fn spreadsheet_clerk() {
+    let Some(dir) = agent("spreadsheet-clerk") else {
+        return;
+    };
+    // Two months' bank exports, and last month's spreadsheet standing in
+    // (text, seen only by `list_files`) for the "exists" reply file.
+    holds(
+        &dir,
+        &[
+            ("expenses-2026-08.csv", "date,description,category,amount\n2026-08-01,Rent August,Housing,1200.00\n2026-08-04,FreshMart,Groceries,71.10\n2026-08-18,Water bill,Utilities,30.25\n"),
+            ("expenses-2026-08.xlsx", "placeholder: stands for last month's spreadsheet the owner already made\n"),
+            ("expenses-2026-09.csv", "date,description,category,amount\n2026-09-01,Rent September,Housing,1200.00\n2026-09-02,FreshMart,Groceries,64.20\n2026-09-05,City Transit pass,Transport,45.00\n2026-09-09,FreshMart,Groceries,38.75\n2026-09-12,Power & Light,Utilities,72.40\n2026-09-15,Cinema,Entertainment,24.00\n2026-09-20,Corner Bakery,Groceries,9.80\n2026-09-27,Fuel stop,Transport,51.30\n"),
+        ],
+        &[],
     );
 }

@@ -1,0 +1,9 @@
+[
+  { "tools": [{ "name": "list_files", "arguments": { "path": ".", "pattern": "expenses-2026-09*" } }] },
+  { "tools": [{ "name": "read_file", "arguments": { "path": "expenses-2026-09.csv" } }] },
+  { "tools": [{ "name": "univer_new", "arguments": { "file": "expenses-2026-09.univer" } }] },
+  { "tools": [{ "name": "univer_status", "arguments": { "file": "expenses-2026-09.univer" } }] },
+  { "tools": [{ "name": "univer_api", "arguments": { "action": "find", "queries": ["SUMIF", "insertSheet"], "unit": "sheet", "limit": 5 } }] },
+  { "tools": [{ "name": "univer_worktree", "arguments": { "action": "create", "file": "expenses-2026-09.univer", "name": "totals" } }] },
+  { "text": "## File read\nexpenses-2026-09.csv: 8 rows, 2026-09-01 to 2026-09-27.\n\n## File written\nexpenses-2026-09.univer (the working file). No .xlsx: the draft to build it in was not allowed.\n\n## Waiting on you\nThe draft (univer_worktree create) was blocked or not answered: allow it and send the task again to build expenses-2026-09.xlsx." }
+]
