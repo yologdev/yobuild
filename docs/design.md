@@ -1638,6 +1638,125 @@ script becomes a test in yoagent-rutis with the first implementation PR, so
 this can be re-run on each DSH bump (0.2.1-rc.2 is out, with an 825-line
 change to `dsh-tools`' types).
 
+### Steps 2 and 3 against yoagent-rutis 0.7.1 (proposed 2026-10-20)
+
+yoagent-rutis 0.7.1 (with yoagent 0.25.11) ships the DSH host and part of
+the pi host. What each gives, what yobuild does with it, and what is still
+missing before a grant can be honoured.
+
+**Step 2, the DSH host — all in yobuild now.** 0.7.1's shim is
+`plugins/dsh/dsh-host.ts` (row `dsh-host`), its rows in `dsh-host.json`
+(`dsh-session`, `dsh-agent`, `dsh-user-approval`, the jsonl backend as
+`dsh-session-persistence`, `dsh-host`), merged by
+`adapters::dsh_host_rows(dsh, sessions)` into `host-services.json` — the
+jsonl backend replacing the storage-less row of that id (rutis-loader keeps
+the first row of an id, so the files are never appended by hand). It calls
+`host_session.info()`, `host_workspace.cwd()` and, for a DSH plugin's
+`steer`/`followup`/waking `send`/`inject`, `host_session.wake(text)`, each
+bounded at 30 s; a stand-in it cannot make (relative cwd, malformed info, a
+refused or slow call) fails the tool call with the reason. Approvals reach
+`ui` through `host-dialogs.ts` (yes → allowed-once, no → rejected, nobody →
+unavailable). yobuild's part:
+
+- **When it loads**: when any DSH plugin has a grant. Then the `dsh`
+  runtime's rows are `dsh_host_rows(plan.dsh_dir, <DshHome>/sessions)`
+  instead of `host-services.json` — DSH's host services included whatever
+  `[dsh] host_services` says (`false` with a grant: a note, "DSH's host
+  services load with the DSH host"). A `DshHome` is made whenever either is
+  on; with `YOAGENT_DSH_HOME` set the session log is written in the user's
+  own DSH home, said by `check` as an agent note.
+- **Where its files are**: `dsh-host.ts` resolves `@deepseek-ai/dsh-scope`
+  and the rest from its own folder, so it must sit at the root of the
+  runtime's folder, as the adapter does. `DSH_FILES` gains `dsh-host.ts`,
+  `dsh-host.json` and `host-services.json` (the two lists `dsh_host_rows`
+  reads from that folder), so the `dsh` set's hash covers them and an
+  install copies them; without pins, `adapters/dsh` already holds them.
+- **Grants**: a DSH plugin takes `workspace` and `wake`, `wake` only with
+  `workspace` (the stand-in reads the folder first: without it every call
+  would fail — refused at `wake`: "a DSH plugin's `wake` needs `workspace`
+  (the stand-in agent)"); `trust`, `model`, `exec`, `observe` stay refused.
+  The stand-in is one for the runtime, and DSH's registry keeps no owner,
+  so **a grant holds for every DSH plugin**: `check` lists, on each DSH
+  entry, the grants in force — the union — as "granted to every DSH
+  plugin: workspace, wake".
+- **Who is granted**: `Host::caller` gains one row besides a rutis plugin's,
+  the exact id `dsh-host`, granted that union. The DSH plugins' own
+  `plugin:<name>…` rows and the `dsh` row stay refused, so a DSH plugin
+  cannot call the host services around its shim.
+- **Wake**: from `dsh-host`, tagged `[DSH plugin] <text>` (the shim cannot
+  say which plugin), under the session's rules and its one allowance.
+  `host_approval.ask` stays a rutis plugin's: DSH's approvals already reach
+  `ui`.
+- **The bump**: yoagent 0.25.11 (a tool result's text blocks share one
+  `tool_output_max_lines` budget: `run_test`'s "a tool result's text blocks
+  all kept" is rechecked against it) and yoagent-rutis 0.7.1, whose
+  DSH base gains the five packages, so the examples' and gallery's locks are
+  regenerated in that PR; `koffi`'s install script is said by `check` (the
+  base's list) and is not run (`--ignore-scripts`): the code PR checks the
+  jsonl backend works without it, else says so here first.
+- **Done when**: `run_test` — a DSH fixture plugin reading
+  `exec.agent.session.header.cwd` (the agent's folder) and waking (reaching
+  the agent as `[DSH plugin] …`), refused both without grants; `check`'s
+  union note; and a gallery agent built through the skill with
+  `dsh-univer-office@0.3.7` (`parts.md` moves it from "not usable" to
+  **CI**), its scripted replies in CI and one live run, asked for first.
+
+**Step 3, pi grants — 0.7.1 covers part.** The pi adapter's row now takes:
+
+| Config | What it does | Per extension |
+|---|---|---|
+| `exec` / `execFor` | `pi.exec`: `false` (default), `true`, or commands matched by name; a refusal is code 126, reported at warn once per extension and command | yes (`execFor`, by file) |
+| `projectTrusted` | `ctx.isProjectTrusted()` | no |
+| `model` / `models` | `ctx.model`, a read-only `ctx.modelRegistry` | no |
+| (none) | observer events fire for every extension with handlers at load | no |
+| (none) | `sendMessage` recorded only; `sendUserMessage` throws | — |
+
+Fixed answers are logged as `[pi] fixed answer: …`. So, per grant:
+
+- **`exec`**: `"off"` → `execFor[file] = false`, `"free"` → `true`. `"gate"`
+  has no form: the adapter matches command names, it does not judge words.
+  Missing, asked of yoagent-rutis: `execFor[file] = "gate"` — each call's
+  `[command, ...args]` and `options.cwd` through `host_approval.judge`; not
+  free → `host_approval.ask` naming the extension, run on `"allow"` only.
+- **`trust`**: `projectTrusted` is one answer for every extension, and
+  `trust` lets a plugin run project code. Asked of yoagent-rutis:
+  `projectTrustedFor`, by file, as `execFor`.
+- **`model = "info"`**: one `model` for the row. The default already tells
+  every extension the run's model id, so the grant adds the provider and
+  limits; yobuild sets `model` (from `host_session.model()`'s figures) when
+  any pi plugin grants it, and `check` says "granted to every pi
+  extension". No adapter change.
+- **`wake`**: not mapped. Asked of yoagent-rutis: per extension
+  (`wakeFor`), `sendUserMessage(text)` and a `sendMessage` with
+  `triggerTurn` or `deliverAs` → `host_session.wake(text, file)`; refused
+  as today without the grant.
+- **`observe`**: 0.7.1 fires observers for every extension, and cannot be
+  made to refuse one. What they carry (the conversation, tool arguments and
+  results) every extension already reads through `message_end`, `context`
+  and `tool_result`, and sending it anywhere is Node's own power
+  (honour-system, above). **Proposed: drop the `observe` grant**; `check`
+  notes a pi entry that registers observer events, and §6 says every pi
+  extension sees the conversation.
+
+On yobuild's side, `Host::caller` accepts the `pi` row for `wake` and
+`ask` with a second argument naming the calling extension's file; yobuild
+maps it (`Plan::pi_files`, canonical) to its plugin and checks that
+plugin's grants — enforced in yobuild, trusting the adapter only to name
+the caller (per-extension trust does not hold against a hostile extension
+in the same runtime, §2). Tagged `[pi extension <plugin>] <text>`.
+
+So step 3 is a pair again: yoagent-rutis (`execFor` `"gate"`,
+`projectTrustedFor`, `wakeFor`, the file passed to the host), then yobuild
+(the grants mapped onto the row's config, the `pi` row as a caller,
+`observe` dropped, fixed answers said). Step 2 needs nothing more from
+yoagent-rutis.
+
+**Fixed answers said** (both steps): the adapters log `[pi] fixed answer: …`
+and `[dsh-host] …` warnings through `yoagent.log`, which yobuild sends to
+`tracing` only. The code PRs turn the fixed-answer tag and a refused
+`pi.exec` into a Warning notice, once a session per text, naming the grant
+that would change it.
+
 ### What it unlocks, and the migration
 
 Expected (measured afterwards, as the matrix is): univer's 13 file tools;
@@ -1664,7 +1783,9 @@ credentials services) for its own PR, limited to named keys.
 `Gate::check_argv`) and `grants` read and said, with rutis's grants
 enforced per row; (2) the DSH host — the stand-in, turns, the jsonl log,
 dialogs through DSH's own services, `workspace` and `wake`, fixed answers
-said; (3) pi grants — the factory wrapper, `trust`, `model = "info"`,
-`wake`, `exec`, `observe`; (4) removing provider keys from plugin
+said; (3) pi grants — `trust`, `model = "info"`, `wake`, `exec` (the
+factory wrapper shipped in yoagent-rutis 0.7.0; `observe` proposed
+dropped, above); (4) removing provider keys from plugin
 runtimes. Each a PR pair (yoagent-rutis,
-then yobuild), each design-checked.
+then yobuild), each design-checked; step 2's yoagent-rutis half shipped in
+0.7.1.
