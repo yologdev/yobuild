@@ -39,9 +39,11 @@ const ansi = (code: string) => (text: string) => `\x1b[${code}m${text}\x1b[0m`
 
 // Text from the session, cleaned for the terminal (design §5, "Untrusted
 // text in the terminal UI"): every string drawn that did not originate here
-// goes through it, before this file styles it — so the escapes on screen
-// are this file's and pi-tui's only. For display only: answers use the
-// request as received.
+// — each `say(…)` argument, the tool line, the answer's `Markdown`, the
+// editor's prefill, stderr — goes through it at the call, before this file
+// styles it (`say` itself does not clean), so the escapes on screen are this
+// file's and pi-tui's only. For display only: answers use the request as
+// received.
 const t = (value: unknown) => terminalText(value)
 
 // No terminal hyperlinks (OSC 8): pi-tui then prints a link's target after
@@ -133,7 +135,7 @@ export default definePlugin<{ demo?: string }>({
       tui.stop()
       frontend
         .send({ type: 'quit' })
-        .catch((e: unknown) => process.stderr.write(`yoagent: could not quit the session: ${String(e)}\n`))
+        .catch((e: unknown) => process.stderr.write(`yoagent: could not quit the session: ${t(String(e))}\n`))
     }
     // Text an `input` question put in the editor, cleared if the question
     // closes before the user answers.

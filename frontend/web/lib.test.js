@@ -305,6 +305,68 @@ test('terminal text loses every escape sequence and control, and keeps the text'
   assert.ok(!/[\x00-\x08\x0b-\x1f\x7f\u0080-\u009f]/.test(joined), JSON.stringify(joined))
 })
 
+test('terminal text: each path of each sequence, pinned', () => {
+  const M = TERMINAL_SEQUENCE_MAX
+  const cases = [
+    // CSI: private parameters, cut by the end, a control, non-ASCII, DEL.
+    ['a\x1b[?25lb', 'ab'],
+    ['\x1b[?1049h', ''],
+    ['a\x1b[12;3', 'a12;3'],
+    ['a\x1b[1\nb', 'a1\nb'],
+    ['a\x1b[12é b', 'a12é b'],
+    ['a\x1b[12\x7fb', 'a12b'],
+    // An ESC in a string sequence that is not ST ends it, then goes alone.
+    ['a\x1b]0;x\x1b[31mb', 'a0;xb'],
+    // BEL ends only OSC; DCS runs to ST.
+    ['a\x1bPq\x07b', 'aqb'],
+    ['a\x1bPx\x07y\x1b\\b', 'ab'],
+    // A string sequence cut by another control.
+    ['a\x1b]0;x\rb', 'a0;xb'],
+    // nF: no final at the end, past its 16, a final past ASCII.
+    ['a\x1b(', 'a'],
+    ['a\x1b' + ' '.repeat(20) + 'Bb', 'a     Bb'],
+    ['a\x1b(éb', 'aéb'],
+    // An ESC before a control or another ESC goes alone: a line break stays.
+    ['a\x1b\nb', 'a\nb'],
+    ['a\x1b\tb', 'a\tb'],
+    ['\x1b\x1b[31m', ''],
+    // Any other ESC takes a whole code point.
+    ['a\x1b😀b', 'ab'],
+    // C1 edges: U+0080 and U+009F go, U+00A0 stays.
+    ['a\u0080b\u009fc d', 'abc d'],
+    // Non-strings.
+    [42, '42'],
+    [null, ''],
+  ]
+  for (const [input, want] of cases) assert.equal(terminalText(input), want, JSON.stringify(input))
+  // Every bidi embedding, override, isolate and mark.
+  for (const c of '؜‎‏‪‫‬‭‮⁦⁧⁨⁩') {
+    assert.equal(terminalText(`a${c}b`), 'ab', c.codePointAt(0).toString(16))
+  }
+  // One bound for all: a sequence of up to M characters goes whole; longer,
+  // only its introducer.
+  const osc = (n) => `\x1b]0;${'x'.repeat(n)}\x07`
+  assert.equal(terminalText(osc(M - 5)), '')
+  assert.equal(terminalText(osc(M - 4)), `0;${'x'.repeat(M - 4)}`)
+  const csi = (n) => `\x1b[${'1'.repeat(n)}m`
+  assert.equal(terminalText(csi(M - 3)), '')
+  assert.equal(terminalText(csi(M - 2)), `${'1'.repeat(M - 2)}m`)
+})
+
+test('terminal text, on any input: no control left but newline and tab, and cleaning again changes nothing', () => {
+  const alphabet = ['\x1b', '[', ']', 'P', 'X', '^', '_', '\\', '\x07', '\r', '\n', '\t', '\x7f', '\u009b', '\u009d', '‮', '😀', '(', 'B', '0', ';', 'm', 'a', ' ']
+  let seed = 42
+  const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648)
+  for (let n = 0; n < 20000; n++) {
+    let input = ''
+    const length = next() % 24
+    for (let k = 0; k < length; k++) input += alphabet[next() % alphabet.length]
+    const out = terminalText(input)
+    assert.ok(!/[\x00-\x08\x0b-\x1f\x7f\u0080-\u009f؜‎‏‪-‮⁦-⁩]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(out), JSON.stringify(input))
+    assert.equal(terminalText(out), out, JSON.stringify(input))
+  }
+})
+
 test('questions show oldest first, once each', () => {
   const q = new Questions()
   assert.equal(q.add(1, { kind: 'confirm' }), true)
