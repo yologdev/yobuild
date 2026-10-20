@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value as Json};
 
 use super::Layout;
-use crate::frontend::host::{rows_from_file, Row};
+use crate::frontend::host::{rows_from_file, rows_from_json, Row};
 use crate::install::{Installed, Set};
 use crate::manifest::{Manifest, Package, Plugin, PluginKind, Runtime, Source};
 
@@ -20,6 +20,33 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// folder), at the version yobuild's own runtimes use.
 const RUTIS_RUNTIME: &str = "@arcships/rutis-runtime";
 
+/// The DSH host's session log (`dsh-host.json`'s row of this package): its
+/// folder is given at start, in the run's `DshHome`. Found by its package,
+/// as yoagent-rutis's `dsh_host_rows` finds it.
+const DSH_SESSION_LOG: &str = "@deepseek-ai/dsh-session-persistence-jsonl";
+
+/// The DSH host's rows from the `dsh` runtime's folder (yoagent-rutis's
+/// `dsh_host_rows`): with DSH's own host services, all of
+/// `host-services.json` with the host's in place of the rows of their ids;
+/// without, only the host's — a grant never brings DSH's files, credentials
+/// or storage services in. The session log's folder is set at start.
+fn dsh_host_rows(dsh: &Path, services: bool) -> Result<Vec<Row>, BoxError> {
+    // No folder here (`start` gives it): one that would be read as the
+    // runtime's own is never written.
+    let rows = yoagent_rutis::adapters::dsh_host_rows(dsh, Path::new(""))?;
+    let rows = match services {
+        true => rows,
+        false => {
+            let host = rows_from_file(&dsh.join("dsh-host.json"), "dsh")?;
+            rows.into_iter()
+                .filter(|row| host.iter().any(|h| row["id"] == h.id()))
+                .collect()
+        }
+    };
+    rows_from_json(json!(rows), "dsh")
+        .map_err(|e| format!("{}: {e}", dsh.join("dsh-host.json").display()).into())
+}
+
 /// The rows to load, the runtimes they need, and the handlers to wait for.
 #[derive(Debug, Default)]
 pub(crate) struct Plan {
@@ -28,6 +55,14 @@ pub(crate) struct Plan {
     pub pi: bool,
     /// Start the `dsh` runtime, in `dsh_dir`.
     pub dsh: bool,
+    /// Load the DSH host (its stand-in agent; design §12, "Step 2"): the DSH
+    /// plugins have grants. Its rows are in `rows`.
+    pub dsh_host: bool,
+    /// The DSH host's session log row, by id: `start` gives it its folder
+    /// (set whenever `dsh_host` is).
+    pub dsh_session_log: Option<String>,
+    /// DSH's own host services load (`[dsh] host_services`).
+    pub dsh_services: bool,
     /// The `dsh` runtime's folder: the `dsh` set's when DSH packages are
     /// pinned, else `adapters/dsh`; the DSH adapter's files it loads are
     /// there.
@@ -311,12 +346,24 @@ pub(crate) fn plan(
         let dsh = plan.dsh_dir.clone();
         plan.dsh = true;
         plan.handlers.push(plan.dsh_handler.clone());
-        if manifest.dsh.host_services {
-            // Read in place: it names packages, which resolve from `dsh`.
-            plan.rows.extend(rows_from_file(
-                &layout.adapters.join("dsh/host-services.json"),
-                "dsh",
-            )?);
+        plan.dsh_services = manifest.dsh.host_services;
+        plan.dsh_host = manifest.dsh_grants().is_some();
+        if plan.dsh_host {
+            let rows = dsh_host_rows(&dsh, plan.dsh_services)?;
+            let log = rows.iter().find(|row| row.name() == DSH_SESSION_LOG);
+            let Some(log) = log else {
+                return Err(format!(
+                    "{}: the DSH host's session log ({DSH_SESSION_LOG}) is not among its rows",
+                    dsh.join("dsh-host.json").display()
+                )
+                .into());
+            };
+            plan.dsh_session_log = Some(log.id().to_owned());
+            plan.rows.extend(rows);
+        } else if plan.dsh_services {
+            // Beside the adapter: it names packages, which resolve from `dsh`.
+            plan.rows
+                .extend(rows_from_file(&dsh.join("host-services.json"), "dsh")?);
         }
         let base = |id: &str, name: &str| Row::new(id, name).runtime("dsh");
         plan.rows.extend([
@@ -1073,6 +1120,65 @@ mod tests {
     }
 
     /// Copies a folder of files and folders (no links).
+    /// The DSH host's rows from the adapters' lists: with the grants,
+    /// `dsh-host.json`'s, and `host-services.json`'s only with DSH's host
+    /// services (DSH's files, credentials, storage never through a grant);
+    /// the session log's row known by its package.
+    #[test]
+    fn a_granted_dsh_plugin_loads_the_dsh_host_and_dshs_own_services_only_on_request() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("d.ts"), "").unwrap();
+        let dsh = Layout::default().adapters.join("dsh");
+        let ids = |file: &str| -> Vec<String> {
+            rows_from_file(&dsh.join(file), "dsh")
+                .unwrap()
+                .iter()
+                .map(|r| r.id().to_owned())
+                .collect()
+        };
+        let (host, services) = (ids("dsh-host.json"), ids("host-services.json"));
+        let loaded = |grants: &str, services: bool| {
+            let plan = plan_of(
+                dir.path(),
+                &format!(
+                    "[[plugin]]\ndsh = \"./d.ts\"\n{grants}[dsh]\nhost_services = {services}\n"
+                ),
+            )
+            .unwrap();
+            unique(&plan.rows).unwrap();
+            plan
+        };
+        let has = |plan: &Plan, id: &str| plan.rows.iter().any(|r| r.id() == id);
+        // Granted, without DSH's services: the host's rows, none of the others.
+        let plan = loaded("grants = { workspace = true }\n", false);
+        assert!(plan.dsh_host && !plan.dsh_services);
+        assert!(host.iter().all(|id| has(&plan, id)), "{:?}", plan.rows);
+        for id in services.iter().filter(|id| !host.contains(id)) {
+            assert!(!has(&plan, id), "{id}: {:?}", plan.rows);
+        }
+        // The session log: one row, the jsonl backend, its folder not yet.
+        let log = plan.dsh_session_log.clone().unwrap();
+        let logs: Vec<&Row> = plan.rows.iter().filter(|r| r.id() == log).collect();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].name(), DSH_SESSION_LOG);
+        // Granted, with them: all, the host's in place of their ids.
+        let plan = loaded("grants = { workspace = true }\n", true);
+        assert!(services.iter().chain(&host).all(|id| has(&plan, id)));
+        let named: Vec<&str> = plan
+            .rows
+            .iter()
+            .filter(|r| r.id() == log)
+            .map(Row::name)
+            .collect();
+        assert_eq!(named, [DSH_SESSION_LOG]);
+        // Not granted: no host; DSH's services only on request.
+        let plan = loaded("", true);
+        assert!(!plan.dsh_host && plan.dsh_session_log.is_none());
+        assert!(!has(&plan, "dsh-host") && services.iter().all(|id| has(&plan, id)));
+        let plan = loaded("", false);
+        assert!(!has(&plan, "dsh-host") && !services.iter().any(|id| has(&plan, id)));
+    }
+
     fn copy_dir(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).unwrap();
         for entry in std::fs::read_dir(from).unwrap() {

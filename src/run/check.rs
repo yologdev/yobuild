@@ -432,6 +432,12 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             None => agent_notes.push(note.clone()),
         }
     }
+    // The DSH host's session log goes to the DSH home: the user's own when
+    // they set one.
+    agent_notes.extend(super::dsh_home_note(
+        &plan,
+        std::env::var_os("YOAGENT_DSH_HOME"),
+    ));
     // Install scripts: what the lock says (only said; a lock that cannot
     // be read for it is a note, never a refusal).
     let scripts = match install::install_scripts(&manifest, &layout.adapters) {
@@ -446,7 +452,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         true => Vec::new(),
         false => {
             let mut base: Vec<String> = DSH_PROBE_BASE.iter().map(|s| s.to_string()).collect();
-            let rows = rows_from_file(&layout.adapters.join("dsh/host-services.json"), "dsh")?;
+            let rows = rows_from_file(&plan.dsh_dir.join("host-services.json"), "dsh")?;
             base.extend(rows.iter().map(|row| row.name().to_owned()));
             base
         }
@@ -538,6 +544,13 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                     .await;
                     entry.problems.extend(report.problem().map(Problem::new));
                     entry.guidance_chars = Some(report.guidance_chars);
+                    // The probe's base has no DSH host: together has it.
+                    if !plugin.grants.is_empty() {
+                        entry.notes.push(
+                            "probed without the DSH host: its grants are not exercised alone"
+                                .into(),
+                        );
+                    }
                     report.tools
                 } else {
                     entry.checked_alone = false;

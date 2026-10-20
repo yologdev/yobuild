@@ -34,7 +34,7 @@ config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }
 rutis   = "plugins/word_count.ts"
 runtime = "node"
 name    = "words"                     # optional: else the file's stem
-grants  = { workspace = true }        # optional: what its host gives it (rutis plugins, for now)
+grants  = { workspace = true }        # optional: what its host gives it (rutis and DSH plugins, for now)
 
 [[mcp]]                               # a stdio MCP server: the pinned package's bin, run
 name  = "files"                       # its tools are files__<tool>
@@ -133,8 +133,8 @@ And optionally:
   `gate = "off"`. Not on a DSH plugin.
 - `grants = { ... }`: what yobuild, as the plugin's host, gives it beyond
   what every plugin has — each off unless granted, and named by `check`.
-  On a rutis plugin, for now (a pi extension's and a DSH plugin's are
-  refused until their hosts come): `workspace = true` (the
+  On a rutis plugin (a pi extension's are refused until its host comes):
+  `workspace = true` (the
   `host_workspace` service's `cwd()`: the agent's folder), `trust = true`
   (`trusted()` says yes: the plugin may run the project's code —
   honour-system, nothing enforces it), `model = "info"`
@@ -149,6 +149,15 @@ And optionally:
   true, judged: false }` with `gate = "off"`); a rutis plugin also
   `host_approval.ask(question, details?)` (Allow/Block put to the owner,
   naming the plugin, answered `"allow"`, `"block"` or `"unanswered"`).
+  On a DSH plugin, `workspace` and `wake` only, `wake` with `workspace`,
+  and **the same on every DSH plugin** (else refused): one DSH host — a
+  stand-in DSH agent in the agent's folder — serves them all. It is what
+  DSH plugins that read the calling agent need (`dsh-univer-office`'s
+  file tools fail `SESSION_SCOPE_UNAVAILABLE` without it); once loaded,
+  every DSH call goes through it. A DSH plugin's `steer`/`followup` reach
+  the agent as `[DSH plugin] text`, line breaks made spaces, under the
+  same limits; one refused is a Warning notice. `[dsh] host_services`
+  still decides DSH's own file, credential and storage services.
 - `config = { ... }`: a table; every string in it may hold `${NAME}`
   references, and a key named like a secret (`token`, `key`, `password`,
   `auth`, …) must hold only references, plus at most a scheme word

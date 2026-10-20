@@ -35,9 +35,12 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// The file an installed set's folder holds, last: its hash.
 const STAMP: &str = ".yobuild-installed";
 /// The adapter files the `dsh` set holds at its root, where they resolve
-/// the set's Cordis: the runtime loads them from there.
-const DSH_FILES: [&str; 3] = [
-    "dsh-tools-adapter.ts", "host-dialogs.ts", "probe-services.ts",
+/// the set's Cordis: the runtime loads them from there. The DSH host's
+/// (`dsh-host.ts`) and the row lists `dsh_host_rows` reads beside it
+/// (`dsh-host.json`, `host-services.json`) among them.
+const DSH_FILES: [&str; 6] = [
+    "dsh-tools-adapter.ts", "host-dialogs.ts", "probe-services.ts", "dsh-host.ts", "dsh-host.json",
+    "host-services.json",
 ];
 /// How long one npm call may take.
 const NPM_TIME: Duration = Duration::from_secs(600);

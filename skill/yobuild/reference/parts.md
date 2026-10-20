@@ -62,7 +62,9 @@ Not usable in yobuild, checked by hand on 2026-10-19 — do not offer them:
 `dsh-univer-office@0.3.7` (spreadsheets and documents) passes `check` and
 lists its 14 tools, but every call fails `Error [SESSION_SCOPE_UNAVAILABLE]:
 Univer tools require a calling agent with a workspace` (DSH's own agent
-sessions), with or without host services; `@dfy-plugins/dsh-visualize@0.1.5`
+sessions), with or without host services — checked before DSH grants
+existed: with `grants = { workspace = true }` it gets a stand-in agent, not
+yet re-checked (the gallery's next agent does); `@dfy-plugins/dsh-visualize@0.1.5`
 (charts) does not install: its peers conflict with yobuild's DSH base
 (npm `ERESOLVE`). A clean `check` shows that a plugin loads, not that its
 tools work: the scripted run calls them.
