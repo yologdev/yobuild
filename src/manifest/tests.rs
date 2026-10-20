@@ -1162,21 +1162,65 @@ fn grants_are_read_for_a_rutis_plugin_and_refused_where_they_do_not_hold() {
         error(&rutis("exec = \"gate\"")),
         "7:19: exec is for a pi extension (`pi.exec`)"
     );
-    assert_eq!(
-        error(&rutis("observe = true")),
-        "7:22: observe is for a pi extension (its observer events)"
-    );
+    // `observe` is no grant (design §12: dropped).
+    assert!(error(&rutis("observe = true")).contains("unknown field `observe`"));
     assert_eq!(
         error(&rutis("model = \"call\"")),
         "7:20: model \"call\": \"info\" (the model's provider, id and limits; model calls are not granted yet)"
     );
     assert!(error(&rutis("disk = true")).contains("unknown field `disk`"));
-    // A pi extension's and a DSH plugin's come with their hosts.
+}
+
+#[test]
+fn a_pi_extension_takes_trust_model_wake_and_exec_and_one_model_for_all() {
+    let pi = |file: &str, grants: &str| {
+        format!("[[plugin]]\npi = \"./{file}.ts\"\ngrants = {{ {grants} }}\n")
+    };
+    let m = read(&format!(
+        "{MINIMAL}{}",
+        pi(
+            "e",
+            "trust = true, model = \"info\", wake = true, exec = \"gate\""
+        )
+    ))
+    .unwrap();
+    let grants = &m.plugins[0].grants;
+    assert_eq!(grants.names(), ["trust", "model", "wake", "exec"]);
+    assert_eq!(grants.exec, ExecGrant::Gate);
+    for (value, exec) in [("off", ExecGrant::Off), ("free", ExecGrant::Free)] {
+        let m = read(&format!(
+            "{MINIMAL}{}",
+            pi("e", &format!("exec = \"{value}\""))
+        ))
+        .unwrap();
+        assert_eq!(m.plugins[0].grants.exec, exec);
+    }
+    assert_eq!(
+        error(&format!("{MINIMAL}{}", pi("e", "exec = \"any\""))),
+        "6:19: exec \"any\": \"off\", \"gate\" (each command judged by the gate) or \"free\""
+    );
+    assert_eq!(
+        error(&format!("{MINIMAL}{}", pi("e", "workspace = true"))),
+        "6:24: a pi extension takes `trust`, `model`, `wake` and `exec`, not `workspace` (it has the folder: `ctx.cwd`)"
+    );
+    // Per extension but `model`: one for every pi extension, on each or none.
+    let m = read(&format!(
+        "{MINIMAL}{}{}",
+        pi("a", "trust = true, model = \"info\""),
+        pi("b", "model = \"info\"")
+    ))
+    .unwrap();
+    assert!(m.plugins[0].grants.trust && !m.plugins[1].grants.trust);
+    assert_eq!(
+        error(&format!("{MINIMAL}{}{}", pi("a", "model = \"info\""), pi("b", "wake = true"))),
+        "9:10: every pi extension sees one model: grant `model = \"info\"` to each pi plugin or none (`a` has it, `b` not)"
+    );
     assert_eq!(
         error(&format!(
-            "{MINIMAL}[[plugin]]\npi = \"./e.ts\"\ngrants = {{ trust = true }}\n"
+            "{MINIMAL}[[plugin]]\npi = \"./a.ts\"\n{}",
+            pi("b", "model = \"info\"")
         )),
-        "6:10: a pi extension's grants come with yobuild's pi host (design §12, M3b), not yet"
+        "8:10: every pi extension sees one model: grant `model = \"info\"` to each pi plugin or none (`b` has it, `a` not)"
     );
 }
 
@@ -1206,10 +1250,6 @@ fn a_dsh_plugin_takes_workspace_and_wake_the_same_on_every_dsh_plugin() {
         (
             "exec = \"gate\"",
             "6:19: a DSH plugin takes `workspace` and `wake`, not `exec`",
-        ),
-        (
-            "observe = true",
-            "6:22: a DSH plugin takes `workspace` and `wake`, not `observe`",
         ),
     ] {
         assert_eq!(error(&format!("{MINIMAL}{}", dsh(grants))), at);

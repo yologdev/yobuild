@@ -834,6 +834,9 @@ reach the owner), `PluginHost` (rows, routing, reload, `env`, `terminal`),
 
 Inherited from yoagent and the handoff work, and kept on by default:
 
+- **A pi extension sees the conversation**: `message_end`, `context` and
+  the observer events carry every message and every tool's arguments and
+  results, to every extension; there is no grant for it (design §12).
 - **Fail closed** at every plugin boundary (yoagent-rutis): a policy that
   times out, crashes or is unloaded denies; a redaction that fails
   withholds; a plugin hooking what the loop cannot enforce is refused.
@@ -1855,6 +1858,17 @@ So step 3 is a pair again: yoagent-rutis (`execFor` `"gate"`,
 wrapped, the file passed to the host), then yobuild (the grants mapped
 onto the row's config, the `Pi` caller, `observe` refused, the one rule,
 fixed answers said).
+
+**Built (M3b step 3, 2026-10-20)** with yoagent-rutis 0.8.0
+(`execFor` `"gate"`, `projectTrustedFor`, `wakeFor`, and the rows
+`host-approval.ts` / `host-session.ts` re-providing the two services in the
+pi runtime, loaded only when a grant uses them). Found on the way: the
+adapter's calls arrive as those re-providing rows', not the `pi` row's —
+`wake` from `pi-host-session`, `ask` from `pi-host-approval` — so the `Pi`
+caller is taken from exactly those, each for its own service. `ask` from
+pi is served only for an extension with `exec = "gate"`. Not done: `check`
+noting a pi entry that registers observer events — the probe does not
+report an extension's handlers; that needs the adapter to say them.
 
 #### Fixed answers, said (both steps)
 

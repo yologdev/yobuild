@@ -17,6 +17,7 @@ pub(crate) mod allowed;
 pub mod check;
 pub(crate) mod host;
 pub(crate) mod measure;
+pub mod plugin_log;
 pub(crate) mod plugins;
 pub(crate) mod script;
 
@@ -190,6 +191,23 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tracing::info!("{said}");
         session.notice(NoticeLevel::Info, said.clone());
     }
+    // What the pi adapter only logs and a grant would change: said, once
+    // (seen through `plugin_log::layer`, which the binary installs).
+    let said = plugin_log::Said::new(
+        &checked.plan.pi_files,
+        manifest
+            .plugins
+            .iter()
+            .any(|p| matches!(p.kind, PluginKind::Pi(_)) && p.grants.model.is_some()),
+    );
+    let _watching = plugin_log::watch({
+        let session = session.clone();
+        move |line| {
+            if let Some(note) = said.note(line) {
+                session.notice(NoticeLevel::Warning, note);
+            }
+        }
+    });
     let scratch = match manifest.builtins.scratch {
         true => Some(Scratch::create(name)?),
         false => None,
@@ -780,7 +798,14 @@ async fn start(
     let judge = gate(manifest, session, cwd, scratch);
     host::provide(
         root,
-        host::Host::new(session.clone(), manifest, cwd, judge.clone(), once),
+        host::Host::new(
+            session.clone(),
+            manifest,
+            cwd,
+            judge.clone(),
+            once,
+            &plan.pi_files,
+        ),
     )?;
     // `ask_owner`, the tool and (for plugins) the host service: one
     // numbering. Before the plugins start: one may use it as it loads. The

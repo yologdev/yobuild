@@ -815,6 +815,7 @@ fn services_on(
             cwd,
             super::gate(manifest, session, cwd, None),
             false,
+            &[],
         ),
     )?;
     let ask_owner = manifest

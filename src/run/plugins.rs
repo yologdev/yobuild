@@ -12,13 +12,18 @@ use serde_json::{json, Value as Json};
 use super::Layout;
 use crate::frontend::host::{rows_from_file, rows_from_json, Row};
 use crate::install::{Installed, Set};
-use crate::manifest::{Manifest, Package, Plugin, PluginKind, Runtime, Source};
+use crate::manifest::{ExecGrant, Manifest, Package, Plugin, PluginKind, Runtime, Source};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// The package a rutis plugin's Node runtime runs (in the manifest's
 /// folder), at the version yobuild's own runtimes use.
 const RUTIS_RUNTIME: &str = "@arcships/rutis-runtime";
+
+/// The rows re-providing `host_approval` and `host_session` to the pi
+/// adapter (`pi-host-approval`, `pi-host-session`).
+pub(crate) const PI_HOST_APPROVAL: &str = "pi-host-approval";
+pub(crate) const PI_HOST_SESSION: &str = "pi-host-session";
 
 /// The DSH host's session log (`dsh-host.json`'s row of this package): its
 /// folder is given at start, in the run's `DshHome`. Found by its package,
@@ -263,6 +268,12 @@ pub(crate) fn plan(
         ..Plan::default()
     };
     let mut extensions: Vec<Json> = Vec::new();
+    // The pi plugins' grants (design §12, "Step 3"): the adapter's settings
+    // by extension file, and whether it is told the model.
+    let mut exec_for = serde_json::Map::new();
+    let mut trusted_for = serde_json::Map::new();
+    let mut wake_for = serde_json::Map::new();
+    let mut model = false;
     let mut dsh_rows: Vec<Row> = Vec::new();
     for plugin in &manifest.plugins {
         let failed = |e: BoxError| -> BoxError { format!("plugin {}: {e}", plugin.name).into() };
@@ -280,6 +291,24 @@ pub(crate) fn plan(
                     .map(|e| std::fs::canonicalize(e).unwrap_or_else(|_| PathBuf::from(e)))
                     .collect();
                 plan.pi_files.push((plugin.name.clone(), files));
+                // Its grants, by each extension file as `extensions` spells
+                // it (the adapter's keys resolve as its entries do).
+                let g = &plugin.grants;
+                for file in found.extensions.iter().filter_map(Json::as_str) {
+                    match g.exec {
+                        ExecGrant::Off => {}
+                        ExecGrant::Gate => _ = exec_for.insert(file.to_owned(), json!("gate")),
+                        ExecGrant::Free => _ = exec_for.insert(file.to_owned(), json!(true)),
+                    }
+                    if g.trust {
+                        trusted_for.insert(file.to_owned(), json!(true));
+                    }
+                    if g.wake {
+                        wake_for.insert(file.to_owned(), json!(true));
+                    }
+                }
+                // One model for every extension (the manifest's one rule).
+                model |= g.model.is_some();
                 extensions.extend(found.extensions);
                 plan.notes.extend(found.notes);
             }
@@ -321,21 +350,49 @@ pub(crate) fn plan(
         let pi = layout.adapters.join("pi");
         plan.pi = true;
         plan.handlers.push(plan.pi_handler.clone());
+        // `own-extension`: a pi tool's own calls to other tools
+        // (`ctx.executeTool`) reach only its extension's tools, so allowing
+        // it does not allow the others' (design §2).
+        let mut config = json!({
+            "extensions": extensions,
+            "cwd": cwd,
+            "name": plan.pi_handler,
+            "nestedCalls": "own-extension",
+        });
+        let gated = exec_for.values().any(|g| g == "gate");
+        let waking = !wake_for.is_empty();
+        for (key, map) in [
+            ("execFor", exec_for),
+            ("projectTrustedFor", trusted_for),
+            ("wakeFor", wake_for),
+        ] {
+            if !map.is_empty() {
+                config[key] = Json::Object(map);
+            }
+        }
+        if model {
+            config["model"] = super::host::model_info(manifest);
+        }
         plan.rows.push(
             Row::new("pi", pi.join("pi-extensions-adapter.ts").display())
                 .runtime("pi")
-                // `own-extension`: a pi tool's own calls to other tools
-                // (`ctx.executeTool`) reach only its extension's tools, so
-                // allowing it does not allow the others' (design §2).
-                .config(json!({
-                    "extensions": extensions,
-                    "cwd": cwd,
-                    "name": plan.pi_handler,
-                    "nestedCalls": "own-extension",
-                })),
+                .config(config),
         );
         plan.rows
             .push(Row::new("pi-host-ui", pi.join("host-ui.ts").display()).runtime("pi"));
+        // The host services the adapter looks up, re-provided in its runtime
+        // (rutis shows a host service only to a plugin injecting it): only
+        // when a grant uses one.
+        if gated {
+            plan.rows.push(
+                Row::new(PI_HOST_APPROVAL, pi.join("host-approval.ts").display()).runtime("pi"),
+            );
+        }
+        if waking {
+            plan.rows.push(
+                Row::new(PI_HOST_SESSION, pi.join("host-session.ts").display()).runtime("pi"),
+            );
+        }
     }
     if dsh_rows.is_empty() {
         if manifest.dsh.host_services {

@@ -53,11 +53,11 @@ use rutis::{CordisError, Ctx};
 use rutis_bridge::session::{host_key, Error, HostDispatch, Reply, Value};
 use serde_json::{json, Value as Json};
 
-use super::plugins::plugin_of;
+use super::plugins::{plugin_of, PI_HOST_APPROVAL, PI_HOST_SESSION};
 use crate::builtins::{Check, Gate};
 use crate::frontend::protocol::{NoticeLevel, UiRequest};
 use crate::frontend::session::{Session, UI_TIMEOUT};
-use crate::manifest::{Grants, Manifest, ModelGrant, PluginKind};
+use crate::manifest::{ExecGrant, Grants, Manifest, ModelGrant, PluginKind};
 
 /// The service names, for the loader's catalog (`share`).
 pub const WORKSPACE: &str = "host_workspace";
@@ -78,12 +78,17 @@ enum Caller<'a> {
     Rutis { name: &'a str, grants: &'a Grants },
     /// The DSH host, for every DSH plugin.
     DshHost { grants: &'a Grants },
+    /// A pi plugin, by its name, named by its extension's file through the
+    /// pi adapter (which enforces nothing for yobuild: it names the caller).
+    Pi { name: &'a str, grants: &'a Grants },
 }
 
 impl<'a> Caller<'a> {
     fn grants(self) -> &'a Grants {
         match self {
-            Caller::Rutis { grants, .. } | Caller::DshHost { grants } => grants,
+            Caller::Rutis { grants, .. }
+            | Caller::DshHost { grants }
+            | Caller::Pi { grants, .. } => grants,
         }
     }
 }
@@ -95,6 +100,10 @@ pub(crate) struct Host {
     gate: Option<Gate>,
     /// Each rutis plugin's grants, by its name.
     grants: HashMap<String, Grants>,
+    /// Each pi plugin's grants, by its name, and its extension files
+    /// (canonical) → its name.
+    pi_grants: HashMap<String, Grants>,
+    pi_files: Vec<(PathBuf, String)>,
     /// The DSH plugins' grants (the same on each), given to the DSH host's
     /// row; none when no DSH plugin has any.
     dsh: Option<Grants>,
@@ -114,6 +123,7 @@ impl Host {
         cwd: &Path,
         gate: Option<Gate>,
         once: bool,
+        pi_files: &[(String, Vec<PathBuf>)],
     ) -> Self {
         let grants = manifest
             .plugins
@@ -121,19 +131,25 @@ impl Host {
             .filter(|p| matches!(p.kind, PluginKind::Rutis { .. }))
             .map(|p| (p.name.clone(), p.grants.clone()))
             .collect();
+        let pi_grants = manifest
+            .plugins
+            .iter()
+            .filter(|p| matches!(p.kind, PluginKind::Pi(_)))
+            .map(|p| (p.name.clone(), p.grants.clone()))
+            .collect();
+        let pi_files = pi_files
+            .iter()
+            .flat_map(|(name, files)| files.iter().map(|f| (f.clone(), name.clone())))
+            .collect();
         let dsh = manifest.dsh_grants().cloned();
-        let config = manifest.agent.model.config();
-        let model = json!({
-            "provider": manifest.agent.model.provider(),
-            "id": manifest.agent.model.id(),
-            "contextWindow": config.context_window,
-            "maxTokens": config.max_tokens,
-        });
+        let model = model_info(manifest);
         Self {
             session,
             cwd: cwd.to_owned(),
             gate,
             grants,
+            pi_grants,
+            pi_files,
             dsh,
             refused: Default::default(),
             model,
@@ -159,9 +175,25 @@ impl Host {
     /// rutis plugin's manifest entry, the DSH plugins' entries; anyone else,
     /// nothing yet.
     fn not_granted(&self, service: &str, method: &str, grant: &str, row: Option<&str>) -> Error {
-        invalid(match self.caller(row) {
+        self.not_granted_to(self.caller(row), service, method, grant, row)
+    }
+
+    /// [`Host::not_granted`] for a caller already found (a pi plugin is
+    /// found by its file, not its row).
+    fn not_granted_to(
+        &self,
+        caller: Option<Caller>,
+        service: &str,
+        method: &str,
+        grant: &str,
+        row: Option<&str>,
+    ) -> Error {
+        invalid(match caller {
             Some(Caller::Rutis { name, .. }) => format!(
                 "{service}.{method}: not granted to plugin {name} (the manifest's `grants = {{ {grant} = … }}` on its [[plugin]])"
+            ),
+            Some(Caller::Pi { name, .. }) => format!(
+                "{service}.{method}: not granted to pi plugin {name} (the manifest's `grants = {{ {grant} = … }}` on its [[plugin]])"
             ),
             Some(Caller::DshHost { .. }) => format!(
                 "{service}.{method}: not granted to the DSH plugins (the manifest's `grants = {{ {grant} = … }}` on each DSH [[plugin]])"
@@ -173,6 +205,54 @@ impl Host {
         })
     }
 
+    /// Whether `row` is the one re-providing `service` to the pi adapter
+    /// (`host-approval.ts`, `host-session.ts`): the adapter's calls arrive as
+    /// that row's, naming the extension by a last argument.
+    fn pi_row(row: Option<&str>, service: &str) -> bool {
+        let pi = match service {
+            APPROVAL => PI_HOST_APPROVAL,
+            _ => PI_HOST_SESSION,
+        };
+        row == Some(pi)
+    }
+
+    /// The pi plugin whose extension is `file` (as the adapter resolved
+    /// it), with its grants; refused for a file no pi plugin loads.
+    fn pi_caller(&self, file: Option<&Json>, signature: &str) -> Result<Caller<'_>, Error> {
+        let Some(file) = file.and_then(Json::as_str) else {
+            return Err(invalid(format!(
+                "{signature}: the pi adapter names the calling extension's file last"
+            )));
+        };
+        let canonical = std::fs::canonicalize(file).unwrap_or_else(|_| PathBuf::from(file));
+        let name = self
+            .pi_files
+            .iter()
+            .find(|(f, _)| *f == canonical)
+            .map(|(_, name)| name.as_str())
+            .ok_or_else(|| invalid(format!("{signature}: no pi plugin loads {file}")))?;
+        let grants = &self.pi_grants[name];
+        Ok(Caller::Pi { name, grants })
+    }
+
+    /// Says a refused wake from a caller that is not told (the DSH host and
+    /// the pi adapter only log it): a Warning notice, once per reason.
+    fn say_refused(&self, caller: Option<Caller>, woke: &Reply) {
+        let who = match caller {
+            Some(Caller::DshHost { .. }) => "A DSH plugin's".to_owned(),
+            Some(Caller::Pi { name, .. }) => format!("pi extension {name}'s"),
+            _ => return,
+        };
+        if let Err(Error::Value(why)) = woke {
+            if self.refused.lock().unwrap().insert(format!("{who}\0{why}")) {
+                self.session.notice(
+                    NoticeLevel::Warning,
+                    format!("{who} wake was refused: {why}"),
+                );
+            }
+        }
+    }
+
     /// A method only a rutis plugin's row is served.
     fn rutis_only(&self, signature: &str, row: Option<&str>) -> Error {
         invalid(format!(
@@ -180,6 +260,19 @@ impl Host {
             who(row)
         ))
     }
+}
+
+/// The manifest's model as `host_session.model()` says it (and the pi
+/// adapter's `model`): provider, id, context window, output limit — the
+/// preset's when there is one.
+pub(crate) fn model_info(manifest: &Manifest) -> Json {
+    let config = manifest.agent.model.config();
+    json!({
+        "provider": manifest.agent.model.provider(),
+        "id": manifest.agent.model.id(),
+        "contextWindow": config.context_window,
+        "maxTokens": config.max_tokens,
+    })
 }
 
 /// Who calls, for messages: a plugin by its name, else its row.
@@ -310,17 +403,21 @@ impl SessionService {
                     _ => Err(host.not_granted(SESSION, "model", "model", row)),
                 }
             }
+            "wake" if Host::pi_row(row, SESSION) => {
+                // `wake(text, file)`: the extension named last.
+                let signature = format!("{SESSION}.wake(text, file)");
+                let args = args(value, 2, &signature)?;
+                let caller = host.pi_caller(args.get(1), &signature)?;
+                let text = args.into_iter().take(1).map(Value::Data).collect();
+                let woke = self.wake(Some(caller), row, Value::List(text));
+                // pi's API returns nothing: said here, once a reason.
+                host.say_refused(Some(caller), &woke);
+                woke
+            }
             "wake" => {
                 let woke = self.wake(caller, row, value);
                 // The DSH host only logs a refusal: said here, once a reason.
-                if let (Some(Caller::DshHost { .. }), Err(Error::Value(why))) = (caller, &woke) {
-                    if host.refused.lock().unwrap().insert(why.clone()) {
-                        host.session.notice(
-                            NoticeLevel::Warning,
-                            format!("A DSH plugin's wake was refused: {why}"),
-                        );
-                    }
-                }
+                host.say_refused(caller, &woke);
                 woke
             }
             other => Err(invalid(format!("{SESSION} has no method `{other}`"))),
@@ -335,7 +432,8 @@ impl SessionService {
         let tag = match caller.filter(|c| c.grants().wake) {
             Some(Caller::Rutis { name, .. }) => format!("[plugin {name}]"),
             Some(Caller::DshHost { .. }) => "[DSH plugin]".to_owned(),
-            None => return Err(host.not_granted(SESSION, "wake", "wake", row)),
+            Some(Caller::Pi { name, .. }) => format!("[pi extension {name}]"),
+            None => return Err(host.not_granted_to(caller, SESSION, "wake", "wake", row)),
         };
         let text = args.first().and_then(Json::as_str);
         // The DSH host joins a message's blocks with line breaks:
@@ -343,7 +441,7 @@ impl SessionService {
         // passing for another message.
         let flat;
         let text = match (caller, text) {
-            (Some(Caller::DshHost { .. }), Some(text)) => {
+            (Some(Caller::DshHost { .. } | Caller::Pi { .. }), Some(text)) => {
                 flat = flatten(text);
                 Some(flat.as_str())
             }
@@ -443,15 +541,32 @@ impl Approval {
                 }))
             }
             "ask" => {
-                let signature = format!("{APPROVAL}.ask(question, details?)");
-                let mut args = args(value, 2, &signature)?.into_iter();
-                let Some(Caller::Rutis { name, .. }) = host.caller(row) else {
-                    return Err(invalid(format!(
-                        "{signature}: only a rutis plugin's row may ask, not {} (DSH's approvals reach the owner through DSH's own; a pi plugin's come with yobuild's pi host, design §12 M3b)",
-                        who(row)
-                    )));
+                let pi = Host::pi_row(row, APPROVAL);
+                let (signature, max) = match pi {
+                    // The extension named last.
+                    true => (format!("{APPROVAL}.ask(question, details, file)"), 3),
+                    false => (format!("{APPROVAL}.ask(question, details?)"), 2),
                 };
-                let name = name.to_owned();
+                let args = args(value, max, &signature)?;
+                let asker = match pi {
+                    true => match host.pi_caller(args.get(2), &signature)? {
+                        // Only a call it judges: `exec = "gate"`.
+                        Caller::Pi { name, grants } if grants.exec == ExecGrant::Gate => {
+                            format!("pi extension {name}")
+                        }
+                        _ => return Err(invalid(format!(
+                            "{signature}: not granted to that pi plugin (the manifest's `grants = {{ exec = \"gate\" }}` on its [[plugin]])"
+                        ))),
+                    },
+                    false => match host.caller(row) {
+                        Some(Caller::Rutis { name, .. }) => format!("plugin {name}"),
+                        _ => return Err(invalid(format!(
+                            "{signature}: only a rutis plugin's row may ask, not {} (DSH's approvals reach the owner through DSH's own)",
+                            who(row)
+                        ))),
+                    },
+                };
+                let mut args = args.into_iter();
                 let question = match args
                     .next()
                     .as_ref()
@@ -476,11 +591,11 @@ impl Approval {
                 if host.session.frontends() == 0 {
                     host.session.notice(
                         NoticeLevel::Warning,
-                        format!("plugin {name} asked \"{question}\": nobody there to answer (it is told \"unanswered\")"),
+                        format!("{asker} asked \"{question}\": nobody there to answer (it is told \"unanswered\")"),
                     );
                 }
                 let request = UiRequest::Select {
-                    title: format!("{question} (asked by plugin {name})"),
+                    title: format!("{question} (asked by {asker})"),
                     message: details,
                     options: vec!["Allow".into(), "Block".into()],
                     multiple: false,
@@ -539,7 +654,7 @@ mod tests {
         let (session, driver) = Session::new(true);
         assert!(session.allow_wakes(if once { 0 } else { IDLE_WAKES }));
         let gate = gate.then(|| Gate::new(session.clone(), dir.path()));
-        let host = Host::new(session.clone(), &manifest, dir.path(), gate, once);
+        let host = Host::new(session.clone(), &manifest, dir.path(), gate, once, &[]);
         (host, session, driver, dir)
     }
 
@@ -742,7 +857,7 @@ mod tests {
         let manifest = Manifest::parse(&text, &dir.path().join("agent.toml"), dir.path()).unwrap();
         let (session, driver) = Session::new(true);
         assert!(session.allow_wakes(IDLE_WAKES));
-        let host = Host::new(session.clone(), &manifest, dir.path(), None, false);
+        let host = Host::new(session.clone(), &manifest, dir.path(), None, false, &[]);
         (host, session, driver, dir)
     }
 
@@ -837,6 +952,97 @@ mod tests {
             "{seen:?}"
         );
         session.send(ClientMessage::Quit);
+        run.await.unwrap();
+    }
+
+    /// A manifest with pi plugins `g` (granted `grants`) and `n` (nothing),
+    /// each one extension file; the host knows their files as `run` does.
+    fn make_pi(grants: &str) -> (Host, Session, Driver, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["g.ts", "n.ts"] {
+            std::fs::write(dir.path().join(f), "").unwrap();
+        }
+        let text = format!(
+            "[agent]\nname = \"a\"\nmodel = \"xai/grok-4.7\"\n\
+             [[plugin]]\npi = \"./g.ts\"\ngrants = {{ {grants} }}\n\
+             [[plugin]]\npi = \"./n.ts\"\n"
+        );
+        let manifest = Manifest::parse(&text, &dir.path().join("agent.toml"), dir.path()).unwrap();
+        let (session, driver) = Session::new(true);
+        assert!(session.allow_wakes(IDLE_WAKES));
+        let canonical = |f: &str| std::fs::canonicalize(dir.path().join(f)).unwrap();
+        let files = [
+            ("g".to_owned(), vec![canonical("g.ts")]),
+            ("n".to_owned(), vec![canonical("n.ts")]),
+        ];
+        let gate = Some(Gate::new(session.clone(), dir.path()));
+        let host = Host::new(session.clone(), &manifest, dir.path(), gate, false, &files);
+        (host, session, driver, dir)
+    }
+
+    const PI_SESSION: Option<&str> = Some(PI_HOST_SESSION);
+    const PI_APPROVAL: Option<&str> = Some(PI_HOST_APPROVAL);
+
+    /// The pi adapter's calls: the extension named by its file, last; its
+    /// plugin's grants, each from its own re-providing row only.
+    #[tokio::test]
+    async fn a_pi_extension_is_named_by_its_file_and_granted_as_its_plugin() {
+        let (host, session, driver, dir) = make_pi("wake = true, exec = \"gate\"");
+        let host = Arc::new(host);
+        let s = SessionService(host.clone());
+        let mut ui = session.connect();
+        let run = tokio::spawn(driver.run(agent(1)));
+        let file = |f: &str| json!(dir.path().join(f).display().to_string());
+        let wake =
+            |text: &str, f: Json| s.invoke_from(PI_SESSION, "wake", list(vec![json!(text), f]));
+        // No file, or one no pi plugin loads: refused.
+        let e = error(s.invoke_from(PI_SESSION, "wake", list(vec![json!("go")])));
+        assert!(e.contains("names the calling extension's file last"), "{e}");
+        let e = error(wake("go", json!("/elsewhere/x.ts")));
+        assert!(e.contains("no pi plugin loads /elsewhere/x.ts"), "{e}");
+        // Not granted to `n`; and not from any other row.
+        let e = error(wake("go", file("n.ts")));
+        assert!(e.contains("not granted to pi plugin n"), "{e}");
+        let e = error(s.invoke_from(Some("pi"), "wake", list(vec![json!("go"), file("g.ts")])));
+        assert!(e.contains("at most 1"), "{e}");
+        // Granted: one line, tagged; a refusal said once a reason.
+        assert!(error(wake("early", file("g.ts"))).contains("owner's task"));
+        assert!(error(wake("early", file("g.ts"))).contains("owner's task"));
+        session.send(ClientMessage::Prompt { text: "hi".into() });
+        let seen = until(&mut ui, is_run_end).await;
+        let refused = seen
+            .iter()
+            .filter(|m| matches!(m, ServerMessage::Notice { message, .. } if message.starts_with("pi extension g's wake was refused: ") && message.contains("owner's task")))
+            .count();
+        assert_eq!(refused, 1, "{seen:?}");
+        assert_eq!(data(wake("two\nlines", file("g.ts"))), json!("sent"));
+        let seen = until(&mut ui, is_run_end).await;
+        assert!(
+            seen.iter().any(|m| matches!(m, ServerMessage::RunStart { prompt, .. } if prompt == "[pi extension g] two lines")),
+            "{seen:?}"
+        );
+        // `ask` with `exec = "gate"` only, from the approval's row.
+        let a = Approval(host);
+        let ask =
+            |row, f: Json| a.invoke_from(row, "ask", list(vec![json!("Run rm?"), Json::Null, f]));
+        let e = error(ask(PI_APPROVAL, file("n.ts")));
+        assert!(e.contains("not granted to that pi plugin"), "{e}");
+        let e = error(ask(PI_SESSION, file("g.ts")));
+        assert!(
+            e.contains("ask(question, details?): 3 argument(s) given"),
+            "{e}"
+        );
+        // The question goes out once the answer is awaited.
+        let asked = tokio::spawn(settled(ask(PI_APPROVAL, file("g.ts"))));
+        let question = until(&mut ui, |m| matches!(m, ServerMessage::UiRequest { .. })).await;
+        assert!(
+            format!("{question:?}").contains("Run rm? (asked by pi extension g)"),
+            "{question:?}"
+        );
+        session.send(ClientMessage::Quit);
+        // Quit with it open: an error, as for a rutis plugin's.
+        let e = asked.await.unwrap().unwrap_err();
+        assert!(e.contains("the session has ended"), "{e}");
         run.await.unwrap();
     }
 
