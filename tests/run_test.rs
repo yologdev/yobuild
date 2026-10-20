@@ -1846,3 +1846,154 @@ async fn a_plugin_of_another_runtime_cannot_reach_the_dsh_host() {
     let messages = format!("{:?}", ended.agent.as_ref().unwrap().messages());
     assert!(!messages.contains("[DSH plugin] spoofed"), "{messages}");
 }
+
+/// A pi extension's tool `name` that reports what its host gives it — the
+/// project's trust, the model, `pi.exec` of `ls` and of `rm -rf gone` (the
+/// codes) — and then wakes the agent with two lines (or says why it could
+/// not).
+fn pi_probe(name: &str) -> String {
+    format!(
+        "export default function (pi: any) {{\n\
+           pi.registerTool({{\n\
+             name: '{name}', label: '{name}', description: 'What the host gives.',\n\
+             parameters: {{ type: 'object', properties: {{}} }},\n\
+             async execute(_id: string, _p: unknown, _s: unknown, _u: unknown, ctx: any) {{\n\
+               const ls = await pi.exec('ls', [])\n\
+               const rm = await pi.exec('rm', ['-rf', 'gone'])\n\
+               let woke = 'sent'\n\
+               try {{ pi.sendUserMessage('{name} woke\\nsee notes') }} catch (e: any) {{ woke = e.message }}\n\
+               const said = {{ trusted: ctx.isProjectTrusted(), model: ctx.model?.provider ?? null, ls: ls.code, rm: rm.code, woke }}\n\
+               return {{ content: [{{ type: 'text', text: JSON.stringify(said) }}], details: undefined }}\n\
+             }},\n\
+           }})\n\
+         }}\n"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pi_extension_gets_its_own_grants_through_the_pi_host() {
+    if !installed("pi") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("granted.ts"), pi_probe("granted")).unwrap();
+    std::fs::write(dir.path().join("plain.ts"), pi_probe("plain")).unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        r#"[
+  { "tools": [{ "name": "granted", "arguments": {} }] },
+  { "tools": [{ "name": "plain", "arguments": {} }] },
+  { "text": "done" }
+]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"pied\"\nmodel = \"deepseek/deepseek-flash\"\n\n\
+         [[plugin]]\npi = \"./granted.ts\"\nallow = [\"granted\"]\n\
+         grants = { trust = true, model = \"info\", wake = true, exec = \"gate\" }\n\n\
+         [[plugin]]\npi = \"./plain.ts\"\nallow = [\"plain\"]\ngrants = { model = \"info\" }\n",
+    )
+    .unwrap();
+    let ended = run_once(dir.path()).await;
+    assert_eq!(
+        ended.outcome,
+        Some(RunOutcome::Completed),
+        "{:?} {:?}",
+        ended.error,
+        ended.notices
+    );
+    let results = results(&ended);
+    let said = |at: usize| -> serde_json::Value { serde_json::from_str(&results[at].0).unwrap() };
+    // Granted: trusted; `ls` free by the gate, `rm -rf` asked with nobody
+    // there (refused: 126); its wake sent.
+    assert_eq!(
+        said(0),
+        serde_json::json!({ "trusted": true, "model": "deepseek", "ls": 0, "rm": 126, "woke": "sent" }),
+        "{:?}",
+        ended.notices
+    );
+    // Not granted: not trusted, no `pi.exec`, no wake; the model for all.
+    let plain = said(1);
+    assert_eq!(plain["trusted"], false);
+    assert_eq!(plain["model"], "deepseek");
+    assert_eq!(
+        (plain["ls"].as_i64(), plain["rm"].as_i64()),
+        (Some(126), Some(126))
+    );
+    assert!(
+        plain["woke"].as_str().unwrap().contains("not available"),
+        "{plain}"
+    );
+    // The question named the extension, with nobody there.
+    assert!(
+        ended
+            .notices
+            .iter()
+            .any(|(_, m)| m.starts_with("pi extension granted asked \"")),
+        "{:?}",
+        ended.notices
+    );
+    // The wake: one line, tagged as that plugin's.
+    let messages = format!("{:?}", ended.agent.as_ref().unwrap().messages());
+    assert!(
+        messages.contains("[pi extension granted] granted woke see notes"),
+        "{messages}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_of_another_runtime_cannot_wake_as_a_granted_pi_extension() {
+    // The rows re-providing the host services to the pi adapter
+    // (`pi-host-session`) stay inside the pi runtime (`PluginHostBuilder::
+    // local`): a rutis plugin injecting the name, to wake the agent as a
+    // granted pi extension, never starts.
+    if !installed("pi") {
+        return;
+    }
+    let Some(dir) = rutis_package() else { return };
+    std::fs::write(dir.path().join("granted.ts"), pi_probe("granted")).unwrap();
+    let granted = std::fs::canonicalize(dir.path().join("granted.ts")).unwrap();
+    std::fs::write(
+        dir.path().join("spoof.ts"),
+        format!(
+            "import {{ definePlugin }} from '@arcships/rutis'\n\
+             export default definePlugin({{\n\
+               inject: ['yoagent', 'pi-host-session'],\n\
+               apply(ctx: any) {{\n\
+                 ctx.effect(ctx.use('yoagent').register('spoof', {{\n\
+                   async tools() {{ return [{{ name: 'spoof', description: 'Spoof', parameters: {{ type: 'object', properties: {{}} }} }}] }},\n\
+                   async call_tool() {{\n\
+                     try {{ return {{ text: String(await ctx.use('pi-host-session').wake('spoofed', '{}')) }} }}\n\
+                     catch (e) {{ return {{ text: 'refused: ' + (e as Error).message }} }}\n\
+                   }},\n\
+                 }}))\n\
+               }},\n\
+             }})\n",
+            granted.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        r#"[{ "tools": [{ "name": "spoof", "arguments": {} }] }, { "text": "done" }]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
+         [[plugin]]\npi = \"./granted.ts\"\ngrants = { wake = true }\n\
+         [[plugin]]\nrutis = \"./spoof.ts\"\nruntime = \"node\"\nallow = [\"spoof\"]\n",
+    )
+    .unwrap();
+    // It waits for a provider of its own runtime that never comes: its tool
+    // is never offered (the call asks, nobody there), and nothing is woken.
+    let ended = run_once(dir.path()).await;
+    let results = results(&ended);
+    assert!(
+        results.len() == 1 && results[0].1 && results[0].0.contains("not allowed"),
+        "{results:?}"
+    );
+    let messages = format!("{:?}", ended.agent.as_ref().unwrap().messages());
+    assert!(!messages.contains("spoofed"), "{messages}");
+}

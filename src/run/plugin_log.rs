@@ -1,0 +1,375 @@
+//! What the pi adapter and the DSH host only log, said to the owner (design
+//! §12, "Fixed answers, said"): a fixed answer a grant would change, a
+//! `pi.exec` refused, a wake the host never got, the DSH host's trouble.
+//! They write it through `yoagent.log`, which yoagent-rutis turns into
+//! `tracing` events (target `yoagent_rutis::plugin`), the fixed answers at
+//! info — below `RUST_LOG`'s default — so the binary adds [`layer`] beside
+//! its log, seeing them whatever the filter, and a running session
+//! watches (`watch`): each line a `Said` knows becomes a Warning notice, once a
+//! session. A line counts only from the row that writes it — the pi
+//! adapter's (`pi`), the DSH host's (`dsh-host`) — read from the call it is
+//! logged in (`caller_row`): any plugin may call `yoagent.log`, and a line
+//! it forged would be yobuild's advice to grant more.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use tracing::field::{Field, Visit};
+use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::filter::{Filtered, Targets};
+use tracing_subscriber::layer::{Context, Layer};
+
+/// A plugin line: who wrote it (the calling row), at what level, the text.
+pub(crate) struct Line<'a> {
+    pub row: Option<&'a str>,
+    pub level: Level,
+    pub text: &'a str,
+}
+
+/// Where the lines go: the session's watcher, while one runs, by the id of
+/// its guard.
+type Sink = Arc<dyn Fn(&Line) + Send + Sync>;
+static SINK: Mutex<Option<(u64, Sink)>> = Mutex::new(None);
+static WATCHES: AtomicU64 = AtomicU64::new(0);
+
+/// The sink, whatever a panic elsewhere left: a tracing layer never panics.
+fn sink() -> MutexGuard<'static, Option<(u64, Sink)>> {
+    SINK.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The layer to add beside the log: plugin lines at info and above, to the
+/// running session's watcher.
+pub fn layer<S: Subscriber>() -> Filtered<impl Layer<S>, Targets, S> {
+    PluginLines.with_filter(Targets::new().with_target("yoagent_rutis::plugin", Level::INFO))
+}
+
+/// [`layer`]'s inner layer.
+struct PluginLines;
+
+impl<S: Subscriber> Layer<S> for PluginLines {
+    fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
+        let Some((_, sink)) = sink().clone() else {
+            return;
+        };
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        let row = rutis_bridge::session::caller_row();
+        sink(&Line {
+            row: row.as_ref().map(|r| r.id()),
+            level: *event.metadata().level(),
+            text: &message.0,
+        });
+    }
+}
+
+struct Message(String);
+
+impl Visit for Message {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "message" {
+            self.0 = value.to_owned();
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}");
+        }
+    }
+}
+
+/// Watching while it is kept: plugin lines go to its sink.
+#[must_use = "watching stops when the guard drops"]
+pub(crate) struct Watching(u64);
+
+impl Drop for Watching {
+    fn drop(&mut self) {
+        // Only its own: a later watch may have replaced it. Dropped outside
+        // the lock (the sink holds a session).
+        let old = {
+            let mut sink = sink();
+            match sink.as_ref().is_some_and(|(id, _)| *id == self.0) {
+                true => sink.take(),
+                false => None,
+            }
+        };
+        drop(old);
+    }
+}
+
+/// Sends each plugin line to `sink` until the guard drops. One session a
+/// process: a later watch replaces an earlier, whose guard then clears
+/// nothing.
+pub(crate) fn watch(sink_: impl Fn(&Line) + Send + Sync + 'static) -> Watching {
+    let id = WATCHES.fetch_add(1, Ordering::Relaxed);
+    let old = sink().replace((id, Arc::new(sink_)));
+    drop(old);
+    Watching(id)
+}
+
+/// The rows whose lines are read: the pi adapter's and the DSH host's.
+const PI_ROW: &str = "pi";
+const DSH_HOST_ROW: &str = super::host::DSH_HOST_ROW;
+
+/// What a session's pi plugins were given, to tell which lines a grant
+/// would change, each said once.
+pub(crate) struct Said {
+    /// Each pi extension file — as planned and canonical — and its
+    /// plugin's name.
+    files: Vec<(PathBuf, String)>,
+    /// The pi plugins are told the model (`model = "info"`, on all or none).
+    model: bool,
+    said: Mutex<HashSet<String>>,
+}
+
+impl Said {
+    pub(crate) fn new(pi_files: &[(String, Vec<PathBuf>)], model: bool) -> Self {
+        let files = pi_files
+            .iter()
+            .flat_map(|(name, files)| files.iter().map(|f| (f.clone(), name.clone())))
+            .collect();
+        Said {
+            files,
+            model,
+            said: Mutex::default(),
+        }
+    }
+
+    /// The notice for `line`, once: `None` for a line from another row, one
+    /// no grant changes or nobody needs told, or one already said.
+    pub(crate) fn note(&self, line: &Line) -> Option<String> {
+        let note = match line.row {
+            Some(PI_ROW) => self.pi(line.text),
+            Some(DSH_HOST_ROW) if line.level <= Level::WARN => dsh_host(line.text),
+            _ => None,
+        }?;
+        self.said
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(note.clone())
+            .then_some(note)
+    }
+
+    fn pi(&self, line: &str) -> Option<String> {
+        if let Some(rest) = line.strip_prefix("[pi] fixed answer") {
+            // ` (<file>): <question> → <answer>`, or with no file.
+            let (who, rest) = match rest.strip_prefix(" (") {
+                Some(rest) => {
+                    let (file, rest) = rest.split_once("): ")?;
+                    (self.who(file), rest)
+                }
+                None => ("a pi extension".to_owned(), rest.strip_prefix(": ")?),
+            };
+            let (question, answer) = rest.rsplit_once(" → ")?;
+            let grant = match question {
+                "ctx.isProjectTrusted()" if answer == "false" => "trust = true",
+                "ctx.model" | "ctx.modelRegistry" if !self.model => "model = \"info\"",
+                _ => return None,
+            };
+            return Some(format!(
+                "{who} asked {question}: answered {answer} (grant `{grant}` to change it)"
+            ));
+        }
+        let rest = line.strip_prefix("[pi] ")?;
+        // `<file>: refused pi.exec("<command>")<why>`
+        if let Some((file, rest)) = rest.split_once(": refused pi.exec(") {
+            let (command, why) = rest.split_once(')')?;
+            let who = self.who(file);
+            if why.starts_with(" is not allowed by the host") {
+                return Some(format!(
+                    "{who} ran pi.exec({command}): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)"
+                ));
+            }
+            // The owner's own "Block", or a cancel: nothing to tell.
+            if why.contains("(block)") || why.contains(" was cancelled") {
+                return None;
+            }
+            let why = why.trim_start_matches(':').trim();
+            return Some(format!("{who} ran pi.exec({command}): refused, {why}"));
+        }
+        // `<file>: wake refused: <why>` — yobuild's own refusals are said
+        // where it refuses (`host_session.wake…`).
+        let (file, why) = rest.split_once(": wake refused: ")?;
+        (!why.contains("host_session.wake"))
+            .then(|| format!("{}'s wake did not reach the agent: {why}", self.who(file)))
+    }
+
+    /// The plugin a file is, as planned or canonical; else the file.
+    fn who(&self, file: &str) -> String {
+        let canonical = std::fs::canonicalize(file).ok();
+        let found = self
+            .files
+            .iter()
+            .find(|(f, _)| f == Path::new(file) || Some(f) == canonical.as_ref());
+        match found {
+            Some((_, name)) => format!("pi extension {name}"),
+            None => format!("pi extension {file}"),
+        }
+    }
+}
+
+/// The DSH host's warnings, but its refusals yobuild made and says itself.
+fn dsh_host(line: &str) -> Option<String> {
+    let text = line.strip_prefix("[dsh-host] ")?;
+    (!text.contains("host_session.wake")).then(|| format!("The DSH host: {text}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pi(text: &str) -> Line<'_> {
+        Line {
+            row: Some(PI_ROW),
+            level: Level::INFO,
+            text,
+        }
+    }
+
+    #[test]
+    fn a_fixed_answer_a_grant_changes_and_a_refused_exec_are_said_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("lens.ts");
+        std::fs::write(&file, "").unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        let said = Said::new(&[("lens".to_owned(), vec![canonical])], false);
+        let at = file.display();
+        let trusted = format!("[pi] fixed answer ({at}): ctx.isProjectTrusted() → false");
+        assert_eq!(
+            said.note(&pi(&trusted)),
+            Some("pi extension lens asked ctx.isProjectTrusted(): answered false (grant `trust = true` to change it)".into())
+        );
+        // Once.
+        assert_eq!(said.note(&pi(&trusted)), None);
+        // Granted already, or no grant changes it: nothing.
+        assert_eq!(
+            said.note(&pi(&format!(
+                "[pi] fixed answer ({at}): ctx.isProjectTrusted() → true"
+            ))),
+            None
+        );
+        assert_eq!(
+            said.note(&pi(&format!(
+                "[pi] fixed answer ({at}): ctx.ui.confirm() (no user to ask) → false"
+            ))),
+            None
+        );
+        assert!(said
+            .note(&pi(&format!(
+                "[pi] fixed answer ({at}): ctx.model → yoagent/x"
+            )))
+            .unwrap()
+            .contains("grant `model = \"info\"`"));
+        // No file: some extension.
+        assert_eq!(
+            said.note(&pi("[pi] fixed answer: ctx.modelRegistry → a read-only list of 0 model(s)")),
+            Some("a pi extension asked ctx.modelRegistry: answered a read-only list of 0 model(s) (grant `model = \"info\"` to change it)".into())
+        );
+        let told = Said::new(&[], true);
+        assert_eq!(
+            told.note(&pi("[pi] fixed answer (/x.ts): ctx.model → deepseek/x")),
+            None
+        );
+        assert_eq!(
+            said.note(&pi(&format!(
+                "[pi] {at}: refused pi.exec(\"git\") is not allowed by the host (the adapter's `exec` / `execFor` setting)"
+            ))),
+            Some("pi extension lens ran pi.exec(\"git\"): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)".into())
+        );
+        assert_eq!(said.note(&pi("[pi] something else")), None);
+    }
+
+    #[test]
+    fn the_gates_other_refusals_and_a_lost_wake_are_said_but_the_owners_block() {
+        let said = Said::new(&[("g".to_owned(), vec![PathBuf::from("/x/g.ts")])], false);
+        for (line, note) in [
+            (
+                "[pi] /x/g.ts: refused pi.exec(\"rm\"): the host could not judge it: host_approval.judge took longer than 30000 ms",
+                "pi extension g ran pi.exec(\"rm\"): refused, the host could not judge it: host_approval.judge took longer than 30000 ms",
+            ),
+            (
+                "[pi] /x/g.ts: refused pi.exec(\"rm\") was not approved by the host (unanswered)",
+                "pi extension g ran pi.exec(\"rm\"): refused, was not approved by the host (unanswered)",
+            ),
+            (
+                "[pi] /x/g.ts: wake refused: no answer within 30 s (it may still be delivered; later wakes go on)",
+                "pi extension g's wake did not reach the agent: no answer within 30 s (it may still be delivered; later wakes go on)",
+            ),
+        ] {
+            assert_eq!(said.note(&pi(line)).as_deref(), Some(note), "{line}");
+        }
+        for line in [
+            "[pi] /x/g.ts: refused pi.exec(\"rm\") was not approved by the host (block)",
+            "[pi] /x/g.ts: refused pi.exec(\"rm\") was cancelled while the host was asked",
+            "[pi] /x/g.ts: wake refused: invalid binding value: host_session.wake(text, file): …",
+        ] {
+            assert_eq!(said.note(&pi(line)), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_line_counts_only_from_the_row_that_writes_it() {
+        let said = Said::new(&[], false);
+        let forged = "[pi] fixed answer (/x.ts): ctx.isProjectTrusted() → false";
+        for row in [None, Some("plugin:evil"), Some(DSH_HOST_ROW)] {
+            let line = Line {
+                row,
+                level: Level::INFO,
+                text: forged,
+            };
+            assert_eq!(said.note(&line), None, "{row:?}");
+        }
+        // The DSH host's warnings, from its row only, but its info lines.
+        let dsh = |level, text| Line {
+            row: Some(DSH_HOST_ROW),
+            level,
+            text,
+        };
+        assert_eq!(
+            said.note(&dsh(
+                Level::WARN,
+                "[dsh-host] writing the DSH session log failed: EACCES"
+            )),
+            Some("The DSH host: writing the DSH session log failed: EACCES".into())
+        );
+        assert_eq!(
+            said.note(&dsh(Level::INFO, "[dsh-host] turn 1 opened")),
+            None
+        );
+        assert_eq!(
+            said.note(&dsh(
+                Level::WARN,
+                "[dsh-host] the host refused a DSH plugin's steering: host_session.wake(text): …"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn the_layer_hands_plugin_lines_at_info_and_up_to_the_watcher_and_a_guard_clears_its_own() {
+        use tracing_subscriber::prelude::*;
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let subscriber = tracing_subscriber::registry().with(layer());
+        tracing::subscriber::with_default(subscriber, || {
+            let into = |seen: &Arc<Mutex<Vec<String>>>, tag: &'static str| {
+                let seen = seen.clone();
+                move |line: &Line| seen.lock().unwrap().push(format!("{tag} {}", line.text))
+            };
+            let first = watch(into(&seen, "first"));
+            let second = watch(into(&seen, "second"));
+            // The first guard's drop leaves the second's sink.
+            drop(first);
+            tracing::info!(target: "yoagent_rutis::plugin", "[pi] fixed answer (/x.ts): q → a");
+            tracing::debug!(target: "yoagent_rutis::plugin", "not this");
+            tracing::warn!(target: "elsewhere", "nor this");
+            drop(second);
+            tracing::warn!(target: "yoagent_rutis::plugin", "nor after");
+        });
+        assert_eq!(
+            *seen.lock().unwrap(),
+            ["second [pi] fixed answer (/x.ts): q → a"]
+        );
+    }
+}

@@ -34,7 +34,7 @@ config = { provider = "bing", disabledEngines = [], bingMarket = "en-US" }
 rutis   = "plugins/word_count.ts"
 runtime = "node"
 name    = "words"                     # optional: else the file's stem
-grants  = { workspace = true }        # optional: what its host gives it (rutis and DSH plugins, for now)
+grants  = { workspace = true }        # optional: what its host gives it
 
 [[mcp]]                               # a stdio MCP server: the pinned package's bin, run
 name  = "files"                       # its tools are files__<tool>
@@ -133,8 +133,7 @@ And optionally:
   `gate = "off"`. Not on a DSH plugin.
 - `grants = { ... }`: what yobuild, as the plugin's host, gives it beyond
   what every plugin has — each off unless granted, and named by `check`.
-  On a rutis plugin (a pi extension's are refused until its host comes):
-  `workspace = true` (the
+  On a rutis plugin: `workspace = true` (the
   `host_workspace` service's `cwd()`: the agent's folder), `trust = true`
   (`trusted()` says yes: the plugin may run the project's code —
   honour-system, nothing enforces it), `model = "info"`
@@ -158,6 +157,20 @@ And optionally:
   the agent as `[DSH plugin] text`, line breaks made spaces, under the
   same limits; one refused is a Warning notice. `[dsh] host_services`
   still decides DSH's own file, credential and storage services.
+  On a pi extension, per extension: `trust = true`
+  (`ctx.isProjectTrusted()` says yes — honour-system), `wake = true`
+  (`pi.sendUserMessage`, or a `pi.sendMessage` that starts a turn, reaches
+  the agent as `[pi extension name] text`, line breaks made spaces, under
+  the same limits; one refused is a Warning notice), `exec = "off"` (the
+  default: `pi.exec` refused), `"gate"` (each command's words judged by
+  the gate; one it would ask about is put to the owner, naming the
+  extension, and runs only on Allow) or `"free"` (anything, as in pi); and
+  `model = "info"` (`ctx.model`, `ctx.modelRegistry`) on **every pi plugin
+  or none** (the adapter has one model for all). `workspace` is refused (a
+  pi extension has `ctx.cwd`). What a pi extension was answered for want
+  of a grant (not trusted, no model) and a `pi.exec` refused are Warning
+  notices naming the grant. Every pi extension sees the conversation
+  (`message_end`, `context`, observer events): there is no grant for it.
 - `config = { ... }`: a table; every string in it may hold `${NAME}`
   references, and a key named like a secret (`token`, `key`, `password`,
   `auth`, …) must hold only references, plus at most a scheme word

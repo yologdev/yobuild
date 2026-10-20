@@ -261,25 +261,27 @@ pub struct Plugin {
     /// judges no calls).
     pub policy: bool,
     /// What its host gives it beyond what every plugin has (`grants`;
-    /// design §12): all off unless the manifest grants them — always, for a
-    /// pi plugin, until its host comes (M3b step 3). A DSH plugin takes
-    /// `workspace` and `wake`, the same on every DSH plugin (one DSH host
-    /// serves them all).
+    /// design §12): all off unless the manifest grants them. A pi plugin
+    /// takes `trust`, `model`, `wake` and `exec` (`model` on every pi plugin
+    /// or none); a DSH plugin `workspace` and `wake`, the same on every DSH
+    /// plugin (one DSH host serves them all).
     pub grants: Grants,
 }
 
 /// What a plugin's host gives it (design §12, "The manifest: `grants`"),
 /// each off unless granted. yobuild enforces a rutis plugin's by its row,
-/// the DSH plugins' by the DSH host's row (`dsh-host`, for all of them); a
-/// pi extension's come with its host (M3b step 3) and are refused until
-/// then.
+/// the DSH plugins' by the DSH host's row (`dsh-host`, for all of them), a
+/// pi extension's through the pi adapter's settings (`execFor`,
+/// `projectTrustedFor`, `wakeFor`, `model`) and the extension's file the
+/// adapter names when it calls.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Grants {
     /// The agent's folder (`host_workspace.cwd()`).
     pub workspace: bool,
-    /// The project counts as trusted (`host_workspace.trusted()`): the plugin
-    /// may run the project's code — an honour-system grant.
+    /// The project counts as trusted (`host_workspace.trusted()`; for a pi
+    /// extension, `ctx.isProjectTrusted()`): the plugin may run the
+    /// project's code — an honour-system grant.
     pub trust: bool,
     /// What it may know of the model: `"info"` (provider, id, limits).
     pub model: Option<ModelGrant>,
@@ -287,6 +289,22 @@ pub struct Grants {
     /// agent tagged as its own, mid-run as steering, else as a run of its
     /// own (capped).
     pub wake: bool,
+    /// What a pi extension's `pi.exec` may run (`exec`; off by default).
+    pub exec: ExecGrant,
+}
+
+/// [`Grants::exec`]: a pi extension's `pi.exec`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExecGrant {
+    /// Refused (pi's adapter answers a failed command).
+    #[default]
+    Off,
+    /// Each call's words judged by the agent's gate, the owner asked when
+    /// it would ask (`host_approval`).
+    Gate,
+    /// Anything, as pi runs it.
+    Free,
 }
 
 /// [`Grants::model`].
@@ -305,10 +323,24 @@ impl Grants {
             (self.trust, "trust"),
             (self.model.is_some(), "model"),
             (self.wake, "wake"),
+            (self.exec != ExecGrant::Off, "exec"),
         ]
         .into_iter()
         .filter_map(|(on, name)| on.then_some(name))
         .collect()
+    }
+
+    /// The grants as `check` says them: the keys, `exec` with its value
+    /// (`"gate"` and `"free"` are worlds apart).
+    pub fn said(&self) -> Vec<String> {
+        self.names()
+            .into_iter()
+            .map(|name| match (name, self.exec) {
+                ("exec", ExecGrant::Gate) => "exec = \"gate\"".to_owned(),
+                ("exec", ExecGrant::Free) => "exec = \"free\"".to_owned(),
+                (name, _) => name.to_owned(),
+            })
+            .collect()
     }
 
     /// Nothing granted.
@@ -654,7 +686,6 @@ struct RawGrants {
     model: Option<Spanned<String>>,
     wake: Option<Spanned<bool>>,
     exec: Option<Spanned<String>>,
-    observe: Option<Spanned<bool>>,
 }
 
 #[derive(Deserialize)]
@@ -707,6 +738,15 @@ struct RawFrontend {
 type Located = (Range<usize>, String);
 
 impl Manifest {
+    /// Whether the pi plugins are told the model (`model = "info"`): on
+    /// every pi plugin or none, which `parse` enforces (the pi adapter has
+    /// one model for all its extensions).
+    pub fn pi_model(&self) -> bool {
+        self.plugins
+            .iter()
+            .any(|p| matches!(p.kind, PluginKind::Pi(_)) && p.grants.model.is_some())
+    }
+
     /// What every DSH plugin is granted — the same on each, which `parse`
     /// enforces (one DSH host serves them all) — when that is anything.
     pub fn dsh_grants(&self) -> Option<&Grants> {
@@ -795,11 +835,12 @@ impl Manifest {
             {
                 allowing.get_or_insert(a.span());
             }
-            // Where a DSH plugin's grants are said: its `grants`, else its `dsh`.
+            // Where a pi or DSH plugin's grants are said: its `grants`, else
+            // its `pi` / `dsh`.
             let grants_at = {
                 let r = raw.get_ref();
                 let at = r.grants.as_ref().map(Spanned::span);
-                at.or_else(|| r.dsh.as_ref().map(Spanned::span))
+                at.or_else(|| r.pi.as_ref().or(r.dsh.as_ref()).map(Spanned::span))
             };
             let (plugin, name_span) =
                 plugin(raw.into_inner(), span.clone(), dir).map_err(located)?;
@@ -808,6 +849,21 @@ impl Manifest {
                 PluginKind::Pi(source) => pinned("pi", source, span.clone()).map_err(located)?,
                 PluginKind::Dsh(source) => pinned("dsh", source, span.clone()).map_err(located)?,
                 PluginKind::Rutis { .. } => {}
+            }
+            // pi's adapter has one model for every extension: `model` on
+            // every pi plugin or none (the one rule).
+            if let PluginKind::Pi(_) = plugin.kind {
+                let first = plugins.iter().find(|p| matches!(p.kind, PluginKind::Pi(_)));
+                if let Some(first) = first.filter(|f| f.grants.model != plugin.grants.model) {
+                    let (with, without) = match first.grants.model.is_some() {
+                        true => (&first.name, &plugin.name),
+                        false => (&plugin.name, &first.name),
+                    };
+                    let m = format!(
+                        "every pi extension sees one model: grant `model = \"info\"` to each pi plugin or none (`{with}` has it, `{without}` not)"
+                    );
+                    return Err(located((grants_at.unwrap_or(span), m)));
+                }
             }
             // One DSH host serves every DSH plugin, so a grant to one is a
             // grant to all: the manifest writes the same on each (design
@@ -1193,11 +1249,45 @@ fn grants(raw: Option<Spanned<RawGrants>>, kind: &PluginKind) -> Result<Grants, 
     let Some(raw) = raw else {
         return Ok(Grants::default());
     };
-    let span = raw.span();
     let raw = raw.into_inner();
+    let model = |raw: Option<Spanned<String>>| match raw {
+        None => Ok(None),
+        Some(model) if model.get_ref() == "info" => Ok(Some(ModelGrant::Info)),
+        Some(model) => {
+            let m = format!(
+                "model {:?}: \"info\" (the model's provider, id and limits; model calls are not granted yet)",
+                model.get_ref()
+            );
+            Err((model.span(), m))
+        }
+    };
+    let on = |b: Option<Spanned<bool>>| b.is_some_and(|b| *b.get_ref());
     if let PluginKind::Pi(_) = kind {
-        let m = "a pi extension's grants come with yobuild's pi host (design §12, M3b), not yet";
-        return Err((span, m.into()));
+        // pi's host: the adapter's per-extension settings (design §12,
+        // "Step 3"); a pi extension has its folder already (`ctx.cwd`).
+        if let Some(workspace) = &raw.workspace {
+            let m = "a pi extension takes `trust`, `model`, `wake` and `exec`, not `workspace` (it has the folder: `ctx.cwd`)";
+            return Err((workspace.span(), m.into()));
+        }
+        let exec = match raw.exec {
+            None => ExecGrant::Off,
+            Some(exec) => match exec.get_ref().as_str() {
+                "off" => ExecGrant::Off,
+                "gate" => ExecGrant::Gate,
+                "free" => ExecGrant::Free,
+                other => {
+                    let m = format!("exec {other:?}: \"off\", \"gate\" (each command judged by the gate) or \"free\"");
+                    return Err((exec.span(), m));
+                }
+            },
+        };
+        return Ok(Grants {
+            trust: on(raw.trust),
+            model: model(raw.model)?,
+            wake: on(raw.wake),
+            exec,
+            ..Grants::default()
+        });
     }
     if let PluginKind::Dsh(_) = kind {
         // The DSH host gives the stand-in agent's folder and its wake; the
@@ -1206,7 +1296,6 @@ fn grants(raw: Option<Spanned<RawGrants>>, kind: &PluginKind) -> Result<Grants, 
             raw.trust.as_ref().map(|t| (t.span(), "trust")),
             raw.model.as_ref().map(|m| (m.span(), "model")),
             raw.exec.as_ref().map(|e| (e.span(), "exec")),
-            raw.observe.as_ref().map(|o| (o.span(), "observe")),
         ];
         if let Some((at, key)) = other.into_iter().flatten().next() {
             let m = format!("a DSH plugin takes `workspace` and `wake`, not `{key}`");
@@ -1232,27 +1321,12 @@ fn grants(raw: Option<Spanned<RawGrants>>, kind: &PluginKind) -> Result<Grants, 
     if let Some(exec) = &raw.exec {
         return Err((exec.span(), "exec is for a pi extension (`pi.exec`)".into()));
     }
-    if let Some(observe) = &raw.observe {
-        let m = "observe is for a pi extension (its observer events)";
-        return Err((observe.span(), m.into()));
-    }
-    let model = match raw.model {
-        None => None,
-        Some(model) if model.get_ref() == "info" => Some(ModelGrant::Info),
-        Some(model) => {
-            let m = format!(
-                "model {:?}: \"info\" (the model's provider, id and limits; model calls are not granted yet)",
-                model.get_ref()
-            );
-            return Err((model.span(), m));
-        }
-    };
-    let on = |b: Option<Spanned<bool>>| b.is_some_and(|b| *b.get_ref());
     Ok(Grants {
         workspace: on(raw.workspace),
         trust: on(raw.trust),
-        model,
+        model: model(raw.model)?,
         wake: on(raw.wake),
+        exec: ExecGrant::Off,
     })
 }
 

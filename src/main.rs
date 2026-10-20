@@ -223,6 +223,7 @@ fn check(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
 
 /// The log: stderr, or a file when a terminal UI owns the screen (`agent`).
 fn logging(agent: Option<&str>) -> Result<Option<PathBuf>, BoxError> {
+    use tracing_subscriber::prelude::*;
     use tracing_subscriber::EnvFilter;
     // The registry warns of no key for `--scripted`'s mock provider, which
     // needs none.
@@ -234,18 +235,21 @@ fn logging(agent: Option<&str>) -> Result<Option<PathBuf>, BoxError> {
         }),
         Err(_) => EnvFilter::new(default),
     };
-    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    // Beside the log, whatever its filter: what plugins log that the
+    // session says (`run::plugin_log`).
+    let registry = tracing_subscriber::registry().with(yobuild::run::plugin_log::layer());
     let Some(agent) = agent else {
-        builder.with_writer(std::io::stderr).init();
+        let log = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+        registry.with(log.with_filter(filter)).init();
         return Ok(None);
     };
     // One per process: two runs of one agent keep their own.
     let path = std::env::temp_dir().join(format!("yobuild-{agent}-{}.log", std::process::id()));
     let file = std::fs::File::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    builder
+    let log = tracing_subscriber::fmt::layer()
         .with_ansi(false)
-        .with_writer(std::sync::Mutex::new(file))
-        .init();
+        .with_writer(std::sync::Mutex::new(file));
+    registry.with(log.with_filter(filter)).init();
     Ok(Some(path))
 }
 

@@ -834,6 +834,9 @@ reach the owner), `PluginHost` (rows, routing, reload, `env`, `terminal`),
 
 Inherited from yoagent and the handoff work, and kept on by default:
 
+- **A pi extension sees the conversation**: `message_end`, `context` and
+  the observer events carry every message and every tool's arguments and
+  results, to every extension; there is no grant for it (design §12).
 - **Fail closed** at every plugin boundary (yoagent-rutis): a policy that
   times out, crashes or is unloaded denies; a redaction that fails
   withholds; a plugin hooking what the loop cannot enforce is refused.
@@ -1856,19 +1859,45 @@ wrapped, the file passed to the host), then yobuild (the grants mapped
 onto the row's config, the `Pi` caller, `observe` refused, the one rule,
 fixed answers said).
 
+**Built (M3b step 3, 2026-10-20)** with yoagent-rutis 0.8.0
+(`execFor` `"gate"`, `projectTrustedFor`, `wakeFor`, and the rows
+`host-approval.ts` / `host-session.ts` re-providing the two services in the
+pi runtime, loaded only when a grant uses them). Found on the way: the
+adapter's calls arrive as those re-providing rows', not the `pi` row's —
+`wake` from `pi-host-session`, `ask` from `pi-host-approval` — so the `Pi`
+caller is taken from exactly those, each for its own service. `ask` from
+pi is served only for an extension with `exec = "gate"`. Not done: `check`
+noting a pi entry that registers observer events — the probe does not
+report an extension's handlers; that needs the adapter to say them.
+
+Found in review: the re-providing rows' names (`pi-host-session`,
+`pi-host-approval`) were shared to every runtime by rutis 0.12's catalog,
+so a rutis plugin could inject `pi-host-session` and wake the agent as a
+granted pi extension; they are runtime-local now, as `yoagent-dsh-host`
+(step 2). An extension file is matched as planned or canonical, and one
+file is one plugin's (two would have the adapter and yobuild apply
+different grants).
+
 #### Fixed answers, said (both steps)
 
-pi logs `[pi] fixed answer: …` at **info**, once per question and answer
-per runtime, naming no extension; `dsh-host.ts` logs `[dsh-host] …` at
-warn, info or debug. `yoagent.log` reaches yobuild only as `tracing`
-events (target `yoagent_rutis::plugin`), whose default filter (`warn`)
-drops info. So yobuild adds a `tracing` layer of its own on that target
-that sees info whatever `RUST_LOG` says, and turns a fixed answer or a
-refused `pi.exec` into a Warning notice once a session per text, naming the
-grant that would change it but not the extension (the line names none):
-"a pi extension asked whether the project is trusted: answered no — grant
-`trust`". Naming the extension needs the adapter to put it in the line,
-asked with step 3.
+As planned (0.7.1): pi logged `[pi] fixed answer: …` at **info**, naming no
+extension; `dsh-host.ts` logs `[dsh-host] …` at warn, info or debug.
+`yoagent.log` reaches yobuild only as `tracing` events (target
+`yoagent_rutis::plugin`), whose default filter (`warn`) drops info. So
+yobuild adds a `tracing` layer of its own on that target that sees info
+whatever `RUST_LOG` says (`run::plugin_log`).
+
+**Built** with step 3, on yoagent-rutis 0.8.0, whose pi lines name the
+extension's file (`[pi] fixed answer (<file>): <question> → <answer>`): a
+line counts only from the row that writes it — `pi` for `[pi] …`,
+`dsh-host` for its warnings, read from the call it is logged in, since any
+plugin may call `yoagent.log` and a forged line would be yobuild's advice
+to grant more. Each becomes a Warning notice once a session, naming the
+extension and, where one would change it, the grant: "pi extension lens
+asked ctx.isProjectTrusted(): answered false (grant `trust = true` to
+change it)"; a `pi.exec` refused for want of `exec`, or by the gate's other
+refusals (not the owner's Block); a pi wake the host never got; the DSH
+host's warnings. Not yet: `check` (no session watches there).
 
 ### What it unlocks, and the migration
 

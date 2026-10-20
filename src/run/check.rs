@@ -485,12 +485,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             handlers: None,
             guidance_chars: None,
             install_scripts: Vec::new(),
-            grants: plugin
-                .grants
-                .names()
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            grants: plugin.grants.said(),
         };
         let names = match &plugin.kind {
             PluginKind::Pi(source) => {
@@ -815,6 +810,7 @@ fn services_on(
             cwd,
             super::gate(manifest, session, cwd, None),
             false,
+            &[],
         ),
     )?;
     let ask_owner = manifest

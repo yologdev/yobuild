@@ -1268,3 +1268,53 @@ fn an_allowed_pi_tool_calls_only_its_own_extensions_tools() {
     );
     assert!(!dir.path().join("secret-ran.txt").exists(), "{stderr}");
 }
+
+#[test]
+fn what_a_pi_extension_was_answered_for_want_of_a_grant_is_said() {
+    // A fixed answer a grant would change, and a `pi.exec` the manifest
+    // does not allow: the adapter only logs them; the binary says them.
+    if !pi_installed() {
+        return;
+    }
+    let dir = project(
+        "[[plugin]]\npi = \"./lens.ts\"\nallow = [\"lens\"]\n",
+        r#"[{ "tools": [{ "name": "lens", "arguments": {} }] }, { "text": "done" }]"#,
+    );
+    std::fs::write(
+        dir.path().join("lens.ts"),
+        "export default function (pi: any) {\n\
+           pi.registerTool({\n\
+             name: 'lens', label: 'Lens', description: 'Asks its host.',\n\
+             parameters: { type: 'object', properties: {} },\n\
+             async execute(_id: string, _p: unknown, _s: unknown, _u: unknown, ctx: any) {\n\
+               const trusted = ctx.isProjectTrusted()\n\
+               const git = await pi.exec('git', ['status'])\n\
+               return { content: [{ type: 'text', text: `${trusted} ${git.code}` }], details: undefined }\n\
+             },\n\
+           })\n\
+         }\n",
+    )
+    .unwrap();
+    let out = yobuild(
+        &[
+            "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+        ],
+        dir.path(),
+    );
+    let stderr = text(&out.stderr);
+    assert!(
+        out.status.success() && stderr.contains("  lens ✓"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("pi extension lens asked ctx.isProjectTrusted(): answered false (grant `trust = true` to change it)"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("pi extension lens ran pi.exec(\"git\"): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)"),
+        "{stderr}"
+    );
+    // Said as notices, not leaked as raw log lines (the log stays at `warn`).
+    assert!(!stderr.contains("[pi] fixed answer ("), "{stderr}");
+    assert!(!stderr.contains(" INFO "), "{stderr}");
+}

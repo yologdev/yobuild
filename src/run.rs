@@ -17,6 +17,7 @@ pub(crate) mod allowed;
 pub mod check;
 pub(crate) mod host;
 pub(crate) mod measure;
+pub mod plugin_log;
 pub(crate) mod plugins;
 pub(crate) mod script;
 
@@ -190,6 +191,17 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tracing::info!("{said}");
         session.notice(NoticeLevel::Info, said.clone());
     }
+    // What the pi adapter only logs and a grant would change: said, once
+    // (seen through `plugin_log::layer`, which the binary installs).
+    let said = plugin_log::Said::new(&checked.plan.pi_names(), manifest.pi_model());
+    let _watching = plugin_log::watch({
+        let session = session.clone();
+        move |line: &plugin_log::Line| {
+            if let Some(note) = said.note(line) {
+                session.notice(NoticeLevel::Warning, note);
+            }
+        }
+    });
     let scratch = match manifest.builtins.scratch {
         true => Some(Scratch::create(name)?),
         false => None,
@@ -739,8 +751,16 @@ const SHARED: [&str; 7] = [
 ];
 
 /// The services the adapters' own rows provide for their runtime only:
-/// the DSH host (`yoagent-dsh-host`).
-const LOCAL: [&str; 1] = [DSH_HOST_SERVICE];
+/// the DSH host (`yoagent-dsh-host`), and the pi adapter's host services
+/// (`pi-host-session`, `pi-host-approval`: a call through them names its
+/// pi extension, so a plugin of another runtime could otherwise call as
+/// one) and its `ui` (`pi-host-ui`).
+const LOCAL: [&str; 4] = [
+    DSH_HOST_SERVICE,
+    plugins::PI_HOST_SESSION,
+    plugins::PI_HOST_APPROVAL,
+    "pi-host-ui",
+];
 
 /// The plugins as [`start`] started them.
 struct Started {
@@ -780,7 +800,14 @@ async fn start(
     let judge = gate(manifest, session, cwd, scratch);
     host::provide(
         root,
-        host::Host::new(session.clone(), manifest, cwd, judge.clone(), once),
+        host::Host::new(
+            session.clone(),
+            manifest,
+            cwd,
+            judge.clone(),
+            once,
+            &plan.pi_names(),
+        ),
     )?;
     // `ask_owner`, the tool and (for plugins) the host service: one
     // numbering. Before the plugins start: one may use it as it loads. The
@@ -834,8 +861,8 @@ async fn start(
         builder = builder.share(service);
     }
     // What the adapters' rows provide for their own runtime: the DSH host
-    // (a plugin of another runtime could otherwise get the stand-in, and
-    // wake as a DSH plugin; design §12).
+    // and the pi adapter's host services (a plugin of another runtime could
+    // otherwise get the stand-in, or call as a pi extension; design §12).
     for service in LOCAL {
         builder = builder.local(service);
     }
