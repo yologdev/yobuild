@@ -1776,6 +1776,17 @@ yobuild's part:
 
 Step 2 needs nothing more from yoagent-rutis.
 
+**Built (M3b step 2, 2026-10-20)**, with yoagent 0.25.11 and
+yoagent-rutis 0.7.1, as above. Checked on the way: `koffi` loads without
+its install script (`--ignore-scripts` stays); the host's rows need
+nothing from `host-services.json` (`dsh-session`, `dsh-agent` and
+`dsh-user-approval` inject `invariants` only in companion plugins of their
+own, which wait without holding the row). `run_test` covers a granted
+plugin's stand-in, its two-line steer, a refused wake said, and no agent
+without grants; the host not starting is unit-shaped only (its message and
+hint), not caused end to end. The gallery agent with `dsh-univer-office`
+is the next PR.
+
 #### Step 3, pi grants
 
 The pi adapter's row in 0.7.1:

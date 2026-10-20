@@ -148,6 +148,12 @@ pub(crate) const HINTS: &[Hint] = &[
         fix: "set [dsh] host_services = true for DSH's own services, or add the DSH plugin the hint names as a [[plugin]]",
     },
     Hint {
+        id: "dsh-host",
+        scope: Scope::Start,
+        pattern: "the DSH host did not start: ",
+        fix: "the DSH host (loaded for DSH plugins' grants) waits for what it names: reinstall the DSH runtime's folder the error names (a `dsh` set's: delete it; adapters/dsh: `npm ci` there) and run again; else drop the DSH plugins' grants",
+    },
+    Hint {
         id: "nothing-provides",
         scope: Scope::Start,
         pattern: "nothing provides",
@@ -321,6 +327,11 @@ mod tests {
                 Scope::Start,
                 "`run` would refuse it at start: DSH plugins wait for services nobody provides: fs".into(),
                 "dsh-services",
+            ),
+            (
+                Scope::Start,
+                "`run` would refuse it at start: the DSH host did not start: it waits for sessionPersistence (the DSH runtime's folder: /h/plugins/dsh/0123)".into(),
+                "dsh-host",
             ),
             (
                 Scope::Start,

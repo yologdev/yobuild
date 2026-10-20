@@ -262,14 +262,17 @@ pub struct Plugin {
     pub policy: bool,
     /// What its host gives it beyond what every plugin has (`grants`;
     /// design §12): all off unless the manifest grants them — always, for a
-    /// pi or DSH plugin, until their hosts come (M3b).
+    /// pi plugin, until its host comes (M3b step 3). A DSH plugin takes
+    /// `workspace` and `wake`, the same on every DSH plugin (one DSH host
+    /// serves them all).
     pub grants: Grants,
 }
 
 /// What a plugin's host gives it (design §12, "The manifest: `grants`"),
-/// each off unless granted. yobuild enforces a rutis plugin's by its row;
-/// a pi extension's and a DSH plugin's come with their hosts (M3b's later
-/// steps) and are refused until then.
+/// each off unless granted. yobuild enforces a rutis plugin's by its row,
+/// the DSH plugins' by the DSH host's row (`dsh-host`, for all of them); a
+/// pi extension's come with its host (M3b step 3) and are refused until
+/// then.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Grants {
@@ -771,7 +774,7 @@ impl Manifest {
         };
         // Where an entry allows tools: with the gate off, that means nothing.
         let mut allowing: Option<Range<usize>> = None;
-        let mut plugins = Vec::new();
+        let mut plugins: Vec<Plugin> = Vec::new();
         for raw in raw.plugins {
             let span = raw.span();
             if let Some(a) = raw
@@ -782,13 +785,41 @@ impl Manifest {
             {
                 allowing.get_or_insert(a.span());
             }
+            // Where a DSH plugin's grants are said: its `grants`, else its `dsh`.
+            let grants_at = {
+                let r = raw.get_ref();
+                let at = r.grants.as_ref().map(Spanned::span);
+                at.or_else(|| r.dsh.as_ref().map(Spanned::span))
+            };
             let (plugin, name_span) =
                 plugin(raw.into_inner(), span.clone(), dir).map_err(located)?;
             unique(&plugin.name, name_span).map_err(located)?;
             match &plugin.kind {
-                PluginKind::Pi(source) => pinned("pi", source, span).map_err(located)?,
-                PluginKind::Dsh(source) => pinned("dsh", source, span).map_err(located)?,
+                PluginKind::Pi(source) => pinned("pi", source, span.clone()).map_err(located)?,
+                PluginKind::Dsh(source) => pinned("dsh", source, span.clone()).map_err(located)?,
                 PluginKind::Rutis { .. } => {}
+            }
+            // One DSH host serves every DSH plugin, so a grant to one is a
+            // grant to all: the manifest writes the same on each (design
+            // §12, "One rule for both ecosystems").
+            if let PluginKind::Dsh(_) = plugin.kind {
+                let first = plugins
+                    .iter()
+                    .find(|p| matches!(p.kind, PluginKind::Dsh(_)));
+                if let Some(first) = first.filter(|f| f.grants != plugin.grants) {
+                    let said = |g: &Grants| match g.is_empty() {
+                        true => "none".to_owned(),
+                        false => g.names().join(", "),
+                    };
+                    let m = format!(
+                        "every DSH plugin shares the DSH host: give each the same grants (`{}` has {}, `{}` {})",
+                        first.name,
+                        said(&first.grants),
+                        plugin.name,
+                        said(&plugin.grants)
+                    );
+                    return Err(located((grants_at.unwrap_or(span), m)));
+                }
             }
             plugins.push(plugin);
         }
@@ -1154,13 +1185,39 @@ fn grants(raw: Option<Spanned<RawGrants>>, kind: &PluginKind) -> Result<Grants, 
     };
     let span = raw.span();
     let raw = raw.into_inner();
-    let host = match kind {
-        PluginKind::Pi(_) => Some("a pi extension's grants come with yobuild's pi host"),
-        PluginKind::Dsh(_) => Some("a DSH plugin's grants come with yobuild's DSH host"),
-        _ => None,
-    };
-    if let Some(host) = host {
-        return Err((span, format!("{host} (design §12, M3b), not yet")));
+    if let PluginKind::Pi(_) = kind {
+        let m = "a pi extension's grants come with yobuild's pi host (design §12, M3b), not yet";
+        return Err((span, m.into()));
+    }
+    if let PluginKind::Dsh(_) = kind {
+        // The DSH host gives the stand-in agent's folder and its wake; the
+        // rest is not its to give (design §12, "Step 2").
+        let other = [
+            raw.trust.as_ref().map(|t| (t.span(), "trust")),
+            raw.model.as_ref().map(|m| (m.span(), "model")),
+            raw.exec.as_ref().map(|e| (e.span(), "exec")),
+            raw.observe.as_ref().map(|o| (o.span(), "observe")),
+        ];
+        if let Some((at, key)) = other.into_iter().flatten().next() {
+            let m = format!("a DSH plugin takes `workspace` and `wake`, not `{key}`");
+            return Err((at, m));
+        }
+        let workspace = raw.workspace.is_some_and(|w| *w.get_ref());
+        if let Some(wake) = raw.wake.filter(|w| *w.get_ref()) {
+            if !workspace {
+                let m = "a DSH plugin's `wake` needs `workspace` (the stand-in agent reads the folder first)";
+                return Err((wake.span(), m.into()));
+            }
+            return Ok(Grants {
+                workspace,
+                wake: true,
+                ..Grants::default()
+            });
+        }
+        return Ok(Grants {
+            workspace,
+            ..Grants::default()
+        });
     }
     if let Some(exec) = &raw.exec {
         return Err((exec.span(), "exec is for a pi extension (`pi.exec`)".into()));

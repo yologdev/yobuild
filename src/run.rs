@@ -802,8 +802,9 @@ async fn start(
         builder = builder.node("pi", &dir);
         runtimes.push(("pi".into(), dir));
     }
-    // DSH's own host services, on request: in a home of their own.
-    let dsh_home = match plan.dsh && manifest.dsh.host_services {
+    // DSH's own host services, on request, and the DSH host's session log:
+    // in a home of their own.
+    let dsh_home = match plan.dsh && (plan.dsh_services || plan.dsh_host) {
         true => Some(DshHome::new()?),
         false => None,
     };
@@ -826,7 +827,17 @@ async fn start(
     }
     let mut host = builder.start(root).await?;
     if !plan.rows.is_empty() {
-        host.load(plan.rows.clone())
+        // The DSH host's session log, in the run's DSH home.
+        let sessions = dsh_home.as_ref().map(|home| home.path().join("sessions"));
+        let rows = plan.rows.iter().map(|row| match (&sessions, row.id()) {
+            (Some(sessions), plugins::DSH_SESSION_LOG)
+                if plan.dsh_host && row.runtime_is("dsh") =>
+            {
+                row.clone().config(serde_json::json!({ "root": sessions }))
+            }
+            _ => row.clone(),
+        });
+        host.load(rows.collect::<Vec<_>>())
             .await
             .map_err(|e| dsh_waiting(e, plan, manifest.dsh.host_services))?;
         // The adapters' handlers, each from its own row; and a rutis plugin
@@ -853,6 +864,9 @@ async fn start(
     }
     if !plan.dsh_modules.is_empty() {
         dsh_services(&mut host, plan, manifest.dsh.host_services).await?;
+    }
+    if plan.dsh_host {
+        dsh_host_started(&mut host, plan).await?;
     }
     Ok(Started {
         bridge,
@@ -1255,12 +1269,51 @@ async fn dsh_services(
 ) -> Result<(), BoxError> {
     let mut missing = Vec::new();
     for wait in [1000, 3000] {
-        missing = probe_services(host, &plan.dsh_dir, &plan.dsh_modules, wait).await?;
+        missing = probe_services(host, &plan.dsh_dir, &plan.dsh_modules, &[], wait).await?;
         if missing.is_empty() {
             return Ok(());
         }
     }
     Err(dsh_missing(&missing, plan, host_services))
+}
+
+/// Whether the DSH host (`dsh-host.ts`) started: it provides
+/// `yoagent-dsh-host` once every service it injects exists. Without it the
+/// DSH adapter finds no host and runs every call agentless — the plugins'
+/// grants not honoured, unsaid — so a host that does not start refuses the
+/// run, naming what it waits for. Looked at as `dsh_services` does.
+async fn dsh_host_started(host: &mut PluginHost, plan: &plugins::Plan) -> Result<(), BoxError> {
+    const HOST: &str = "yoagent-dsh-host";
+    let module = plan.dsh_dir.join("dsh-host.ts").display().to_string();
+    let mut missing = Vec::new();
+    for wait in [1000, 3000] {
+        missing = probe_services(
+            host,
+            &plan.dsh_dir,
+            std::slice::from_ref(&module),
+            &[HOST],
+            wait,
+        )
+        .await?;
+        if !missing.iter().any(|m| m == HOST) {
+            return Ok(());
+        }
+    }
+    let waits: Vec<&str> = missing
+        .iter()
+        .map(String::as_str)
+        .filter(|m| *m != HOST)
+        .collect();
+    let why = match waits.is_empty() {
+        true => "it provides no host, though every service it injects exists (its log says why)"
+            .to_owned(),
+        false => format!("it waits for {}", waits.join(", ")),
+    };
+    Err(format!(
+        "the DSH host did not start: {why} (the DSH runtime's folder: {})",
+        plan.dsh_dir.display()
+    )
+    .into())
 }
 
 /// A `load` that failed because DSH plugins wait for services nobody
@@ -1328,6 +1381,7 @@ async fn probe_services(
     host: &mut PluginHost,
     base: &Path,
     modules: &[String],
+    names: &[&str],
     wait_ms: u64,
 ) -> Result<Vec<String>, BoxError> {
     let out = tempfile::NamedTempFile::new()?.into_temp_path();
@@ -1337,6 +1391,7 @@ async fn probe_services(
         .runtime("dsh")
         .config(serde_json::json!({
             "modules": modules,
+            "names": names,
             "base": base,
             "out": &*out,
             "waitMs": wait_ms,

@@ -1178,10 +1178,66 @@ fn grants_are_read_for_a_rutis_plugin_and_refused_where_they_do_not_hold() {
         )),
         "6:10: a pi extension's grants come with yobuild's pi host (design §12, M3b), not yet"
     );
+}
+
+#[test]
+fn a_dsh_plugin_takes_workspace_and_wake_the_same_on_every_dsh_plugin() {
+    let dsh = |grants: &str| format!("[[plugin]]\ndsh = \"./d.ts\"\ngrants = {{ {grants} }}\n");
+    let m = read(&format!(
+        "{MINIMAL}{}",
+        dsh("workspace = true, wake = true")
+    ))
+    .unwrap();
+    assert_eq!(m.plugins[0].grants.names(), ["workspace", "wake"]);
+    // `wake` needs the stand-in, which needs the folder.
     assert_eq!(
-        error(&format!(
-            "{MINIMAL}[[plugin]]\ndsh = \"./d.ts\"\ngrants = {{ workspace = true }}\n"
-        )),
-        "6:10: a DSH plugin's grants come with yobuild's DSH host (design §12, M3b), not yet"
+        error(&format!("{MINIMAL}{}", dsh("wake = true"))),
+        "6:19: a DSH plugin's `wake` needs `workspace` (the stand-in agent reads the folder first)"
     );
+    for (grants, at) in [
+        (
+            "trust = true",
+            "6:20: a DSH plugin takes `workspace` and `wake`, not `trust`",
+        ),
+        (
+            "model = \"info\"",
+            "6:20: a DSH plugin takes `workspace` and `wake`, not `model`",
+        ),
+        (
+            "exec = \"gate\"",
+            "6:19: a DSH plugin takes `workspace` and `wake`, not `exec`",
+        ),
+        (
+            "observe = true",
+            "6:22: a DSH plugin takes `workspace` and `wake`, not `observe`",
+        ),
+    ] {
+        assert_eq!(error(&format!("{MINIMAL}{}", dsh(grants))), at);
+    }
+    // One host for all: the same grants on each, refused at the first that differs.
+    let two = |a: &str, b: &str| {
+        format!("{MINIMAL}[[plugin]]\ndsh = \"./a.ts\"\n{a}[[plugin]]\ndsh = \"./b.ts\"\n{b}")
+    };
+    let m = read(&two(
+        "grants = { workspace = true }\n",
+        "grants = { workspace = true }\n",
+    ))
+    .unwrap();
+    assert!(m.plugins.iter().all(|p| p.grants.names() == ["workspace"]));
+    assert_eq!(
+        error(&two("grants = { workspace = true }\n", "")),
+        "8:7: every DSH plugin shares the DSH host: give each the same grants (`a` has workspace, `b` none)"
+    );
+    assert_eq!(
+        error(&two("", "grants = { workspace = true, wake = true }\n")),
+        "8:10: every DSH plugin shares the DSH host: give each the same grants (`a` has none, `b` workspace, wake)"
+    );
+    // A rutis plugin between them is its own.
+    let m = read(&format!(
+        "{MINIMAL}{}[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\n{}",
+        dsh("workspace = true"),
+        dsh("workspace = true").replace("d.ts", "e.ts")
+    ))
+    .unwrap();
+    assert!(m.plugins[1].grants.is_empty());
 }

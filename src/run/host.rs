@@ -2,26 +2,33 @@
 //! it, offered to every plugin runtime beside `frontend`, `ui` and
 //! `ask_owner`, and answering `Err` for what the manifest did not grant.
 //! Always provided: rutis starts no plugin whose injected service is
-//! missing. A grant is found by the calling row (`caller_row`): a rutis
-//! plugin's rows are `plugin:<name>[:<row>]`; a pi or DSH plugin's (the
-//! `pi` and `dsh` rows, and a DSH plugin's own `plugin:<name>…` rows) get
-//! theirs with their hosts (M3b's later steps), nothing until then. Every
-//! method refuses arguments past its own.
+//! missing. A grant is found by the calling row (`caller_row`), as a
+//! [`Caller`]: a rutis plugin's rows are `plugin:<name>[:<row>]`, each with
+//! its plugin's grants; the DSH host's row (`dsh-host`, design §12 "Step
+//! 2") has the DSH plugins' grants, the same on each (the manifest's one
+//! rule); a pi plugin's come with yobuild's pi host (M3b step 3), and the
+//! `pi` and `dsh` rows and a DSH plugin's own `plugin:<name>…` rows get
+//! nothing. Each method serves the kinds it names. Every method refuses
+//! arguments past its own.
 //!
 //! Named `host_…`: every shared service reaches every runtime, and DSH has
 //! services of its own named `approval` and `sessions`.
 //!
 //! - `host_workspace.cwd()` (sync) — the agent's folder (`workspace`).
 //! - `host_workspace.trusted()` (sync) — whether the project counts as
-//!   trusted for this plugin (`trust`): `false` without the grant.
+//!   trusted for this plugin (`trust`; a rutis plugin): `false` without the
+//!   grant.
 //! - `host_session.info()` (sync) — `{ id, generation }`: the session's id
 //!   and how many times it was reset (any plugin).
 //! - `host_session.model()` (sync) — `{ provider, id, contextWindow,
 //!   maxTokens }`: the manifest's model, also under `--scripted` (`model =
-//!   "info"`).
+//!   "info"`; a rutis plugin).
 //! - `host_session.wake(text)` (sync) — `"sent"`: the text, one line (no
 //!   control character), reaches
-//!   the agent as `[plugin <name>] <text>` (`wake`) — steering a run going
+//!   the agent as `[plugin <name>] <text>` (`wake`; from the DSH host,
+//!   `[DSH plugin] <text>`, its line breaks made spaces — the shim joins a
+//!   message's blocks with them — and a refusal said as a Warning notice
+//!   once per reason, since the shim only logs it) — steering a run going
 //!   on, else a run of its own, at most [`IDLE_WAKES`] a session for all
 //!   plugins together, none under `--once`, never before the owner's first
 //!   run (the session's driver decides: [`Session::wake`]; one it cannot
@@ -60,6 +67,27 @@ pub const APPROVAL: &str = "host_approval";
 /// How many runs all plugins' wakes together may start in a session.
 pub const IDLE_WAKES: u32 = 3;
 
+/// The DSH host's row (`dsh-host.json`): the one row the DSH plugins'
+/// grants are given to.
+pub(crate) const DSH_HOST_ROW: &str = "dsh-host";
+
+/// Who calls, by its row, with what it is granted.
+#[derive(Clone, Copy)]
+enum Caller<'a> {
+    /// A rutis plugin, by its name.
+    Rutis { name: &'a str, grants: &'a Grants },
+    /// The DSH host, for every DSH plugin.
+    DshHost { grants: &'a Grants },
+}
+
+impl<'a> Caller<'a> {
+    fn grants(self) -> &'a Grants {
+        match self {
+            Caller::Rutis { grants, .. } | Caller::DshHost { grants } => grants,
+        }
+    }
+}
+
 /// What the host services know.
 pub(crate) struct Host {
     session: Session,
@@ -67,6 +95,11 @@ pub(crate) struct Host {
     gate: Option<Gate>,
     /// Each rutis plugin's grants, by its name.
     grants: HashMap<String, Grants>,
+    /// The DSH plugins' grants (the same on each), given to the DSH host's
+    /// row; none when no DSH plugin has any.
+    dsh: Option<Grants>,
+    /// The reasons a DSH host's wake was refused, each said once.
+    refused: std::sync::Mutex<std::collections::HashSet<String>>,
     model: Json,
     /// Under `--once` (the session allows no wakes): said when refusing one.
     once: bool,
@@ -88,6 +121,12 @@ impl Host {
             .filter(|p| matches!(p.kind, PluginKind::Rutis { .. }))
             .map(|p| (p.name.clone(), p.grants.clone()))
             .collect();
+        let dsh = manifest
+            .plugins
+            .iter()
+            .find(|p| matches!(p.kind, PluginKind::Dsh(_)))
+            .map(|p| p.grants.clone())
+            .filter(|g| !g.is_empty());
         let config = manifest.agent.model.config();
         let model = json!({
             "provider": manifest.agent.model.provider(),
@@ -100,36 +139,58 @@ impl Host {
             cwd: cwd.to_owned(),
             gate,
             grants,
+            dsh,
+            refused: Default::default(),
             model,
             once,
         }
     }
 
-    /// The calling rutis plugin's name and grants, by its row; `None` for
-    /// any other caller (a pi or DSH plugin's row, or no row).
-    fn caller<'a>(&'a self, row: Option<&'a str>) -> Option<(&'a str, &'a Grants)> {
-        let name = plugin_of(row?)?;
-        self.grants.get(name).map(|g| (name, g))
+    /// The caller and its grants, by its row: a rutis plugin's, or the DSH
+    /// host's when DSH plugins have grants; `None` for any other caller (a
+    /// pi plugin's row, the `dsh` row, a DSH plugin's own, or no row).
+    fn caller<'a>(&'a self, row: Option<&'a str>) -> Option<Caller<'a>> {
+        let row = row?;
+        if row == DSH_HOST_ROW {
+            return self.dsh.as_ref().map(|grants| Caller::DshHost { grants });
+        }
+        let name = plugin_of(row)?;
+        self.grants
+            .get(name)
+            .map(|grants| Caller::Rutis { name, grants })
     }
 
     /// Refused for want of a grant, saying which and what would give it: a
-    /// rutis plugin's manifest entry; anyone else, nothing yet.
+    /// rutis plugin's manifest entry, the DSH plugins' entries; anyone else,
+    /// nothing yet.
     fn not_granted(&self, service: &str, method: &str, grant: &str, row: Option<&str>) -> Error {
         invalid(match self.caller(row) {
-            Some((name, _)) => format!(
+            Some(Caller::Rutis { name, .. }) => format!(
                 "{service}.{method}: not granted to plugin {name} (the manifest's `grants = {{ {grant} = … }}` on its [[plugin]])"
             ),
+            Some(Caller::DshHost { .. }) => format!(
+                "{service}.{method}: not granted to the DSH plugins (the manifest's `grants = {{ {grant} = … }}` on each DSH [[plugin]])"
+            ),
             None => format!(
-                "{service}.{method}: not for {}: only a rutis plugin may be granted it (a pi or DSH plugin's grants come with yobuild's pi/DSH host, design §12 M3b, not yet)",
+                "{service}.{method}: not for {}: only a rutis plugin, or the DSH host for DSH plugins, may be granted it (a pi plugin's grants come with yobuild's pi host, design §12 M3b, not yet)",
                 who(row)
             ),
         })
+    }
+
+    /// A method only a rutis plugin's row is served.
+    fn rutis_only(&self, signature: &str, row: Option<&str>) -> Error {
+        invalid(format!(
+            "{signature}: only a rutis plugin's row is served, not {}",
+            who(row)
+        ))
     }
 }
 
 /// Who calls, for messages: a plugin by its name, else its row.
 fn who(row: Option<&str>) -> String {
     match row {
+        Some(DSH_HOST_ROW) => "the DSH host".to_owned(),
         Some(row) => match plugin_of(row) {
             Some(name) => format!("plugin {name}"),
             None => format!("the `{row}` row"),
@@ -187,7 +248,8 @@ struct Workspace(Arc<Host>);
 
 impl Workspace {
     fn invoke_from(&self, row: Option<&str>, method: &str, value: Value) -> Reply {
-        let grants = self.0.caller(row).map(|(_, g)| g);
+        let caller = self.0.caller(row);
+        let grants = caller.map(Caller::grants);
         match method {
             "cwd" => {
                 args(value, 0, &format!("{WORKSPACE}.cwd()"))?;
@@ -203,8 +265,12 @@ impl Workspace {
                 }
             }
             "trusted" => {
-                args(value, 0, &format!("{WORKSPACE}.trusted()"))?;
-                Ok(Value::Data(json!(grants.is_some_and(|g| g.trust))))
+                let signature = format!("{WORKSPACE}.trusted()");
+                args(value, 0, &signature)?;
+                match caller {
+                    Some(Caller::DshHost { .. }) => Err(self.0.rutis_only(&signature, row)),
+                    _ => Ok(Value::Data(json!(grants.is_some_and(|g| g.trust)))),
+                }
             }
             other => Err(invalid(format!("{WORKSPACE} has no method `{other}`"))),
         }
@@ -237,52 +303,101 @@ impl SessionService {
                 })))
             }
             "model" => {
-                args(value, 0, &format!("{SESSION}.model()"))?;
-                match caller.is_some_and(|(_, g)| g.model == Some(ModelGrant::Info)) {
-                    true => Ok(Value::Data(host.model.clone())),
-                    false => Err(host.not_granted(SESSION, "model", "model", row)),
+                let signature = format!("{SESSION}.model()");
+                args(value, 0, &signature)?;
+                match caller {
+                    Some(Caller::DshHost { .. }) => Err(host.rutis_only(&signature, row)),
+                    Some(Caller::Rutis { grants, .. })
+                        if grants.model == Some(ModelGrant::Info) =>
+                    {
+                        Ok(Value::Data(host.model.clone()))
+                    }
+                    _ => Err(host.not_granted(SESSION, "model", "model", row)),
                 }
             }
             "wake" => {
-                let signature = format!("{SESSION}.wake(text)");
-                let args = args(value, 1, &signature)?;
-                let Some((name, _)) = caller.filter(|(_, g)| g.wake) else {
-                    return Err(host.not_granted(SESSION, "wake", "wake", row));
-                };
-                let Some(text) = args.first().and_then(Json::as_str).and_then(one_line) else {
-                    return Err(invalid(format!("{signature}: text is one non-empty line")));
-                };
-                let session = &host.session;
-                if session.is_closed() {
-                    return Err(invalid(format!("{signature}: the session has ended")));
-                }
-                // What surely cannot be delivered is refused here; the driver
-                // decides the rest.
-                if !session.is_running() {
-                    if !session.has_started() {
-                        return Err(invalid(format!(
-                            "{signature}: the agent has not started the owner's task yet"
-                        )));
-                    }
-                    if session.wakes_left() == 0 {
-                        return Err(invalid(match host.once {
-                            true => format!("{signature}: under --once, only while the task's run goes on"),
-                            false => format!(
-                                "{signature}: the agent is idle and plugins already started {IDLE_WAKES} runs this session"
-                            ),
-                        }));
+                let woke = self.wake(caller, row, value);
+                // The DSH host only logs a refusal: said here, once a reason.
+                if let (Some(Caller::DshHost { .. }), Err(Error::Value(why))) = (caller, &woke) {
+                    if host.refused.lock().unwrap().insert(why.clone()) {
+                        host.session.notice(
+                            NoticeLevel::Warning,
+                            format!("A DSH plugin's wake was refused: {why}"),
+                        );
                     }
                 }
-                // Tagged as the plugin's, one line: never the owner's words.
-                if !session.wake(format!("[plugin {name}] {text}")) {
-                    return Err(invalid(format!("{signature}: the session has ended")));
-                }
-                tracing::info!("plugin {name} woke the agent");
-                Ok(Value::Data(json!("sent")))
+                woke
             }
             other => Err(invalid(format!("{SESSION} has no method `{other}`"))),
         }
     }
+
+    /// `wake(text)`, refused or sent.
+    fn wake(&self, caller: Option<Caller>, row: Option<&str>, value: Value) -> Reply {
+        let host = &self.0;
+        let signature = format!("{SESSION}.wake(text)");
+        let args = args(value, 1, &signature)?;
+        let tag = match caller.filter(|c| c.grants().wake) {
+            Some(Caller::Rutis { name, .. }) => format!("[plugin {name}]"),
+            Some(Caller::DshHost { .. }) => "[DSH plugin]".to_owned(),
+            None => return Err(host.not_granted(SESSION, "wake", "wake", row)),
+        };
+        let text = args.first().and_then(Json::as_str);
+        // The DSH host joins a message's blocks with line breaks:
+        // made spaces, so it is still one line, nothing after a break
+        // passing for another message.
+        let flat;
+        let text = match (caller, text) {
+            (Some(Caller::DshHost { .. }), Some(text)) => {
+                flat = flatten(text);
+                Some(flat.as_str())
+            }
+            (_, text) => text,
+        };
+        let Some(text) = text.and_then(one_line) else {
+            return Err(invalid(format!("{signature}: text is one non-empty line")));
+        };
+        let session = &host.session;
+        if session.is_closed() {
+            return Err(invalid(format!("{signature}: the session has ended")));
+        }
+        // What surely cannot be delivered is refused here; the driver
+        // decides the rest.
+        if !session.is_running() {
+            if !session.has_started() {
+                return Err(invalid(format!(
+                    "{signature}: the agent has not started the owner's task yet"
+                )));
+            }
+            if session.wakes_left() == 0 {
+                return Err(invalid(match host.once {
+                    true => format!("{signature}: under --once, only while the task's run goes on"),
+                    false => format!(
+                        "{signature}: the agent is idle and plugins already started {IDLE_WAKES} runs this session"
+                    ),
+                }));
+            }
+        }
+        // Tagged as the plugin's, one line: never the owner's words.
+        if !session.wake(format!("{tag} {text}")) {
+            return Err(invalid(format!("{signature}: the session has ended")));
+        }
+        tracing::info!("{} woke the agent", who(row));
+        Ok(Value::Data(json!("sent")))
+    }
+}
+
+/// `text` with every line break, and every other character `one_line`
+/// refuses, made a space.
+fn flatten(text: &str) -> String {
+    text.chars()
+        .map(
+            |c| match c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                true => ' ',
+                false => c,
+            },
+        )
+        .collect()
 }
 
 impl HostDispatch for SessionService {
@@ -335,9 +450,9 @@ impl Approval {
             "ask" => {
                 let signature = format!("{APPROVAL}.ask(question, details?)");
                 let mut args = args(value, 2, &signature)?.into_iter();
-                let Some((name, _)) = host.caller(row) else {
+                let Some(Caller::Rutis { name, .. }) = host.caller(row) else {
                     return Err(invalid(format!(
-                        "{signature}: only a rutis plugin's row may ask, not {} (a pi or DSH plugin's asks come with yobuild's pi/DSH host, design §12 M3b)",
+                        "{signature}: only a rutis plugin's row may ask, not {} (DSH's approvals reach the owner through DSH's own; a pi plugin's come with yobuild's pi host, design §12 M3b)",
                         who(row)
                     )));
                 };
@@ -617,6 +732,108 @@ mod tests {
         until(&mut ui, is_run_end).await;
         let e = error(s.invoke_from(P, "wake", list(vec![json!("go")])));
         assert!(e.contains("--once"), "{e}");
+        session.send(ClientMessage::Quit);
+        run.await.unwrap();
+    }
+
+    /// A manifest whose two DSH plugins are granted `grants`.
+    fn make_dsh(grants: &str) -> (Host, Session, Driver, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let text = format!(
+            "[agent]\nname = \"a\"\nmodel = \"xai/grok-4.7\"\n\
+             [[plugin]]\ndsh = \"./d.ts\"\ngrants = {{ {grants} }}\n\
+             [[plugin]]\ndsh = \"./e.ts\"\ngrants = {{ {grants} }}\n"
+        );
+        let manifest = Manifest::parse(&text, &dir.path().join("agent.toml"), dir.path()).unwrap();
+        let (session, driver) = Session::new(true);
+        assert!(session.allow_wakes(IDLE_WAKES));
+        let host = Host::new(session.clone(), &manifest, dir.path(), None, false);
+        (host, session, driver, dir)
+    }
+
+    const DSH_HOST: Option<&str> = Some(DSH_HOST_ROW);
+
+    #[test]
+    fn the_dsh_host_has_the_dsh_plugins_grants_and_no_more() {
+        let (host, _, _driver, dir) = make_dsh("workspace = true");
+        let host = Arc::new(host);
+        let w = Workspace(host.clone());
+        assert_eq!(
+            data(w.invoke_from(DSH_HOST, "cwd", list(vec![]))),
+            json!(dir.path().to_str().unwrap())
+        );
+        // A DSH plugin's own row and the adapter's get nothing.
+        for (row, who) in [(D, "plugin d"), (Some("dsh"), "the `dsh` row")] {
+            let e = error(w.invoke_from(row, "cwd", list(vec![])));
+            assert!(e.contains(&format!("cwd: not for {who}")), "{e}");
+        }
+        // Not served what only a rutis plugin is.
+        let e = error(w.invoke_from(DSH_HOST, "trusted", list(vec![])));
+        assert!(
+            e.contains("trusted(): only a rutis plugin's row is served, not the DSH host"),
+            "{e}"
+        );
+        let s = SessionService(host.clone());
+        let e = error(s.invoke_from(DSH_HOST, "model", list(vec![])));
+        assert!(e.contains("not the DSH host"), "{e}");
+        let a = Approval(host);
+        let e = error(a.invoke_from(DSH_HOST, "ask", list(vec![json!("ok?")])));
+        assert!(
+            e.contains("only a rutis plugin's row may ask, not the DSH host"),
+            "{e}"
+        );
+        // `wake` not granted: said as the DSH plugins' grant.
+        let e = error(s.invoke_from(DSH_HOST, "wake", list(vec![json!("go")])));
+        assert!(e.contains("not granted to the DSH plugins"), "{e}");
+        // No DSH plugin granted anything: the row is nobody.
+        let (host, ..) = make("", false, false);
+        let e = error(Workspace(Arc::new(host)).invoke_from(DSH_HOST, "cwd", list(vec![])));
+        assert!(e.contains("not for the DSH host"), "{e}");
+    }
+
+    /// The DSH host's wake: one line made of the message's lines, tagged as
+    /// a DSH plugin's; a refusal said once a reason, as the shim only logs it.
+    #[tokio::test]
+    async fn the_dsh_hosts_wake_is_one_line_and_its_refusals_are_said() {
+        let (host, session, driver, _dir) = make_dsh("workspace = true, wake = true");
+        let s = SessionService(Arc::new(host));
+        let mut ui = session.connect();
+        let run = tokio::spawn(driver.run(agent(2)));
+        let wake = |text: &str| s.invoke_from(DSH_HOST, "wake", list(vec![json!(text)]));
+        // Before the owner's task: refused, and said — once.
+        assert!(error(wake("early")).contains("has not started the owner's task"));
+        assert!(error(wake("early")).contains("has not started the owner's task"));
+        assert!(error(wake(" \n ")).contains("one non-empty line"));
+        session.send(ClientMessage::Prompt { text: "hi".into() });
+        let seen = until(&mut ui, is_run_end).await;
+        let said: Vec<&String> = seen
+            .iter()
+            .filter_map(|m| match m {
+                ServerMessage::Notice { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            said.iter()
+                .filter(
+                    |m| m.contains("A DSH plugin's wake was refused") && m.contains("owner's task")
+                )
+                .count(),
+            1,
+            "{said:?}"
+        );
+        assert!(
+            said.iter()
+                .any(|m| m.contains("A DSH plugin's wake was refused")
+                    && m.contains("one non-empty line")),
+            "{said:?}"
+        );
+        assert_eq!(data(wake("found it\nsee notes.md")), json!("sent"));
+        let seen = until(&mut ui, is_run_end).await;
+        assert!(
+            seen.iter().any(|m| matches!(m, ServerMessage::RunStart { prompt, .. } if prompt == "[DSH plugin] found it see notes.md")),
+            "{seen:?}"
+        );
         session.send(ClientMessage::Quit);
         run.await.unwrap();
     }

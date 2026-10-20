@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value as Json};
 
 use super::Layout;
-use crate::frontend::host::{rows_from_file, Row};
+use crate::frontend::host::{rows_from_file, rows_from_json, Row};
 use crate::install::{Installed, Set};
 use crate::manifest::{Manifest, Package, Plugin, PluginKind, Runtime, Source};
 
@@ -20,6 +20,29 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// folder), at the version yobuild's own runtimes use.
 const RUTIS_RUNTIME: &str = "@arcships/rutis-runtime";
 
+/// The DSH host's session log row (`dsh-host.json`): its folder is given
+/// at start, in the run's `DshHome`.
+pub(crate) const DSH_SESSION_LOG: &str = "dsh-session-persistence";
+
+/// The DSH host's rows from the `dsh` runtime's folder (yoagent-rutis's
+/// `dsh_host_rows`): with DSH's own host services, all of
+/// `host-services.json` with the host's in place of the rows of their ids;
+/// without, only the host's — a grant never brings DSH's files, credentials
+/// or storage services in. The session log's folder is set at start.
+fn dsh_host_rows(dsh: &Path, services: bool) -> Result<Vec<Row>, BoxError> {
+    let rows = yoagent_rutis::adapters::dsh_host_rows(dsh, Path::new(""))?;
+    let rows = match services {
+        true => rows,
+        false => {
+            let host = rows_from_file(&dsh.join("dsh-host.json"), "dsh")?;
+            rows.into_iter()
+                .filter(|row| host.iter().any(|h| row["id"] == h.id()))
+                .collect()
+        }
+    };
+    rows_from_json(json!(rows), "dsh")
+}
+
 /// The rows to load, the runtimes they need, and the handlers to wait for.
 #[derive(Debug, Default)]
 pub(crate) struct Plan {
@@ -28,6 +51,12 @@ pub(crate) struct Plan {
     pub pi: bool,
     /// Start the `dsh` runtime, in `dsh_dir`.
     pub dsh: bool,
+    /// Load the DSH host (its stand-in agent; design §12, "Step 2"): a DSH
+    /// plugin has grants. Its rows are in `rows`, the session log's
+    /// (`DSH_SESSION_LOG`) given its folder at start.
+    pub dsh_host: bool,
+    /// DSH's own host services load (`[dsh] host_services`).
+    pub dsh_services: bool,
     /// The `dsh` runtime's folder: the `dsh` set's when DSH packages are
     /// pinned, else `adapters/dsh`; the DSH adapter's files it loads are
     /// there.
@@ -311,12 +340,18 @@ pub(crate) fn plan(
         let dsh = plan.dsh_dir.clone();
         plan.dsh = true;
         plan.handlers.push(plan.dsh_handler.clone());
-        if manifest.dsh.host_services {
-            // Read in place: it names packages, which resolve from `dsh`.
-            plan.rows.extend(rows_from_file(
-                &layout.adapters.join("dsh/host-services.json"),
-                "dsh",
-            )?);
+        plan.dsh_services = manifest.dsh.host_services;
+        // One rule makes every DSH plugin's grants the same (the manifest).
+        plan.dsh_host = manifest
+            .plugins
+            .iter()
+            .any(|p| matches!(p.kind, PluginKind::Dsh(_)) && !p.grants.is_empty());
+        if plan.dsh_host {
+            plan.rows.extend(dsh_host_rows(&dsh, plan.dsh_services)?);
+        } else if plan.dsh_services {
+            // Beside the adapter: it names packages, which resolve from `dsh`.
+            plan.rows
+                .extend(rows_from_file(&dsh.join("host-services.json"), "dsh")?);
         }
         let base = |id: &str, name: &str| Row::new(id, name).runtime("dsh");
         plan.rows.extend([

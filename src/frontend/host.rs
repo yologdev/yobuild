@@ -186,6 +186,15 @@ impl DshHome {
 /// such as `yoagent-rutis/plugins/dsh/host-services.json`), each routed to
 /// the runtime `runtime`. Other keys are ignored.
 pub fn rows_from_file(path: &Path, runtime: &str) -> Result<Vec<Row>, BoxError> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let listed: Json =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    rows_from_json(listed, runtime).map_err(|e| format!("{}: {e}", path.display()).into())
+}
+
+/// The rows of a JSON list (`[{ "id", "name", "config"? }]`, as
+/// [`rows_from_file`] reads one), each routed to the runtime `runtime`.
+pub fn rows_from_json(listed: Json, runtime: &str) -> Result<Vec<Row>, BoxError> {
     #[derive(serde::Deserialize)]
     struct Listed {
         id: String,
@@ -193,9 +202,7 @@ pub fn rows_from_file(path: &Path, runtime: &str) -> Result<Vec<Row>, BoxError> 
         #[serde(default)]
         config: Option<Json>,
     }
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let listed: Vec<Listed> =
-        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let listed: Vec<Listed> = serde_json::from_value(listed)?;
     Ok(listed
         .into_iter()
         .map(|row| {
