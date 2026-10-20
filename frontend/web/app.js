@@ -9,7 +9,7 @@
 // A tool no plugin draws, whose result carries `details.view`, gets a card
 // (and its line the view's title).
 
-import { diffRows, markdownParts, Questions, runEndLine, safeUrl, toolView, viewTitle } from './lib.js'
+import { diffRows, markdownBlocks, Questions, runEndLine, safeUrl, toolView, viewTitle } from './lib.js'
 
 const log = document.getElementById('log')
 const panels = document.getElementById('panels')
@@ -47,23 +47,108 @@ const add = (className, text) => {
   scroll()
   return el
 }
-// Answers as DOM nodes built from markdownParts — never HTML from the model.
+// Answers as DOM nodes built from markdownBlocks — never HTML from the
+// model: every node is made here, its text set as text.
 function markdown(text, element) {
-  element.replaceChildren()
-  for (const part of markdownParts(text)) {
-    if (part.kind === 'text') {
-      element.append(part.text)
-      continue
+  element.replaceChildren(...markdownBlocks(text).map(block))
+}
+
+function block(b) {
+  switch (b.kind) {
+    case 'heading':
+      return inlineInto(document.createElement(`h${b.level}`), b.inline)
+    case 'paragraph':
+      return inlineInto(document.createElement('p'), b.inline)
+    case 'list': {
+      const list = document.createElement(b.ordered ? 'ol' : 'ul')
+      if (b.ordered && b.start !== 1) list.start = b.start
+      for (const item of b.items) {
+        const li = document.createElement('li')
+        // A tight item (one paragraph) holds its text directly.
+        if (item.length === 1 && item[0].kind === 'paragraph') inlineInto(li, item[0].inline)
+        else li.append(...item.map(block))
+        list.append(li)
+      }
+      return list
     }
-    const node = document.createElement(part.kind === 'link' ? 'a' : part.kind)
-    node.textContent = part.text
-    if (part.kind === 'link') {
-      node.href = part.url
-      node.target = '_blank'
-      node.rel = 'noreferrer'
+    case 'code': {
+      const pre = document.createElement('pre')
+      if (b.lang) pre.dataset.lang = b.lang
+      const code = document.createElement('code')
+      code.textContent = b.text
+      pre.append(code)
+      return pre
     }
-    element.append(node)
+    case 'quote': {
+      const quote = document.createElement('blockquote')
+      quote.append(...b.blocks.map(block))
+      return quote
+    }
+    case 'rule':
+      return document.createElement('hr')
+    case 'table': {
+      const wrap = document.createElement('div')
+      wrap.className = 'table'
+      const table = document.createElement('table')
+      const row = (cells, tag) => {
+        const tr = document.createElement('tr')
+        cells.forEach((cell, at) => {
+          const td = inlineInto(document.createElement(tag), cell)
+          if (b.align[at]) td.style.textAlign = b.align[at]
+          tr.append(td)
+        })
+        return tr
+      }
+      const head = document.createElement('thead')
+      head.append(row(b.header, 'th'))
+      const body = document.createElement('tbody')
+      body.append(...b.rows.map((r) => row(r, 'td')))
+      table.append(head, body)
+      wrap.append(table)
+      return wrap
+    }
+    default:
+      return document.createTextNode('')
   }
+}
+
+function inlineInto(element, parts) {
+  for (const part of parts) {
+    switch (part.kind) {
+      case 'text':
+        element.append(part.text)
+        break
+      case 'br':
+        element.append(document.createElement('br'))
+        break
+      case 'code': {
+        const code = document.createElement('code')
+        code.textContent = part.text
+        element.append(code)
+        break
+      }
+      case 'link': {
+        const url = safeUrl(part.url)
+        if (!url) {
+          element.append(part.text)
+          break
+        }
+        const a = document.createElement('a')
+        a.textContent = part.text
+        a.href = url
+        a.target = '_blank'
+        a.rel = 'noreferrer'
+        element.append(a)
+        break
+      }
+      case 'strong':
+      case 'em':
+      case 'del':
+        element.append(inlineInto(document.createElement(part.kind), part.parts))
+        break
+    }
+  }
+  return element
 }
 
 const short = (value, max = 80) => {
@@ -249,7 +334,12 @@ function onEvent(event) {
       return
     case 'toolExecutionStart': {
       const line = add('tool')
-      line.append(document.createTextNode(`▶ ${event.toolName} ${short(event.args)}`))
+      const label = document.createElement('span')
+      label.className = 'label'
+      label.textContent = `▶ ${event.toolName} ${short(event.args)}`
+      line.append(label)
+      // Cut at the page's width: the whole line on hover.
+      line.title = `${event.toolName} ${short(event.args, 400)}`
       tools.set(event.toolCallId, { line, args: event.args })
       return
     }

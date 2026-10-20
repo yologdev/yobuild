@@ -867,7 +867,7 @@ component), as its own step.
   the text.
 - **Drawn as DOM nodes** — `app.js` builds each block with `createElement`
   and `textContent`, never `innerHTML`: a reply cannot add markup, scripts
-  or styles. Links go through `safeUrl` (http(s) only), open in a new tab,
+  or styles. Links are https only (as before), checked again by `safeUrl`, open in a new tab,
   `rel="noreferrer"`. A streaming reply is parsed again as it grows (its
   deltas come ≤ 30 ms apart, merged): the cost of a few kilobytes.
   Thinking text and tool cards stay as they are.
@@ -877,6 +877,10 @@ component), as its own step.
 - **Tool lines** — a line too long for the page (a plugin's card title
   with an absolute path) is cut at the page's width with an ellipsis, the
   whole line on hover.
+- **Built (2026-10-21)** as designed; an image is text whole (`![…](…)`,
+  not even a link to its URL). Tried in headless Chrome on a report like
+  the gallery's: headings, nested lists, the table's right-aligned column,
+  a code block with its language, a quote, a rule, a long tool line cut.
 - **Tests** — `node --test frontend/web/lib.test.js`: each block and
   inline kind, nesting, a table's alignments and odd rows, an unclosed
   fence, escapes, images and HTML kept as text, the depth limit, links
