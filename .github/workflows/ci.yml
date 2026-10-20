@@ -86,6 +86,11 @@ jobs:
           cargo run --locked -- run tests/fixtures/echo/agent.toml \
             --scripted tests/fixtures/echo/script.json --once "echo hi" | tee run-out.txt
           grep -qx Completed run-out.txt
+      - name: The terminal UI on a pty, given an answer with escape sequences and deceptive links (none reaches the terminal as one)
+        timeout-minutes: 5
+        run: |
+          cargo build --locked
+          python3 tests/terminal_text_pty.py target/debug/yobuild
       - name: yobuild run with the terminal UI on a pty (a typed task, Ctrl+C quits with 0, a dead UI is an error)
         timeout-minutes: 5
         run: |

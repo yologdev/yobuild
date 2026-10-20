@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { drawMarkdown, jsonText, MAX_DEPTH, markdownBlocks, markdownParts, Questions, runEndLine } from './lib.js'
+import { drawMarkdown, jsonText, MAX_DEPTH, markdownBlocks, markdownParts, Questions, runEndLine, TERMINAL_SEQUENCE_MAX, terminalText } from './lib.js'
 
 test('a value with a big integer still reads as JSON text', () => {
   assert.equal(jsonText({ id: 2n ** 64n, n: 1 }), '{"id":"18446744073709551616","n":1}')
@@ -276,6 +276,33 @@ test('the page draws answers only through drawMarkdown: no HTML from strings any
   for (const sink of ['innerHTML', 'outerHTML', 'insertAdjacentHTML', 'document.write', 'DOMParser']) {
     assert.ok(!app.includes(sink), sink)
   }
+})
+
+test('terminal text loses every escape sequence and control, and keeps the text', () => {
+  const cases = [
+    ['a\x1b[2Jb\x1b[31mred\x1b[0m', 'abred'],
+    ['a\x1b]0;PWNED\x07b', 'ab'],
+    ['a\x1b]8;;https://evil\x1b\\click\x1b]8;;\x1b\\b', 'aclickb'],
+    ['a\x1b]52;c;aGk=\x07b', 'ab'],
+    ['a\x1bPq#0\x1b\\b \x1b_x\x1b\\c \x1b^y\x1b\\d \x1bXz\x1b\\e', 'ab c d e'],
+    ['a\x1b(Bb\x1bcc', 'abc'],
+    ['a\x07b\x08c\rd\x7fe\x00f', 'abcdef'],
+    ['a\u009b2Jb\u009d0;t\u0007c', 'a2Jb0;tc'],
+    ['a‮evil‬⁦x⁩‎‏؜b', 'aevilxb'],
+    ['tab\tand\nline, ünï 中文 😀', 'tab\tand\nline, ünï 中文 😀'],
+    ['end \x1b', 'end '],
+  ]
+  for (const [input, want] of cases) assert.equal(terminalText(input), want, JSON.stringify(input))
+  assert.equal(terminalText(undefined), '')
+  // Unterminated: it ends at the next control — the line after is shown —
+  // or after the bound; only the introducer goes.
+  assert.equal(terminalText('a\x1b]0;title\nnext line'), 'a0;title\nnext line')
+  const long = 'x'.repeat(TERMINAL_SEQUENCE_MAX + 10)
+  assert.equal(terminalText(`\x1b]0;${long}`), `0;${long}`)
+  // Pieces cleaned apart join clean (an answer's deltas).
+  const pieces = ['ok \x1b]0;', 'T\x07 done', '\x1b[2', 'J!']
+  const joined = pieces.map(terminalText).join('')
+  assert.ok(!/[\x00-\x08\x0b-\x1f\x7f\u0080-\u009f]/.test(joined), JSON.stringify(joined))
 })
 
 test('questions show oldest first, once each', () => {

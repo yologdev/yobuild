@@ -918,7 +918,7 @@ terminal UI already draws answers with pi-tui's own Markdown component
   HTML as text, no image), and `app.js` holding no HTML sink; `web_test`
   unchanged (the protocol is).
 
-### Untrusted text in the terminal UI (proposed 2026-10-21)
+### Untrusted text in the terminal UI (built 2026-10-21)
 
 The terminal UI draws answers as Markdown (pi-tui's `Markdown`), but it
 prints the session's text as it comes, and a terminal runs the escape
@@ -969,34 +969,34 @@ given.
     cannot reorder what is shown;
   - everything else kept, Unicode included. Its result has no control
     character but `\n` and `\t`, so pieces cleaned apart join clean.
-- **Links in answers** — the answer's `Markdown` is a subclass whose
-  `render(width)` filters the lines pi-tui made, each line on its own
-  (pi-tui reopens a link on every wrapped line): every `OSC 8` there is
-  pi-tui's, as the input has none left. An opening `ESC]8;;<target>`
-  (ended by ST or BEL) whose target is not `https:` (compared without
-  case) is removed with its closing sequence, the text kept, and the
-  target printed after it as pi-tui's fallback does — as the page shows a
-  link it will not open whole, as written; a kept https link whose text
-  differs from its target gets the target printed after it too, so what is
-  shown is where it goes. Autolinks pi-tui makes from `www.…` (`http:`)
-  or an address (`mailto:`) are unlinked the same way, by intent.
+- **Links in answers** — no terminal hyperlinks at all:
+  `setCapabilityOverrides({ hyperlinks: false })`, which outranks the
+  environment (`PI_HYPERLINKS=1` included). pi-tui then makes no `OSC 8`
+  link, and prints a link's target after its text whenever the two differ
+  — so `[x](javascript:…)` is the text `x (javascript:…)`, and
+  `[https://bank.example](https://evil.example)` shows where it goes; its
+  autolinks (`www.…`, an address) likewise. (Proposed first: unlinking
+  non-https `OSC 8` links in pi-tui's rendered lines and printing targets
+  there — but pi-tui throws on a line wider than the terminal, and lines
+  it has fitted cannot grow; turning its links off gets the same, stricter
+  — no link opens without its target in view — and nothing is re-wrapped.)
+  A terminal that links bare URLs by itself still does, on text that shows
+  the URL.
 - **Not changed** — the page (its text is set as text, design §5
   "Answers as Markdown"; UI plugins are trusted code), the protocol, the
   plugins.
-- **Tests** — `lib.test.js`: each kind of sequence and control removed,
-  an unterminated one bounded, text and Unicode kept, the result's
-  joining; the link filter given rendered lines (wrapped, both
-  terminators, schemes in any case, a differing text). The pty check
-  (`tests/terminal_pty.py`, in its `yobuild run examples/coding.toml`
-  form) is given a scripted fixture of its own (`tests/fixtures/`), its
-  answer holding sentinels — an `OSC 0` title of a unique word, an
-  `ESC[2J` and a `javascript:` link between two text markers — and reads
-  until the answer's last marker: run with `PI_HYPERLINKS=1`, no byte
-  between the markers is ESC, BEL, U+009B or U+009D, the title word never
-  follows `ESC]0;`, and every `ESC]8;;` target in the stream is https;
-  run without it, the fallback shows the `javascript:` target as text
-  only. (pi-tui writes `ESC[2J` itself when it redraws, so the check is
-  the sentinels', not the bytes'.)
+- **Tests** — `lib.test.js`: each kind of sequence (CSI, OSC by BEL and
+  ST, DCS/SOS/PM/APC, nF) and control (C0 but `\n`/`\t`, DEL, C1, bidi)
+  removed, an unterminated one bounded, text and Unicode kept, pieces
+  cleaned apart joining clean. `tests/terminal_text_pty.py` (in CI) runs a
+  fixture agent (`tests/fixtures/hostile-text`, terminal frontend, one
+  scripted answer holding an `OSC 0` title with a unique word, an `OSC 52`
+  clipboard write, a title-report query `ESC[21t` — no sequence pi-tui
+  sends itself — a screen clear, a bidi override, a `javascript:` link and
+  a link showing one address and going to another) on a pty, with and
+  without `PI_HYPERLINKS=1`: the answer drawn, none of those sequences in
+  the stream, no `OSC 8` link with a target, the two targets shown as
+  text. Against the UI before this, 7 of its 9 checks fail.
 
 ## 6. Safety model
 
