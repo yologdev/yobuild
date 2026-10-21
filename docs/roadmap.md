@@ -168,7 +168,7 @@ the compatibility matrix for the plugins it uses.
 **Done when** three agents in the gallery were built through the skill by
 a coding agent, not by hand, and each is checked and run scripted in CI.
 
-## M3b — The host layer (design §12; proposed 2026-10-19, steps 1–3 built 2026-10-20)
+## M3b — The host layer (design §12; proposed 2026-10-19, steps 1–3 built 2026-10-20, step 4 2026-10-21)
 
 What a plugin's own app gives it — DSH's agent and session, pi's trust and
 model — provided by yobuild as host services, translated by the adapters,
@@ -192,12 +192,12 @@ plugin of it or none) and named by `check`.
 - Left: `check` saying fixed answers (no session watches there), and noting
   a pi extension's observer events (the adapter would have to report its
   handlers).
-- Plugin runtimes without the provider key variables (step 4; design §12
-  "Step 4", proposed 2026-10-21, amended the same day): every credential
-  yoagent reads removed from runtimes and stdio MCP servers (`env -u`;
-  set empty only in `check`'s pi/DSH probes alone and on Windows) and from
-  the helpers; a `keys` grant and a server's `env` handing one back on
-  purpose, which `check` notes; not a sandbox, said.
+- **Built (step 4, 2026-10-21; design §12 "Step 4"):** every credential
+  yoagent reads taken out of plugin runtimes and stdio MCP servers (`env
+  -u`; set empty only in `check`'s pi/DSH probes alone and on Windows) and
+  of the helpers; a `keys` grant and a server's `env` handing one back on
+  purpose, which `check` notes; not a sandbox, said. Later: an allowlist
+  (a runtime started with a small kept set), its own design.
 
 **Done when** `dsh-univer-office` and `pi-lens` work in a gallery agent,
 their tools' results checked (not only `✓`); the stand-in probe runs inside

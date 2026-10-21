@@ -87,16 +87,28 @@ jobs:
             --scripted tests/fixtures/echo/script.json --once "echo hi" | tee run-out.txt
           grep -qx Completed run-out.txt
       - name: The terminal UI on a pty, given an answer with escape sequences and deceptive links (none reaches the terminal as one)
+        # A credential set, so the plugin runtimes start through `env -u`
+        # (design §12, "Step 4"); scripted, so never sent anywhere.
+        env:
+          OPENAI_API_KEY: not-a-real-key
         timeout-minutes: 5
         run: |
           cargo build --locked
           python3 tests/terminal_text_pty.py target/debug/yobuild
       - name: yobuild run with the terminal UI on a pty (a typed task, Ctrl+C quits with 0, a dead UI is an error)
+        # A credential set, so the plugin runtimes start through `env -u`
+        # (design §12, "Step 4"); scripted, so never sent anywhere.
+        env:
+          OPENAI_API_KEY: not-a-real-key
         timeout-minutes: 5
         run: |
           cargo build --locked
           python3 tests/run_terminal_pty.py target/debug/yobuild
       - name: The coding example (yobuild run examples/coding.toml) on a pty (its pi policy asks before rm -rf build, Block from the keyboard)
+        # A credential set, so the plugin runtimes start through `env -u`
+        # (design §12, "Step 4"); scripted, so never sent anywhere.
+        env:
+          OPENAI_API_KEY: not-a-real-key
         shell: bash
         timeout-minutes: 5
         run: |

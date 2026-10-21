@@ -52,7 +52,12 @@ struct Ran {
 }
 
 fn yobuild(args: &[&str], cwd: &Path, home: &Path) -> Ran {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_yobuild"));
+    // None of the credentials yoagent reads a developer may hold: `check` would note them.
+    for key in yobuild::manifest::KEY_VARIABLES {
+        command.env_remove(key);
+    }
+    let mut child = command
         .env("YOBUILD_HOME", CACHE)
         .env("HOME", home)
         .env_remove("RUST_LOG")

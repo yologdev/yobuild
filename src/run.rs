@@ -182,7 +182,13 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tracing::info!("{note}");
         session.notice(NoticeLevel::Warning, note.clone());
     }
-    if let Some(note) = dsh_home_note(&checked.plan, std::env::var_os("YOAGENT_DSH_HOME")) {
+    let notes = withheld_note(&manifest, &withheld(&manifest))
+        .into_iter()
+        .chain(dsh_home_note(
+            &checked.plan,
+            std::env::var_os("YOAGENT_DSH_HOME"),
+        ));
+    for note in notes {
         tracing::info!("{note}");
         session.notice(NoticeLevel::Info, note);
     }
@@ -866,6 +872,19 @@ async fn start(
     for service in LOCAL {
         builder = builder.local(service);
     }
+    let withheld = withheld(manifest);
+    tracing::debug!(
+        "withheld from plugin runtimes: {withheld:?}; kept: {:?}",
+        plan.keys
+    );
+    for name in withheld {
+        builder = builder.withhold(name);
+    }
+    for (runtime, keys) in &plan.keys {
+        for key in keys {
+            builder = builder.keep(runtime, key);
+        }
+    }
     let mut host = builder.start(root).await?;
     if !plan.rows.is_empty() {
         let rows = with_session_log(plan, dsh_home.as_ref())?;
@@ -953,11 +972,15 @@ fn prepare(
     }
     let installed = install::install(manifest, &layout.adapters, home, locked)?;
     let plan = plugins::plan(manifest, layout, &installed, cwd, &lookup)?;
+    let withheld = withheld(manifest);
     notes.extend(plan.notes.iter().cloned());
     let servers = manifest
         .mcp
         .iter()
-        .map(|server| Ok((server.name.clone(), launch(server, &installed, &lookup)?)))
+        .map(|server| {
+            let launch = launch(server, &installed, &lookup, &withheld)?;
+            Ok((server.name.clone(), launch))
+        })
         .collect::<Result<_, BoxError>>()?;
     Ok(Prepared {
         installed,
@@ -1309,6 +1332,33 @@ async fn dsh_services(
     Err(dsh_missing(&missing, plan, host_services))
 }
 
+/// What plugins and stdio MCP servers have taken out of their environment:
+/// those of `withheld` some plugin's runtime or stdio server does not keep
+/// (a `keys` grant, a server's `env`), when there are any. Said by `run`
+/// (an Info notice) and by `check` (an agent note), since one that needs a
+/// key fails at its first call, and nothing else says why.
+pub(crate) fn withheld_note(manifest: &Manifest, withheld: &[String]) -> Option<String> {
+    let taken: Vec<String> = withheld
+        .iter()
+        .filter(|name| {
+            let plugins = manifest
+                .plugins
+                .iter()
+                .any(|p| !p.grants.keys.contains(name));
+            let servers = manifest.mcp.iter().any(|s| match &s.transport {
+                Transport::Stdio { env, .. } => !env.contains_key(*name),
+                _ => false,
+            });
+            plugins || servers
+        })
+        .map(|k| format!("`{k}`"))
+        .collect();
+    (!taken.is_empty()).then(|| format!(
+        "plugins and stdio MCP servers have the credentials yoagent reads set here taken out of their environment ({}): one that needs one gets it only from its entry (a `keys` grant, or a `\"${{NAME}}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered",
+        taken.join(", ")
+    ))
+}
+
 /// Where the DSH host writes its session log, when that is the user's own
 /// DSH home (`YOAGENT_DSH_HOME`, `home`): said by `check` and by `run`.
 pub(crate) fn dsh_home_note(
@@ -1613,6 +1663,9 @@ enum Launch {
         command: PathBuf,
         args: Vec<String>,
         env: HashMap<String, String>,
+        /// The credentials set here ([`withheld`]); [`without`] leaves
+        /// out those its `env` sets.
+        withheld: Vec<String>,
     },
     Http {
         url: String,
@@ -1620,10 +1673,14 @@ enum Launch {
     },
 }
 
+/// How to start `server`; a stdio server has each of `withheld` (the
+/// credentials set here) taken out of its environment, unless its own `env`
+/// sets it.
 fn launch(
     server: &Mcp,
     installed: &install::Installed,
     lookup: &dyn Fn(&str) -> Option<String>,
+    withheld: &[String],
 ) -> Result<Launch, BoxError> {
     let failed =
         |e: &dyn std::fmt::Display| -> BoxError { format!("mcp {}: {e}", server.name).into() };
@@ -1662,6 +1719,7 @@ fn launch(
                     .map(|(k, v)| Ok((k.clone(), v.resolve_with(lookup)?)))
                     .collect::<Result<_, crate::manifest::Unset>>()
                     .map_err(|e| failed(&e))?,
+                withheld: withheld.to_vec(),
             }
         }
         Transport::Http { url, headers } => Launch::Http {
@@ -1675,14 +1733,132 @@ fn launch(
     })
 }
 
+/// The credentials yoagent reads that are set in this process (design §12,
+/// "Step 4"), which plugin runtimes and stdio MCP servers have taken out of
+/// their environment but where their entry hands one over: a plugin could
+/// otherwise call a model past the budget, unmetered. (The adapters' helper
+/// scripts have every one removed: `plugins::node_json`.)
+pub(crate) fn withheld(manifest: &Manifest) -> Vec<String> {
+    manifest
+        .key_variables()
+        .into_iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .collect()
+}
+
+/// The credentials the manifest hands an entry on purpose, by its name: a
+/// plugin's `keys` grant or one referenced in its `config`, or in an MCP
+/// server's `env` (or an `env` name whose value is a reference:
+/// `OPENAI_API_KEY = "${MINE}"` hands a key over under that name), `args`,
+/// URL or headers. `check` notes each (what
+/// it spends with it is not metered).
+pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
+    let keys = manifest.key_variables();
+    let given = |names: Vec<&str>| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for name in names {
+            if keys.iter().any(|k| k == name) && !out.iter().any(|o| o == name) {
+                out.push(name.to_owned());
+            }
+        }
+        out
+    };
+    let plugins = manifest.plugins.iter().map(|plugin| {
+        let names = plugin.config_references();
+        let names = plugin.grants.keys.iter().chain(&names);
+        (
+            plugin.name.clone(),
+            given(names.map(String::as_str).collect()),
+        )
+    });
+    let servers = manifest.mcp.iter().map(|server| {
+        let names: Vec<&str> = match &server.transport {
+            // A key's name filled from somewhere (a secret's name holds
+            // only references: `guard`).
+            Transport::Stdio { args, env, .. } => env
+                .iter()
+                .filter(|(_, value)| !value.references().is_empty())
+                .map(|(name, _)| name.as_str())
+                .chain(args.iter().chain(env.values()).flat_map(|v| v.references()))
+                .collect(),
+            Transport::Http { url, headers } => std::iter::once(url)
+                .chain(headers.values())
+                .flat_map(|v| v.references())
+                .collect(),
+        };
+        (server.name.clone(), given(names))
+    });
+    plugins
+        .chain(servers)
+        .filter(|(_, keys)| !keys.is_empty())
+        .collect()
+}
+
+/// A stdio server's program, arguments and added variables (those its
+/// `env` sets; off unix, the withheld ones set empty too).
+type StdioCommand = (String, Vec<String>, HashMap<String, String>);
+
+/// A stdio server's command with `withheld` taken out of its environment
+/// (`frontend::host::env_without`: `/usr/bin/env -u NAME … <command>
+/// <args>`; yoagent's transport can only add variables), but the names its
+/// own `env` sets: `env -u` removes a name whoever set it.
+#[cfg(unix)]
+fn without(
+    command: &Path,
+    args: &[String],
+    env: &HashMap<String, String>,
+    withheld: &[String],
+) -> Result<StdioCommand, BoxError> {
+    let names: Vec<&String> = withheld
+        .iter()
+        .filter(|name| !env.contains_key(*name))
+        .collect();
+    let (program, argv) = crate::frontend::host::env_without(
+        &names,
+        command.as_os_str().to_owned(),
+        args.iter().map(Into::into).collect(),
+    )?;
+    // Every word was a `String` (the command a path the manifest or the
+    // installed package names), so none is lost here.
+    let text = |word: std::ffi::OsString| word.to_string_lossy().into_owned();
+    Ok((
+        text(program),
+        argv.into_iter().map(text).collect(),
+        env.clone(),
+    ))
+}
+
+/// No `env` to exec through: the variables are set empty instead (but the
+/// names its own `env` sets).
+#[cfg(not(unix))]
+fn without(
+    command: &Path,
+    args: &[String],
+    env: &HashMap<String, String>,
+    withheld: &[String],
+) -> Result<StdioCommand, BoxError> {
+    let mut env = env.clone();
+    for name in withheld {
+        env.entry(name.clone()).or_default();
+    }
+    Ok((command.display().to_string(), args.to_vec(), env))
+}
+
 /// An MCP server's tools, each `<server>__<tool>` (the server is called with
 /// its own names); those its `allow` names must be among them.
 async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, BoxError> {
     let failed = |e: &dyn std::fmt::Display| format!("mcp {}: {e}", server.name);
     let client = match launch {
-        Launch::Stdio { command, args, env } => {
+        Launch::Stdio {
+            command,
+            args,
+            env,
+            withheld,
+        } => {
+            let (command, args, env) =
+                without(command, args, env, withheld).map_err(|e| failed(&e))?;
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            McpClient::connect_stdio(&command.display().to_string(), &args, Some(env.clone()))
+            McpClient::connect_stdio(&command, &args, Some(env))
                 .await
                 .map_err(|e| failed(&e))?
         }
@@ -2259,5 +2435,181 @@ mod tests {
         assert_eq!(bin(None).unwrap_err(), "@s/srv: its bin is not a path");
         write("null");
         assert_eq!(bin(None).unwrap_err(), "@s/srv has no bin");
+    }
+
+    /// A stdio server has the credentials set here taken out but those its
+    /// `env` sets (`env -u` would remove those too): through `env` on unix.
+    #[test]
+    fn a_server_has_the_withheld_credentials_taken_out_but_what_its_env_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = Manifest::parse(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
+             [[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\nargs = [\"--x\"]\n\
+             env = { OPENAI_API_KEY = \"${MINE}\" }\n",
+            &dir.path().join("a.toml"),
+            dir.path(),
+        )
+        .unwrap();
+        let withheld = ["OPENAI_API_KEY".to_owned(), "GROQ_API_KEY".to_owned()];
+        let launch = super::launch(
+            &m.mcp[0],
+            &install::Installed::default(),
+            &|_: &str| Some("v".to_owned()),
+            &withheld,
+        )
+        .unwrap();
+        let Launch::Stdio {
+            command,
+            args,
+            env,
+            withheld,
+        } = launch
+        else {
+            panic!("stdio")
+        };
+        assert_eq!(withheld, ["OPENAI_API_KEY", "GROQ_API_KEY"]);
+        let (program, argv, env) = super::without(&command, &args, &env, &withheld).unwrap();
+        assert_eq!(env.get("OPENAI_API_KEY").map(String::as_str), Some("v"));
+        let command = command.display().to_string();
+        if cfg!(unix) {
+            assert_eq!(program, "/usr/bin/env");
+            assert_eq!(argv, ["-u", "GROQ_API_KEY", command.as_str(), "--x"]);
+        } else {
+            assert_eq!((program, argv), (command, vec!["--x".to_owned()]));
+            assert_eq!(env.get("GROQ_API_KEY").map(String::as_str), Some(""));
+        }
+        // Nothing withheld: the command as it is.
+        let (program, argv, _) = super::without(Path::new("/s"), &[], &env, &[]).unwrap();
+        assert_eq!((program.as_str(), argv.len()), ("/s", 0));
+    }
+
+    #[test]
+    fn the_withheld_note_names_only_what_some_plugin_or_stdio_server_loses() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = |entries: &str, withheld: &[&str]| {
+            let m = Manifest::parse(
+                &format!("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n{entries}"),
+                &dir.path().join("a.toml"),
+                dir.path(),
+            )
+            .unwrap();
+            let withheld: Vec<String> = withheld.iter().map(|k| k.to_string()).collect();
+            super::withheld_note(&m, &withheld)
+        };
+        let keys = ["OPENAI_API_KEY", "GROQ_API_KEY"];
+        let stdio = "[[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n";
+        // Nothing runs that could lose one, or nothing is set.
+        assert_eq!(note("", &keys), None);
+        assert_eq!(
+            note(
+                "[[mcp]]\nname = \"h\"\nurl = \"https://h.example/mcp\"\n",
+                &keys
+            ),
+            None
+        );
+        assert_eq!(note(stdio, &[]), None);
+        // A stdio server loses both; one whose `env` sets one loses the other.
+        let said = note(stdio, &keys).unwrap();
+        assert!(
+            said.contains("(`OPENAI_API_KEY`, `GROQ_API_KEY`)"),
+            "{said}"
+        );
+        let said = note(
+            &format!("{stdio}env = {{ OPENAI_API_KEY = \"${{MINE}}\" }}\n"),
+            &keys,
+        )
+        .unwrap();
+        assert!(said.contains("environment (`GROQ_API_KEY`)"), "{said}");
+        // Every plugin granted all of them: nothing lost, nothing said.
+        let granted = "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\n\
+                       grants = { keys = [\"GROQ_API_KEY\", \"OPENAI_API_KEY\"] }\n";
+        assert_eq!(note(granted, &keys), None);
+        let other = "[[plugin]]\nrutis = \"./q.ts\"\nruntime = \"node\"\n";
+        assert!(note(&format!("{granted}{other}"), &keys).is_some());
+    }
+
+    /// A command whose path holds `=` (which `env` would read as an
+    /// assignment) still runs, with its arguments, each name taken out once.
+    #[cfg(unix)]
+    #[test]
+    fn a_server_in_a_folder_named_with_an_equals_sign_still_starts() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("a=b");
+        std::fs::create_dir(&folder).unwrap();
+        let script = folder.join("s.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho \"ran $1 [${HOME+home}] [${YOBUILD_T+set}]\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let withheld = ["YOBUILD_T".to_owned(), "YOBUILD_T".to_owned()];
+        let (program, argv, _) =
+            super::without(&script, &["x=1".to_owned()], &HashMap::new(), &withheld).unwrap();
+        assert_eq!(argv[..4], ["-u", "YOBUILD_T", "/bin/sh", "-c"]);
+        let out = std::process::Command::new(program)
+            .args(argv)
+            .env("YOBUILD_T", "secret")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "ran x=1 [home] []\n");
+    }
+
+    #[test]
+    fn the_keys_handed_over_are_the_key_variables_an_entry_refers_to_or_is_filled_under() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = Manifest::parse(
+            r#"[agent]
+name = "a"
+model = "acme/m"
+base_url = "https://acme.example/v1"
+api_key_env = "ACME_KEY"
+[[plugin]]
+name = "nested"
+dsh = "./d.ts"
+config = { apiKey = "${OPENAI_API_KEY}", deep = { list = ["x ${ACME_KEY}", "${OPENAI_API_KEY}"] }, home = "${HOME}" }
+[[plugin]]
+name = "plain"
+dsh = "./e.ts"
+config = { home = "${HOME}" }
+[[plugin]]
+name = "granted"
+rutis = "./g.ts"
+runtime = "node"
+config = { key = "${ACME_KEY}" }
+grants = { keys = ["OPENAI_API_KEY"] }
+[[mcp]]
+name = "stdio"
+npm = "./s.sh"
+args = ["--token", "${GROQ_API_KEY}"]
+env = { OPENAI_API_KEY = "${MINE}", LOG = "${DEEPSEEK_API_KEY_FILE}" }
+[[mcp]]
+name = "web"
+url = "https://mcp.example/${API_KEY}"
+headers = { Authorization = "Bearer ${ANTHROPIC_API_KEY}" }
+"#,
+            &dir.path().join("a.toml"),
+            dir.path(),
+        )
+        .unwrap();
+        let given = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            super::keys_given(&m),
+            [
+                // Nested, each once; `HOME` is no key; the custom
+                // provider's own variable is one.
+                ("nested".to_owned(), given(&["OPENAI_API_KEY", "ACME_KEY"])),
+                // Its `keys` grant first, then its config's.
+                ("granted".to_owned(), given(&["OPENAI_API_KEY", "ACME_KEY"])),
+                // Filled under a key's name, and in its arguments; a name
+                // that only starts like a key's is none.
+                (
+                    "stdio".to_owned(),
+                    given(&["OPENAI_API_KEY", "GROQ_API_KEY"])
+                ),
+                ("web".to_owned(), given(&["API_KEY", "ANTHROPIC_API_KEY"])),
+            ]
+        );
     }
 }

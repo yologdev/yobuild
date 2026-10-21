@@ -93,6 +93,23 @@ pub const PROVIDERS: [(&str, &[&str]); 11] = [
     ("meta", &["META_API_KEY", "MODEL_API_KEY"]),
 ];
 
+/// Every variable yoagent reads a credential from, for any provider or
+/// decision model it knows: yoagent 0.25.12's `api_key_variables` as it is
+/// (unit-tested), which `resolve_api_key` reads — [`PROVIDERS`]' and those
+/// of the providers yobuild does not offer, Bedrock's (AWS's own
+/// credentials among them), its fallbacks `YOAGENT_API_KEY` and `API_KEY`,
+/// TypeSafe's and Cloudflare's. Plugins and stdio MCP servers have those
+/// set here taken out of their environment unless their entry hands one
+/// over (design §12, "Step 4").
+pub const KEY_VARIABLES: [&str; 26] = [
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+    "GROQ_API_KEY", "MISTRAL_API_KEY", "XAI_API_KEY", "DASHSCOPE_API_KEY", "ZAI_API_KEY",
+    "MINIMAX_API_KEY", "META_API_KEY", "MODEL_API_KEY", "OPENROUTER_API_KEY", "CEREBRAS_API_KEY",
+    "OPENCODE_API_KEY", "AZURE_OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "YOAGENT_API_KEY", "API_KEY", "TYPESAFE_API_KEY",
+    "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_AUTH_TOKEN",
+];
+
 /// Local servers yoagent has a constructor for, which take no key: `ollama`
 /// (`base_url` defaults to [`OLLAMA`]) and `local` (any OpenAI-compatible
 /// server on this machine: LM Studio, llama.cpp, …; `base_url` required).
@@ -291,6 +308,10 @@ pub struct Grants {
     pub wake: bool,
     /// What a pi extension's `pi.exec` may run (`exec`; off by default).
     pub exec: ExecGrant,
+    /// The credentials yoagent reads left in its runtime's environment
+    /// (`keys`; design §12, "Step 4"), sorted: a runtime's environment is
+    /// the whole runtime's, so the same on every plugin that shares it.
+    pub keys: Vec<String>,
 }
 
 /// [`Grants::exec`]: a pi extension's `pi.exec`.
@@ -318,26 +339,37 @@ pub enum ModelGrant {
 impl Grants {
     /// The keys granted, as the manifest names them.
     pub fn names(&self) -> Vec<&'static str> {
+        // Every field named: a grant added later is said here.
+        let Grants {
+            workspace,
+            trust,
+            model,
+            wake,
+            exec,
+            keys,
+        } = self;
         [
-            (self.workspace, "workspace"),
-            (self.trust, "trust"),
-            (self.model.is_some(), "model"),
-            (self.wake, "wake"),
-            (self.exec != ExecGrant::Off, "exec"),
+            (*workspace, "workspace"),
+            (*trust, "trust"),
+            (model.is_some(), "model"),
+            (*wake, "wake"),
+            (*exec != ExecGrant::Off, "exec"),
+            (!keys.is_empty(), "keys"),
         ]
         .into_iter()
         .filter_map(|(on, name)| on.then_some(name))
         .collect()
     }
 
-    /// The grants as `check` says them: the keys, `exec` with its value
-    /// (`"gate"` and `"free"` are worlds apart).
+    /// The grants as `check` says them: their names, `exec` with its value
+    /// (`"gate"` and `"free"` are worlds apart) and `keys` with its names.
     pub fn said(&self) -> Vec<String> {
         self.names()
             .into_iter()
             .map(|name| match (name, self.exec) {
                 ("exec", ExecGrant::Gate) => "exec = \"gate\"".to_owned(),
                 ("exec", ExecGrant::Free) => "exec = \"free\"".to_owned(),
+                ("keys", _) => format!("keys = [{}]", self.keys.join(", ")),
                 (name, _) => name.to_owned(),
             })
             .collect()
@@ -346,6 +378,22 @@ impl Grants {
     /// Nothing granted.
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// Nothing the host serves granted: `keys` aside, which only the
+    /// runtime's launch reads (so a DSH plugin granted only `keys` starts no
+    /// DSH host).
+    pub fn hosts_nothing(&self) -> bool {
+        // Every field named: a grant added later is decided here.
+        let Grants {
+            workspace,
+            trust,
+            model,
+            wake,
+            exec,
+            keys: _,
+        } = self;
+        !workspace && !trust && model.is_none() && !wake && *exec == ExecGrant::Off
     }
 }
 
@@ -363,6 +411,33 @@ impl Plugin {
             serde_json::Value::Object(map) => Ok(Some(map)),
             _ => unreachable!("a table stays a table"),
         }
+    }
+
+    /// The names its configuration's strings refer to (`${NAME}`), at any
+    /// depth, each once, in the order met.
+    pub fn config_references(&self) -> Vec<String> {
+        fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::String(text) => {
+                    for name in Value::new(text.clone())
+                        .expect("checked when read")
+                        .references()
+                    {
+                        if !out.iter().any(|o| o == name) {
+                            out.push(name.to_owned());
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+                serde_json::Value::Object(map) => map.values().for_each(|v| walk(v, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for value in self.config.iter().flat_map(|c| c.values()) {
+            walk(value, &mut out);
+        }
+        out
     }
 }
 
@@ -686,6 +761,7 @@ struct RawGrants {
     model: Option<Spanned<String>>,
     wake: Option<Spanned<bool>>,
     exec: Option<Spanned<String>>,
+    keys: Option<Vec<Spanned<String>>>,
 }
 
 #[derive(Deserialize)]
@@ -747,14 +823,24 @@ impl Manifest {
             .any(|p| matches!(p.kind, PluginKind::Pi(_)) && p.grants.model.is_some())
     }
 
+    /// The variables that may hold a credential yoagent reads:
+    /// [`KEY_VARIABLES`], then the agent's own (`api_key_env`, a custom
+    /// provider's) when it is not among them; each once. Those set in
+    /// yobuild's environment are taken out of plugins' and stdio MCP
+    /// servers' unless the manifest hands one over.
+    pub fn key_variables(&self) -> Vec<String> {
+        key_variables(&self.agent.model)
+    }
+
     /// What every DSH plugin is granted — the same on each, which `parse`
-    /// enforces (one DSH host serves them all) — when that is anything.
+    /// enforces (one DSH host serves them all) — when that is anything the
+    /// DSH host serves (`keys` alone is not: [`Grants::hosts_nothing`]).
     pub fn dsh_grants(&self) -> Option<&Grants> {
         self.plugins
             .iter()
             .find(|p| matches!(p.kind, PluginKind::Dsh(_)))
             .map(|p| &p.grants)
-            .filter(|g| !g.is_empty())
+            .filter(|g| !g.hosts_nothing())
     }
 
     /// Reads and checks the manifest at `path`; its folder, made absolute,
@@ -790,6 +876,7 @@ impl Manifest {
         })?;
 
         let agent = agent(raw.agent, dir).map_err(located)?;
+        let credentials = key_variables(&agent.model);
         let limits = limits(raw.limits, &agent.model).map_err(located)?;
         let mut names: Vec<String> = Vec::new();
         let mut unique = |name: &str, span: Range<usize>| -> Result<(), Located> {
@@ -843,7 +930,7 @@ impl Manifest {
                 at.or_else(|| r.pi.as_ref().or(r.dsh.as_ref()).map(Spanned::span))
             };
             let (plugin, name_span) =
-                plugin(raw.into_inner(), span.clone(), dir).map_err(located)?;
+                plugin(raw.into_inner(), span.clone(), dir, &credentials).map_err(located)?;
             unique(&plugin.name, name_span).map_err(located)?;
             match &plugin.kind {
                 PluginKind::Pi(source) => pinned("pi", source, span.clone()).map_err(located)?,
@@ -862,16 +949,30 @@ impl Manifest {
                     let m = format!(
                         "every pi extension sees one model: grant `model = \"info\"` to each pi plugin or none (`{with}` has it, `{without}` not)"
                     );
+                    return Err(located((grants_at.clone().unwrap_or(span), m)));
+                }
+                if let Some(first) = first.filter(|f| f.grants.keys != plugin.grants.keys) {
+                    let m = format!(
+                        "every pi extension runs in one runtime, whose environment is theirs together: give each pi plugin the same `keys` or none ({})",
+                        keys_differ(first, &plugin)
+                    );
                     return Err(located((grants_at.unwrap_or(span), m)));
                 }
             }
-            // One DSH host serves every DSH plugin, so a grant to one is a
-            // grant to all: the manifest writes the same on each (design
-            // §12, "One rule for both ecosystems").
+            // One DSH runtime runs every DSH plugin, and one DSH host serves
+            // them: a grant to one is a grant to all, so the manifest writes
+            // the same on each (design §12, "One rule for both ecosystems").
             if let PluginKind::Dsh(_) = plugin.kind {
                 let first = plugins
                     .iter()
                     .find(|p| matches!(p.kind, PluginKind::Dsh(_)));
+                if let Some(first) = first.filter(|f| f.grants.keys != plugin.grants.keys) {
+                    let m = format!(
+                        "every DSH plugin runs in one runtime, whose environment is theirs together: give each DSH plugin the same `keys` or none ({})",
+                        keys_differ(first, &plugin)
+                    );
+                    return Err(located((grants_at.unwrap_or(span), m)));
+                }
                 if let Some(first) = first.filter(|f| f.grants != plugin.grants) {
                     let said = |g: &Grants| match g.is_empty() {
                         true => "none".to_owned(),
@@ -944,6 +1045,17 @@ fn normal(path: &Path) -> PathBuf {
     path.components()
         .filter(|c| !matches!(c, Component::CurDir))
         .collect()
+}
+
+/// [`Manifest::key_variables`], for the agent's model.
+fn key_variables(model: &Model) -> Vec<String> {
+    let mut names: Vec<String> = KEY_VARIABLES.iter().map(|n| n.to_string()).collect();
+    for name in model.key_env() {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
 }
 
 fn agent(raw: RawAgent, dir: &Path) -> Result<Agent, Located> {
@@ -1244,12 +1356,41 @@ fn json(value: toml::Value) -> serde_json::Value {
     }
 }
 
-/// A plugin's `grants`, checked for its ecosystem (design §12's table).
-fn grants(raw: Option<Spanned<RawGrants>>, kind: &PluginKind) -> Result<Grants, Located> {
+/// Two plugins' `keys` as a refusal says them: "`a` has X, Y, `b` none".
+pub(crate) fn keys_differ(first: &Plugin, other: &Plugin) -> String {
+    let said = |p: &Plugin| match p.grants.keys.is_empty() {
+        true => format!("`{}` none", p.name),
+        false => format!("`{}` has {}", p.name, p.grants.keys.join(", ")),
+    };
+    format!("{}, {}", said(first), said(other))
+}
+
+/// A plugin's `grants`, checked for its ecosystem (design §12's table);
+/// `credentials` are the names `keys` may hold ([`key_variables`]).
+fn grants(
+    raw: Option<Spanned<RawGrants>>,
+    kind: &PluginKind,
+    credentials: &[String],
+) -> Result<Grants, Located> {
     let Some(raw) = raw else {
         return Ok(Grants::default());
     };
-    let raw = raw.into_inner();
+    let mut raw = raw.into_inner();
+    // Names only from the list, each once: anything else is not withheld.
+    let mut keys: Vec<String> = Vec::new();
+    for key in raw.keys.take().into_iter().flatten() {
+        let name = key.get_ref();
+        if !credentials.contains(name) {
+            let m = format!("`{name}` is not a credential yoagent reads: nothing withholds it");
+            return Err((key.span(), m));
+        }
+        if keys.contains(name) {
+            return Err((key.span(), format!("`{name}` is listed twice")));
+        }
+        keys.push(name.clone());
+    }
+    keys.sort();
+    let keys = keys;
     let model = |raw: Option<Spanned<String>>| match raw {
         None => Ok(None),
         Some(model) if model.get_ref() == "info" => Ok(Some(ModelGrant::Info)),
@@ -1266,7 +1407,7 @@ fn grants(raw: Option<Spanned<RawGrants>>, kind: &PluginKind) -> Result<Grants, 
         // pi's host: the adapter's per-extension settings (design §12,
         // "Step 3"); a pi extension has its folder already (`ctx.cwd`).
         if let Some(workspace) = &raw.workspace {
-            let m = "a pi extension takes `trust`, `model`, `wake` and `exec`, not `workspace` (it has the folder: `ctx.cwd`)";
+            let m = "a pi extension takes `trust`, `model`, `wake`, `exec` and `keys`, not `workspace` (it has the folder: `ctx.cwd`)";
             return Err((workspace.span(), m.into()));
         }
         let exec = match raw.exec {
@@ -1286,6 +1427,7 @@ fn grants(raw: Option<Spanned<RawGrants>>, kind: &PluginKind) -> Result<Grants, 
             model: model(raw.model)?,
             wake: on(raw.wake),
             exec,
+            keys,
             ..Grants::default()
         });
     }
@@ -1298,7 +1440,7 @@ fn grants(raw: Option<Spanned<RawGrants>>, kind: &PluginKind) -> Result<Grants, 
             raw.exec.as_ref().map(|e| (e.span(), "exec")),
         ];
         if let Some((at, key)) = other.into_iter().flatten().next() {
-            let m = format!("a DSH plugin takes `workspace` and `wake`, not `{key}`");
+            let m = format!("a DSH plugin takes `workspace`, `wake` and `keys`, not `{key}`");
             return Err((at, m));
         }
         let workspace = raw.workspace.is_some_and(|w| *w.get_ref());
@@ -1310,11 +1452,13 @@ fn grants(raw: Option<Spanned<RawGrants>>, kind: &PluginKind) -> Result<Grants, 
             return Ok(Grants {
                 workspace,
                 wake: true,
+                keys,
                 ..Grants::default()
             });
         }
         return Ok(Grants {
             workspace,
+            keys,
             ..Grants::default()
         });
     }
@@ -1327,6 +1471,7 @@ fn grants(raw: Option<Spanned<RawGrants>>, kind: &PluginKind) -> Result<Grants, 
         model: model(raw.model)?,
         wake: on(raw.wake),
         exec: ExecGrant::Off,
+        keys,
     })
 }
 
@@ -1334,6 +1479,7 @@ fn plugin(
     raw: RawPlugin,
     table: Range<usize>,
     dir: &Path,
+    credentials: &[String],
 ) -> Result<(Plugin, Range<usize>), Located> {
     let given: Vec<&Spanned<String>> = [&raw.pi, &raw.dsh, &raw.rutis]
         .into_iter()
@@ -1398,7 +1544,7 @@ fn plugin(
         }
     };
     let allow = allow(raw.allow.as_ref(), true)?;
-    let grants = grants(raw.grants, &kind)?;
+    let grants = grants(raw.grants, &kind, credentials)?;
     Ok((
         Plugin {
             name,

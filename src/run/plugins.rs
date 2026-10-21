@@ -73,7 +73,8 @@ pub(crate) struct Plan {
     /// Start the `dsh` runtime, in `dsh_dir`.
     pub dsh: bool,
     /// Load the DSH host (its stand-in agent; design §12, "Step 2"): the DSH
-    /// plugins have grants. Its rows are in `rows`.
+    /// plugins have a grant the host serves (`keys` alone is none). Its rows
+    /// are in `rows`.
     pub dsh_host: bool,
     /// The DSH host's session log row, by id: `start` gives it its folder
     /// (set whenever `dsh_host` is).
@@ -112,6 +113,10 @@ pub(crate) struct Plan {
     /// The same files as `extensions` spells them, which the pi adapter
     /// names back to the host services.
     pub pi_spelled: Vec<(String, Vec<PathBuf>)>,
+    /// The credentials each runtime is granted (`keys`; design §12, "Step
+    /// 4"), by runtime name, for every runtime a plugin runs in (none
+    /// granted: an empty list): left in its environment.
+    pub keys: Vec<(String, Vec<String>)>,
 }
 
 /// The folder of an installed package, at exactly `package`'s version;
@@ -173,11 +178,17 @@ pub(crate) fn in_set(sets: &Installed, set: Set, package: &Package) -> Result<Pa
 const HELPER_TIME: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Runs one of the adapters' helper scripts with Node; its JSON output, an
-/// object (its stderr goes to the debug log).
-fn node_json(script: &Path, args: &[&Path]) -> Result<Helper, BoxError> {
+/// object (its stderr goes to the debug log). `keys` (the credentials
+/// yoagent reads) are removed from its environment: `inspect-package.mjs`
+/// imports a plugin's code.
+fn node_json(script: &Path, args: &[&Path], keys: &[String]) -> Result<Helper, BoxError> {
     use std::io::Read;
     let failed = |e: &dyn std::fmt::Display| format!("node {}: {e}", script.display());
-    let mut child = std::process::Command::new("node")
+    let mut command = std::process::Command::new("node");
+    for key in keys {
+        command.env_remove(key);
+    }
+    let mut child = command
         .arg(script)
         .args(args)
         .stdout(std::process::Stdio::piped())
@@ -263,6 +274,25 @@ impl Helper {
     }
 }
 
+impl Plan {
+    /// The runtime `runtime` keeps `keys` (each plugin of one runtime is
+    /// granted the same: the manifest and `plan` see to it).
+    fn keep(&mut self, runtime: &str, keys: &[String]) {
+        match self.keys.iter().find(|(r, _)| r == runtime) {
+            Some((_, kept)) => debug_assert_eq!(kept, keys, "runtime `{runtime}`'s plugins' keys"),
+            None => self.keys.push((runtime.to_owned(), keys.to_vec())),
+        }
+    }
+
+    /// What the runtime `runtime` keeps of the withheld credentials.
+    pub fn kept(&self, runtime: &str) -> &[String] {
+        self.keys
+            .iter()
+            .find(|(r, _)| r == runtime)
+            .map_or(&[], |(_, keys)| keys.as_slice())
+    }
+}
+
 /// What the manifest's plugins load. Every refusal about their files and
 /// packages comes from here, before anything starts (what a running DSH
 /// runtime lacks is checked once it runs: `run::dsh_services`).
@@ -274,6 +304,7 @@ pub(crate) fn plan(
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Plan, BoxError> {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let keys = manifest.key_variables();
     let mut plan = Plan {
         pi_handler: format!("pi-extensions-{suffix}"),
         dsh_handler: format!("dsh-tools-{suffix}"),
@@ -294,10 +325,11 @@ pub(crate) fn plan(
         let config = plugin.config_with(lookup).map_err(|e| failed(e.into()))?;
         match &plugin.kind {
             PluginKind::Pi(source) => {
+                plan.keep("pi", &plugin.grants.keys);
                 if config.is_some() {
                     return Err(failed("a pi extension takes no config".into()));
                 }
-                let found = pi_extensions(layout, sets, plugin, source).map_err(failed)?;
+                let found = pi_extensions(layout, sets, plugin, source, &keys).map_err(failed)?;
                 // Each file as planned (how the adapter names it back) and
                 // canonical (how a tool's source is compared); one file is
                 // one plugin's: two would have the adapter and yobuild apply
@@ -337,8 +369,10 @@ pub(crate) fn plan(
                 plan.notes.extend(found.notes);
             }
             PluginKind::Dsh(source) => {
+                plan.keep("dsh", &plugin.grants.keys);
                 let (rows, peers) =
-                    dsh_rows_of(layout, &plan.dsh_dir, plugin, source, config).map_err(failed)?;
+                    dsh_rows_of(layout, &plan.dsh_dir, plugin, source, config, &keys)
+                        .map_err(failed)?;
                 plan.dsh_modules
                     .extend(rows.iter().map(|row| row.name().to_owned()));
                 plan.dsh_peers.extend(peers);
@@ -361,6 +395,26 @@ pub(crate) fn plan(
                         plan.rutis.len() - 1
                     }
                 };
+                // One runtime per package, its environment its plugins'
+                // together: the same `keys` on each.
+                let first = manifest.plugins.iter().find(|p| match &p.kind {
+                    PluginKind::Rutis { path, .. } => {
+                        package_of(path).is_ok_and(|p| p == plan.rutis[at])
+                    }
+                    _ => false,
+                });
+                if let Some(first) = first.filter(|f| f.grants.keys != plugin.grants.keys) {
+                    return Err(failed(
+                        format!(
+                            "it runs in one runtime with plugin {} (the package at {}), whose environment is theirs together: give each the same `keys` or none ({})",
+                            first.name,
+                            plan.rutis[at].display(),
+                            crate::manifest::keys_differ(first, plugin)
+                        )
+                        .into(),
+                    ));
+                }
+                plan.keep(&rutis_runtime_name(at), &plugin.grants.keys);
                 let mut row =
                     Row::new(row_id(&plugin.name), path.display()).runtime(rutis_runtime_name(at));
                 if let Some(config) = config {
@@ -502,6 +556,7 @@ fn pi_extensions(
     sets: &Installed,
     plugin: &Plugin,
     source: &Source,
+    keys: &[String],
 ) -> Result<PiFound, BoxError> {
     let dir = match source {
         Source::Package(p) => in_set(sets, Set::Pi, p)?,
@@ -517,7 +572,11 @@ fn pi_extensions(
         });
     }
     // What pi's package manager finds in it.
-    let found = node_json(&layout.adapters.join("pi/resolve-package.mjs"), &[&dir])?;
+    let found = node_json(
+        &layout.adapters.join("pi/resolve-package.mjs"),
+        &[&dir],
+        keys,
+    )?;
     let extensions = found.list("extensions")?.clone();
     if extensions.is_empty() {
         return Err(format!("no pi extension in {}", dir.display()).into());
@@ -580,6 +639,7 @@ fn dsh_rows_of(
     plugin: &Plugin,
     source: &Source,
     config: Option<serde_json::Map<String, Json>>,
+    keys: &[String],
 ) -> Result<(Vec<Row>, Vec<String>), BoxError> {
     let id = row_id(&plugin.name);
     let p = match source {
@@ -602,6 +662,7 @@ fn dsh_rows_of(
     let inspected = node_json(
         &layout.adapters.join("dsh/inspect-package.mjs"),
         &[base, Path::new(p.name())],
+        keys,
     )?;
     rows_of_bundle(&id, &inspected, config, &modules, &optional_peers(&dir)?)
 }
@@ -1142,6 +1203,35 @@ mod tests {
             .map(|r| r.runtime_name().unwrap())
             .collect();
         assert_eq!(runtimes, ["rutis-0", "rutis-1", "rutis-0"]);
+        // One runtime's environment is its plugins' together: the same
+        // `keys` on the plugins of one package; another package's its own.
+        let keys = |p: &str, q: &str, r: &str| {
+            plan_of(
+                dir.path(),
+                &format!(
+                    "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\ngrants = {{ keys = [{p}] }}\n\
+                     [[plugin]]\nrutis = \"./other/q.ts\"\nruntime = \"node\"\ngrants = {{ keys = [{q}] }}\n\
+                     [[plugin]]\nrutis = \"./r.ts\"\nruntime = \"node\"\ngrants = {{ keys = [{r}] }}\n"
+                ),
+            )
+        };
+        let granted = keys(r#""API_KEY""#, "", r#""API_KEY""#).unwrap();
+        assert_eq!(
+            granted.keys,
+            [
+                ("rutis-0".to_owned(), vec!["API_KEY".to_owned()]),
+                ("rutis-1".to_owned(), vec![])
+            ]
+        );
+        assert!(granted.kept("rutis-1").is_empty());
+        let e = keys(r#""API_KEY""#, "", "").err().unwrap();
+        assert_eq!(
+            e,
+            format!(
+                "plugin r: it runs in one runtime with plugin p (the package at {}), whose environment is theirs together: give each the same `keys` or none (`p` has API_KEY, `r` none)",
+                canonical(dir.path()).display()
+            )
+        );
         // `..` is resolved before looking up: a folder the path names on
         // its way is not the plugin's package.
         // (The runtime taken away, so the refusal names the folder.)
@@ -1261,6 +1351,11 @@ mod tests {
         assert!(!has(&plan, "dsh-host") && services.iter().all(|id| has(&plan, id)));
         let plan = loaded("", false);
         assert!(!has(&plan, "dsh-host") && !services.iter().any(|id| has(&plan, id)));
+        // `keys` alone: no host, the `dsh` runtime keeping them.
+        let plan = loaded("grants = { keys = [\"API_KEY\"] }\n", false);
+        assert!(!plan.dsh_host && !has(&plan, "dsh-host"));
+        assert_eq!(plan.kept("dsh"), ["API_KEY"]);
+        assert!(plan.kept("pi").is_empty());
     }
 
     /// The pi plugins' grants become the adapter's settings, by each
@@ -1359,5 +1454,31 @@ mod tests {
                 std::fs::copy(entry.path(), target).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn a_helper_runs_without_the_variables_it_is_told_to_drop() {
+        // `cargo test` sets `CARGO_PKG_NAME` and `CARGO_MANIFEST_DIR` for
+        // the test: a variable this process surely holds.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("env.mjs");
+        std::fs::write(
+            &script,
+            "const v = (n) => process.env[n] ?? 'unset'\n\
+             console.log(JSON.stringify({ name: v('CARGO_PKG_NAME'), dir: v('CARGO_MANIFEST_DIR') }))\n",
+        )
+        .unwrap();
+        let seen = |keys: &[&str]| {
+            let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            let found = node_json(&script, &[], &keys).unwrap();
+            (
+                found.field("name").unwrap().clone(),
+                found.field("dir").unwrap().clone(),
+            )
+        };
+        assert_eq!(seen(&[]).0, "yobuild");
+        let (name, dir) = seen(&["CARGO_PKG_NAME"]);
+        assert_eq!(name, "unset");
+        assert_eq!(dir, env!("CARGO_MANIFEST_DIR"));
     }
 }

@@ -215,6 +215,85 @@ pub fn rows_from_json(listed: Json, runtime: &str) -> Result<Vec<Row>, BoxError>
         .collect())
 }
 
+/// `launcher` with the variables `names` taken out of its environment
+/// ([`env_without`]), so nothing of rutis's command is copied, and what
+/// rutis adds as it spawns (its channel) is not among them. `env -u`
+/// removes a name whoever set it, so `names` holds none the launch sets.
+#[cfg(unix)]
+fn without(mut launcher: Launcher, names: &[&OsString]) -> Result<Launcher, BoxError> {
+    let program = std::mem::take(&mut launcher.program);
+    let args = std::mem::take(&mut launcher.args);
+    let (program, args) = env_without(names, program, args)?;
+    launcher.program = program;
+    launcher.args = args;
+    Ok(launcher)
+}
+
+/// No `env` to exec through: the variables are set empty instead.
+#[cfg(not(unix))]
+fn without(launcher: Launcher, names: &[&OsString]) -> Result<Launcher, BoxError> {
+    Ok(names
+        .iter()
+        .fold(launcher, |launcher, name| launcher.env(*name, "")))
+}
+
+/// Where [`env_without`] finds `env`, and the shell it runs a program
+/// through when `env` would misread its path.
+#[cfg(unix)]
+const ENV: &str = "/usr/bin/env";
+#[cfg(unix)]
+const SH: &str = "/bin/sh";
+
+/// `program args` started with the variables `names` taken out of its
+/// environment (design §12 "Step 4"): `/usr/bin/env -u NAME … program
+/// args`, each name once — `env` execs it, the same process (pid, process
+/// group, inherited descriptors). A launcher can only add variables. `env`
+/// reads a word holding `=` before the program as an assignment, `--` or
+/// not, so such a program goes through `/bin/sh -c 'exec "$0" "$@"'`.
+/// Nothing withheld: as it is; no `/usr/bin/env` (or `/bin/sh` when
+/// needed): an error, not the variables left in. (On macOS `env` is
+/// protected, so `DYLD_*` variables do not reach the program either — only
+/// when something is withheld.)
+#[cfg(unix)]
+pub(crate) fn env_without(
+    names: &[impl AsRef<std::ffi::OsStr>],
+    program: OsString,
+    args: Vec<OsString>,
+) -> Result<(OsString, Vec<OsString>), BoxError> {
+    if names.is_empty() {
+        return Ok((program, args));
+    }
+    let shell = program.to_string_lossy().contains('=');
+    let needed = [Some(ENV), shell.then_some(SH)];
+    if let Some(missing) = needed
+        .into_iter()
+        .flatten()
+        .find(|p| !Path::new(p).is_file())
+    {
+        let names: Vec<_> = names.iter().map(|n| n.as_ref().to_string_lossy()).collect();
+        return Err(format!(
+            "cannot take {} out of {}'s environment: {missing} is not there (unset them before starting yobuild, or set them only where they are needed)",
+            names.join(", "),
+            Path::new(&program).display()
+        )
+        .into());
+    }
+    let mut wrapped: Vec<OsString> = Vec::new();
+    for (at, name) in names.iter().enumerate() {
+        let name = name.as_ref();
+        if !names[..at].iter().any(|n| n.as_ref() == name) {
+            wrapped.push("-u".into());
+            wrapped.push(name.to_owned());
+        }
+    }
+    if shell {
+        wrapped.extend([SH.into(), "-c".into(), r#"exec "$0" "$@""#.into()]);
+    }
+    wrapped.push(program);
+    wrapped.extend(args);
+    Ok((ENV.into(), wrapped))
+}
+
 /// The type [`PluginHostBuilder::local`] names its services for: never
 /// provided, so they never cross runtimes.
 struct RuntimeLocal;
@@ -226,6 +305,8 @@ pub struct PluginHostBuilder {
     local: Vec<String>,
     terminal: Option<String>,
     env: Vec<(String, OsString, OsString)>,
+    withhold: Vec<OsString>,
+    keep: Vec<(String, OsString)>,
 }
 
 impl PluginHostBuilder {
@@ -260,6 +341,25 @@ impl PluginHostBuilder {
         self
     }
 
+    /// Take the variable `name` out of every runtime's environment (a
+    /// credential, design §12 "Step 4"), but where [`keep`](Self::keep) or an
+    /// [`env`](Self::env) entry of that name says otherwise. rutis's
+    /// launcher can only add variables, so the runtime starts as
+    /// `/usr/bin/env -u NAME … <rutis's command>`: `env` execs it, the same
+    /// process. Without `env` (not unix) it is set empty instead.
+    pub fn withhold(mut self, name: impl Into<OsString>) -> Self {
+        self.withhold.push(name.into());
+        self
+    }
+
+    /// Leave the withheld variable `name` in the runtime `runtime` (a
+    /// `keys` grant). A runtime this builder does not start is an error at
+    /// [`start`](Self::start).
+    pub fn keep(mut self, runtime: impl Into<String>, name: impl Into<OsString>) -> Self {
+        self.keep.push((runtime.into(), name.into()));
+        self
+    }
+
     /// A host service plugins may inject (`yoagent`, `frontend`, `ui`, …).
     pub fn share(mut self, service: impl Into<String>) -> Self {
         self.shared.push(service.into());
@@ -278,13 +378,17 @@ impl PluginHostBuilder {
 
     /// Start the runtimes and the loader on `root`.
     pub async fn start(self, root: &Ctx) -> Result<PluginHost, BoxError> {
-        if let Some((runtime, name, _)) = self
-            .env
-            .iter()
-            .find(|(runtime, ..)| !self.runtimes.iter().any(|(r, _)| r == runtime))
-        {
+        let started = |runtime: &String| self.runtimes.iter().any(|(r, _)| r == runtime);
+        if let Some((runtime, name, _)) = self.env.iter().find(|(runtime, ..)| !started(runtime)) {
             return Err(format!(
                 "environment variable {} set for runtime `{runtime}`, which is not started",
+                name.to_string_lossy()
+            )
+            .into());
+        }
+        if let Some((runtime, name)) = self.keep.iter().find(|(runtime, _)| !started(runtime)) {
+            return Err(format!(
+                "environment variable {} kept for runtime `{runtime}`, which is not started",
                 name.to_string_lossy()
             )
             .into());
@@ -302,15 +406,24 @@ impl PluginHostBuilder {
         }
         let routes: Arc<Mutex<HashMap<String, String>>> = Arc::default();
         let mut resolvers = Vec::new();
+        // Every launch first: one that cannot withhold what it must fails
+        // `start` before any runtime is registered.
+        let mut launchers = Vec::new();
         for (name, dir) in &self.runtimes {
-            let launcher = self
-                .env
+            let env: Vec<_> = self.env.iter().filter(|(r, ..)| r == name).collect();
+            let withheld: Vec<&OsString> = self
+                .withhold
                 .iter()
-                .filter(|(runtime, ..)| runtime == name)
-                .fold(
-                    Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
-                    |launcher, (_, key, value)| launcher.env(key, value),
-                );
+                .filter(|key| !self.keep.iter().any(|(r, k)| r == name && k == *key))
+                .filter(|key| !env.iter().any(|(_, k, _)| k == *key))
+                .collect();
+            let launcher = env.iter().fold(
+                Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
+                |launcher, (_, key, value)| launcher.env(key, value),
+            );
+            launchers.push((name, dir, without(launcher, &withheld)?));
+        }
+        for (name, dir, launcher) in launchers {
             let mut runtime =
                 LocalRuntime::launcher(name.clone(), launcher, dir.join("package.json"));
             if self.terminal.as_ref() == Some(name) {

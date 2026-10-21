@@ -1044,7 +1044,13 @@ Inherited from yoagent and the handoff work, and kept on by default:
 - **Message size**: calls to plugins stay under rutis's 16 MiB limit.
 
 Not covered, and said so: plugins run with the process's rights; the
-environment they inherit is visible to them; the gate judges command
+environment they inherit is visible to them — but the credentials yoagent
+reads, which are taken out of plugin runtimes' and stdio MCP servers'
+unless the manifest hands one over, and out of the adapters' helpers'
+always (§12, "Step 4"; the agent's own `bash` keeps them): against honest code calling a
+model unmetered, not a sandbox — a plugin can read a key where the owner
+keeps it (`~/.aws/credentials` too), and `GITHUB_TOKEN` and the like still
+pass; the gate judges command
 lines and file tools, not what code does once it runs (a build or a test
 runs the project's code, including what the agent edited); and it guards
 the owner's files against being deleted or replaced (not against edits),
@@ -1773,7 +1779,7 @@ table read with `deny_unknown_fields`, every key off when absent:
 | `model` | `"info"` (later `"call"`) | yes | later (a model-info `llm`) | yes | `ctx.model`/`modelRegistry`; for rutis, `llm`'s model info |
 | `wake` | bool | yes | yes (the stand-in's `steer`/`followup`) | yes | `session` wake |
 | `exec` | `"off"` / `"gate"` / `"free"` | yes | — | — | `pi.exec` |
-| `keys` | names of credentials yoagent reads (step 4, proposed) | yes (every pi plugin or none) | yes (every DSH plugin or none) | yes (every plugin of its package or none) | those variables left in its runtime |
+| `keys` | names of credentials yoagent reads (step 4) | yes (every pi plugin or none) | yes (every DSH plugin or none) | yes (every plugin of its package or none) | those variables left in its runtime |
 
 A key an ecosystem does not take is refused with its place; it goes in
 `src/manifest/tests.rs` and `skill/yobuild/reference/manifest.md` (whose
@@ -1804,14 +1810,15 @@ the probe" for those asked only in a tool call. A `hints` row and its
 
 - **Honour-system** — `trust`, network, installs, and also what goes around
   `exec` and `llm`: a plugin already has Node's whole power; it can spawn
-  through `child_process`, or call a provider with the keys every runtime
-  inherits (§6). A grant changes how honest code behaves (pi-lens installs
+  through `child_process`, or read a key where the owner keeps it (the
+  credentials yoagent reads are taken out of the runtimes' environment:
+  step 4, below; §6). A grant changes how honest code behaves (pi-lens installs
   language servers into `~/.pi-lens` and runs the project's code); nothing
   enforces it. Said by `check` and in §6.
 - **Mediated** — calls through the host: `pi.exec` judged by the gate,
   `llm` charged to the budget, wake bounded, approvals naming the plugin.
-  Metering holds only once plugin runtimes lose the provider key variables:
-  step 4, below ("Step 4: plugins without the provider keys").
+  Metering holds for honest code since step 4 took the credentials yoagent
+  reads out of plugin runtimes and stdio servers (below).
 - **Never granted**: provider routing and payload rewriting, context
   rewriting, DSH's `loader` (plugins loading plugins past the lock),
   plugins' own model adapters reaching yoagent, DSH's app plugins
@@ -2094,7 +2101,7 @@ change it)"; a `pi.exec` refused for want of `exec`, or by the gate's other
 refusals (not the owner's Block); a pi wake the host never got; the DSH
 host's warnings. Not yet: `check` (no session watches there).
 
-### Step 4: plugins without the provider keys (proposed 2026-10-21, amended the same day)
+### Step 4: plugins without the provider keys (built 2026-10-21)
 
 **Why.** Every process yobuild starts inherits its environment, and with it
 every model key the owner has exported: `DEEPSEEK_API_KEY` for the agent,
@@ -2197,7 +2204,7 @@ given `X`, a credential yoagent reads: what it spends with it is not
 metered".
 - An MCP server's `env` naming a variable on the list
   (`env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }`), or a reference to one
-  in its arguments, URL or headers, sets it for that server.
+  in its arguments, URL or headers, hands its value to that server.
 - A DSH or rutis plugin's `config` takes `${NAME}` references (the `guard`
   rule), filled at start; a reference to a variable on the list.
 - A `keys` grant on a `[[plugin]]`, `grants = { keys = ["AWS_ACCESS_KEY_ID",
@@ -2221,12 +2228,21 @@ name alone (they set empty only what is withheld from that plugin).
 
 **Said.** §6 ("Not covered") and the honour-system bullet say the
 credentials are removed, and that this is not a sandbox. The skill's
-`manifest.md` says how to pass one (a server's `env`, `keys`), and
-`parts.md` which listed plugins lose a feature without one. `check` says
-in an agent note which ones are withheld when a plugin or stdio server
-would run. The owner is not told on every run: it is the default, not an
-event. A plugin that fails for want of a key says so in its own words; no
-hint can match them.
+`manifest.md` says how to pass one (a server's `env`, `keys`). Which
+listed plugins lose a feature without one is for `parts.md` once one is
+found to. When a plugin or stdio server would run, the withheld ones are
+named — by `check` in an agent note (adding that its pi and DSH probes
+alone get them empty), by `run` in an Info notice as the session starts —
+since a plugin that fails for want of a key says so in its own words, and
+no hint can match them.
+
+**Where `env` falls short** (unix; found in review). `env` reads a word
+holding `=` before the program as an assignment, so a program whose path
+holds one runs through `/bin/sh -c 'exec "$0" "$@"'` (still one process).
+With no `/usr/bin/env`, starting a runtime or server is refused rather
+than the variables left in. On macOS `/usr/bin/env` is protected, so
+`DYLD_*` variables do not reach a runtime or server either — only while a
+credential is withheld; known, not worked around.
 
 **Tests.**
 - `cli_test`, the binary with `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, a
@@ -2235,20 +2251,27 @@ hint can match them.
   recording which of those names it sees and how (unset, empty, a value).
   In `run` and in `check` together: the listed ones unset, the unrelated
   one kept, the server's `env` key handed over; in `check` alone: pi and
-  DSH empty, rutis unset. Each with a `keys` grant on one: that runtime
-  sees the granted key, the others do not. `check --json`: the notes on
-  the entries and the agent note.
+  DSH empty, rutis unset. Then a different `keys` grant on each plugin:
+  every runtime keeps only its own. `check --json`: the notes on the
+  entries and the agent note; `run`'s Info notice.
+- `src/run.rs`: the note names only what some plugin or stdio server
+  loses, and nothing when none does (no plugin, an HTTP server only,
+  every name granted).
 - `src/manifest/tests.rs`: `keys` refused with a name not on the list, a
-  repeat, a list that differs between two pi plugins, two DSH plugins, or
-  two rutis plugins of one package (two packages may differ); `keys` on a
-  DSH plugin accepted with or without `workspace`. Unit: `KEY_VARIABLES`
+  repeat, a list that differs between two pi plugins or two DSH plugins
+  (each list said); `keys` on a DSH plugin accepted with or without
+  `workspace`. Unit: `KEY_VARIABLES`
   equals yoagent's list; `Manifest::key_variables` adds `api_key_env`; the
   per-process `-u` list leaves out what that process is handed.
 - Host test: `withhold` removes a variable from every runtime, `keep`
   leaves it in one, `keep` for a runtime not started is an error.
 - `tests/run_terminal_pty.py` and `tests/terminal_pty.py` with a key set
   (CI sets one), so the terminal UI is started through `env`.
-- `src/run/plugins.rs`: a `keys`-only DSH grant plans no DSH host.
+- `src/run/plugins.rs`: a `keys`-only DSH grant plans no DSH host; two
+  rutis plugins of one package refused with different `keys` (two
+  packages may differ).
+- `src/run.rs`: a server's command in a folder named with `=` runs, each
+  name taken out once.
 
 **History.** Proposed 2026-10-21 as *blanked* (set empty everywhere, true
 removal waiting for rutis's `Launcher::env_remove`), AWS's and Cloudflare's
@@ -2263,6 +2286,19 @@ started with `PATH`, `HOME`, `TMPDIR`, the locale, `TERM`, the proxy
 settings and what is granted — which the same `env` gives (`env -i`)
 without a rutis change: its own design later, the keep-list measured
 against the gallery.
+
+**Built** (2026-10-21): `manifest::KEY_VARIABLES` (26, yoagent 0.25.12's
+list), `Manifest::key_variables`, `Grants::keys` / `hosts_nothing`,
+`PluginHostBuilder::withhold` / `keep` and `run::without`, both through
+`frontend::host::env_without` (`env -u`; `/bin/sh` for a path with `=`;
+every launch made before a runtime is registered), `Plan::keys` / `kept` (the rutis same-per-package refusal is
+`plan`'s, which knows the packages), `run::withheld`, the MCP launch's
+`withheld`, `run::withheld_note` (`run`'s notice, `check`'s note),
+`run::keys_given`; the tests listed above,
+`cli_test` `plugins_and_servers_have_the_credentials_taken_out_unless_handed_one`
+and host_test
+`a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set`
+among them.
 
 ### What it unlocks, and the migration
 

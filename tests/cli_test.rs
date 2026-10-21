@@ -13,9 +13,19 @@ const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/echo"
 /// runs of the suite.
 const CACHE: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/yobuild-home");
 
+/// The binary with the tests' cache, and none of the model keys this
+/// process may hold (a developer's own): a test sets those it needs.
+fn bin() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_yobuild"));
+    command.env("YOBUILD_HOME", CACHE);
+    for key in yobuild::manifest::KEY_VARIABLES {
+        command.env_remove(key);
+    }
+    command
+}
+
 fn yobuild(args: &[&str], cwd: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_yobuild"))
-        .env("YOBUILD_HOME", CACHE)
+    bin()
         .args(args)
         .current_dir(cwd)
         .env_remove("RUST_LOG")
@@ -113,8 +123,7 @@ fn arguments_are_checked_before_anything_runs() {
 #[test]
 fn a_missing_key_stops_the_run_before_it_starts() {
     let (agent, _) = fixture();
-    let out = Command::new(env!("CARGO_BIN_EXE_yobuild"))
-        .env("YOBUILD_HOME", CACHE)
+    let out = bin()
         .args(["run", &agent, "--once", "x"])
         .env_remove("DEEPSEEK_API_KEY")
         .output()
@@ -386,14 +395,16 @@ mod web {
         }
 
         /// `yobuild <args> <web>` in `dir`, connected `late` after it serves.
+        /// A credential is set, so the plugin runtimes start through
+        /// `/usr/bin/env -u` (design §12 "Step 4"), as a user's would.
         pub async fn start(
             dir: &std::path::Path,
             args: &[&str],
             web: &[&str],
             late: Duration,
         ) -> Page {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
-                .env("YOBUILD_HOME", super::CACHE)
+            let mut child = super::bin()
+                .env("OPENAI_API_KEY", "not-a-real-key")
                 .args(args)
                 .args(web)
                 .current_dir(dir)
@@ -574,8 +585,7 @@ fn ctrl_c_stops_a_once_run_as_aborted() {
         "[builtins]\ngate = \"off\"\n",
         r#"[{ "tools": [{ "name": "bash", "arguments": { "command": "sleep 30" } }] }, { "text": "done" }]"#,
     );
-    let child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
-        .env("YOBUILD_HOME", CACHE)
+    let child = bin()
         .args([
             "run", "agent.toml", "--scripted", "script.json", "--once", "go",
         ])
@@ -990,11 +1000,26 @@ fn check_lists_an_mcp_servers_tools_and_refuses_bad_arguments() {
     assert!(err.starts_with("yobuild: unknown option --once"), "{err}");
 }
 
-/// Whether DSH's runtime is installed (`npm ci` in `adapters/dsh`).
+/// Whether DSH's runtime is installed (`npm ci` in `adapters/dsh`);
+/// required with `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 fn installed_dsh() -> bool {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("adapters/dsh/node_modules")
-        .is_dir()
+    required(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/dsh/node_modules"),
+        "scripts/copy-adapters.sh, then npm ci in adapters/dsh",
+    )
+}
+
+/// Whether `dir` is there; else skipped, or a failure with
+/// `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
+fn required(dir: &Path, setup: &str) -> bool {
+    if dir.is_dir() {
+        return true;
+    }
+    if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
+        panic!("{} is required: {setup}", dir.display());
+    }
+    eprintln!("SKIPPED: {setup}");
+    false
 }
 
 // -- the example agents (examples/*.toml), as their demos ran ---------------
@@ -1198,8 +1223,15 @@ async fn the_handoff_example_asks_without_waiting_and_the_answer_starts_the_next
         .filter(|f| f.starts_with("Plugin time this run: "))
         .count();
     assert_eq!(measured, 2, "{facts:?}");
+    // Found through `env`, which execs the runtime: the same process.
     assert!(
         facts.iter().any(|f| f.contains("Runtime memory: pi ")),
+        "{facts:?}"
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|f| f.contains("taken out of their environment (`OPENAI_API_KEY`)")),
         "{facts:?}"
     );
     let facts: Vec<&String> = facts.iter().filter(|f| f.starts_with("Facts:")).collect();
@@ -1317,4 +1349,225 @@ fn what_a_pi_extension_was_answered_for_want_of_a_grant_is_said() {
     // Said as notices, not leaked as raw log lines (the log stays at `warn`).
     assert!(!stderr.contains("[pi] fixed answer ("), "{stderr}");
     assert!(!stderr.contains(" INFO "), "{stderr}");
+}
+
+#[test]
+fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
+    // Design §12, "Step 4": every credential yoagent reads that is set here
+    // is gone from a plugin runtime's or an MCP server's environment — the
+    // agent's own (a custom provider's `api_key_env`) and any other
+    // provider's — but `check`'s pi and DSH probes alone, which get them
+    // empty; one not set stays unset, and the rest of the environment is as
+    // it is. What the manifest hands over on purpose gets there (a server's
+    // `env`, a `keys` grant to its runtime alone), and `check` notes it. Each
+    // load appends a line: `check` loads each plugin alone, then all
+    // together.
+    let rutis = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins/node_modules");
+    if !pi_installed()
+        || !installed_dsh()
+        || !required(
+            &rutis.join("@arcships/rutis-runtime"),
+            "npm ci in frontend/plugins",
+        )
+    {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let names = [
+        "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ACME_KEY", "GROQ_API_KEY", "UNRELATED",
+    ];
+    let seen = format!("JSON.stringify({names:?}.map((n) => process.env[n] ?? 'unset')) + '\\n'");
+    // The runtimes' own working folder is not the agent's: an absolute path.
+    let writes = |name: &str| {
+        let out = dir.path().join(format!("{name}.seen"));
+        format!("appendFileSync({:?}, {seen})", out.display().to_string())
+    };
+    let imports = "import { appendFileSync } from 'node:fs'\n";
+    std::fs::write(
+        dir.path().join("pi.ts"),
+        format!(
+            "{imports}export default function () {{ {} }}\n",
+            writes("pi")
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("dsh.ts"),
+        format!(
+            "{imports}export const name = 'dsh'\nexport function apply() {{ {} }}\n",
+            writes("dsh")
+        ),
+    )
+    .unwrap();
+    let r = dir.path().join("r");
+    std::fs::create_dir(&r).unwrap();
+    std::os::unix::fs::symlink(&rutis, r.join("node_modules")).unwrap();
+    std::fs::write(r.join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    std::fs::write(
+        r.join("plug.ts"),
+        format!(
+            "{imports}import {{ definePlugin }} from '@arcships/rutis'\n\
+             export default definePlugin({{ apply() {{ {} }} }})\n",
+            writes("rutis")
+        ),
+    )
+    .unwrap();
+    let server = dir.path().join("server.sh");
+    std::fs::write(
+        &server,
+        format!(
+            "#!/usr/bin/env bash\n\
+             printf '[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]\\n' \"${{DEEPSEEK_API_KEY-unset}}\" \"${{OPENAI_API_KEY-unset}}\" \"${{ACME_KEY-unset}}\" \"${{GROQ_API_KEY-unset}}\" \"${{UNRELATED-unset}}\" >> {:?}\n\
+             exec bash \"$1\"\n",
+            dir.path().join("mcp.seen").display().to_string()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&server, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // `pi`, `dsh` and `rutis`: each plugin's `grants`.
+    let manifest = |pi: &str, dsh: &str, rutis: &str| {
+        std::fs::write(
+            dir.path().join("agent.toml"),
+            format!(
+                "[agent]\nname = \"a\"\nmodel = \"acme/m\"\nbase_url = \"https://acme.example/v1\"\napi_key_env = \"ACME_KEY\"\n\
+                 [[plugin]]\npi = \"./pi.ts\"\ngrants = {{ {pi} }}\n\
+                 [[plugin]]\ndsh = \"./dsh.ts\"\ngrants = {{ {dsh} }}\n\
+                 [[plugin]]\nname = \"plug\"\nrutis = \"./r/plug.ts\"\nruntime = \"node\"\ngrants = {{ {rutis} }}\nconfig = {{ apiKey = \"${{DEEPSEEK_API_KEY}}\" }}\n\
+                 [[mcp]]\nname = \"server\"\nnpm = \"./server.sh\"\nargs = [\"{FIXTURE}/server.sh\"]\nenv = {{ OPENAI_API_KEY = \"${{OPENAI_API_KEY}}\" }}\n",
+            ),
+        )
+        .unwrap();
+    };
+    manifest("", "", "");
+    std::fs::write(dir.path().join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
+    let with_keys = |args: &[&str]| {
+        bin()
+            .env_remove("RUST_LOG")
+            .env("DEEPSEEK_API_KEY", "sk-d")
+            .env("OPENAI_API_KEY", "sk-o")
+            .env("ACME_KEY", "sk-a")
+            .env("UNRELATED", "kept")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+    };
+    let gone = r#"["unset","unset","unset","unset","kept"]"#;
+    // `check`'s pi and DSH probes alone: set empty (yoagent-rutis builds
+    // their launch).
+    let blank = r#"["","","","unset","kept"]"#;
+    // The server's own `env` hands it `OPENAI_API_KEY`.
+    let handed = r#"["unset","sk-o","unset","unset","kept"]"#;
+    // Each file's lines, the file removed for the next command.
+    let lines = |name: &str, said: &str| -> Vec<String> {
+        let file = dir.path().join(format!("{name}.seen"));
+        let read = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{name}: {e}\n{said}"));
+        std::fs::remove_file(&file).unwrap();
+        read.lines().map(str::to_owned).collect()
+    };
+    let run = [
+        "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+    ];
+    let out = with_keys(&run);
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    for name in ["pi", "dsh", "rutis"] {
+        assert_eq!(lines(name, &stderr), [gone], "{name}");
+    }
+    assert_eq!(lines("mcp", &stderr), [handed]);
+    // Said as the session starts: what fails for want of a key says why.
+    let withheld = "plugins and stdio MCP servers have the credentials yoagent reads set here taken out of their environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ACME_KEY`): one that needs one gets it only from its entry (a `keys` grant, or a `\"${NAME}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered";
+    assert!(
+        stderr.contains(&format!("  Info: {withheld}\n")),
+        "{stderr}"
+    );
+
+    // `check` runs the plugins as `run` does, alone and together, and notes the
+    // keys handed over on the entries given them.
+    let check = || {
+        let out = with_keys(&["check", "agent.toml", "--json"]);
+        let stderr = text(&out.stderr);
+        let report: serde_json::Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {stderr}"));
+        assert_eq!(report["ok"], true, "{report}");
+        (report, stderr)
+    };
+    let (report, stderr) = check();
+    for name in ["pi", "dsh"] {
+        assert_eq!(lines(name, &stderr), [blank, gone], "{name}");
+    }
+    assert_eq!(lines("rutis", &stderr), [gone, gone]);
+    // A server is started once, to list its tools.
+    assert_eq!(lines("mcp", &stderr), [handed]);
+    let notes = |report: &serde_json::Value, name: &str| -> Vec<String> {
+        report["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("{name}: {report}"))["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let given = |key: &str| {
+        format!("it is given `{key}`, a credential yoagent reads: what it spends with it is not metered")
+    };
+    assert_eq!(notes(&report, "server"), [given("OPENAI_API_KEY")]);
+    assert_eq!(notes(&report, "plug"), [given("DEEPSEEK_API_KEY")]);
+    assert!(
+        notes(&report, "pi").is_empty() && notes(&report, "dsh").is_empty(),
+        "{report}"
+    );
+    // Beside the model's limits (`acme` has no preset), the keys withheld.
+    let agent_notes = report["agent"]["notes"].as_array().unwrap();
+    let said: Vec<_> = agent_notes
+        .iter()
+        .filter(|n| {
+            n.as_str()
+                .unwrap()
+                .starts_with("plugins and stdio MCP servers")
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [&serde_json::json!(format!(
+            "{withheld} (`check`'s pi and DSH plugins probed alone get them empty instead)"
+        ))],
+        "{report}"
+    );
+
+    // A `keys` grant leaves those in its runtime only: the pi runtime keeps
+    // the agent's key, the DSH runtime (no DSH host for `keys`) OpenAI's,
+    // the rutis plugin's DeepSeek's.
+    manifest(
+        r#"keys = ["ACME_KEY"]"#, r#"keys = ["OPENAI_API_KEY"]"#, r#"keys = ["DEEPSEEK_API_KEY"]"#,
+    );
+    let rutis_keeps = r#"["sk-d","unset","unset","unset","kept"]"#;
+    let pi_keeps = r#"["unset","unset","sk-a","unset","kept"]"#;
+    let dsh_keeps = r#"["unset","sk-o","unset","unset","kept"]"#;
+    let out = with_keys(&run);
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(lines("pi", &stderr), [pi_keeps]);
+    assert_eq!(lines("dsh", &stderr), [dsh_keeps]);
+    assert_eq!(lines("rutis", &stderr), [rutis_keeps]);
+    assert_eq!(lines("mcp", &stderr), [handed]);
+    let (report, stderr) = check();
+    assert_eq!(
+        lines("pi", &stderr),
+        [r#"["","","sk-a","unset","kept"]"#, pi_keeps]
+    );
+    assert_eq!(
+        lines("dsh", &stderr),
+        [r#"["","sk-o","","unset","kept"]"#, dsh_keeps]
+    );
+    assert_eq!(lines("rutis", &stderr), [rutis_keeps, rutis_keeps]);
+    lines("mcp", &stderr);
+    // Noted as handed over; no "probed without the DSH host".
+    assert_eq!(notes(&report, "pi"), [given("ACME_KEY")]);
+    assert_eq!(notes(&report, "dsh"), [given("OPENAI_API_KEY")]);
+    assert_eq!(notes(&report, "plug"), [given("DEEPSEEK_API_KEY")]);
 }

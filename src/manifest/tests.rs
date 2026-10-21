@@ -1207,7 +1207,7 @@ fn a_pi_extension_takes_trust_model_wake_and_exec_and_one_model_for_all() {
     );
     assert_eq!(
         error(&format!("{MINIMAL}{}", pi("e", "workspace = true"))),
-        "6:24: a pi extension takes `trust`, `model`, `wake` and `exec`, not `workspace` (it has the folder: `ctx.cwd`)"
+        "6:24: a pi extension takes `trust`, `model`, `wake`, `exec` and `keys`, not `workspace` (it has the folder: `ctx.cwd`)"
     );
     // Per extension but `model`: one for every pi extension, on each or none.
     let m = read(&format!(
@@ -1247,15 +1247,15 @@ fn a_dsh_plugin_takes_workspace_and_wake_the_same_on_every_dsh_plugin() {
     for (grants, at) in [
         (
             "trust = true",
-            "6:20: a DSH plugin takes `workspace` and `wake`, not `trust`",
+            "6:20: a DSH plugin takes `workspace`, `wake` and `keys`, not `trust`",
         ),
         (
             "model = \"info\"",
-            "6:20: a DSH plugin takes `workspace` and `wake`, not `model`",
+            "6:20: a DSH plugin takes `workspace`, `wake` and `keys`, not `model`",
         ),
         (
             "exec = \"gate\"",
-            "6:19: a DSH plugin takes `workspace` and `wake`, not `exec`",
+            "6:19: a DSH plugin takes `workspace`, `wake` and `keys`, not `exec`",
         ),
     ] {
         assert_eq!(error(&format!("{MINIMAL}{}", dsh(grants))), at);
@@ -1286,4 +1286,134 @@ fn a_dsh_plugin_takes_workspace_and_wake_the_same_on_every_dsh_plugin() {
     ))
     .unwrap();
     assert!(m.plugins[1].grants.is_empty());
+}
+
+#[test]
+fn the_key_variables_hold_every_providers_and_the_agents_own() {
+    for (provider, names) in PROVIDERS {
+        for name in names {
+            assert!(KEY_VARIABLES.contains(name), "{provider}: {name}");
+        }
+    }
+    let unique: std::collections::HashSet<_> = KEY_VARIABLES.iter().collect();
+    assert_eq!(unique.len(), KEY_VARIABLES.len());
+    // yoagent's own list, as it is: a variable a later yoagent reads fails
+    // here until it is added.
+    let mut theirs = yoagent::provider::api_key_variables();
+    let mut ours = KEY_VARIABLES.to_vec();
+    theirs.sort_unstable();
+    ours.sort_unstable();
+    assert_eq!(ours, theirs);
+    let m = read("[agent]\nname = \"a\"\nmodel = \"acme/m1\"\nbase_url = \"https://acme.example/v1\"\napi_key_env = \"ACME_KEY\"\n").unwrap();
+    let names = m.key_variables();
+    assert_eq!(names.len(), KEY_VARIABLES.len() + 1);
+    assert_eq!(names.last().map(String::as_str), Some("ACME_KEY"));
+    // A known provider's variable is not repeated.
+    let m = read("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n").unwrap();
+    assert_eq!(m.key_variables().len(), KEY_VARIABLES.len());
+}
+
+#[test]
+fn keys_names_credentials_the_same_on_every_plugin_of_a_runtime() {
+    let plugin = |kind: &str, file: &str, grants: &str| {
+        format!("[[plugin]]\n{kind} = \"./{file}\"\ngrants = {{ {grants} }}\n")
+    };
+    let m = read(&format!(
+        "{MINIMAL}{}",
+        plugin(
+            "pi",
+            "a.ts",
+            "keys = [\"OPENAI_API_KEY\", \"AWS_ACCESS_KEY_ID\"]"
+        )
+    ))
+    .unwrap();
+    // Sorted, said with its names; nothing the host serves.
+    let grants = &m.plugins[0].grants;
+    assert_eq!(grants.keys, ["AWS_ACCESS_KEY_ID", "OPENAI_API_KEY"]);
+    assert_eq!(
+        grants.said(),
+        ["keys = [AWS_ACCESS_KEY_ID, OPENAI_API_KEY]"]
+    );
+    assert!(grants.hosts_nothing() && !grants.is_empty());
+    // Only what is withheld: yoagent's list and the agent's `api_key_env`.
+    assert_eq!(
+        error(&format!(
+            "{MINIMAL}{}",
+            plugin("pi", "a.ts", "keys = [\"GITHUB_TOKEN\"]")
+        )),
+        "6:20: `GITHUB_TOKEN` is not a credential yoagent reads: nothing withholds it"
+    );
+    assert_eq!(
+        error(&format!(
+            "{MINIMAL}{}",
+            plugin("pi", "a.ts", "keys = [\"API_KEY\", \"API_KEY\"]")
+        )),
+        "6:31: `API_KEY` is listed twice"
+    );
+    let custom = "[agent]\nname = \"a\"\nmodel = \"acme/m1\"\nbase_url = \"https://acme.example/v1\"\napi_key_env = \"ACME_KEY\"\n";
+    let m = read(&format!(
+        "{custom}{}",
+        plugin("pi", "a.ts", "keys = [\"ACME_KEY\"]")
+    ))
+    .unwrap();
+    assert_eq!(m.plugins[0].grants.keys, ["ACME_KEY"]);
+    // One pi runtime: the same on every pi plugin or none.
+    assert_eq!(
+        error(&format!(
+            "{MINIMAL}{}{}",
+            plugin("pi", "a.ts", "keys = [\"API_KEY\"]"),
+            plugin("pi", "b.ts", "trust = true")
+        )),
+        "9:10: every pi extension runs in one runtime, whose environment is theirs together: give each pi plugin the same `keys` or none (`a` has API_KEY, `b` none)"
+    );
+    // One DSH runtime and host: the same grants on each; `keys` alone
+    // starts no DSH host.
+    let m = read(&format!(
+        "{MINIMAL}{}{}",
+        plugin("dsh", "a.ts", "keys = [\"API_KEY\"]"),
+        plugin("dsh", "b.ts", "keys = [\"API_KEY\"]")
+    ))
+    .unwrap();
+    assert!(m.dsh_grants().is_none());
+    let m = read(&format!(
+        "{MINIMAL}{}",
+        plugin("dsh", "a.ts", "workspace = true, keys = [\"API_KEY\"]")
+    ))
+    .unwrap();
+    assert_eq!(
+        m.dsh_grants().map(Grants::names),
+        Some(vec!["workspace", "keys"])
+    );
+    assert_eq!(
+        error(&format!(
+            "{MINIMAL}{}{}",
+            plugin("dsh", "a.ts", "keys = [\"API_KEY\"]"),
+            plugin("dsh", "b.ts", "")
+        )),
+        "9:10: every DSH plugin runs in one runtime, whose environment is theirs together: give each DSH plugin the same `keys` or none (`a` has API_KEY, `b` none)"
+    );
+    assert_eq!(
+        error(&format!(
+            "{MINIMAL}{}{}",
+            plugin("dsh", "a.ts", "workspace = true, keys = [\"API_KEY\"]"),
+            plugin("dsh", "b.ts", "workspace = true, keys = [\"OPENAI_API_KEY\"]")
+        )),
+        "9:10: every DSH plugin runs in one runtime, whose environment is theirs together: give each DSH plugin the same `keys` or none (`a` has API_KEY, `b` has OPENAI_API_KEY)"
+    );
+    // The same keys, other host grants: the DSH host's rule.
+    assert_eq!(
+        error(&format!(
+            "{MINIMAL}{}{}",
+            plugin("dsh", "a.ts", "workspace = true, keys = [\"API_KEY\"]"),
+            plugin("dsh", "b.ts", "keys = [\"API_KEY\"]")
+        )),
+        "9:10: every DSH plugin shares the DSH host: give each the same grants (`a` has workspace, keys, `b` keys)"
+    );
+    // rutis: by package, which `plan` sees (`run/plugins.rs`); read here.
+    let m = read(&format!(
+        "{MINIMAL}{}runtime = \"node\"\n",
+        plugin("rutis", "p.ts", "keys = [\"API_KEY\"]")
+    ))
+    .unwrap();
+    assert_eq!(m.plugins[0].grants.keys, ["API_KEY"]);
 }

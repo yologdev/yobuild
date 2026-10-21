@@ -432,6 +432,45 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             None => agent_notes.push(note.clone()),
         }
     }
+    // A credential handed over on purpose reaches the entry (design §12,
+    // "Step 4"): what it spends with it is outside the budget.
+    for (name, keys) in super::keys_given(&manifest) {
+        let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
+        entry_notes.push((
+            name,
+            format!(
+                "it is given {}, a credential yoagent reads: what it spends with it is not metered",
+                keys.join(", ")
+            ),
+        ));
+    }
+    // Plugins and stdio servers have the credentials set here taken out
+    // (design §12, "Step 4"): one that needs a key fails at its first call,
+    // which this says before then.
+    let withheld = super::withheld(&manifest);
+    let probed = manifest
+        .plugins
+        .iter()
+        .any(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_)));
+    agent_notes.extend(
+        super::withheld_note(&manifest, &withheld).map(|note| match probed {
+            true => {
+                format!("{note} (`check`'s pi and DSH plugins probed alone get them empty instead)")
+            }
+            false => note,
+        }),
+    );
+    // The pi and DSH probes alone run as `run` runs plugins, but for the
+    // launch, which yoagent-rutis builds: what is withheld from the plugin
+    // set empty instead.
+    let probe_options = |plugin: &crate::manifest::Plugin| {
+        withheld
+            .iter()
+            .filter(|name| !plugin.grants.keys.contains(name))
+            .fold(yoagent_rutis::probe::ProbeOptions::default(), |o, name| {
+                o.env(name, "")
+            })
+    };
     // The DSH host's session log goes to the DSH home: the user's own when
     // they set one.
     agent_notes.extend(super::dsh_home_note(
@@ -498,8 +537,15 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                     .filter(|(name, _)| *name == plugin.name)
                     .flat_map(|(_, files)| files.iter().map(|f| f.display().to_string()))
                     .collect();
-                let report =
-                    yoagent_rutis::probe::pi(&layout.adapters, &cwd, &files, &[], None).await;
+                let report = yoagent_rutis::probe::pi_with(
+                    &layout.adapters,
+                    &cwd,
+                    &files,
+                    &[],
+                    None,
+                    &probe_options(plugin),
+                )
+                .await;
                 entry.problems.extend(report.problem().map(Problem::new));
                 for builtin in &report.without {
                     entry.problems.push(Problem::new(format!(
@@ -529,18 +575,19 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                     .filter(|name| dsh_probe_base.iter().any(|b| b == name))
                     .collect();
                 if in_base.is_empty() {
-                    let report = yoagent_rutis::probe::dsh(
+                    let report = yoagent_rutis::probe::dsh_with(
                         &layout.adapters,
                         &plan.dsh_dir,
                         &serde_json::Value::Array(rows),
                         &[],
                         None,
+                        &probe_options(plugin),
                     )
                     .await;
                     entry.problems.extend(report.problem().map(Problem::new));
                     entry.guidance_chars = Some(report.guidance_chars);
                     // The probe's base has no DSH host: together has it.
-                    if !plugin.grants.is_empty() {
+                    if !plugin.grants.hosts_nothing() {
                         entry.notes.push(
                             "probed without the DSH host: its grants are not exercised alone"
                                 .into(),
@@ -610,7 +657,11 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             source,
             checked_alone: true,
             problems: Vec::new(),
-            notes: Vec::new(),
+            notes: entry_notes
+                .iter()
+                .filter(|(name, _)| *name == server.name)
+                .map(|(_, note)| note.clone())
+                .collect(),
             tools: Vec::new(),
             handlers: None,
             guidance_chars: None,
@@ -862,6 +913,12 @@ async fn rutis_alone(
         let mut builder = PluginHost::builder().node(&runtime, dir);
         for service in super::SHARED {
             builder = builder.share(service);
+        }
+        for name in super::withheld(manifest) {
+            builder = builder.withhold(name);
+        }
+        for key in plan.kept(&runtime) {
+            builder = builder.keep(&runtime, key);
         }
         let mut host = builder.start(&root).await?;
         host.load([row]).await?;
