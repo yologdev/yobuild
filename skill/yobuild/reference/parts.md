@@ -22,8 +22,9 @@ a plugin listed here can still need a setting this list does not know.
 every change: use these versions. The rest are from yoagent's
 compatibility matrix (`docs/evals/plugin-compatibility.md`, run
 2026-10-16: each package loaded unchanged, its tools listed, none
-called), at the version it tested: as of that date, so `yobuild check`
-decides. Tool names and arguments: `yobuild check --json` lists them
+called), at the version it tested, and re-checked through `yobuild
+check` on 2026-10-22 (each loads with the tools listed): as of that
+date, so `yobuild check` decides. Tool names and arguments: `yobuild check --json` lists them
 (`agent.tools[].parameters`).
 
 ### pi (`[[plugin]] pi = "…"`)
