@@ -339,13 +339,22 @@ pub enum ModelGrant {
 impl Grants {
     /// The keys granted, as the manifest names them.
     pub fn names(&self) -> Vec<&'static str> {
+        // Every field named: a grant added later is said here.
+        let Grants {
+            workspace,
+            trust,
+            model,
+            wake,
+            exec,
+            keys,
+        } = self;
         [
-            (self.workspace, "workspace"),
-            (self.trust, "trust"),
-            (self.model.is_some(), "model"),
-            (self.wake, "wake"),
-            (self.exec != ExecGrant::Off, "exec"),
-            (!self.keys.is_empty(), "keys"),
+            (*workspace, "workspace"),
+            (*trust, "trust"),
+            (model.is_some(), "model"),
+            (*wake, "wake"),
+            (*exec != ExecGrant::Off, "exec"),
+            (!keys.is_empty(), "keys"),
         ]
         .into_iter()
         .filter_map(|(on, name)| on.then_some(name))
@@ -375,11 +384,16 @@ impl Grants {
     /// runtime's launch reads (so a DSH plugin granted only `keys` starts no
     /// DSH host).
     pub fn hosts_nothing(&self) -> bool {
-        Self {
-            keys: Vec::new(),
-            ..self.clone()
-        }
-        .is_empty()
+        // Every field named: a grant added later is decided here.
+        let Grants {
+            workspace,
+            trust,
+            model,
+            wake,
+            exec,
+            keys: _,
+        } = self;
+        !workspace && !trust && model.is_none() && !wake && *exec == ExecGrant::Off
     }
 }
 
@@ -945,13 +959,20 @@ impl Manifest {
                     return Err(located((grants_at.unwrap_or(span), m)));
                 }
             }
-            // One DSH host serves every DSH plugin, so a grant to one is a
-            // grant to all: the manifest writes the same on each (design
-            // §12, "One rule for both ecosystems").
+            // One DSH runtime runs every DSH plugin, and one DSH host serves
+            // them: a grant to one is a grant to all, so the manifest writes
+            // the same on each (design §12, "One rule for both ecosystems").
             if let PluginKind::Dsh(_) = plugin.kind {
                 let first = plugins
                     .iter()
                     .find(|p| matches!(p.kind, PluginKind::Dsh(_)));
+                if let Some(first) = first.filter(|f| f.grants.keys != plugin.grants.keys) {
+                    let m = format!(
+                        "every DSH plugin runs in one runtime, whose environment is theirs together: give each DSH plugin the same `keys` or none ({})",
+                        keys_differ(first, &plugin)
+                    );
+                    return Err(located((grants_at.unwrap_or(span), m)));
+                }
                 if let Some(first) = first.filter(|f| f.grants != plugin.grants) {
                     let said = |g: &Grants| match g.is_empty() {
                         true => "none".to_owned(),
@@ -1335,7 +1356,6 @@ fn json(value: toml::Value) -> serde_json::Value {
     }
 }
 
-/// A plugin's `grants`, checked for its ecosystem (design §12's table).
 /// Two plugins' `keys` as a refusal says them: "`a` has X, Y, `b` none".
 pub(crate) fn keys_differ(first: &Plugin, other: &Plugin) -> String {
     let said = |p: &Plugin| match p.grants.keys.is_empty() {

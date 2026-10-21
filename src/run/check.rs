@@ -448,17 +448,9 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     // (design §12, "Step 4"): one that needs a key fails at its first call,
     // which this says before then.
     let withheld = super::withheld(&manifest);
-    let any_stdio = manifest
-        .mcp
-        .iter()
-        .any(|s| matches!(s.transport, crate::manifest::Transport::Stdio { .. }));
-    if !withheld.is_empty() && (!manifest.plugins.is_empty() || any_stdio) {
-        let names: Vec<String> = withheld.iter().map(|k| format!("`{k}`")).collect();
-        agent_notes.push(format!(
-            "plugins and MCP servers have the credentials yoagent reads set here taken out of their environment ({}): one that needs one gets it only from its entry (a `keys` grant, `\"${{NAME}}\"` in its `config`, or a server's `env`), and what it spends with it is not metered",
-            names.join(", ")
-        ));
-    }
+    agent_notes.extend(super::withheld_note(&manifest, &withheld).map(|note| {
+        format!("{note} (`check`'s pi and DSH plugins probed alone get them empty instead)")
+    }));
     // The pi and DSH probes alone run as `run` runs plugins, but for the
     // launch, which yoagent-rutis builds: what is withheld from the plugin
     // set empty instead.

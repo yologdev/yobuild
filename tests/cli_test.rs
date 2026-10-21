@@ -395,6 +395,8 @@ mod web {
         }
 
         /// `yobuild <args> <web>` in `dir`, connected `late` after it serves.
+        /// A credential is set, so the plugin runtimes start through
+        /// `/usr/bin/env -u` (design §12 "Step 4"), as a user's would.
         pub async fn start(
             dir: &std::path::Path,
             args: &[&str],
@@ -402,6 +404,7 @@ mod web {
             late: Duration,
         ) -> Page {
             let mut child = super::bin()
+                .env("OPENAI_API_KEY", "not-a-real-key")
                 .args(args)
                 .args(web)
                 .current_dir(dir)
@@ -1220,8 +1223,15 @@ async fn the_handoff_example_asks_without_waiting_and_the_answer_starts_the_next
         .filter(|f| f.starts_with("Plugin time this run: "))
         .count();
     assert_eq!(measured, 2, "{facts:?}");
+    // Found through `env`, which execs the runtime: the same process.
     assert!(
         facts.iter().any(|f| f.contains("Runtime memory: pi ")),
+        "{facts:?}"
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|f| f.contains("taken out of their environment (`OPENAI_API_KEY`)")),
         "{facts:?}"
     );
     let facts: Vec<&String> = facts.iter().filter(|f| f.starts_with("Facts:")).collect();
@@ -1414,21 +1424,21 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     )
     .unwrap();
     std::fs::set_permissions(&server, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    // `pi` and `dsh`: each plugin's `grants`.
-    let manifest = |pi: &str, dsh: &str| {
+    // `pi`, `dsh` and `rutis`: each plugin's `grants`.
+    let manifest = |pi: &str, dsh: &str, rutis: &str| {
         std::fs::write(
             dir.path().join("agent.toml"),
             format!(
                 "[agent]\nname = \"a\"\nmodel = \"acme/m\"\nbase_url = \"https://acme.example/v1\"\napi_key_env = \"ACME_KEY\"\n\
                  [[plugin]]\npi = \"./pi.ts\"\ngrants = {{ {pi} }}\n\
                  [[plugin]]\ndsh = \"./dsh.ts\"\ngrants = {{ {dsh} }}\n\
-                 [[plugin]]\nname = \"plug\"\nrutis = \"./r/plug.ts\"\nruntime = \"node\"\nconfig = {{ apiKey = \"${{DEEPSEEK_API_KEY}}\" }}\n\
+                 [[plugin]]\nname = \"plug\"\nrutis = \"./r/plug.ts\"\nruntime = \"node\"\ngrants = {{ {rutis} }}\nconfig = {{ apiKey = \"${{DEEPSEEK_API_KEY}}\" }}\n\
                  [[mcp]]\nname = \"server\"\nnpm = \"./server.sh\"\nargs = [\"{FIXTURE}/server.sh\"]\nenv = {{ OPENAI_API_KEY = \"${{OPENAI_API_KEY}}\" }}\n",
             ),
         )
         .unwrap();
     };
-    manifest("", "");
+    manifest("", "", "");
     std::fs::write(dir.path().join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
     let with_keys = |args: &[&str]| {
         bin()
@@ -1465,6 +1475,12 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         assert_eq!(lines(name, &stderr), [gone], "{name}");
     }
     assert_eq!(lines("mcp", &stderr), [handed]);
+    // Said as the session starts: what fails for want of a key says why.
+    let withheld = "plugins and stdio MCP servers have the credentials yoagent reads set here taken out of their environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ACME_KEY`): one that needs one gets it only from its entry (a `keys` grant, or a `\"${NAME}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered";
+    assert!(
+        stderr.contains(&format!("  Info: {withheld}\n")),
+        "{stderr}"
+    );
 
     // `check` runs the plugins as `run` does, alone and together, and notes the
     // keys handed over on the entries given them.
@@ -1505,17 +1521,31 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         notes(&report, "pi").is_empty() && notes(&report, "dsh").is_empty(),
         "{report}"
     );
-    // The model's limits aside (`acme` has no preset), the keys withheld.
+    // Beside the model's limits (`acme` has no preset), the keys withheld.
+    let agent_notes = report["agent"]["notes"].as_array().unwrap();
+    let said: Vec<_> = agent_notes
+        .iter()
+        .filter(|n| {
+            n.as_str()
+                .unwrap()
+                .starts_with("plugins and stdio MCP servers")
+        })
+        .collect();
     assert_eq!(
-        report["agent"]["notes"].as_array().unwrap()[1..],
-        [serde_json::json!(
-            "plugins and MCP servers have the credentials yoagent reads set here taken out of their environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ACME_KEY`): one that needs one gets it only from its entry (a `keys` grant, `\"${NAME}\"` in its `config`, or a server's `env`), and what it spends with it is not metered"
-        )]
+        said,
+        [&serde_json::json!(format!(
+            "{withheld} (`check`'s pi and DSH plugins probed alone get them empty instead)"
+        ))],
+        "{report}"
     );
 
     // A `keys` grant leaves those in its runtime only: the pi runtime keeps
-    // the agent's key, the DSH runtime (no DSH host for `keys`) OpenAI's.
-    manifest(r#"keys = ["ACME_KEY"]"#, r#"keys = ["OPENAI_API_KEY"]"#);
+    // the agent's key, the DSH runtime (no DSH host for `keys`) OpenAI's,
+    // the rutis plugin's DeepSeek's.
+    manifest(
+        r#"keys = ["ACME_KEY"]"#, r#"keys = ["OPENAI_API_KEY"]"#, r#"keys = ["DEEPSEEK_API_KEY"]"#,
+    );
+    let rutis_keeps = r#"["sk-d","unset","unset","unset","kept"]"#;
     let pi_keeps = r#"["unset","unset","sk-a","unset","kept"]"#;
     let dsh_keeps = r#"["unset","sk-o","unset","unset","kept"]"#;
     let out = with_keys(&run);
@@ -1523,7 +1553,7 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     assert!(out.status.success(), "{stderr}");
     assert_eq!(lines("pi", &stderr), [pi_keeps]);
     assert_eq!(lines("dsh", &stderr), [dsh_keeps]);
-    assert_eq!(lines("rutis", &stderr), [gone]);
+    assert_eq!(lines("rutis", &stderr), [rutis_keeps]);
     assert_eq!(lines("mcp", &stderr), [handed]);
     let (report, stderr) = check();
     assert_eq!(
@@ -1534,9 +1564,10 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         lines("dsh", &stderr),
         [r#"["","sk-o","","unset","kept"]"#, dsh_keeps]
     );
-    assert_eq!(lines("rutis", &stderr), [gone, gone]);
+    assert_eq!(lines("rutis", &stderr), [rutis_keeps, rutis_keeps]);
     lines("mcp", &stderr);
     // Noted as handed over; no "probed without the DSH host".
     assert_eq!(notes(&report, "pi"), [given("ACME_KEY")]);
     assert_eq!(notes(&report, "dsh"), [given("OPENAI_API_KEY")]);
+    assert_eq!(notes(&report, "plug"), [given("DEEPSEEK_API_KEY")]);
 }

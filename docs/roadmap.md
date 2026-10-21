@@ -168,7 +168,7 @@ the compatibility matrix for the plugins it uses.
 **Done when** three agents in the gallery were built through the skill by
 a coding agent, not by hand, and each is checked and run scripted in CI.
 
-## M3b — The host layer (design §12; proposed 2026-10-19, steps 1–3 built 2026-10-20)
+## M3b — The host layer (design §12; proposed 2026-10-19, steps 1–3 built 2026-10-20, step 4 2026-10-21)
 
 What a plugin's own app gives it — DSH's agent and session, pi's trust and
 model — provided by yobuild as host services, translated by the adapters,

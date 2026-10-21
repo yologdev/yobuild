@@ -204,8 +204,9 @@ yoagent reads that is set in the environment (`DEEPSEEK_API_KEY`,
 `OPENAI_API_KEY`, …, AWS's `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
 `AWS_SESSION_TOKEN`, Cloudflare's tokens, `API_KEY`, the agent's
 `api_key_env`) taken out of their environment, in `run` and in `check`
-alike, so they cannot call a model outside the run's budget. `check` says
-which, as an agent note. A server or plugin that truly needs one is handed
+alike (`check`'s pi and DSH plugins probed alone get them empty), so they
+cannot call a model outside the run's budget. `check` says which, as an
+agent note, and `run` as an Info notice. A server or plugin that truly needs one is handed
 it on purpose: a stdio server through its `env`
 (`OPENAI_API_KEY = "${OPENAI_API_KEY}"`) or its `args`, an HTTP server
 through its `url` or `headers`, a DSH or rutis plugin through a `${NAME}`

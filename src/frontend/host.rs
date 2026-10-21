@@ -215,34 +215,72 @@ pub fn rows_from_json(listed: Json, runtime: &str) -> Result<Vec<Row>, BoxError>
         .collect())
 }
 
-/// `launcher` with the variables `names` taken out of its environment:
-/// `/usr/bin/env -u NAME … <its program> <its arguments>`, so nothing of
-/// rutis's command is copied, and what rutis adds as it spawns (its
-/// channel) is not among them. `env -u` removes a name whoever set it, so
-/// `names` holds none the launch sets.
+/// `launcher` with the variables `names` taken out of its environment
+/// ([`env_without`]), so nothing of rutis's command is copied, and what
+/// rutis adds as it spawns (its channel) is not among them. `env -u`
+/// removes a name whoever set it, so `names` holds none the launch sets.
 #[cfg(unix)]
-fn without(mut launcher: Launcher, names: &[&OsString]) -> Launcher {
-    if names.is_empty() {
-        return launcher;
-    }
-    let program = std::mem::replace(&mut launcher.program, "/usr/bin/env".into());
-    let mut args: Vec<OsString> = Vec::new();
-    for name in names {
-        args.push("-u".into());
-        args.push((*name).clone());
-    }
-    args.push(program);
-    args.append(&mut launcher.args);
+fn without(mut launcher: Launcher, names: &[&OsString]) -> Result<Launcher, BoxError> {
+    let program = std::mem::take(&mut launcher.program);
+    let args = std::mem::take(&mut launcher.args);
+    let (program, args) = env_without(names, program, args)?;
+    launcher.program = program;
     launcher.args = args;
-    launcher
+    Ok(launcher)
 }
 
 /// No `env` to exec through: the variables are set empty instead.
 #[cfg(not(unix))]
-fn without(launcher: Launcher, names: &[&OsString]) -> Launcher {
-    names
+fn without(launcher: Launcher, names: &[&OsString]) -> Result<Launcher, BoxError> {
+    Ok(names
         .iter()
-        .fold(launcher, |launcher, name| launcher.env(*name, ""))
+        .fold(launcher, |launcher, name| launcher.env(*name, "")))
+}
+
+/// Where [`env_without`] finds `env`.
+#[cfg(unix)]
+const ENV: &str = "/usr/bin/env";
+
+/// `program args` started with the variables `names` taken out of its
+/// environment (design §12 "Step 4"): `/usr/bin/env -u NAME … program
+/// args` — `env` execs it, the same process (pid, process group, inherited
+/// descriptors). A launcher can only add variables. `env` reads a word
+/// holding `=` before the program as an assignment, `--` or not, so such a
+/// program goes through `/bin/sh -c 'exec "$0" "$@"'`. Nothing withheld:
+/// as it is; no `/usr/bin/env`: an error, not the variables left in. (On
+/// macOS `env` is protected, so `DYLD_*` variables do not reach the
+/// program either — only when something is withheld.)
+#[cfg(unix)]
+pub(crate) fn env_without(
+    names: &[&OsString],
+    program: OsString,
+    args: Vec<OsString>,
+) -> Result<(OsString, Vec<OsString>), BoxError> {
+    if names.is_empty() {
+        return Ok((program, args));
+    }
+    if !Path::new(ENV).is_file() {
+        let names: Vec<_> = names.iter().map(|n| n.to_string_lossy()).collect();
+        return Err(format!(
+            "cannot take {} out of {}'s environment: {ENV} is not there",
+            names.join(", "),
+            Path::new(&program).display()
+        )
+        .into());
+    }
+    let mut wrapped: Vec<OsString> = Vec::new();
+    for (at, name) in names.iter().enumerate() {
+        if !names[..at].contains(name) {
+            wrapped.push("-u".into());
+            wrapped.push((*name).clone());
+        }
+    }
+    if program.to_string_lossy().contains('=') {
+        wrapped.extend(["/bin/sh".into(), "-c".into(), r#"exec "$0" "$@""#.into()]);
+    }
+    wrapped.push(program);
+    wrapped.extend(args);
+    Ok((ENV.into(), wrapped))
 }
 
 /// The type [`PluginHostBuilder::local`] names its services for: never
@@ -369,7 +407,7 @@ impl PluginHostBuilder {
                 Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
                 |launcher, (_, key, value)| launcher.env(key, value),
             );
-            let launcher = without(launcher, &withheld);
+            let launcher = without(launcher, &withheld)?;
             let mut runtime =
                 LocalRuntime::launcher(name.clone(), launcher, dir.join("package.json"));
             if self.terminal.as_ref() == Some(name) {

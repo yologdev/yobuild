@@ -1390,7 +1390,24 @@ fn keys_names_credentials_the_same_on_every_plugin_of_a_runtime() {
             plugin("dsh", "a.ts", "keys = [\"API_KEY\"]"),
             plugin("dsh", "b.ts", "")
         )),
-        "9:10: every DSH plugin shares the DSH host: give each the same grants (`a` has keys, `b` none)"
+        "9:10: every DSH plugin runs in one runtime, whose environment is theirs together: give each DSH plugin the same `keys` or none (`a` has API_KEY, `b` none)"
+    );
+    assert_eq!(
+        error(&format!(
+            "{MINIMAL}{}{}",
+            plugin("dsh", "a.ts", "workspace = true, keys = [\"API_KEY\"]"),
+            plugin("dsh", "b.ts", "workspace = true, keys = [\"OPENAI_API_KEY\"]")
+        )),
+        "9:10: every DSH plugin runs in one runtime, whose environment is theirs together: give each DSH plugin the same `keys` or none (`a` has API_KEY, `b` has OPENAI_API_KEY)"
+    );
+    // The same keys, other host grants: the DSH host's rule.
+    assert_eq!(
+        error(&format!(
+            "{MINIMAL}{}{}",
+            plugin("dsh", "a.ts", "workspace = true, keys = [\"API_KEY\"]"),
+            plugin("dsh", "b.ts", "keys = [\"API_KEY\"]")
+        )),
+        "9:10: every DSH plugin shares the DSH host: give each the same grants (`a` has workspace, keys, `b` keys)"
     );
     // rutis: by package, which `plan` sees (`run/plugins.rs`); read here.
     let m = read(&format!(

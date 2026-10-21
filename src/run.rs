@@ -182,7 +182,13 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tracing::info!("{note}");
         session.notice(NoticeLevel::Warning, note.clone());
     }
-    if let Some(note) = dsh_home_note(&checked.plan, std::env::var_os("YOAGENT_DSH_HOME")) {
+    let notes = withheld_note(&manifest, &withheld(&manifest))
+        .into_iter()
+        .chain(dsh_home_note(
+            &checked.plan,
+            std::env::var_os("YOAGENT_DSH_HOME"),
+        ));
+    for note in notes {
         tracing::info!("{note}");
         session.notice(NoticeLevel::Info, note);
     }
@@ -869,6 +875,11 @@ async fn start(
     for name in withheld(manifest) {
         builder = builder.withhold(name);
     }
+    tracing::debug!(
+        "withheld from plugin runtimes: {:?}; kept: {:?}",
+        withheld(manifest),
+        plan.keys
+    );
     for (runtime, keys) in &plan.keys {
         for key in keys {
             builder = builder.keep(runtime, key);
@@ -1321,6 +1332,25 @@ async fn dsh_services(
     Err(dsh_missing(&missing, plan, host_services))
 }
 
+/// What plugins and stdio MCP servers have taken out of their environment
+/// (`withheld`), when one runs: said by `run` (an Info notice) and by
+/// `check` (an agent note), since one that needs a key fails at its first
+/// call, and nothing else says why.
+pub(crate) fn withheld_note(manifest: &Manifest, withheld: &[String]) -> Option<String> {
+    let stdio = manifest
+        .mcp
+        .iter()
+        .any(|s| matches!(s.transport, Transport::Stdio { .. }));
+    if withheld.is_empty() || (manifest.plugins.is_empty() && !stdio) {
+        return None;
+    }
+    let names: Vec<String> = withheld.iter().map(|k| format!("`{k}`")).collect();
+    Some(format!(
+        "plugins and stdio MCP servers have the credentials yoagent reads set here taken out of their environment ({}): one that needs one gets it only from its entry (a `keys` grant, or a `\"${{NAME}}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered",
+        names.join(", ")
+    ))
+}
+
 /// Where the DSH host writes its session log, when that is the user's own
 /// DSH home (`YOAGENT_DSH_HOME`, `home`): said by `check` and by `run`.
 pub(crate) fn dsh_home_note(
@@ -1625,8 +1655,8 @@ enum Launch {
         command: PathBuf,
         args: Vec<String>,
         env: HashMap<String, String>,
-        /// The credentials taken out of its environment: [`withheld`] but
-        /// what its `env` sets.
+        /// The credentials taken out of its environment ([`withheld`]):
+        /// all but what its `env` sets ([`without`]).
         withheld: Vec<String>,
     },
     Http {
@@ -1681,11 +1711,7 @@ fn launch(
                     .map(|(k, v)| Ok((k.clone(), v.resolve_with(lookup)?)))
                     .collect::<Result<_, crate::manifest::Unset>>()
                     .map_err(|e| failed(&e))?,
-                withheld: withheld
-                    .iter()
-                    .filter(|k| !env.contains_key(*k))
-                    .cloned()
-                    .collect(),
+                withheld: withheld.to_vec(),
             }
         }
         Transport::Http { url, headers } => Launch::Http {
@@ -1759,44 +1785,55 @@ pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-/// A stdio server's command with `withheld` taken out of its environment:
-/// `/usr/bin/env -u NAME … <command> <args>` (yoagent's transport can only
-/// add variables). `withheld` holds none of `env`'s names: `env -u` removes
-/// a name whoever set it.
+/// A stdio server's program, arguments and added variables.
+type StdioCommand = (String, Vec<String>, HashMap<String, String>);
+
+/// A stdio server's command with `withheld` taken out of its environment
+/// (`frontend::host::env_without`: `/usr/bin/env -u NAME … <command>
+/// <args>`; yoagent's transport can only add variables), but the names its
+/// own `env` sets: `env -u` removes a name whoever set it.
 #[cfg(unix)]
 fn without(
     command: &Path,
     args: &[String],
     env: &HashMap<String, String>,
     withheld: &[String],
-) -> (String, Vec<String>, HashMap<String, String>) {
-    let command = command.display().to_string();
-    if withheld.is_empty() {
-        return (command, args.to_vec(), env.clone());
-    }
-    let mut wrapped: Vec<String> = Vec::new();
-    for name in withheld {
-        wrapped.push("-u".into());
-        wrapped.push(name.clone());
-    }
-    wrapped.push(command);
-    wrapped.extend(args.iter().cloned());
-    ("/usr/bin/env".into(), wrapped, env.clone())
+) -> Result<StdioCommand, BoxError> {
+    let names: Vec<std::ffi::OsString> = withheld
+        .iter()
+        .filter(|name| !env.contains_key(*name))
+        .map(Into::into)
+        .collect();
+    let names: Vec<&std::ffi::OsString> = names.iter().collect();
+    let (program, argv) = crate::frontend::host::env_without(
+        &names,
+        command.as_os_str().to_owned(),
+        args.iter().map(Into::into).collect(),
+    )?;
+    // Every word was a `String` (the command a path the manifest or the
+    // installed package names), so none is lost here.
+    let text = |word: std::ffi::OsString| word.to_string_lossy().into_owned();
+    Ok((
+        text(program),
+        argv.into_iter().map(text).collect(),
+        env.clone(),
+    ))
 }
 
-/// No `env` to exec through: the variables are set empty instead.
+/// No `env` to exec through: the variables are set empty instead (but the
+/// names its own `env` sets).
 #[cfg(not(unix))]
 fn without(
     command: &Path,
     args: &[String],
     env: &HashMap<String, String>,
     withheld: &[String],
-) -> (String, Vec<String>, HashMap<String, String>) {
+) -> Result<StdioCommand, BoxError> {
     let mut env = env.clone();
     for name in withheld {
-        env.insert(name.clone(), String::new());
+        env.entry(name.clone()).or_default();
     }
-    (command.display().to_string(), args.to_vec(), env)
+    Ok((command.display().to_string(), args.to_vec(), env))
 }
 
 /// An MCP server's tools, each `<server>__<tool>` (the server is called with
@@ -1810,7 +1847,8 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
             env,
             withheld,
         } => {
-            let (command, args, env) = without(command, args, env, withheld);
+            let (command, args, env) =
+                without(command, args, env, withheld).map_err(|e| failed(&e))?;
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             McpClient::connect_stdio(&command, &args, Some(env))
                 .await
@@ -2421,21 +2459,48 @@ mod tests {
         else {
             panic!("stdio")
         };
-        assert_eq!(withheld, ["GROQ_API_KEY"]);
-        let (program, argv, env) = super::without(&command, &args, &env, &withheld);
+        assert_eq!(withheld, ["OPENAI_API_KEY", "GROQ_API_KEY"]);
+        let (program, argv, env) = super::without(&command, &args, &env, &withheld).unwrap();
         assert_eq!(env.get("OPENAI_API_KEY").map(String::as_str), Some("v"));
         let command = command.display().to_string();
         if cfg!(unix) {
             assert_eq!(program, "/usr/bin/env");
             assert_eq!(argv, ["-u", "GROQ_API_KEY", command.as_str(), "--x"]);
-            assert!(!env.contains_key("GROQ_API_KEY"));
         } else {
             assert_eq!((program, argv), (command, vec!["--x".to_owned()]));
             assert_eq!(env.get("GROQ_API_KEY").map(String::as_str), Some(""));
         }
         // Nothing withheld: the command as it is.
-        let (program, argv, _) = super::without(Path::new("/s"), &[], &env, &[]);
+        let (program, argv, _) = super::without(Path::new("/s"), &[], &env, &[]).unwrap();
         assert_eq!((program.as_str(), argv.len()), ("/s", 0));
+    }
+
+    /// A command whose path holds `=` (which `env` would read as an
+    /// assignment) still runs, with its arguments, each name taken out once.
+    #[cfg(unix)]
+    #[test]
+    fn a_server_in_a_folder_named_with_an_equals_sign_still_starts() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("a=b");
+        std::fs::create_dir(&folder).unwrap();
+        let script = folder.join("s.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho \"ran $1 [${HOME+home}] [${YOBUILD_T+set}]\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let withheld = ["YOBUILD_T".to_owned(), "YOBUILD_T".to_owned()];
+        let (program, argv, _) =
+            super::without(&script, &["x=1".to_owned()], &HashMap::new(), &withheld).unwrap();
+        assert_eq!(argv[..4], ["-u", "YOBUILD_T", "/bin/sh", "-c"]);
+        let out = std::process::Command::new(program)
+            .args(argv)
+            .env("YOBUILD_T", "secret")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "ran x=1 [home] []\n");
     }
 
     #[test]

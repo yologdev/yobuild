@@ -272,15 +272,14 @@ impl Helper {
     }
 }
 
-/// What the manifest's plugins load. Every refusal about their files and
-/// packages comes from here, before anything starts (what a running DSH
-/// runtime lacks is checked once it runs: `run::dsh_services`).
 impl Plan {
     /// The runtime `runtime` keeps `keys` (each plugin of one runtime is
     /// granted the same: the manifest and `plan` see to it).
     fn keep(&mut self, runtime: &str, keys: &[String]) {
-        if !keys.is_empty() && !self.keys.iter().any(|(r, _)| r == runtime) {
-            self.keys.push((runtime.to_owned(), keys.to_vec()));
+        match self.keys.iter().find(|(r, _)| r == runtime) {
+            Some((_, kept)) => debug_assert_eq!(kept, keys, "runtime `{runtime}`'s plugins' keys"),
+            None if !keys.is_empty() => self.keys.push((runtime.to_owned(), keys.to_vec())),
+            None => {}
         }
     }
 
@@ -293,6 +292,9 @@ impl Plan {
     }
 }
 
+/// What the manifest's plugins load. Every refusal about their files and
+/// packages comes from here, before anything starts (what a running DSH
+/// runtime lacks is checked once it runs: `run::dsh_services`).
 pub(crate) fn plan(
     manifest: &Manifest,
     layout: &Layout,

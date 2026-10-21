@@ -1045,9 +1045,9 @@ Inherited from yoagent and the handoff work, and kept on by default:
 
 Not covered, and said so: plugins run with the process's rights; the
 environment they inherit is visible to them — but the credentials yoagent
-reads, which are taken out of plugin runtimes', stdio MCP servers' and the
-adapters' helpers' (design §12, "Step 4"; the agent's own `bash` keeps
-them) unless the manifest hands one over: against honest code calling a
+reads, which are taken out of plugin runtimes' and stdio MCP servers'
+unless the manifest hands one over, and out of the adapters' helpers'
+always (design §12, "Step 4"; the agent's own `bash` keeps them): against honest code calling a
 model unmetered, not a sandbox — a plugin can read a key where the owner
 keeps it (`~/.aws/credentials` too), and `GITHUB_TOKEN` and the like still
 pass; the gate judges command
@@ -1817,8 +1817,8 @@ the probe" for those asked only in a tool call. A `hints` row and its
   enforces it. Said by `check` and in §6.
 - **Mediated** — calls through the host: `pi.exec` judged by the gate,
   `llm` charged to the budget, wake bounded, approvals naming the plugin.
-  Metering holds only once plugin runtimes lose the provider key variables:
-  step 4, below ("Step 4: plugins without the provider keys").
+  Metering holds for honest code since step 4 took the credentials yoagent
+  reads out of plugin runtimes and stdio servers (below).
 - **Never granted**: provider routing and payload rewriting, context
   rewriting, DSH's `loader` (plugins loading plugins past the lock),
   plugins' own model adapters reaching yoagent, DSH's app plugins
@@ -2204,7 +2204,7 @@ given `X`, a credential yoagent reads: what it spends with it is not
 metered".
 - An MCP server's `env` naming a variable on the list
   (`env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }`), or a reference to one
-  in its arguments, URL or headers, sets it for that server.
+  in its arguments, URL or headers, hands its value to that server.
 - A DSH or rutis plugin's `config` takes `${NAME}` references (the `guard`
   rule), filled at start; a reference to a variable on the list.
 - A `keys` grant on a `[[plugin]]`, `grants = { keys = ["AWS_ACCESS_KEY_ID",
@@ -2228,12 +2228,21 @@ name alone (they set empty only what is withheld from that plugin).
 
 **Said.** §6 ("Not covered") and the honour-system bullet say the
 credentials are removed, and that this is not a sandbox. The skill's
-`manifest.md` says how to pass one (a server's `env`, `keys`), and
-`parts.md` which listed plugins lose a feature without one. `check` says
-in an agent note which ones are withheld when a plugin or stdio server
-would run. The owner is not told on every run: it is the default, not an
-event. A plugin that fails for want of a key says so in its own words; no
-hint can match them.
+`manifest.md` says how to pass one (a server's `env`, `keys`). Which
+listed plugins lose a feature without one is for `parts.md` once one is
+found to. When a plugin or stdio server would run, the withheld ones are
+named — by `check` in an agent note (adding that its pi and DSH probes
+alone get them empty), by `run` in an Info notice as the session starts —
+since a plugin that fails for want of a key says so in its own words, and
+no hint can match them.
+
+**Where `env` falls short** (unix; found in review). `env` reads a word
+holding `=` before the program as an assignment, so a program whose path
+holds one runs through `/bin/sh -c 'exec "$0" "$@"'` (still one process).
+With no `/usr/bin/env`, starting a runtime or server is refused rather
+than the variables left in. On macOS `/usr/bin/env` is protected, so
+`DYLD_*` variables do not reach a runtime or server either — only while a
+credential is withheld; known, not worked around.
 
 **Tests.**
 - `cli_test`, the binary with `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, a
@@ -2246,16 +2255,20 @@ hint can match them.
   sees the granted key, the others do not. `check --json`: the notes on
   the entries and the agent note.
 - `src/manifest/tests.rs`: `keys` refused with a name not on the list, a
-  repeat, a list that differs between two pi plugins, two DSH plugins, or
-  two rutis plugins of one package (two packages may differ); `keys` on a
-  DSH plugin accepted with or without `workspace`. Unit: `KEY_VARIABLES`
+  repeat, a list that differs between two pi plugins or two DSH plugins
+  (each list said); `keys` on a DSH plugin accepted with or without
+  `workspace`. Unit: `KEY_VARIABLES`
   equals yoagent's list; `Manifest::key_variables` adds `api_key_env`; the
   per-process `-u` list leaves out what that process is handed.
 - Host test: `withhold` removes a variable from every runtime, `keep`
   leaves it in one, `keep` for a runtime not started is an error.
 - `tests/run_terminal_pty.py` and `tests/terminal_pty.py` with a key set
   (CI sets one), so the terminal UI is started through `env`.
-- `src/run/plugins.rs`: a `keys`-only DSH grant plans no DSH host.
+- `src/run/plugins.rs`: a `keys`-only DSH grant plans no DSH host; two
+  rutis plugins of one package refused with different `keys` (two
+  packages may differ).
+- `src/run.rs`: a server's command in a folder named with `=` runs, each
+  name taken out once.
 
 **History.** Proposed 2026-10-21 as *blanked* (set empty everywhere, true
 removal waiting for rutis's `Launcher::env_remove`), AWS's and Cloudflare's
