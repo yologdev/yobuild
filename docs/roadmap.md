@@ -196,7 +196,10 @@ plugin of it or none) and named by `check`.
   yoagent reads taken out of plugin runtimes and stdio MCP servers (`env
   -u`; set empty only in `check`'s pi/DSH probes alone and on Windows) and
   of the helpers; a `keys` grant and a server's `env` handing one back on
-  purpose, which `check` notes; not a sandbox, said. Later: an allowlist
+  purpose, which `check` notes; not a sandbox, said. After the yoagent
+  session's review: a program that cannot start said before `env` runs, a
+  `keys` grant of an unset name said, the `DYLD_*` note on macOS, a macOS
+  CI job. Later: an allowlist
   (a runtime started with a small kept set), its own design.
 
 **Done when** `dsh-univer-office` and `pi-lens` work in a gallery agent,

@@ -377,6 +377,23 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
         matches!(&wrong, Err(e) if e.to_string().contains("`iu`")),
         "a typo must not pass"
     );
+    // Through `env`, a `node` the runtime cannot find would only show as
+    // `env` exiting 127: it is looked for first, on the runtime's `PATH`.
+    #[cfg(unix)]
+    {
+        let empty = tempfile::tempdir().unwrap();
+        let missing = PluginHost::builder()
+            .node("ui", plugins())
+            .withhold(NAME)
+            .env("ui", "PATH", empty.path())
+            .start(&root)
+            .await;
+        assert!(
+            matches!(&missing, Err(e) if e.to_string() == "runtime `ui`: yobuild cannot start node: it is not on PATH"),
+            "{:?}",
+            missing.err().map(|e| e.to_string())
+        );
+    }
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
@@ -388,7 +405,7 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
             format!(
                 "import {{ writeFileSync }} from 'node:fs'\n\
                  export const name = '{name}'\n\
-                 export function apply() {{ writeFileSync({:?}, JSON.stringify(process.env.{NAME} ?? null)) }}\n",
+                 export function apply() {{ writeFileSync({:?}, JSON.stringify([process.env.{NAME} ?? null, process.env.DYLD_YOBUILD_TEST ?? null])) }}\n",
                 out.display().to_string()
             ),
         )
@@ -405,6 +422,10 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
         .withhold(NAME)
         .env("two", NAME, "given")
         .keep("three", NAME)
+        // A runtime's own `DYLD_*` entry: dropped by the protected
+        // `/usr/bin/env` on macOS, where the runtime starts through it.
+        .env("one", "DYLD_YOBUILD_TEST", "1")
+        .env("three", "DYLD_YOBUILD_TEST", "1")
         .start(&root)
         .await
         .unwrap();
@@ -420,13 +441,30 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
         true => "null",
         false => r#""""#,
     };
-    assert_eq!(written(&a_out).await, gone);
-    assert_eq!(written(&b_out).await, r#""given""#);
+    // Through `env` on macOS with System Integrity Protection on (the
+    // default; GitHub's macOS runners have it off), `DYLD_*` is gone with
+    // it; kept, nothing goes through `env`, and it arrives.
+    let dropped = match cfg!(target_os = "macos") && sip_enabled() {
+        true => "null",
+        false => r#""1""#,
+    };
+    assert_eq!(written(&a_out).await, format!("[{gone},{dropped}]"));
+    assert_eq!(written(&b_out).await, r#"["given",null]"#);
     assert_eq!(
         written(&c_out).await,
-        serde_json::to_string(&inherited).unwrap()
+        format!("[{},\"1\"]", serde_json::to_string(&inherited).unwrap())
     );
     root.shutdown().await.unwrap();
+}
+
+/// macOS's System Integrity Protection is on (`csrutil status`), under
+/// which starting the protected `/usr/bin/env` drops `DYLD_*` variables.
+/// A "Custom Configuration" reads `status: unknown (…)`: taken as off.
+fn sip_enabled() -> bool {
+    std::process::Command::new("csrutil")
+        .arg("status")
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("status: enabled"))
 }
 
 /// The text of `path` once a plugin wrote it.

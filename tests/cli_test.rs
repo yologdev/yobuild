@@ -1440,8 +1440,22 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     };
     manifest("", "", "");
     std::fs::write(dir.path().join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
-    let with_keys = |args: &[&str]| {
-        bin()
+    // On macOS cargo sets `DYLD_*` variables for the tests: removed, and
+    // one of ours set, which `run` and `check` name (`env` drops it).
+    let dyld: Vec<_> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| name.to_string_lossy().starts_with("DYLD_"))
+        .collect();
+    let with_env = |extra: &[(&str, &str)], args: &[&str]| {
+        let mut command = bin();
+        for name in &dyld {
+            command.env_remove(name);
+        }
+        for (name, value) in extra {
+            command.env(name, value);
+        }
+        command
+            .env("DYLD_YOBUILD_TEST", "1")
             .env_remove("RUST_LOG")
             .env("DEEPSEEK_API_KEY", "sk-d")
             .env("OPENAI_API_KEY", "sk-o")
@@ -1452,6 +1466,7 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
             .output()
             .unwrap()
     };
+    let with_keys = |args: &[&str]| with_env(&[], args);
     let gone = r#"["unset","unset","unset","unset","kept"]"#;
     // `check`'s pi and DSH probes alone: set empty (yoagent-rutis builds
     // their launch).
@@ -1481,17 +1496,24 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         stderr.contains(&format!("  Info: {withheld}\n")),
         "{stderr}"
     );
+    let dyld_note = "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get `DYLD_YOBUILD_TEST`: with System Integrity Protection on (macOS's default), starting the protected /usr/bin/env drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)";
+    assert_eq!(
+        stderr.contains(&format!("  Info: {dyld_note}\n")),
+        cfg!(target_os = "macos"),
+        "{stderr}"
+    );
 
     // `check` runs the plugins as `run` does, alone and together, and notes the
     // keys handed over on the entries given them.
-    let check = || {
-        let out = with_keys(&["check", "agent.toml", "--json"]);
+    let check_with = |extra: &[(&str, &str)]| {
+        let out = with_env(extra, &["check", "agent.toml", "--json"]);
         let stderr = text(&out.stderr);
         let report: serde_json::Value =
             serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {stderr}"));
         assert_eq!(report["ok"], true, "{report}");
         (report, stderr)
     };
+    let check = || check_with(&[]);
     let (report, stderr) = check();
     for name in ["pi", "dsh"] {
         assert_eq!(lines(name, &stderr), [blank, gone], "{name}");
@@ -1515,12 +1537,33 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     let given = |key: &str| {
         format!("it is given `{key}`, a credential yoagent reads: what it spends with it is not metered")
     };
-    assert_eq!(notes(&report, "server"), [given("OPENAI_API_KEY")]);
-    assert_eq!(notes(&report, "plug"), [given("DEEPSEEK_API_KEY")]);
-    assert!(
-        notes(&report, "pi").is_empty() && notes(&report, "dsh").is_empty(),
-        "{report}"
+    // The server keeps one the others lose: each entry says what it lost.
+    let taken = |keys: &[&str]| {
+        let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
+        format!("it has {} taken out of its environment", keys.join(", "))
+    };
+    // A pi or DSH plugin's probe alone gets them empty, which its note
+    // adds.
+    let probed = |note: String| format!("{note}; its probe alone gets them empty");
+    let all = taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY"]);
+    assert_eq!(
+        notes(&report, "server"),
+        [
+            given("OPENAI_API_KEY"),
+            taken(&["DEEPSEEK_API_KEY", "ACME_KEY"])
+        ]
     );
+    // Its config refers to the key: handed over in its config, not left in
+    // its runtime, which the note says.
+    assert_eq!(
+        notes(&report, "plug"),
+        [
+            given("DEEPSEEK_API_KEY"),
+            format!("{all} (its `config` still gets `DEEPSEEK_API_KEY`, filled in at start)")
+        ]
+    );
+    assert_eq!(notes(&report, "pi"), [probed(all.clone())], "{report}");
+    assert_eq!(notes(&report, "dsh"), [probed(all)], "{report}");
     // Beside the model's limits (`acme` has no preset), the keys withheld.
     let agent_notes = report["agent"]["notes"].as_array().unwrap();
     let said: Vec<_> = agent_notes
@@ -1528,9 +1571,14 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         .filter(|n| {
             n.as_str()
                 .unwrap()
-                .starts_with("plugins and stdio MCP servers")
+                .starts_with("plugins and stdio MCP servers have")
         })
         .collect();
+    assert_eq!(
+        agent_notes.iter().any(|n| n == dyld_note),
+        cfg!(target_os = "macos"),
+        "{report}"
+    );
     assert_eq!(
         said,
         [&serde_json::json!(format!(
@@ -1551,6 +1599,8 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     let out = with_keys(&run);
     let stderr = text(&out.stderr);
     assert!(out.status.success(), "{stderr}");
+    // Every granted name set: no plugin warned.
+    assert!(!stderr.contains("  Warning: plugin "), "{stderr}");
     assert_eq!(lines("pi", &stderr), [pi_keeps]);
     assert_eq!(lines("dsh", &stderr), [dsh_keeps]);
     assert_eq!(lines("rutis", &stderr), [rutis_keeps]);
@@ -1567,7 +1617,159 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     assert_eq!(lines("rutis", &stderr), [rutis_keeps, rutis_keeps]);
     lines("mcp", &stderr);
     // Noted as handed over; no "probed without the DSH host".
-    assert_eq!(notes(&report, "pi"), [given("ACME_KEY")]);
-    assert_eq!(notes(&report, "dsh"), [given("OPENAI_API_KEY")]);
-    assert_eq!(notes(&report, "plug"), [given("DEEPSEEK_API_KEY")]);
+    assert_eq!(
+        notes(&report, "pi"),
+        [
+            given("ACME_KEY"),
+            probed(taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY"]))
+        ]
+    );
+    assert_eq!(
+        notes(&report, "dsh"),
+        [
+            given("OPENAI_API_KEY"),
+            probed(taken(&["DEEPSEEK_API_KEY", "ACME_KEY"]))
+        ]
+    );
+    assert_eq!(
+        notes(&report, "plug"),
+        [
+            given("DEEPSEEK_API_KEY"),
+            taken(&["OPENAI_API_KEY", "ACME_KEY"])
+        ]
+    );
+
+    // A `keys` grant of a name not set here hands nothing over: said so.
+    manifest(
+        r#"keys = ["GROQ_API_KEY"]"#, r#"keys = ["OPENAI_API_KEY"]"#,
+        r#"keys = ["DEEPSEEK_API_KEY"]"#,
+    );
+    let unset =
+        "its `keys` grant names `GROQ_API_KEY`, unset or empty here: it gets no key from it";
+    let (report, _) = check();
+    assert_eq!(
+        notes(&report, "pi"),
+        [
+            unset.to_owned(),
+            probed(taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY"])),
+        ]
+    );
+    // `run` says it too, as a Warning, for that plugin only (the others'
+    // grants are set).
+    let out = with_keys(&run);
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!("  Warning: plugin pi: {unset}\n")),
+        "{stderr}"
+    );
+    assert_eq!(stderr.matches("  Warning: plugin ").count(), 1, "{stderr}");
+    for name in ["pi", "dsh", "rutis", "mcp"] {
+        lines(name, &stderr);
+    }
+    // Exported empty (`export GROQ_API_KEY=`, to turn it off) is the same:
+    // nothing usable handed over, not "given".
+    let (report, _) = check_with(&[("GROQ_API_KEY", "")]);
+    assert_eq!(
+        notes(&report, "pi"),
+        [
+            unset.to_owned(),
+            probed(taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY"])),
+        ]
+    );
+}
+
+/// A stdio server whose program cannot run is said before anything starts
+/// through `/usr/bin/env` (design §12 "Step 4", found after the merge):
+/// `check` names it as the server's problem, with its fix, and `run`
+/// refuses with what to do — in the same words whether a key is set or not.
+/// With a key set, on macOS, the `DYLD_*` variables it would lose are named
+/// (run on macOS by CI's `macos` job).
+#[cfg(unix)]
+#[test]
+fn a_server_that_cannot_start_is_said_with_what_to_do() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
+         [[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
+    let server = dir.path().join("s.sh");
+    std::fs::write(&server, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // The server's path as the manifest makes it (`/private/var/…` on
+    // macOS, where the temp folder is `/var/…`): only its end compared.
+    let said = "/s.sh: it is not executable";
+    let fix = "the program a stdio MCP server or a plugin runtime (Node) runs is missing";
+    // On macOS cargo sets `DYLD_*` variables for the tests: removed, and
+    // one of ours set.
+    let dyld: Vec<_> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| name.to_string_lossy().starts_with("DYLD_"))
+        .collect();
+    let yobuild = |key: Option<&str>, args: &[&str]| {
+        let mut command = bin();
+        for name in &dyld {
+            command.env_remove(name);
+        }
+        if let Some(key) = key {
+            command.env("DEEPSEEK_API_KEY", key);
+        }
+        command
+            .env("DYLD_YOBUILD_TEST", "1")
+            .env_remove("RUST_LOG")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+    };
+    for key in [Some("sk-d"), None] {
+        let out = yobuild(key, &["check", "agent.toml", "--json"]);
+        let stderr = text(&out.stderr);
+        assert!(!out.status.success(), "{stderr}");
+        let report: serde_json::Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {stderr}"));
+        let problem = &report["entries"][0]["problems"][0];
+        assert_eq!(report["entries"][0]["name"], "s", "{report}");
+        assert!(
+            problem["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("yobuild cannot start ") && m.ends_with(said)),
+            "{report}"
+        );
+        assert!(
+            problem["fix"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{report}"))
+                .starts_with(fix),
+            "{report}"
+        );
+        let dyld_said = report["agent"]["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| {
+                n.as_str()
+                    .unwrap()
+                    .contains("does not get `DYLD_YOBUILD_TEST`")
+            });
+        assert_eq!(
+            dyld_said,
+            key.is_some() && cfg!(target_os = "macos"),
+            "{report}"
+        );
+    }
+    let out = yobuild(
+        Some("sk-d"),
+        &[
+            "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+        ],
+    );
+    let stderr = text(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains(said), "{stderr}");
+    assert!(stderr.contains(&format!("  what to do: {fix}")), "{stderr}");
 }

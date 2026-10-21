@@ -2168,7 +2168,9 @@ only add variables, so yobuild puts `env` in front:
 - *MCP servers.* The same prefix before a stdio server's command (yoagent's
   transport takes a command and arguments).
 - *Helper scripts.* yobuild builds their `Command` itself: `env_remove`, on
-  every platform.
+  every platform — every listed credential, a `keys` grant or not, though
+  `inspect-package.mjs` imports a DSH package's code: a plugin that reads
+  its granted key as it is imported sees it unset there, and set in `run`.
 
 `env -u NAME` removes `NAME` whoever set it — also a variable set on the
 command, as a server's `env` is. So the `-u` list is made per process: the
@@ -2189,7 +2191,9 @@ whether the variable exists, rather than its value, sees a difference):
 `check`'s pi and DSH probes alone, whose launcher yoagent-rutis builds
 (`probe::pi_with` / `probe::dsh_with` with `ProbeOptions::env`, yoagent-rutis
 0.8.1, only add); and the runtimes and MCP servers on Windows, which has
-no `env`. `check`'s rutis plugin alone (`rutis_alone`) goes through
+no `env` (the notes say "set empty" there, not "taken out": a plugin may
+read an empty key differently from none, and nothing tests that path, CI
+being Linux and macOS). `check`'s rutis plugin alone (`rutis_alone`) goes through
 `PluginHost`, so removed.
 
 Checked with a prototype on 2026-10-21: the runtimes see the variables
@@ -2239,10 +2243,70 @@ no hint can match them.
 **Where `env` falls short** (unix; found in review). `env` reads a word
 holding `=` before the program as an assignment, so a program whose path
 holds one runs through `/bin/sh -c 'exec "$0" "$@"'` (still one process).
-With no `/usr/bin/env`, starting a runtime or server is refused rather
-than the variables left in. On macOS `/usr/bin/env` is protected, so
-`DYLD_*` variables do not reach a runtime or server either — only while a
-credential is withheld; known, not worked around.
+With no `/usr/bin/env` (or `/bin/sh`, for a program whose path holds
+`=`), starting a runtime or server that has a credential taken out is
+refused rather than the variables left in, saying that yobuild needs it
+(hint `no-env`). Whenever a credential yoagent reads is set in yobuild's
+environment (usually the agent's own key), a runtime or server losing it
+— the terminal UI's always — does not start on an image without it:
+install it. On macOS with System Integrity Protection on (the default;
+GitHub's macOS runners have it off) `/usr/bin/env` is protected, and
+starting it drops `DYLD_*` variables, so they do not reach what starts
+through it either — only while a credential is taken out of that
+runtime's or server's environment; not worked around, but said: `run`
+(an Info notice) and `check` (an agent note) name the `DYLD_*` variables
+it will not get (`run::dyld_note`: this process's, and a stdio server's
+own `env` entries that go through `env`), when something does start
+through `env` — a plugin whose `keys` do not keep every one, a stdio
+server whose `env` does not set every one, or the terminal UI, which
+keeps none (`Platform::terminal`: `run` without `--once` on a terminal
+manifest; `check` says what such a `run` would do).
+
+**Found after the merge** (the yoagent session's review of #55, then
+two rounds of #56's own review).
+- Spawning `env` succeeds whatever the program is, so a server or runtime
+  program that is not there or cannot run showed only as `env` exiting
+  127 or 126 ("MCP server '/usr/bin/env' exited …", "Cordis process exited
+  before connecting …"). `frontend::host::startable` now looks for it
+  first, as `execvp` will — a path from the child's folder, a bare name
+  (`node`) on the child's `PATH` (the launch's own when it sets one, else
+  this process's, else `/bin:/usr/bin`; an empty or relative entry from
+  the child's folder) — asking the system whether this user may run it
+  (`access(X_OK)`: an ACL counts, another user's 0744 file does not; a
+  `noexec` mount is not seen), and refuses with "yobuild cannot start X:
+  no such file" / "it is not a file" / "it is not executable" / "it is not
+  on PATH" / "it is on PATH but not executable" / "it is not on PATH where
+  it could be looked at (…)", or the system's own error (a folder it may
+  not search, a symlink loop) — never "no such file" for a file that is
+  there; a runtime's prefixed "runtime `pi`: ". Hint `cannot-start`,
+  matching "yobuild cannot start " only: rutis says its own spawn failures
+  as "cannot start X: …", whose cause may be anything (the terminal not
+  there), and a plugin's own words may say a program "cannot be started";
+  rutis's one failure whose cause is plain, "cannot start node: No such
+  file or directory", gets hint `no-node` (install Node). A runtime's
+  program is looked for only when it starts through `env`; a stdio
+  server's always (its command is always a path), so a missing one is
+  said alike with a key set or not.
+- A name `set` here is set and not empty (`run::key_is_set`: one exported
+  empty hands over nothing usable). Each name of a `keys` grant that is
+  not is said on the entry (`run::keys_unset`, `unset_grant_note`):
+  "its `keys` grant names `X`, unset or empty here: it gets no key from
+  it" when none of the grant's names is set — by `check`, and by `run` as
+  a Warning ("plugin P: …") — else "…: not handed over (the rest of the
+  grant is)", by `check` and by `run` as Info (the others may be
+  fallbacks). `keys_given` counts only set names: a grant's, a reference's
+  (one to an empty variable is filled empty), and a server's `env` name
+  only when a reference filling it is set.
+- When the entries lose different credentials (a `keys` grant or a
+  server's `env` keeps some for one), `check` notes on each plugin and
+  stdio server what it has taken out (`run::withheld_from`; "set empty"
+  off unix, `TAKEN_ONE`), beside the combined note — a pi or DSH plugin's
+  adding that its probe alone gets them empty, and a plugin whose `config`
+  refers to one that it still gets it there; alike, the combined note
+  alone.
+- `Plan::keep`'s rule (one runtime, one `keys`) is an error naming the
+  plugins, in the manifest's words, not only a debug assertion, should the
+  manifest's checks ever loosen.
 
 **Tests.**
 - `cli_test`, the binary with `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, a
@@ -2271,7 +2335,37 @@ credential is withheld; known, not worked around.
   rutis plugins of one package refused with different `keys` (two
   packages may differ).
 - `src/run.rs`: a server's command in a folder named with `=` runs, each
-  name taken out once.
+  name taken out once; a program missing, not a file, not executable, or
+  not on the `PATH` its `env` sets refused before `env` runs (and with
+  nothing withheld too); the `DYLD_*` note only on macOS and only when
+  something starts through `env` (not when every entry keeps what is
+  withheld; with the terminal UI and no plugin, but not under `--once`; a
+  server's own `DYLD_*` `env` entry named only when that server goes
+  through `env`); each entry's losses said only when they differ; a
+  `keys` grant's unset names said — "it gets no key from it" when all
+  are, else "not handed over"; `keys_given` leaving out unset or empty
+  names (a reference, an `env` name filled from an empty one).
+  `src/frontend/host.rs`: relative and empty `PATH` entries from the
+  child's folder, a later entry that runs winning, a symlink loop and a
+  folder this user may not search said in the system's words. Host test:
+  `node` not on a runtime's `PATH` refused at `start`, naming the runtime;
+  a runtime's `DYLD_*` entry gone through `env` on macOS with SIP on
+  (`csrutil status`), arriving where nothing goes through it. `cli_test`
+  `a_server_that_cannot_start_is_said_with_what_to_do`: `check`'s problem
+  and fix, with a key and without, `run`'s refusal with what to do, the
+  `DYLD_*` note on macOS; the credentials test: `run`'s Warning for an
+  unset grant, for that plugin only and for none when every grant is set,
+  and a key exported empty said as unset. `src/hints.rs`: `cannot-start`
+  not given for rutis's own spawn failure, a server's words or a
+  plugin's; `no-node` for rutis's missing `node`.
+- `src/run/plugins.rs`: `Plan::keep` refuses a runtime whose plugins keep
+  different `keys`, naming them.
+- CI job `macos`: the unit tests, host_test's
+  `a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set` and
+  cli_test's `a_server_that_cannot_start_is_said_with_what_to_do` on
+  macOS (BSD `env`). SIP is off on the runners, so the `DYLD_*` drop
+  itself is not exercised there — host_test checks it on a machine with
+  SIP on (`csrutil status`), and CI that `DYLD_*` arrives otherwise.
 
 **History.** Proposed 2026-10-21 as *blanked* (set empty everywhere, true
 removal waiting for rutis's `Launcher::env_remove`), AWS's and Cloudflare's
@@ -2294,7 +2388,11 @@ list), `Manifest::key_variables`, `Grants::keys` / `hosts_nothing`,
 every launch made before a runtime is registered), `Plan::keys` / `kept` (the rutis same-per-package refusal is
 `plan`'s, which knows the packages), `run::withheld`, the MCP launch's
 `withheld`, `run::withheld_note` (`run`'s notice, `check`'s note),
-`run::keys_given`; the tests listed above,
+`run::keys_given`; after the merge `frontend::host::startable`,
+`run::key_is_set`, `run::keys_unset` / `UnsetGrant`,
+`run::unset_grant_note`, `run::withheld_from`, `run::dyld_note` /
+`Platform`, `run::TAKEN_ONE`, the hints `cannot-start`, `no-node` and
+`no-env`, the `macos` CI job; the tests listed above,
 `cli_test` `plugins_and_servers_have_the_credentials_taken_out_unless_handed_one`
 and host_test
 `a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set`

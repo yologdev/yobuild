@@ -47,6 +47,11 @@ uuid = { version = "1", features = ["v4"] }
 # A cache folder's name: the hash of its set in `agent.lock`.
 sha2 = "0.10"
 
+[target.'cfg(unix)'.dependencies]
+# Whether this user may run a program (`access(X_OK)`), asked before it is
+# started through `/usr/bin/env` (`frontend::host::startable`).
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "signal"] }
 tokio-tungstenite = "0.28"
