@@ -37,15 +37,10 @@ decides. Tool names and arguments: `yobuild check --json` lists them
 | a plan-review policy | `@plannotator/pi-extension@0.28.22` | tool-call hooks (no tools) |
 | ask the user (pi's way) | `@juicesharp/rpiv-ask-user-question@2.13.8` | 1 tool — prefer `ask_owner` |
 | an MCP bridge | `pi-mcp-adapter@5.3.1` | 1 tool — prefer `[[mcp]]` |
+| code health: type errors, lint, an outline of the project | `pi-lens@4.4.3` | **needs `grants = { trust = true }`** — without it pi-lens starts no language server, and its diagnostics say "unavailable" (never a finding). 8 tools: `lens_diagnostics` (`{source: "lsp", scope: "paths", paths: [...]}` probes files; the session cache alone is not proof of clean), `project_report`, `symbol_search`, `module_report`, `read_symbol`, `read_enclosing`, `effective_config`, `pi_lens_activate_tools` — all read. Checked by hand on 2026-10-21 (not in CI): a TypeScript type error found (`error[typescript] (2345)`). What `trust` lets it do — tell the person: it downloads and runs language servers and scanners (from GitHub and npm) into `~/.pi-lens`, and runs them on the project, the project's own code among what they load. Its first call in a fresh `~/.pi-lens` may come back "inconclusive" while those install (about 20 s); a second call finds. Its 4 skills are not loaded |
 
-Not usable in yobuild, checked on 2026-10-19: `pi-lens@4.4.3` (code health:
-lint, types) passes `check` and its tools print `✓`, but it treats the
-project as untrusted under yobuild and so never starts a language server:
-its diagnostics report every file clean, a type error included (its own
-log, `~/.pi-lens/latency.log`: `no_clients_none_spawning`) — checked
-before pi grants existed: with `grants = { trust = true }` it is told the
-project is trusted, not yet re-checked. For linting,
-ESLint's MCP server (below).
+For linting with no language servers to install, ESLint's MCP server
+(below).
 
 Refused by yobuild's pi adapter (they hook what yoagent cannot enforce, or
 need pi's app): `billion-context`, `pi-goal-x`, `@companion-ai/feynman`,

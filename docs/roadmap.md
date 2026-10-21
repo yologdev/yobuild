@@ -199,6 +199,14 @@ their tools' results checked (not only `✓`); the stand-in probe runs inside
 rutis as a test in yoagent-rutis; the compatibility matrix is re-measured;
 and `check` names every grant and every fixed answer.
 
+Where it stands (2026-10-21): `dsh-univer-office` works in a gallery agent
+(`spreadsheet-clerk`: CI to its first asking tool, one live run checking
+the `.xlsx`'s totals); `pi-lens` works with `trust = true`, checked by
+hand (a type error found), not yet in a gallery agent — its language
+servers come from GitHub and npm on first use, which a CI run would fetch
+each time; the stand-in probe is a test in yoagent-rutis; the matrix is not
+re-measured; `check` names every grant, not yet the fixed answers.
+
 ## M3c — Plugin web output and model calls (design §12, L3 and `llm`)
 
 - The frontend's plugin origin and framed UI plugins.
