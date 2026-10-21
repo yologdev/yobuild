@@ -1740,8 +1740,9 @@ pub(crate) fn withheld(manifest: &Manifest) -> Vec<String> {
 
 /// The credentials the manifest hands an entry on purpose, by its name: a
 /// plugin's `keys` grant or one referenced in its `config`, or in an MCP
-/// server's `env` (or filled by it: `OPENAI_API_KEY = "${MINE}"` hands a key
-/// over under that name), `args`, URL or headers. `check` notes each (what
+/// server's `env` (or an `env` name whose value is a reference:
+/// `OPENAI_API_KEY = "${MINE}"` hands a key over under that name), `args`,
+/// URL or headers. `check` notes each (what
 /// it spends with it is not metered).
 pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
     let keys = manifest.key_variables();
