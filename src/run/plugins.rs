@@ -1375,4 +1375,30 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn a_helper_runs_without_the_variables_it_is_told_to_drop() {
+        // `cargo test` sets `CARGO_PKG_NAME` and `CARGO_MANIFEST_DIR` for
+        // the test: a variable this process surely holds.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("env.mjs");
+        std::fs::write(
+            &script,
+            "const v = (n) => process.env[n] ?? 'unset'\n\
+             console.log(JSON.stringify({ name: v('CARGO_PKG_NAME'), dir: v('CARGO_MANIFEST_DIR') }))\n",
+        )
+        .unwrap();
+        let seen = |keys: &[&str]| {
+            let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            let found = node_json(&script, &[], &keys).unwrap();
+            (
+                found.field("name").unwrap().clone(),
+                found.field("dir").unwrap().clone(),
+            )
+        };
+        assert_eq!(seen(&[]).0, "yobuild");
+        let (name, dir) = seen(&["CARGO_PKG_NAME"]);
+        assert_eq!(name, "unset");
+        assert_eq!(dir, env!("CARGO_MANIFEST_DIR"));
+    }
 }

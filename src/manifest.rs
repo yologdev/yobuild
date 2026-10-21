@@ -93,18 +93,29 @@ pub const PROVIDERS: [(&str, &[&str]); 11] = [
     ("meta", &["META_API_KEY", "MODEL_API_KEY"]),
 ];
 
-/// Every variable yoagent reads a model's key from, for any provider it
-/// knows (yoagent 0.25.11's `resolve_api_key`): [`PROVIDERS`]' and
-/// those of the providers yobuild does not offer, plus its fallbacks
-/// `YOAGENT_API_KEY` and `API_KEY`. Plugins and MCP servers get them blank
-/// (design §12, "Step 4"). AWS's own credentials are not here: they are a
-/// cloud account's, not only Bedrock's.
-pub const KEY_VARIABLES: [&str; 20] = [
+/// Every variable yoagent reads a model's key from, for any provider or
+/// decision model it knows (yoagent 0.25.12's `api_key_variables`, which
+/// `resolve_api_key` reads): [`PROVIDERS`]' and those of the providers
+/// yobuild does not offer, its fallbacks `YOAGENT_API_KEY` and `API_KEY`,
+/// and TypeSafe's. Plugins and MCP servers get those set here empty
+/// (design §12, "Step 4"). Not here, though yoagent lists them: AWS's own
+/// credentials and Cloudflare's tokens, a cloud account's rather than only
+/// a model's (a Bedrock model blanked of `AWS_BEARER_TOKEN_BEDROCK` falls
+/// back to the AWS credentials).
+pub const KEY_VARIABLES: [&str; 21] = [
     "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
     "GROQ_API_KEY", "MISTRAL_API_KEY", "XAI_API_KEY", "DASHSCOPE_API_KEY", "ZAI_API_KEY",
     "MINIMAX_API_KEY", "META_API_KEY", "MODEL_API_KEY", "OPENROUTER_API_KEY", "CEREBRAS_API_KEY",
     "OPENCODE_API_KEY", "AZURE_OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "YOAGENT_API_KEY",
-    "API_KEY",
+    "API_KEY", "TYPESAFE_API_KEY",
+];
+
+/// The credentials yoagent lists that [`KEY_VARIABLES`] leaves out: a cloud
+/// account's.
+#[cfg(test)]
+pub(crate) const ACCOUNT_VARIABLES: [&str; 5] = [
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_AUTH_TOKEN",
 ];
 
 /// Local servers yoagent has a constructor for, which take no key: `ollama`
@@ -377,6 +388,33 @@ impl Plugin {
             serde_json::Value::Object(map) => Ok(Some(map)),
             _ => unreachable!("a table stays a table"),
         }
+    }
+
+    /// The names its configuration's strings refer to (`${NAME}`), at any
+    /// depth, each once, in the order met.
+    pub fn config_references(&self) -> Vec<String> {
+        fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::String(text) => {
+                    for name in Value::new(text.clone())
+                        .expect("checked when read")
+                        .references()
+                    {
+                        if !out.iter().any(|o| o == name) {
+                            out.push(name.to_owned());
+                        }
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+                serde_json::Value::Object(map) => map.values().for_each(|v| walk(v, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for value in self.config.iter().flat_map(|c| c.values()) {
+            walk(value, &mut out);
+        }
+        out
     }
 }
 
@@ -761,9 +799,10 @@ impl Manifest {
             .any(|p| matches!(p.kind, PluginKind::Pi(_)) && p.grants.model.is_some())
     }
 
-    /// The variables that may hold a model's key: [`KEY_VARIABLES`] and the
-    /// agent's own (`api_key_env`), each once. Plugins and MCP servers get
-    /// them blank unless the manifest hands one over.
+    /// The variables that may hold a model's key: [`KEY_VARIABLES`], then
+    /// the agent's own (`api_key_env`, a custom provider's) when it is not
+    /// among them; each once. Those set in yobuild's environment reach
+    /// plugins and MCP servers empty unless the manifest hands one over.
     pub fn key_variables(&self) -> Vec<String> {
         let mut names: Vec<String> = KEY_VARIABLES.iter().map(|n| n.to_string()).collect();
         for name in self.agent.model.key_env() {

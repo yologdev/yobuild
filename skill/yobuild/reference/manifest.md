@@ -193,14 +193,19 @@ A server may want absolute paths (`check --json` shows its parameters):
 the prompt builds them from `{cwd}`, and the reply files write
 `"{cwd}/…"`.
 
-**Model keys.** Plugins and MCP servers get every model key variable
-(`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, …, `API_KEY`, the agent's
-`api_key_env`) empty, so they cannot call a model outside the run's budget.
-A server or plugin that truly needs one is handed it on purpose: a server
-through its `env` (`OPENAI_API_KEY = "${OPENAI_API_KEY}"`), a DSH or rutis
-plugin through a `${NAME}` in its `config`. A pi extension cannot be handed
-one. `check` notes each key handed over ("its model calls are not
-metered"). Tell the person before you hand one over.
+**Model keys.** Plugins and MCP servers get each model key variable set
+in the environment (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, …, `API_KEY`,
+the agent's `api_key_env`) empty, in `run` and in `check` alike, so they
+cannot call a model outside the run's budget. `check` says which, as an
+agent note. AWS's own credentials stay, so a plugin can still reach
+Bedrock with them. A server or plugin that truly needs a key is handed it
+on purpose: a stdio server through its `env`
+(`OPENAI_API_KEY = "${OPENAI_API_KEY}"`) or its `args`, an HTTP server
+through its `url` or `headers`, a DSH or rutis plugin through a `${NAME}`
+in its `config`. A pi extension cannot be handed one. `check` notes each
+key handed over ("its model calls are not metered"). Tell the person
+before you hand one over. A plugin that fails with an authentication
+error, or says a feature is off, may be one that wanted a key.
 
 **Pins.** Every package is `name@1.2.3` (exact; `1.2.3-beta.1` too) or a
 local path (`./`, `../`, `/`). Tags, ranges, `git`, URLs and `file:` are

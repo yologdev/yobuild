@@ -1689,9 +1689,10 @@ fn launch(
     })
 }
 
-/// The model key variables set in this process, which plugin runtimes, MCP
-/// servers and the adapters' helpers get blank (design §12, "Step 4": a
-/// plugin could otherwise call a model past the budget, unmetered).
+/// The model key variables set in this process (design §12, "Step 4"),
+/// which plugin runtimes and stdio MCP servers get empty: a plugin could
+/// otherwise call a model past the budget, unmetered. (The adapters' helper
+/// scripts have every one removed instead: `plugins::node_json`.)
 pub(crate) fn blanked(manifest: &Manifest) -> Vec<String> {
     manifest
         .key_variables()
@@ -1701,8 +1702,9 @@ pub(crate) fn blanked(manifest: &Manifest) -> Vec<String> {
 }
 
 /// The model key variables the manifest hands an entry on purpose, by its
-/// name: a reference in a plugin's `config`, or in an MCP server's `env`,
-/// `args`, URL or headers. `check` notes each (its model calls are not
+/// name: one referenced in a plugin's `config`, or in an MCP server's `env`
+/// (or filled by it: `OPENAI_API_KEY = "${MINE}"` hands a key over under
+/// that name), `args`, URL or headers. `check` notes each (its model calls are not
 /// metered).
 pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
     let keys = manifest.key_variables();
@@ -1716,24 +1718,21 @@ pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
         out
     };
     let plugins = manifest.plugins.iter().map(|plugin| {
-        let seen = std::cell::RefCell::new(Vec::new());
-        // Filled with nothing: only the names asked for count.
-        let _ = plugin.config_with(|name| {
-            seen.borrow_mut().push(name.to_owned());
-            Some(String::new())
-        });
-        let seen = seen.into_inner();
+        let names = plugin.config_references();
         (
             plugin.name.clone(),
-            given(seen.iter().map(String::as_str).collect()),
+            given(names.iter().map(String::as_str).collect()),
         )
     });
     let servers = manifest.mcp.iter().map(|server| {
         let names: Vec<&str> = match &server.transport {
-            Transport::Stdio { args, env, .. } => args
+            // A key's name filled from somewhere (a secret's name holds
+            // only references: `guard`).
+            Transport::Stdio { args, env, .. } => env
                 .iter()
-                .chain(env.values())
-                .flat_map(|v| v.references())
+                .filter(|(_, value)| !value.references().is_empty())
+                .map(|(name, _)| name.as_str())
+                .chain(args.iter().chain(env.values()).flat_map(|v| v.references()))
                 .collect(),
             Transport::Http { url, headers } => std::iter::once(url)
                 .chain(headers.values())
@@ -2332,5 +2331,54 @@ mod tests {
         assert_eq!(bin(None).unwrap_err(), "@s/srv: its bin is not a path");
         write("null");
         assert_eq!(bin(None).unwrap_err(), "@s/srv has no bin");
+    }
+
+    #[test]
+    fn the_keys_handed_over_are_the_key_variables_an_entry_refers_to_or_is_filled_under() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = Manifest::parse(
+            r#"[agent]
+name = "a"
+model = "acme/m"
+base_url = "https://acme.example/v1"
+api_key_env = "ACME_KEY"
+[[plugin]]
+name = "nested"
+dsh = "./d.ts"
+config = { apiKey = "${OPENAI_API_KEY}", deep = { list = ["x ${ACME_KEY}", "${OPENAI_API_KEY}"] }, home = "${HOME}" }
+[[plugin]]
+name = "plain"
+dsh = "./e.ts"
+config = { home = "${HOME}" }
+[[mcp]]
+name = "stdio"
+npm = "./s.sh"
+args = ["--token", "${GROQ_API_KEY}"]
+env = { OPENAI_API_KEY = "${MINE}", LOG = "${DEEPSEEK_API_KEY_FILE}" }
+[[mcp]]
+name = "web"
+url = "https://mcp.example/${API_KEY}"
+headers = { Authorization = "Bearer ${ANTHROPIC_API_KEY}" }
+"#,
+            &dir.path().join("a.toml"),
+            dir.path(),
+        )
+        .unwrap();
+        let given = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            super::keys_given(&m),
+            [
+                // Nested, each once; `HOME` is no key; the custom
+                // provider's own variable is one.
+                ("nested".to_owned(), given(&["OPENAI_API_KEY", "ACME_KEY"])),
+                // Filled under a key's name, and in its arguments; a name
+                // that only starts like a key's is none.
+                (
+                    "stdio".to_owned(),
+                    given(&["OPENAI_API_KEY", "GROQ_API_KEY"])
+                ),
+                ("web".to_owned(), given(&["API_KEY", "ANTHROPIC_API_KEY"])),
+            ]
+        );
     }
 }

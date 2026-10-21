@@ -444,6 +444,27 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             ),
         ));
     }
+    // Plugins and stdio servers get the model keys set here empty (design
+    // §12, "Step 4"): one that needs a key fails at its first call, which
+    // this says before then.
+    let blanked = super::blanked(&manifest);
+    let any_stdio = manifest
+        .mcp
+        .iter()
+        .any(|s| matches!(s.transport, crate::manifest::Transport::Stdio { .. }));
+    if !blanked.is_empty() && (!manifest.plugins.is_empty() || any_stdio) {
+        let names: Vec<String> = blanked.iter().map(|k| format!("`{k}`")).collect();
+        agent_notes.push(format!(
+            "plugins and MCP servers get the model keys set here empty ({}): one that needs a key gets it only from its entry (`\"${{NAME}}\"` in its `config`, or a server's `env`), and its model calls are not metered",
+            names.join(", ")
+        ));
+    }
+    // The probes alone run as `run` runs plugins: those keys empty.
+    let probe_options = blanked
+        .iter()
+        .fold(yoagent_rutis::probe::ProbeOptions::default(), |o, name| {
+            o.env(name, "")
+        });
     // The DSH host's session log goes to the DSH home: the user's own when
     // they set one.
     agent_notes.extend(super::dsh_home_note(
@@ -510,8 +531,15 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                     .filter(|(name, _)| *name == plugin.name)
                     .flat_map(|(_, files)| files.iter().map(|f| f.display().to_string()))
                     .collect();
-                let report =
-                    yoagent_rutis::probe::pi(&layout.adapters, &cwd, &files, &[], None).await;
+                let report = yoagent_rutis::probe::pi_with(
+                    &layout.adapters,
+                    &cwd,
+                    &files,
+                    &[],
+                    None,
+                    &probe_options,
+                )
+                .await;
                 entry.problems.extend(report.problem().map(Problem::new));
                 for builtin in &report.without {
                     entry.problems.push(Problem::new(format!(
@@ -541,12 +569,13 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                     .filter(|name| dsh_probe_base.iter().any(|b| b == name))
                     .collect();
                 if in_base.is_empty() {
-                    let report = yoagent_rutis::probe::dsh(
+                    let report = yoagent_rutis::probe::dsh_with(
                         &layout.adapters,
                         &plan.dsh_dir,
                         &serde_json::Value::Array(rows),
                         &[],
                         None,
+                        &probe_options,
                     )
                     .await;
                     entry.problems.extend(report.problem().map(Problem::new));

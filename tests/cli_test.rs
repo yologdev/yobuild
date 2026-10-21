@@ -13,9 +13,19 @@ const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/echo"
 /// runs of the suite.
 const CACHE: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/yobuild-home");
 
+/// The binary with the tests' cache, and none of the model keys this
+/// process may hold (a developer's own): a test sets those it needs.
+fn bin() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_yobuild"));
+    command.env("YOBUILD_HOME", CACHE);
+    for key in yobuild::manifest::KEY_VARIABLES {
+        command.env_remove(key);
+    }
+    command
+}
+
 fn yobuild(args: &[&str], cwd: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_yobuild"))
-        .env("YOBUILD_HOME", CACHE)
+    bin()
         .args(args)
         .current_dir(cwd)
         .env_remove("RUST_LOG")
@@ -113,8 +123,7 @@ fn arguments_are_checked_before_anything_runs() {
 #[test]
 fn a_missing_key_stops_the_run_before_it_starts() {
     let (agent, _) = fixture();
-    let out = Command::new(env!("CARGO_BIN_EXE_yobuild"))
-        .env("YOBUILD_HOME", CACHE)
+    let out = bin()
         .args(["run", &agent, "--once", "x"])
         .env_remove("DEEPSEEK_API_KEY")
         .output()
@@ -392,8 +401,7 @@ mod web {
             web: &[&str],
             late: Duration,
         ) -> Page {
-            let mut child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
-                .env("YOBUILD_HOME", super::CACHE)
+            let mut child = super::bin()
                 .args(args)
                 .args(web)
                 .current_dir(dir)
@@ -574,8 +582,7 @@ fn ctrl_c_stops_a_once_run_as_aborted() {
         "[builtins]\ngate = \"off\"\n",
         r#"[{ "tools": [{ "name": "bash", "arguments": { "command": "sleep 30" } }] }, { "text": "done" }]"#,
     );
-    let child = Command::new(env!("CARGO_BIN_EXE_yobuild"))
-        .env("YOBUILD_HOME", CACHE)
+    let child = bin()
         .args([
             "run", "agent.toml", "--scripted", "script.json", "--once", "go",
         ])
@@ -990,11 +997,26 @@ fn check_lists_an_mcp_servers_tools_and_refuses_bad_arguments() {
     assert!(err.starts_with("yobuild: unknown option --once"), "{err}");
 }
 
-/// Whether DSH's runtime is installed (`npm ci` in `adapters/dsh`).
+/// Whether DSH's runtime is installed (`npm ci` in `adapters/dsh`);
+/// required with `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 fn installed_dsh() -> bool {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("adapters/dsh/node_modules")
-        .is_dir()
+    required(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/dsh/node_modules"),
+        "scripts/copy-adapters.sh, then npm ci in adapters/dsh",
+    )
+}
+
+/// Whether `dir` is there; else skipped, or a failure with
+/// `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
+fn required(dir: &Path, setup: &str) -> bool {
+    if dir.is_dir() {
+        return true;
+    }
+    if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
+        panic!("{} is required: {setup}", dir.display());
+    }
+    eprintln!("SKIPPED: {setup}");
+    false
 }
 
 // -- the example agents (examples/*.toml), as their demos ran ---------------
@@ -1323,22 +1345,31 @@ fn what_a_pi_extension_was_answered_for_want_of_a_grant_is_said() {
 fn plugins_and_servers_get_the_model_keys_blank_unless_handed_one() {
     // Design §12, "Step 4": every model key variable set here reaches a
     // plugin runtime or an MCP server empty — the agent's own (a custom
-    // provider's `api_key_env`) and any other provider's — and the rest of
-    // the environment as it is. A key the manifest hands over on purpose
-    // gets there, and `check` notes it.
+    // provider's `api_key_env`) and any other provider's — one not set stays
+    // unset, and the rest of the environment is as it is. A key the manifest
+    // hands over on purpose gets there, and `check` notes it. Each load
+    // appends a line: `check` loads each plugin alone, then all together.
     let rutis = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins/node_modules");
-    if !pi_installed() || !installed_dsh() || !rutis.join("@arcships/rutis-runtime").is_dir() {
+    if !pi_installed()
+        || !installed_dsh()
+        || !required(
+            &rutis.join("@arcships/rutis-runtime"),
+            "npm ci in frontend/plugins",
+        )
+    {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let seen = "JSON.stringify(['DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'ACME_KEY', 'UNRELATED']\
-                .map((n) => process.env[n] ?? 'unset'))";
+    let names = [
+        "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ACME_KEY", "GROQ_API_KEY", "UNRELATED",
+    ];
+    let seen = format!("JSON.stringify({names:?}.map((n) => process.env[n] ?? 'unset')) + '\\n'");
     // The runtimes' own working folder is not the agent's: an absolute path.
     let writes = |name: &str| {
         let out = dir.path().join(format!("{name}.seen"));
-        format!("writeFileSync({:?}, {seen})", out.display().to_string())
+        format!("appendFileSync({:?}, {seen})", out.display().to_string())
     };
-    let imports = "import { writeFileSync } from 'node:fs'\n";
+    let imports = "import { appendFileSync } from 'node:fs'\n";
     std::fs::write(
         dir.path().join("pi.ts"),
         format!(
@@ -1371,9 +1402,12 @@ fn plugins_and_servers_get_the_model_keys_blank_unless_handed_one() {
     let server = dir.path().join("server.sh");
     std::fs::write(
         &server,
-        "#!/usr/bin/env bash\n\
-         printf '[\"%s\",\"%s\",\"%s\",\"%s\"]' \"${DEEPSEEK_API_KEY-unset}\" \"${OPENAI_API_KEY-unset}\" \"${ACME_KEY-unset}\" \"${UNRELATED-unset}\" > mcp.seen\n\
-         exec bash \"$1\"\n",
+        format!(
+            "#!/usr/bin/env bash\n\
+             printf '[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]\\n' \"${{DEEPSEEK_API_KEY-unset}}\" \"${{OPENAI_API_KEY-unset}}\" \"${{ACME_KEY-unset}}\" \"${{GROQ_API_KEY-unset}}\" \"${{UNRELATED-unset}}\" >> {:?}\n\
+             exec bash \"$1\"\n",
+            dir.path().join("mcp.seen").display().to_string()
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&server, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -1390,8 +1424,7 @@ fn plugins_and_servers_get_the_model_keys_blank_unless_handed_one() {
     .unwrap();
     std::fs::write(dir.path().join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
     let with_keys = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_yobuild"))
-            .env("YOBUILD_HOME", CACHE)
+        bin()
             .env_remove("RUST_LOG")
             .env("DEEPSEEK_API_KEY", "sk-d")
             .env("OPENAI_API_KEY", "sk-o")
@@ -1402,25 +1435,38 @@ fn plugins_and_servers_get_the_model_keys_blank_unless_handed_one() {
             .output()
             .unwrap()
     };
+    let blank = r#"["","","","unset","kept"]"#;
+    // The server's own `env` hands it `OPENAI_API_KEY`.
+    let handed = r#"["","sk-o","","unset","kept"]"#;
+    // Each file's lines, the file removed for the next command.
+    let lines = |name: &str, said: &str| -> Vec<String> {
+        let file = dir.path().join(format!("{name}.seen"));
+        let read = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{name}: {e}\n{said}"));
+        std::fs::remove_file(&file).unwrap();
+        read.lines().map(str::to_owned).collect()
+    };
     let out = with_keys(&[
         "run", "agent.toml", "--scripted", "script.json", "--once", "go",
     ]);
     let stderr = text(&out.stderr);
     assert!(out.status.success(), "{stderr}");
-    let seen = |name: &str| {
-        std::fs::read_to_string(dir.path().join(format!("{name}.seen")))
-            .unwrap_or_else(|e| panic!("{name}: {e}\n{stderr}"))
-    };
     for name in ["pi", "dsh", "rutis"] {
-        assert_eq!(seen(name), r#"["","","","kept"]"#, "{name}");
+        assert_eq!(lines(name, &stderr), [blank], "{name}");
     }
-    // The server's own `env` hands it `OPENAI_API_KEY`.
-    assert_eq!(seen("mcp"), r#"["","sk-o","","kept"]"#);
+    assert_eq!(lines("mcp", &stderr), [handed]);
 
-    // `check` notes the keys handed over, on the entries given them.
+    // `check` runs the plugins as `run` does, alone and together, and notes the
+    // keys handed over on the entries given them.
     let out = with_keys(&["check", "agent.toml", "--json"]);
-    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .unwrap_or_else(|e| panic!("{e}: {}", text(&out.stderr)));
+    let stderr = text(&out.stderr);
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {stderr}"));
+    assert_eq!(report["ok"], true, "{report}");
+    for name in ["pi", "dsh", "rutis"] {
+        assert_eq!(lines(name, &stderr), [blank, blank], "{name}");
+    }
+    // A server is started once, to list its tools.
+    assert_eq!(lines("mcp", &stderr), [handed]);
     let notes = |name: &str| -> Vec<String> {
         report["entries"]
             .as_array()
@@ -1441,5 +1487,12 @@ fn plugins_and_servers_get_the_model_keys_blank_unless_handed_one() {
     assert!(
         notes("pi").is_empty() && notes("dsh").is_empty(),
         "{report}"
+    );
+    // The model's limits aside (`acme` has no preset), the keys withheld.
+    assert_eq!(
+        report["agent"]["notes"].as_array().unwrap()[1..],
+        [serde_json::json!(
+            "plugins and MCP servers get the model keys set here empty (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ACME_KEY`): one that needs a key gets it only from its entry (`\"${NAME}\"` in its `config`, or a server's `env`), and its model calls are not metered"
+        )]
     );
 }

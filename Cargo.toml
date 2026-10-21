@@ -25,8 +25,8 @@ tempfile = "3"
 # whose `adapters()` names the crate's own files, read in place:
 # `dsh/host-services.json`). rutis 0.12 throughout: the runtimes
 # (`frontend/plugins`, the adapters') must match.
-yoagent = "0.25.11"
-yoagent-rutis = { version = "0.8.0", features = ["node", "loader", "probe"] }
+yoagent = "0.25.12"
+yoagent-rutis = { version = "0.8.1", features = ["node", "loader", "probe"] }
 rutis = "0.12"
 rutis-bridge = { version = "0.12", default-features = false, features = ["node"] }
 rutis-loader = { version = "0.12", features = ["node"] }

@@ -261,8 +261,8 @@ impl PluginHostBuilder {
         self
     }
 
-    /// Give every runtime's process the variable `name` empty, in place of
-    /// the value it would inherit (a model's key, design §12 "Step 4"):
+    /// Set the variable `name` empty in every runtime's process, whether or
+    /// not it would inherit one (a model's key, design §12 "Step 4"):
     /// rutis's launcher can add variables, not remove them. An
     /// [`env`](Self::env) entry of the same name for a runtime wins there.
     pub fn blank(mut self, name: impl Into<OsString>) -> Self {

@@ -1297,6 +1297,14 @@ fn the_key_variables_hold_every_providers_and_the_agents_own() {
     }
     let unique: std::collections::HashSet<_> = KEY_VARIABLES.iter().collect();
     assert_eq!(unique.len(), KEY_VARIABLES.len());
+    // yoagent's own list, but for a cloud account's credentials: a
+    // variable a later yoagent reads fails here until it is placed.
+    let mut theirs = yoagent::provider::api_key_variables();
+    theirs.retain(|name| !super::ACCOUNT_VARIABLES.contains(name));
+    let mut ours = KEY_VARIABLES.to_vec();
+    theirs.sort_unstable();
+    ours.sort_unstable();
+    assert_eq!(ours, theirs);
     let m = read("[agent]\nname = \"a\"\nmodel = \"acme/m1\"\nbase_url = \"https://acme.example/v1\"\napi_key_env = \"ACME_KEY\"\n").unwrap();
     let names = m.key_variables();
     assert_eq!(names.len(), KEY_VARIABLES.len() + 1);
