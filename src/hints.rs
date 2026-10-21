@@ -210,17 +210,26 @@ pub(crate) const HINTS: &[Hint] = &[
     Hint {
         id: "cannot-start",
         scope: Scope::Start,
-        // `frontend::host::startable`'s words only: rutis says its own spawn
-        // failures as "cannot start X: …", whose cause may be anything (the
-        // terminal not there), and a server's own text may say it too.
-        pattern: " cannot be started: ",
-        fix: "the program a stdio MCP server or a plugin runtime (Node) runs is missing, not executable for you, or behind a folder you cannot read: fix the server's path or the permissions, install its package again, or install Node",
+        // `frontend::host::startable`'s words only, which name yobuild: rutis
+        // says its own spawn failures as "cannot start X: …", whose cause
+        // may be anything (the terminal not there), and a plugin's or
+        // server's own text may say a program "cannot be started".
+        pattern: "yobuild cannot start ",
+        fix: "the program a stdio MCP server or a plugin runtime (Node) runs is missing, not executable for you, or behind a folder you cannot search: fix the server's path or the permissions, install its package again, or install Node",
+    },
+    Hint {
+        id: "no-node",
+        scope: Scope::Start,
+        // rutis's spawn failure for the one cause it can name: no `node`
+        // (nothing withheld, so `startable` did not look first).
+        pattern: "cannot start node: No such file or directory",
+        fix: "the plugin runtimes run on Node, which is not on PATH: install Node 22.19 or later",
     },
     Hint {
         id: "no-env",
         scope: Scope::Start,
         pattern: "is not there, and yobuild needs it to start a plugin runtime or stdio MCP server",
-        fix: "install `env` at /usr/bin/env (and /bin/sh), which a minimal image may lack: yobuild starts every plugin runtime and stdio server through it while a credential yoagent reads is set",
+        fix: "install `env` at /usr/bin/env, which a minimal image may lack (and /bin/sh, needed for a program whose path holds `=`): yobuild starts a plugin runtime or stdio server through it while a credential yoagent reads is taken out of its environment",
     },
     Hint {
         id: "mcp-no-tools",
@@ -396,13 +405,21 @@ mod tests {
             // `frontend::host::startable`'s words, through `run::mcp`.
             (
                 Scope::Start,
-                "mcp files: /p/s.sh cannot be started: no such file".into(),
+                "mcp files: yobuild cannot start /p/s.sh: no such file".into(),
                 "cannot-start",
             ),
             (
                 Scope::Start,
-                "node cannot be started: it is not on PATH".into(),
+                "yobuild cannot start node: it is not on PATH".into(),
                 "cannot-start",
+            ),
+            // rutis's own spawn failure for a missing `node`
+            // (rutis-bridge's `runtime/spawn.rs`: "cannot start {program}:
+            // {error}").
+            (
+                Scope::Start,
+                "cannot start node: No such file or directory (os error 2)".into(),
+                "no-node",
             ),
             // `frontend::host::env_without`'s.
             (
@@ -464,6 +481,16 @@ mod tests {
         )
         .is_none());
         assert!(hint(Scope::Start, "mcp db: cannot start database: locked").is_none());
+        // A plugin's own words in a "plugin stopped" Notice: that Notice's
+        // hint, not a program yobuild looked for.
+        assert_eq!(
+            hint(
+                Scope::Start,
+                "a plugin stopped: plugin `plugin:x` failed: headless browser cannot be started: no display"
+            )
+            .map(|h| h.id),
+            Some("plugin-failed")
+        );
         // The session budget before the run's.
         assert_eq!(
             hint(

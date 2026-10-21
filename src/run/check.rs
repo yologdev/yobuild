@@ -432,11 +432,12 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             None => agent_notes.push(note.clone()),
         }
     }
-    // A `keys` grant naming only what is unset (or empty) here hands
+    // Each name of a `keys` grant that is unset (or empty) here hands
     // nothing over: said, so the plugin is not taken to have it.
     let set = super::key_is_set;
-    for (name, keys) in super::keys_unset(&manifest, set) {
-        entry_notes.push((name, super::unset_grant_note(&keys)));
+    for unset in super::keys_unset(&manifest, set) {
+        let note = super::unset_grant_note(&unset);
+        entry_notes.push((unset.plugin, note));
     }
     // A credential handed over on purpose reaches the entry (design §12,
     // "Step 4"): what it spends with it is outside the budget.
@@ -485,7 +486,12 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         &manifest,
         &withheld,
         std::env::vars_os().map(|(k, _)| k),
-        cfg!(target_os = "macos"),
+        // What a `run` would start: the terminal UI on a terminal
+        // manifest (`check` itself starts none).
+        super::Platform {
+            macos: cfg!(target_os = "macos"),
+            terminal: manifest.frontend.terminal,
+        },
     ));
     agent_notes.extend(
         super::withheld_note(&manifest, &withheld).map(|note| match probed {

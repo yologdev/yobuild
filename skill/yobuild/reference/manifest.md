@@ -212,17 +212,18 @@ it on purpose: a stdio server through its `env`
 through its `url` or `headers`, a DSH or rutis plugin through a `${NAME}`
 in its `config`, any plugin through `grants = { keys = [...] }` (its
 whole runtime gets it). `check` notes each ("it is given `X`, a
-credential yoagent reads: what it spends with it is not metered"); a
-`keys` grant naming a variable that is unset or empty gets nothing, which
-`check` and `run` say ("its `keys` grant names `X`, unset or empty here:
-it gets no key from it"). When entries lose different credentials,
-`check` notes on each what it has taken out. On macOS (with System Integrity Protection on, the
-default), `DYLD_*` variables do not reach what starts through `/usr/bin/env` (a plugin runtime or
-stdio server with a credential taken out, the terminal UI) either:
-`check` and `run` name them. Tell the person before you hand one over. This is not a sandbox: a plugin can
-still read a key from a file the person keeps it in (`~/.aws/credentials`,
-a shell profile), and other secrets (`GITHUB_TOKEN`, `NPM_TOKEN`) still
-pass. A plugin that fails with an authentication error, or says a feature
+credential yoagent reads: what it spends with it is not metered"). A
+`keys` grant naming a variable that is unset or empty hands nothing over
+under that name, which `check` and `run` say ("its `keys` grant names
+`X`, unset or empty here: …"). When entries lose different credentials,
+`check` notes on each what it has taken out. On macOS (with System
+Integrity Protection on, the default), `DYLD_*` variables do not reach
+what starts through `/usr/bin/env` (a plugin runtime or stdio server
+with a credential taken out, the terminal UI) either: `check` and `run`
+name them. Tell the person before you hand one over. This is not a
+sandbox: a plugin can still read a key from a file the person keeps it
+in (`~/.aws/credentials`, a shell profile), and other secrets
+(`GITHUB_TOKEN`, `NPM_TOKEN`) still pass. A plugin that fails with an authentication error, or says a feature
 is off, may be one that wanted a key.
 
 **Pins.** Every package is `name@1.2.3` (exact; `1.2.3-beta.1` too) or a

@@ -264,9 +264,10 @@ const SH: &str = "/bin/sh";
 /// reads a word holding `=` before the program as an assignment, `--` or
 /// not, so such a program goes through `/bin/sh -c 'exec "$0" "$@"'`.
 /// Nothing withheld: as it is; no `/usr/bin/env` (or `/bin/sh` when
-/// needed): an error, not the variables left in. (On macOS `env` is
-/// protected, so `DYLD_*` variables do not reach the program either — only
-/// when something is withheld: `run::dyld_note`.)
+/// needed): an error, not the variables left in. (On macOS with System
+/// Integrity Protection on, the default, `env` is protected, so `DYLD_*`
+/// variables do not reach the program either — only when something is
+/// withheld: `run::dyld_note`.)
 ///
 /// Spawning `env` succeeds whatever `program` is, so a program that is not
 /// there or cannot run would only show as `env` exiting 126 or 127: it is
@@ -321,9 +322,10 @@ pub(crate) fn env_without(
 /// kernel's answer for the real user, so an ACL counts and another
 /// user's 0744 file does not; a `noexec` mount is not seen), found as
 /// `execvp` finds it: a name holding `/` from `cwd`, else each folder of
-/// `path`, else of this process's `PATH`, else of `/bin:/usr/bin` (an
-/// empty entry is the child's folder). The error says which program and
-/// why: "X cannot be started: no such file", "it is not a file", "it is
+/// `path`, else of this process's `PATH`, else of `/bin:/usr/bin`
+/// (glibc's default; macOS's searches the same two the other way round)
+/// (an empty entry is the child's folder). The error says which program and
+/// why: "yobuild cannot start X: no such file", "it is not a file", "it is
 /// not executable", "it is not on PATH", "it is on PATH but not
 /// executable", "it is not on PATH where it could be looked at (…)", or
 /// the system's own error (a folder it may not search, a symlink loop) —
@@ -340,7 +342,7 @@ pub(crate) fn startable(
     };
     let shown = Path::new(program).display();
     let failed = |why: &dyn std::fmt::Display| -> BoxError {
-        format!("{shown} cannot be started: {why}").into()
+        format!("yobuild cannot start {shown}: {why}").into()
     };
     if program.as_encoded_bytes().contains(&b'/') {
         return match runnable(&from(Path::new(program))) {
@@ -356,6 +358,13 @@ pub(crate) fn startable(
         .or_else(|| std::env::var_os("PATH"))
         .unwrap_or_else(|| "/bin:/usr/bin".into());
     // As `execvp`: the first that runs; else what kept the others from it.
+    // Two differences, both rare and both for a bare name (a runtime's
+    // `node`; a server's command is always a path): glibc's `execvp` stops
+    // at an error other than ENOENT, ENOTDIR or EACCES (ELOOP, …), where
+    // this goes on looking — so it may let pass what `env` then fails on,
+    // never refuse what would run; and a folder named like the program is
+    // passed over here, where `execvp` notes EACCES — so "it is not on
+    // PATH" is said where a folder of that name is.
     let mut not_executable = false;
     let mut error: Option<(PathBuf, std::io::Error)> = None;
     for dir in std::env::split_paths(&search) {
@@ -403,9 +412,10 @@ fn runnable(path: &Path) -> Result<(), Unrunnable> {
         Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => return Err(Unrunnable::Missing),
         Err(e) => return Err(Unrunnable::Failed(e)),
     }
+    // A NUL in the path: `metadata` refused it already (InvalidInput);
+    // said as the system's error should one ever get here.
     let Ok(text) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        // A NUL in the path: nothing can start it.
-        return Err(Unrunnable::Missing);
+        return Err(Unrunnable::Failed(std::io::ErrorKind::InvalidInput.into()));
     };
     // SAFETY: `text` is a valid NUL-terminated string that outlives the call.
     match unsafe { libc::access(text.as_ptr(), libc::X_OK) } {
@@ -544,7 +554,9 @@ impl PluginHostBuilder {
                 Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
                 |launcher, (_, key, value)| launcher.env(key, value),
             );
-            launchers.push((name, dir, without(launcher, &withheld)?));
+            let launcher =
+                without(launcher, &withheld).map_err(|e| format!("runtime `{name}`: {e}"))?;
+            launchers.push((name, dir, launcher));
         }
         for (name, dir, launcher) in launchers {
             let mut runtime =
@@ -938,7 +950,6 @@ mod tests {
         assert_eq!(start("bin/tool", Some(cwd), None), Ok(()));
         assert_eq!(start("tool", Some(cwd), Some("bin")), Ok(()));
         // An empty entry is the child's folder.
-        assert_eq!(start("bin/tool", Some(cwd), Some("")), Ok(()));
         assert_eq!(start("tool", Some(&bin), Some(":/nowhere")), Ok(()));
         // A later entry that runs wins over an earlier one that does not.
         let early = cwd.join("early");
@@ -951,8 +962,8 @@ mod tests {
         std::os::unix::fs::symlink(&looped, &looped).unwrap();
         let e = start(looped.to_str().unwrap(), None, None).unwrap_err();
         assert!(
-            e.starts_with(&format!("{} cannot be started: ", looped.display()))
-                && !e.ends_with("no such file"),
+            e.starts_with(&format!("yobuild cannot start {}: ", looped.display()))
+                && e.contains("symbolic links"),
             "{e}"
         );
         // A folder this user may not search: said, the file not called
@@ -972,7 +983,7 @@ mod tests {
             );
             assert!(
                 e2.starts_with(
-                    "tool cannot be started: it is not on PATH where it could be looked at ("
+                    "yobuild cannot start tool: it is not on PATH where it could be looked at ("
                 ) && e2.contains("ermission denied"),
                 "{e2}"
             );

@@ -1446,10 +1446,13 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         .map(|(name, _)| name)
         .filter(|name| name.to_string_lossy().starts_with("DYLD_"))
         .collect();
-    let with_keys = |args: &[&str]| {
+    let with_env = |extra: &[(&str, &str)], args: &[&str]| {
         let mut command = bin();
         for name in &dyld {
             command.env_remove(name);
+        }
+        for (name, value) in extra {
+            command.env(name, value);
         }
         command
             .env("DYLD_YOBUILD_TEST", "1")
@@ -1463,6 +1466,7 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
             .output()
             .unwrap()
     };
+    let with_keys = |args: &[&str]| with_env(&[], args);
     let gone = r#"["unset","unset","unset","unset","kept"]"#;
     // `check`'s pi and DSH probes alone: set empty (yoagent-rutis builds
     // their launch).
@@ -1492,7 +1496,7 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         stderr.contains(&format!("  Info: {withheld}\n")),
         "{stderr}"
     );
-    let dyld_note = "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get `DYLD_YOBUILD_TEST`: with System Integrity Protection on (macOS's default), /usr/bin/env drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)";
+    let dyld_note = "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get `DYLD_YOBUILD_TEST`: with System Integrity Protection on (macOS's default), starting the protected /usr/bin/env drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)";
     assert_eq!(
         stderr.contains(&format!("  Info: {dyld_note}\n")),
         cfg!(target_os = "macos"),
@@ -1501,14 +1505,15 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
 
     // `check` runs the plugins as `run` does, alone and together, and notes the
     // keys handed over on the entries given them.
-    let check = || {
-        let out = with_keys(&["check", "agent.toml", "--json"]);
+    let check_with = |extra: &[(&str, &str)]| {
+        let out = with_env(extra, &["check", "agent.toml", "--json"]);
         let stderr = text(&out.stderr);
         let report: serde_json::Value =
             serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {stderr}"));
         assert_eq!(report["ok"], true, "{report}");
         (report, stderr)
     };
+    let check = || check_with(&[]);
     let (report, stderr) = check();
     for name in ["pi", "dsh"] {
         assert_eq!(lines(name, &stderr), [blank, gone], "{name}");
@@ -1594,6 +1599,8 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     let out = with_keys(&run);
     let stderr = text(&out.stderr);
     assert!(out.status.success(), "{stderr}");
+    // Every granted name set: no plugin warned.
+    assert!(!stderr.contains("  Warning: plugin "), "{stderr}");
     assert_eq!(lines("pi", &stderr), [pi_keeps]);
     assert_eq!(lines("dsh", &stderr), [dsh_keeps]);
     assert_eq!(lines("rutis", &stderr), [rutis_keeps]);
@@ -1647,7 +1654,8 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
             probed(taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY"])),
         ]
     );
-    // `run` says it too, as a Warning: the plugin fails at its first call.
+    // `run` says it too, as a Warning, for that plugin only (the others'
+    // grants are set).
     let out = with_keys(&run);
     let stderr = text(&out.stderr);
     assert!(out.status.success(), "{stderr}");
@@ -1655,9 +1663,20 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         stderr.contains(&format!("  Warning: plugin pi: {unset}\n")),
         "{stderr}"
     );
+    assert_eq!(stderr.matches("  Warning: plugin ").count(), 1, "{stderr}");
     for name in ["pi", "dsh", "rutis", "mcp"] {
         lines(name, &stderr);
     }
+    // Exported empty (`export GROQ_API_KEY=`, to turn it off) is the same:
+    // nothing usable handed over, not "given".
+    let (report, _) = check_with(&[("GROQ_API_KEY", "")]);
+    assert_eq!(
+        notes(&report, "pi"),
+        [
+            unset.to_owned(),
+            probed(taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY"])),
+        ]
+    );
 }
 
 /// A stdio server whose program cannot run is said before anything starts
@@ -1681,10 +1700,9 @@ fn a_server_that_cannot_start_is_said_with_what_to_do() {
     let server = dir.path().join("s.sh");
     std::fs::write(&server, "#!/bin/sh\n").unwrap();
     std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let said = format!(
-        "{} cannot be started: it is not executable",
-        server.display()
-    );
+    // The server's path as the manifest makes it (`/private/var/…` on
+    // macOS, where the temp folder is `/var/…`): only its end compared.
+    let said = "/s.sh: it is not executable";
     let fix = "the program a stdio MCP server or a plugin runtime (Node) runs is missing";
     // On macOS cargo sets `DYLD_*` variables for the tests: removed, and
     // one of ours set.
@@ -1717,11 +1735,16 @@ fn a_server_that_cannot_start_is_said_with_what_to_do() {
         let problem = &report["entries"][0]["problems"][0];
         assert_eq!(report["entries"][0]["name"], "s", "{report}");
         assert!(
-            problem["message"].as_str().unwrap().contains(&said),
+            problem["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("yobuild cannot start ") && m.ends_with(said)),
             "{report}"
         );
         assert!(
-            problem["fix"].as_str().unwrap().starts_with(fix),
+            problem["fix"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{report}"))
+                .starts_with(fix),
             "{report}"
         );
         let dyld_said = report["agent"]["notes"]
@@ -1747,6 +1770,6 @@ fn a_server_that_cannot_start_is_said_with_what_to_do() {
     );
     let stderr = text(&out.stderr);
     assert!(!out.status.success(), "{stderr}");
-    assert!(stderr.contains(&said), "{stderr}");
+    assert!(stderr.contains(said), "{stderr}");
     assert!(stderr.contains(&format!("  what to do: {fix}")), "{stderr}");
 }

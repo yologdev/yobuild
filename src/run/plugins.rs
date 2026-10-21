@@ -277,15 +277,12 @@ impl Helper {
     }
 }
 
-/// `keys` as a refusal names them: `none`, else each in backticks.
-fn said(keys: &[String]) -> String {
+/// A plugin's `keys` as a refusal says them, as the manifest's
+/// (`manifest::keys_differ`): "`a` has X, Y" or "`b` none".
+fn said(plugin: &str, keys: &[String]) -> String {
     match keys {
-        [] => "none".to_owned(),
-        keys => keys
-            .iter()
-            .map(|k| format!("`{k}`"))
-            .collect::<Vec<_>>()
-            .join(", "),
+        [] => format!("`{plugin}` none"),
+        keys => format!("`{plugin}` has {}", keys.join(", ")),
     }
 }
 
@@ -294,8 +291,8 @@ impl Plan {
     /// Each plugin of one runtime is granted the same (the manifest and
     /// `plan` refuse otherwise, naming the plugins); should those checks
     /// ever loosen, this refuses rather than let one plugin's grant decide
-    /// its runtime's environment — naming the plugin that came first, as
-    /// they do.
+    /// its runtime's environment — naming the plugin that came first, in
+    /// their words.
     fn keep(&mut self, runtime: &str, plugin: &str, keys: &[String]) -> Result<(), BoxError> {
         match self.keys.iter().find(|(r, _)| r == runtime) {
             Some((_, kept)) if kept != keys => {
@@ -305,9 +302,9 @@ impl Plan {
                     .find(|(r, _)| r == runtime)
                     .map_or("another", |(_, p)| p.as_str());
                 Err(format!(
-                    "it runs in one runtime with plugin {first}, whose environment is theirs together: give each the same `keys` or none ({first} has {}, {plugin} {})",
-                    said(kept),
-                    said(keys)
+                    "it runs in one runtime with plugin {first}, whose environment is theirs together: give each the same `keys` or none ({}, {})",
+                    said(first, kept),
+                    said(plugin, keys)
                 )
                 .into())
             }
@@ -891,7 +888,7 @@ mod tests {
         plan.keep("dsh", "d", &[]).unwrap();
         assert_eq!(
             plan.keep("pi", "c", &[]).unwrap_err().to_string(),
-            "it runs in one runtime with plugin a, whose environment is theirs together: give each the same `keys` or none (a has `OPENAI_API_KEY`, c none)"
+            "it runs in one runtime with plugin a, whose environment is theirs together: give each the same `keys` or none (`a` has OPENAI_API_KEY, `c` none)"
         );
         assert!(plan.keep("dsh", "e", &key("GROQ_API_KEY")).is_err());
         assert_eq!(plan.kept("pi"), key("OPENAI_API_KEY"));

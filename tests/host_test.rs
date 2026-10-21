@@ -389,7 +389,7 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
             .start(&root)
             .await;
         assert!(
-            matches!(&missing, Err(e) if e.to_string() == "node cannot be started: it is not on PATH"),
+            matches!(&missing, Err(e) if e.to_string() == "runtime `ui`: yobuild cannot start node: it is not on PATH"),
             "{:?}",
             missing.err().map(|e| e.to_string())
         );
@@ -458,7 +458,8 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
 }
 
 /// macOS's System Integrity Protection is on (`csrutil status`), under
-/// which the protected `/usr/bin/env` drops `DYLD_*` variables.
+/// which starting the protected `/usr/bin/env` drops `DYLD_*` variables.
+/// A "Custom Configuration" reads `status: unknown (…)`: taken as off.
 fn sip_enabled() -> bool {
     std::process::Command::new("csrutil")
         .arg("status")
