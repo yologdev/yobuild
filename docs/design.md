@@ -1773,6 +1773,7 @@ table read with `deny_unknown_fields`, every key off when absent:
 | `model` | `"info"` (later `"call"`) | yes | later (a model-info `llm`) | yes | `ctx.model`/`modelRegistry`; for rutis, `llm`'s model info |
 | `wake` | bool | yes | yes (the stand-in's `steer`/`followup`) | yes | `session` wake |
 | `exec` | `"off"` / `"gate"` / `"free"` | yes | — | — | `pi.exec` |
+| `keys` | model key variables' names | yes (every pi plugin or none) | yes (every DSH plugin or none) | yes (every plugin of its package or none) | those variables left in its runtime (step 4) |
 
 A key an ecosystem does not take is refused with its place; it goes in
 `src/manifest/tests.rs` and `skill/yobuild/reference/manifest.md` (whose
@@ -2192,6 +2193,60 @@ as `env` is. Unit tests: the list against `PROVIDERS` and the manifest's
 **Decided in the review (2026-10-21):** blank now, without waiting for
 rutis's `env_remove`; the agent's `bash` left out; no key grant for pi
 until an extension that needs one is wanted.
+
+**Amended (2026-10-21, before the code PR): removed, not blanked; every
+credential yoagent lists; a `keys` grant.** Asked by the yoagent session's
+user; checked with a prototype.
+
+- *Removed.* Each runtime starts as `/usr/bin/env -u NAME … <rutis's own
+  command>`: `PluginHost` takes the launcher `Launcher::node` builds and
+  puts `env` and the `-u` list before its program and arguments (its
+  fields are public), so nothing of rutis's command is copied. `env`
+  execs the runtime: one process, the same pid and process group, so
+  shutdown, the terminal UI's group and `--measure`'s `ps` see what they
+  see today. `-u` removes only the names listed, taken from yobuild's own
+  environment, so what rutis sets on the process as it spawns it (its
+  channel) and what yobuild sets (`DSH_HOME`, a granted key) pass. The
+  same prefix goes before a stdio MCP server's command (yoagent's
+  transport takes a command and arguments). Not removed but blanked, as
+  before: `check`'s pi and DSH probes alone (yoagent-rutis builds their
+  launcher; `ProbeOptions::env` sets them empty), and every process on
+  Windows (no `env`). Prototype (uncommitted): the runtimes see the keys
+  unset in `run`, in `check` together and in rutis's probe alone, an MCP
+  server too but the key its `env` hands over; `run_terminal_pty.py` and
+  `terminal_pty.py` pass with keys set (the terminal UI through `env`,
+  pi's question answered from the keyboard).
+- *Every credential yoagent lists.* `KEY_VARIABLES` is yoagent 0.25.12's
+  `provider::api_key_variables()` as it is — AWS's `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` and Cloudflare's tokens
+  included — plus the manifest's `api_key_env`. AWS's keys open the
+  whole account (S3, IAM, machines, billing), and for a Bedrock user they
+  are the model's credentials: leaving them undid this step for exactly
+  that user. The unit test is equality with yoagent's list. An S3 or
+  Cloudflare MCP server is handed them on purpose through its `env`, and
+  `check` notes it.
+- *A `keys` grant.* `grants = { keys = ["AWS_ACCESS_KEY_ID", …] }`: those
+  variables are left in the plugin's runtime as yobuild has them. Names
+  only from the key list (any other is not withheld: refused, "`X` is not
+  a model key: nothing withholds it"), each once. A runtime's
+  environment is the whole runtime's, so the "one rule for both
+  ecosystems": the same on every pi plugin or none, on every DSH plugin
+  or none, and on every rutis plugin of one package (one runtime per
+  package) or none. `check` notes it on the entry, as a key handed over:
+  "it is given `X`, a model's key: its model calls are not metered". Named
+  `keys`, not `env`: a server's `env` sets values, this lets names
+  through. A pi plugin can now be handed a key, which the review had
+  left for later; the grant costs nothing until written.
+- *Not a sandbox, said plainly* (§6, the skill): a plugin runs as the
+  owner. It can read `~/.aws/credentials` and use `AWS_PROFILE` (not a
+  key: kept), reach a cloud machine's metadata endpoint, or read any file
+  the owner can. Removing the variables stops a library from picking a
+  key up by default, nothing more. And the list holds only what yoagent
+  knows: `GITHUB_TOKEN`, `NPM_TOKEN` and the like still pass. The
+  stronger step is an allowlist — a runtime started with `PATH`, `HOME`,
+  `TMPDIR`, the locale, `TERM`, the proxy settings and what is granted —
+  which the same `env -u` gives without a rutis change: its own design
+  later, the keep-list measured against the gallery.
 
 ### What it unlocks, and the migration
 
