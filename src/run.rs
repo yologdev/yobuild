@@ -866,6 +866,9 @@ async fn start(
     for service in LOCAL {
         builder = builder.local(service);
     }
+    for name in blanked(manifest) {
+        builder = builder.blank(name);
+    }
     let mut host = builder.start(root).await?;
     if !plan.rows.is_empty() {
         let rows = with_session_log(plan, dsh_home.as_ref())?;
@@ -953,11 +956,15 @@ fn prepare(
     }
     let installed = install::install(manifest, &layout.adapters, home, locked)?;
     let plan = plugins::plan(manifest, layout, &installed, cwd, &lookup)?;
+    let blank = blanked(manifest);
     notes.extend(plan.notes.iter().cloned());
     let servers = manifest
         .mcp
         .iter()
-        .map(|server| Ok((server.name.clone(), launch(server, &installed, &lookup)?)))
+        .map(|server| {
+            let launch = launch(server, &installed, &lookup, &blank)?;
+            Ok((server.name.clone(), launch))
+        })
         .collect::<Result<_, BoxError>>()?;
     Ok(Prepared {
         installed,
@@ -1620,10 +1627,13 @@ enum Launch {
     },
 }
 
+/// How to start `server`; a stdio server gets each of `blank` (the model
+/// key variables set here) empty, unless its own `env` sets it.
 fn launch(
     server: &Mcp,
     installed: &install::Installed,
     lookup: &dyn Fn(&str) -> Option<String>,
+    blank: &[String],
 ) -> Result<Launch, BoxError> {
     let failed =
         |e: &dyn std::fmt::Display| -> BoxError { format!("mcp {}: {e}", server.name).into() };
@@ -1657,9 +1667,13 @@ fn launch(
                     .map(|a| a.resolve_with(lookup))
                     .collect::<Result<_, _>>()
                     .map_err(|e| failed(&e))?,
-                env: env
+                env: blank
                     .iter()
-                    .map(|(k, v)| Ok((k.clone(), v.resolve_with(lookup)?)))
+                    .map(|k| Ok((k.clone(), String::new())))
+                    .chain(
+                        env.iter()
+                            .map(|(k, v)| Ok((k.clone(), v.resolve_with(lookup)?))),
+                    )
                     .collect::<Result<_, crate::manifest::Unset>>()
                     .map_err(|e| failed(&e))?,
             }
@@ -1673,6 +1687,65 @@ fn launch(
                 .map_err(|e| failed(&e))?,
         },
     })
+}
+
+/// The model key variables set in this process, which plugin runtimes, MCP
+/// servers and the adapters' helpers get blank (design §12, "Step 4": a
+/// plugin could otherwise call a model past the budget, unmetered).
+pub(crate) fn blanked(manifest: &Manifest) -> Vec<String> {
+    manifest
+        .key_variables()
+        .into_iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .collect()
+}
+
+/// The model key variables the manifest hands an entry on purpose, by its
+/// name: a reference in a plugin's `config`, or in an MCP server's `env`,
+/// `args`, URL or headers. `check` notes each (its model calls are not
+/// metered).
+pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
+    let keys = manifest.key_variables();
+    let given = |names: Vec<&str>| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for name in names {
+            if keys.iter().any(|k| k == name) && !out.iter().any(|o| o == name) {
+                out.push(name.to_owned());
+            }
+        }
+        out
+    };
+    let plugins = manifest.plugins.iter().map(|plugin| {
+        let seen = std::cell::RefCell::new(Vec::new());
+        // Filled with nothing: only the names asked for count.
+        let _ = plugin.config_with(|name| {
+            seen.borrow_mut().push(name.to_owned());
+            Some(String::new())
+        });
+        let seen = seen.into_inner();
+        (
+            plugin.name.clone(),
+            given(seen.iter().map(String::as_str).collect()),
+        )
+    });
+    let servers = manifest.mcp.iter().map(|server| {
+        let names: Vec<&str> = match &server.transport {
+            Transport::Stdio { args, env, .. } => args
+                .iter()
+                .chain(env.values())
+                .flat_map(|v| v.references())
+                .collect(),
+            Transport::Http { url, headers } => std::iter::once(url)
+                .chain(headers.values())
+                .flat_map(|v| v.references())
+                .collect(),
+        };
+        (server.name.clone(), given(names))
+    });
+    plugins
+        .chain(servers)
+        .filter(|(_, keys)| !keys.is_empty())
+        .collect()
 }
 
 /// An MCP server's tools, each `<server>__<tool>` (the server is called with

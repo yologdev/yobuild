@@ -432,6 +432,18 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             None => agent_notes.push(note.clone()),
         }
     }
+    // A model's key handed over on purpose reaches the entry (design §12,
+    // "Step 4"): what it calls with it is outside the budget.
+    for (name, keys) in super::keys_given(&manifest) {
+        let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
+        entry_notes.push((
+            name,
+            format!(
+                "it is given {}, a model's key: its model calls are not metered",
+                keys.join(", ")
+            ),
+        ));
+    }
     // The DSH host's session log goes to the DSH home: the user's own when
     // they set one.
     agent_notes.extend(super::dsh_home_note(
@@ -610,7 +622,11 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             source,
             checked_alone: true,
             problems: Vec::new(),
-            notes: Vec::new(),
+            notes: entry_notes
+                .iter()
+                .filter(|(name, _)| *name == server.name)
+                .map(|(_, note)| note.clone())
+                .collect(),
             tools: Vec::new(),
             handlers: None,
             guidance_chars: None,
@@ -862,6 +878,9 @@ async fn rutis_alone(
         let mut builder = PluginHost::builder().node(&runtime, dir);
         for service in super::SHARED {
             builder = builder.share(service);
+        }
+        for name in super::blanked(manifest) {
+            builder = builder.blank(name);
         }
         let mut host = builder.start(&root).await?;
         host.load([row]).await?;

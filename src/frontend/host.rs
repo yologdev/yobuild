@@ -226,6 +226,7 @@ pub struct PluginHostBuilder {
     local: Vec<String>,
     terminal: Option<String>,
     env: Vec<(String, OsString, OsString)>,
+    blank: Vec<OsString>,
 }
 
 impl PluginHostBuilder {
@@ -257,6 +258,15 @@ impl PluginHostBuilder {
         value: impl Into<OsString>,
     ) -> Self {
         self.env.push((runtime.into(), name.into(), value.into()));
+        self
+    }
+
+    /// Give every runtime's process the variable `name` empty, in place of
+    /// the value it would inherit (a model's key, design §12 "Step 4"):
+    /// rutis's launcher can add variables, not remove them. An
+    /// [`env`](Self::env) entry of the same name for a runtime wins there.
+    pub fn blank(mut self, name: impl Into<OsString>) -> Self {
+        self.blank.push(name.into());
         self
     }
 
@@ -303,14 +313,18 @@ impl PluginHostBuilder {
         let routes: Arc<Mutex<HashMap<String, String>>> = Arc::default();
         let mut resolvers = Vec::new();
         for (name, dir) in &self.runtimes {
+            let launcher = self.blank.iter().fold(
+                Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
+                |launcher, key| launcher.env(key, ""),
+            );
+            // After the blanks: a later entry of one name wins.
             let launcher = self
                 .env
                 .iter()
                 .filter(|(runtime, ..)| runtime == name)
-                .fold(
-                    Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
-                    |launcher, (_, key, value)| launcher.env(key, value),
-                );
+                .fold(launcher, |launcher, (_, key, value)| {
+                    launcher.env(key, value)
+                });
             let mut runtime =
                 LocalRuntime::launcher(name.clone(), launcher, dir.join("package.json"));
             if self.terminal.as_ref() == Some(name) {

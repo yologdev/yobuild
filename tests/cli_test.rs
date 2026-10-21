@@ -1318,3 +1318,128 @@ fn what_a_pi_extension_was_answered_for_want_of_a_grant_is_said() {
     assert!(!stderr.contains("[pi] fixed answer ("), "{stderr}");
     assert!(!stderr.contains(" INFO "), "{stderr}");
 }
+
+#[test]
+fn plugins_and_servers_get_the_model_keys_blank_unless_handed_one() {
+    // Design §12, "Step 4": every model key variable set here reaches a
+    // plugin runtime or an MCP server empty — the agent's own (a custom
+    // provider's `api_key_env`) and any other provider's — and the rest of
+    // the environment as it is. A key the manifest hands over on purpose
+    // gets there, and `check` notes it.
+    let rutis = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins/node_modules");
+    if !pi_installed() || !installed_dsh() || !rutis.join("@arcships/rutis-runtime").is_dir() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let seen = "JSON.stringify(['DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'ACME_KEY', 'UNRELATED']\
+                .map((n) => process.env[n] ?? 'unset'))";
+    // The runtimes' own working folder is not the agent's: an absolute path.
+    let writes = |name: &str| {
+        let out = dir.path().join(format!("{name}.seen"));
+        format!("writeFileSync({:?}, {seen})", out.display().to_string())
+    };
+    let imports = "import { writeFileSync } from 'node:fs'\n";
+    std::fs::write(
+        dir.path().join("pi.ts"),
+        format!(
+            "{imports}export default function () {{ {} }}\n",
+            writes("pi")
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("dsh.ts"),
+        format!(
+            "{imports}export const name = 'dsh'\nexport function apply() {{ {} }}\n",
+            writes("dsh")
+        ),
+    )
+    .unwrap();
+    let r = dir.path().join("r");
+    std::fs::create_dir(&r).unwrap();
+    std::os::unix::fs::symlink(&rutis, r.join("node_modules")).unwrap();
+    std::fs::write(r.join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    std::fs::write(
+        r.join("plug.ts"),
+        format!(
+            "{imports}import {{ definePlugin }} from '@arcships/rutis'\n\
+             export default definePlugin({{ apply() {{ {} }} }})\n",
+            writes("rutis")
+        ),
+    )
+    .unwrap();
+    let server = dir.path().join("server.sh");
+    std::fs::write(
+        &server,
+        "#!/usr/bin/env bash\n\
+         printf '[\"%s\",\"%s\",\"%s\",\"%s\"]' \"${DEEPSEEK_API_KEY-unset}\" \"${OPENAI_API_KEY-unset}\" \"${ACME_KEY-unset}\" \"${UNRELATED-unset}\" > mcp.seen\n\
+         exec bash \"$1\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&server, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        format!(
+            "[agent]\nname = \"a\"\nmodel = \"acme/m\"\nbase_url = \"https://acme.example/v1\"\napi_key_env = \"ACME_KEY\"\n\
+             [[plugin]]\npi = \"./pi.ts\"\n\
+             [[plugin]]\ndsh = \"./dsh.ts\"\n\
+             [[plugin]]\nname = \"plug\"\nrutis = \"./r/plug.ts\"\nruntime = \"node\"\nconfig = {{ apiKey = \"${{DEEPSEEK_API_KEY}}\" }}\n\
+             [[mcp]]\nname = \"server\"\nnpm = \"./server.sh\"\nargs = [\"{FIXTURE}/server.sh\"]\nenv = {{ OPENAI_API_KEY = \"${{OPENAI_API_KEY}}\" }}\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
+    let with_keys = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_yobuild"))
+            .env("YOBUILD_HOME", CACHE)
+            .env_remove("RUST_LOG")
+            .env("DEEPSEEK_API_KEY", "sk-d")
+            .env("OPENAI_API_KEY", "sk-o")
+            .env("ACME_KEY", "sk-a")
+            .env("UNRELATED", "kept")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+    };
+    let out = with_keys(&[
+        "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+    ]);
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    let seen = |name: &str| {
+        std::fs::read_to_string(dir.path().join(format!("{name}.seen")))
+            .unwrap_or_else(|e| panic!("{name}: {e}\n{stderr}"))
+    };
+    for name in ["pi", "dsh", "rutis"] {
+        assert_eq!(seen(name), r#"["","","","kept"]"#, "{name}");
+    }
+    // The server's own `env` hands it `OPENAI_API_KEY`.
+    assert_eq!(seen("mcp"), r#"["","sk-o","","kept"]"#);
+
+    // `check` notes the keys handed over, on the entries given them.
+    let out = with_keys(&["check", "agent.toml", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", text(&out.stderr)));
+    let notes = |name: &str| -> Vec<String> {
+        report["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("{name}: {report}"))["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n.as_str().unwrap().to_owned())
+            .collect()
+    };
+    let given =
+        |key: &str| format!("it is given `{key}`, a model's key: its model calls are not metered");
+    assert_eq!(notes("server"), [given("OPENAI_API_KEY")]);
+    assert_eq!(notes("plug"), [given("DEEPSEEK_API_KEY")]);
+    assert!(
+        notes("pi").is_empty() && notes("dsh").is_empty(),
+        "{report}"
+    );
+}

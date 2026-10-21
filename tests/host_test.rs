@@ -353,6 +353,53 @@ async fn env_reaches_only_its_runtime_and_an_unknown_one_is_an_error() {
     root.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn a_blanked_variable_reaches_every_runtime_empty_unless_its_env_sets_it() {
+    if !runtime_installed() {
+        return;
+    }
+    // Set by cargo for the tests: what a runtime would inherit.
+    const NAME: &str = "CARGO_MANIFEST_DIR";
+    assert!(std::env::var_os(NAME).is_some_and(|v| !v.is_empty()));
+    let root = Ctx::root().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    let writer = |name: &str| {
+        let file = dir.path().join(format!("{name}.mjs"));
+        let out = dir.path().join(format!("{name}.txt"));
+        std::fs::write(
+            &file,
+            format!(
+                "import {{ writeFileSync }} from 'node:fs'\n\
+                 export const name = '{name}'\n\
+                 export function apply() {{ writeFileSync({:?}, JSON.stringify(process.env.{NAME})) }}\n",
+                out.display().to_string()
+            ),
+        )
+        .unwrap();
+        (file, out)
+    };
+    let (a, a_out) = writer("a");
+    let (b, b_out) = writer("b");
+    let mut host = PluginHost::builder()
+        .node("one", plugins())
+        .node("two", plugins())
+        .blank(NAME)
+        .env("two", NAME, "given")
+        .start(&root)
+        .await
+        .unwrap();
+    host.load([
+        Row::new("a", a.display()).runtime("one"),
+        Row::new("b", b.display()).runtime("two"),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(written(&a_out).await, r#""""#);
+    assert_eq!(written(&b_out).await, r#""given""#);
+    root.shutdown().await.unwrap();
+}
+
 /// The text of `path` once a plugin wrote it.
 async fn written(path: &Path) -> String {
     tokio::time::timeout(WAIT, async {

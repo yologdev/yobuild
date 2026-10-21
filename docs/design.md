@@ -1044,7 +1044,11 @@ Inherited from yoagent and the handoff work, and kept on by default:
 - **Message size**: calls to plugins stay under rutis's 16 MiB limit.
 
 Not covered, and said so: plugins run with the process's rights; the
-environment they inherit is visible to them; the gate judges command
+environment they inherit is visible to them — except the model key
+variables, which plugin runtimes, MCP servers and the adapters' helpers get
+empty (design §12, "Step 4"; the agent's own `bash` keeps them), against
+honest code calling a model unmetered, not hostile code, which can read a
+key where the owner keeps it; the gate judges command
 lines and file tools, not what code does once it runs (a build or a test
 runs the project's code, including what the agent edited); and it guards
 the owner's files against being deleted or replaced (not against edits),
@@ -1804,8 +1808,8 @@ the probe" for those asked only in a tool call. A `hints` row and its
 
 - **Honour-system** — `trust`, network, installs, and also what goes around
   `exec` and `llm`: a plugin already has Node's whole power; it can spawn
-  through `child_process`, or call a provider with the keys every runtime
-  inherits (§6). A grant changes how honest code behaves (pi-lens installs
+  through `child_process`, or read a model key where the owner keeps it
+  (the runtimes get the key variables empty: step 4, below; §6). A grant changes how honest code behaves (pi-lens installs
   language servers into `~/.pi-lens` and runs the project's code); nothing
   enforces it. Said by `check` and in §6.
 - **Mediated** — calls through the host: `pi.exec` judged by the gate,
@@ -2263,6 +2267,12 @@ started with `PATH`, `HOME`, `TMPDIR`, the locale, `TERM`, the proxy
 settings and what is granted — which the same `env` gives (`env -i`)
 without a rutis change: its own design later, the keep-list measured
 against the gallery.
+
+**Built** (`manifest::KEY_VARIABLES`, `Manifest::key_variables`,
+`PluginHostBuilder::blank`, `run::blanked`, `run::keys_given`): in `run`,
+in `check`'s rutis probe and its run together, for stdio MCP servers and
+the helpers. The pi and DSH probes `check` runs alone wait for
+yoagent-rutis's `env` argument.
 
 ### What it unlocks, and the migration
 

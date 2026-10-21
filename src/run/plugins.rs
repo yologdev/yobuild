@@ -173,11 +173,17 @@ pub(crate) fn in_set(sets: &Installed, set: Set, package: &Package) -> Result<Pa
 const HELPER_TIME: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Runs one of the adapters' helper scripts with Node; its JSON output, an
-/// object (its stderr goes to the debug log).
-fn node_json(script: &Path, args: &[&Path]) -> Result<Helper, BoxError> {
+/// object (its stderr goes to the debug log). `keys` (the model key
+/// variables) are removed from its environment: `inspect-package.mjs`
+/// imports a plugin's code.
+fn node_json(script: &Path, args: &[&Path], keys: &[String]) -> Result<Helper, BoxError> {
     use std::io::Read;
     let failed = |e: &dyn std::fmt::Display| format!("node {}: {e}", script.display());
-    let mut child = std::process::Command::new("node")
+    let mut command = std::process::Command::new("node");
+    for key in keys {
+        command.env_remove(key);
+    }
+    let mut child = command
         .arg(script)
         .args(args)
         .stdout(std::process::Stdio::piped())
@@ -274,6 +280,7 @@ pub(crate) fn plan(
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Plan, BoxError> {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let keys = manifest.key_variables();
     let mut plan = Plan {
         pi_handler: format!("pi-extensions-{suffix}"),
         dsh_handler: format!("dsh-tools-{suffix}"),
@@ -297,7 +304,7 @@ pub(crate) fn plan(
                 if config.is_some() {
                     return Err(failed("a pi extension takes no config".into()));
                 }
-                let found = pi_extensions(layout, sets, plugin, source).map_err(failed)?;
+                let found = pi_extensions(layout, sets, plugin, source, &keys).map_err(failed)?;
                 // Each file as planned (how the adapter names it back) and
                 // canonical (how a tool's source is compared); one file is
                 // one plugin's: two would have the adapter and yobuild apply
@@ -338,7 +345,8 @@ pub(crate) fn plan(
             }
             PluginKind::Dsh(source) => {
                 let (rows, peers) =
-                    dsh_rows_of(layout, &plan.dsh_dir, plugin, source, config).map_err(failed)?;
+                    dsh_rows_of(layout, &plan.dsh_dir, plugin, source, config, &keys)
+                        .map_err(failed)?;
                 plan.dsh_modules
                     .extend(rows.iter().map(|row| row.name().to_owned()));
                 plan.dsh_peers.extend(peers);
@@ -502,6 +510,7 @@ fn pi_extensions(
     sets: &Installed,
     plugin: &Plugin,
     source: &Source,
+    keys: &[String],
 ) -> Result<PiFound, BoxError> {
     let dir = match source {
         Source::Package(p) => in_set(sets, Set::Pi, p)?,
@@ -517,7 +526,11 @@ fn pi_extensions(
         });
     }
     // What pi's package manager finds in it.
-    let found = node_json(&layout.adapters.join("pi/resolve-package.mjs"), &[&dir])?;
+    let found = node_json(
+        &layout.adapters.join("pi/resolve-package.mjs"),
+        &[&dir],
+        keys,
+    )?;
     let extensions = found.list("extensions")?.clone();
     if extensions.is_empty() {
         return Err(format!("no pi extension in {}", dir.display()).into());
@@ -580,6 +593,7 @@ fn dsh_rows_of(
     plugin: &Plugin,
     source: &Source,
     config: Option<serde_json::Map<String, Json>>,
+    keys: &[String],
 ) -> Result<(Vec<Row>, Vec<String>), BoxError> {
     let id = row_id(&plugin.name);
     let p = match source {
@@ -602,6 +616,7 @@ fn dsh_rows_of(
     let inspected = node_json(
         &layout.adapters.join("dsh/inspect-package.mjs"),
         &[base, Path::new(p.name())],
+        keys,
     )?;
     rows_of_bundle(&id, &inspected, config, &modules, &optional_peers(&dir)?)
 }

@@ -1287,3 +1287,21 @@ fn a_dsh_plugin_takes_workspace_and_wake_the_same_on_every_dsh_plugin() {
     .unwrap();
     assert!(m.plugins[1].grants.is_empty());
 }
+
+#[test]
+fn the_key_variables_hold_every_providers_and_the_agents_own() {
+    for (provider, names) in PROVIDERS {
+        for name in names {
+            assert!(KEY_VARIABLES.contains(name), "{provider}: {name}");
+        }
+    }
+    let unique: std::collections::HashSet<_> = KEY_VARIABLES.iter().collect();
+    assert_eq!(unique.len(), KEY_VARIABLES.len());
+    let m = read("[agent]\nname = \"a\"\nmodel = \"acme/m1\"\nbase_url = \"https://acme.example/v1\"\napi_key_env = \"ACME_KEY\"\n").unwrap();
+    let names = m.key_variables();
+    assert_eq!(names.len(), KEY_VARIABLES.len() + 1);
+    assert_eq!(names.last().map(String::as_str), Some("ACME_KEY"));
+    // A known provider's variable is not repeated.
+    let m = read("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n").unwrap();
+    assert_eq!(m.key_variables().len(), KEY_VARIABLES.len());
+}

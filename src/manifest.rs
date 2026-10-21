@@ -93,6 +93,20 @@ pub const PROVIDERS: [(&str, &[&str]); 11] = [
     ("meta", &["META_API_KEY", "MODEL_API_KEY"]),
 ];
 
+/// Every variable yoagent reads a model's key from, for any provider it
+/// knows (yoagent 0.25.11's `resolve_api_key`): [`PROVIDERS`]' and
+/// those of the providers yobuild does not offer, plus its fallbacks
+/// `YOAGENT_API_KEY` and `API_KEY`. Plugins and MCP servers get them blank
+/// (design §12, "Step 4"). AWS's own credentials are not here: they are a
+/// cloud account's, not only Bedrock's.
+pub const KEY_VARIABLES: [&str; 20] = [
+    "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+    "GROQ_API_KEY", "MISTRAL_API_KEY", "XAI_API_KEY", "DASHSCOPE_API_KEY", "ZAI_API_KEY",
+    "MINIMAX_API_KEY", "META_API_KEY", "MODEL_API_KEY", "OPENROUTER_API_KEY", "CEREBRAS_API_KEY",
+    "OPENCODE_API_KEY", "AZURE_OPENAI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "YOAGENT_API_KEY",
+    "API_KEY",
+];
+
 /// Local servers yoagent has a constructor for, which take no key: `ollama`
 /// (`base_url` defaults to [`OLLAMA`]) and `local` (any OpenAI-compatible
 /// server on this machine: LM Studio, llama.cpp, …; `base_url` required).
@@ -745,6 +759,19 @@ impl Manifest {
         self.plugins
             .iter()
             .any(|p| matches!(p.kind, PluginKind::Pi(_)) && p.grants.model.is_some())
+    }
+
+    /// The variables that may hold a model's key: [`KEY_VARIABLES`] and the
+    /// agent's own (`api_key_env`), each once. Plugins and MCP servers get
+    /// them blank unless the manifest hands one over.
+    pub fn key_variables(&self) -> Vec<String> {
+        let mut names: Vec<String> = KEY_VARIABLES.iter().map(|n| n.to_string()).collect();
+        for name in self.agent.model.key_env() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
     }
 
     /// What every DSH plugin is granted — the same on each, which `parse`
