@@ -223,7 +223,20 @@ pub fn rows_from_json(listed: Json, runtime: &str) -> Result<Vec<Row>, BoxError>
 fn without(mut launcher: Launcher, names: &[&OsString]) -> Result<Launcher, BoxError> {
     let program = std::mem::take(&mut launcher.program);
     let args = std::mem::take(&mut launcher.args);
-    let (program, args) = env_without(names, program, args)?;
+    // The child's `PATH`, when the launch sets one.
+    let path = launcher
+        .env
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "PATH")
+        .map(|(_, value)| value.clone());
+    let (program, args) = env_without(
+        names,
+        program,
+        args,
+        launcher.cwd.as_deref(),
+        path.as_deref(),
+    )?;
     launcher.program = program;
     launcher.args = args;
     Ok(launcher)
@@ -253,16 +266,25 @@ const SH: &str = "/bin/sh";
 /// Nothing withheld: as it is; no `/usr/bin/env` (or `/bin/sh` when
 /// needed): an error, not the variables left in. (On macOS `env` is
 /// protected, so `DYLD_*` variables do not reach the program either — only
-/// when something is withheld.)
+/// when something is withheld: `run::dyld_note`.)
+///
+/// Spawning `env` succeeds whatever `program` is, so a program that is not
+/// there or cannot run would only show as `env` exiting 126 or 127: it is
+/// looked for first ([`startable`]), as the child will — a path from `cwd`
+/// (the child's folder; `None`: this process's), a bare name on `path`
+/// (the child's `PATH` when the launch sets one; `None`: this process's).
 #[cfg(unix)]
 pub(crate) fn env_without(
     names: &[impl AsRef<std::ffi::OsStr>],
     program: OsString,
     args: Vec<OsString>,
+    cwd: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
 ) -> Result<(OsString, Vec<OsString>), BoxError> {
     if names.is_empty() {
         return Ok((program, args));
     }
+    startable(&program, cwd, path)?;
     let shell = program.to_string_lossy().contains('=');
     let needed = [Some(ENV), shell.then_some(SH)];
     if let Some(missing) = needed
@@ -272,7 +294,7 @@ pub(crate) fn env_without(
     {
         let names: Vec<_> = names.iter().map(|n| n.as_ref().to_string_lossy()).collect();
         return Err(format!(
-            "cannot take {} out of {}'s environment: {missing} is not there (unset them before starting yobuild, or set them only where they are needed)",
+            "cannot take {} out of {}'s environment: {missing} is not there, and yobuild needs it to start plugin runtimes and stdio MCP servers while a credential yoagent reads is set",
             names.join(", "),
             Path::new(&program).display()
         )
@@ -292,6 +314,57 @@ pub(crate) fn env_without(
     wrapped.push(program);
     wrapped.extend(args);
     Ok((ENV.into(), wrapped))
+}
+
+/// `program` names a file the child can execute, found as `execvp` finds
+/// it: a name holding `/` from `cwd`, else each folder of `path` (unset:
+/// `/bin:/usr/bin`, `execvp`'s default; an empty entry is the child's
+/// folder). The error says which program and why, in the words of a spawn
+/// that fails.
+#[cfg(unix)]
+fn startable(
+    program: &std::ffi::OsStr,
+    cwd: Option<&Path>,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<(), BoxError> {
+    use std::os::unix::fs::PermissionsExt;
+    let from = |p: &Path| match cwd {
+        Some(cwd) if p.is_relative() => cwd.join(p),
+        _ => p.to_path_buf(),
+    };
+    // Some(true): there and executable; Some(false): there, not
+    // executable; None: not there (or not a file).
+    let state = |p: &Path| {
+        std::fs::metadata(p)
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+    };
+    let shown = Path::new(program).display();
+    if program.as_encoded_bytes().contains(&b'/') {
+        return match state(&from(Path::new(program))) {
+            Some(true) => Ok(()),
+            Some(false) => Err(format!("cannot start {shown}: it is not executable").into()),
+            None => Err(format!("cannot start {shown}: no such file").into()),
+        };
+    }
+    let search = path
+        .map(OsString::from)
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_else(|| "/bin:/usr/bin".into());
+    let mut found = false;
+    for dir in std::env::split_paths(&search) {
+        match state(&from(&dir.join(program))) {
+            Some(true) => return Ok(()),
+            Some(false) => found = true,
+            None => {}
+        }
+    }
+    Err(match found {
+        true => format!("cannot start {shown}: it is on PATH but not executable"),
+        false => format!("cannot start {shown}: it is not on PATH"),
+    }
+    .into())
 }
 
 /// The type [`PluginHostBuilder::local`] names its services for: never

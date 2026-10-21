@@ -377,6 +377,23 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
         matches!(&wrong, Err(e) if e.to_string().contains("`iu`")),
         "a typo must not pass"
     );
+    // Through `env`, a `node` the runtime cannot find would only show as
+    // `env` exiting 127: it is looked for first, on the runtime's `PATH`.
+    #[cfg(unix)]
+    {
+        let empty = tempfile::tempdir().unwrap();
+        let missing = PluginHost::builder()
+            .node("ui", plugins())
+            .withhold(NAME)
+            .env("ui", "PATH", empty.path())
+            .start(&root)
+            .await;
+        assert!(
+            matches!(&missing, Err(e) if e.to_string() == "cannot start node: it is not on PATH"),
+            "{:?}",
+            missing.err().map(|e| e.to_string())
+        );
+    }
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();

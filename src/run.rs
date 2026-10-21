@@ -182,8 +182,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tracing::info!("{note}");
         session.notice(NoticeLevel::Warning, note.clone());
     }
-    let notes = withheld_note(&manifest, &withheld(&manifest))
+    let withheld = withheld(&manifest);
+    let dyld = dyld_note(&manifest, &withheld, std::env::vars_os().map(|(k, _)| k));
+    let notes = withheld_note(&manifest, &withheld)
         .into_iter()
+        .chain(dyld)
         .chain(dsh_home_note(
             &checked.plan,
             std::env::var_os("YOAGENT_DSH_HOME"),
@@ -1354,8 +1357,87 @@ pub(crate) fn withheld_note(manifest: &Manifest, withheld: &[String]) -> Option<
         .map(|k| format!("`{k}`"))
         .collect();
     (!taken.is_empty()).then(|| format!(
-        "plugins and stdio MCP servers have the credentials yoagent reads set here taken out of their environment ({}): one that needs one gets it only from its entry (a `keys` grant, or a `\"${{NAME}}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered",
+        "plugins and stdio MCP servers have the credentials yoagent reads set here {TAKEN} ({}): one that needs one gets it only from its entry (a `keys` grant, or a `\"${{NAME}}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered",
         taken.join(", ")
+    ))
+}
+
+/// What each plugin and stdio MCP server loses of `withheld`, by its name,
+/// when they do not all lose the same (a `keys` grant or a server's `env`
+/// keeps some for one): `check` notes each entry's then, since the one
+/// combined note ([`withheld_note`]) cannot say who lost what. Alike (or
+/// none started): nothing.
+pub(crate) fn withheld_from(
+    manifest: &Manifest,
+    withheld: &[String],
+) -> Vec<(String, Vec<String>)> {
+    let lost = |kept: &dyn Fn(&String) -> bool| -> Vec<String> {
+        withheld
+            .iter()
+            .filter(|name| !kept(name))
+            .cloned()
+            .collect()
+    };
+    let plugins = manifest
+        .plugins
+        .iter()
+        .map(|p| (p.name.clone(), lost(&|name| p.grants.keys.contains(name))));
+    let servers = manifest.mcp.iter().filter_map(|s| match &s.transport {
+        Transport::Stdio { env, .. } => {
+            Some((s.name.clone(), lost(&|name| env.contains_key(name))))
+        }
+        _ => None,
+    });
+    let entries: Vec<(String, Vec<String>)> = plugins.chain(servers).collect();
+    let alike = entries.windows(2).all(|pair| pair[0].1 == pair[1].1);
+    match alike {
+        true => Vec::new(),
+        false => entries
+            .into_iter()
+            .filter(|(_, lost)| !lost.is_empty())
+            .collect(),
+    }
+}
+
+/// What happens to a withheld credential: on unix it is taken out
+/// (`/usr/bin/env -u`); elsewhere, with no `env` to exec through, it is set
+/// empty — which a plugin may read differently from unset (an SDK sends the
+/// empty key), so the notes say which.
+#[cfg(unix)]
+const TAKEN: &str = "taken out of their environment";
+#[cfg(not(unix))]
+const TAKEN: &str =
+    "set empty in their environment (not taken out: there is no `env` here to start them through)";
+
+/// The `DYLD_*` variables `vars` holds that plugin runtimes and stdio MCP
+/// servers do not get, said when there are any: on macOS `/usr/bin/env` is
+/// protected (SIP), and the loader drops them as it runs it — so only
+/// while a credential is withheld (`withheld`) and something starts through
+/// it (a plugin or a stdio server). A native module that needs one works
+/// or breaks by whether a key is set; this says why.
+pub(crate) fn dyld_note(
+    manifest: &Manifest,
+    withheld: &[String],
+    vars: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Option<String> {
+    let started = !manifest.plugins.is_empty()
+        || manifest
+            .mcp
+            .iter()
+            .any(|s| matches!(s.transport, Transport::Stdio { .. }));
+    if !cfg!(target_os = "macos") || withheld.is_empty() || !started {
+        return None;
+    }
+    let mut dropped: Vec<String> = vars
+        .into_iter()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("DYLD_"))
+        .map(|name| format!("`{name}`"))
+        .collect();
+    dropped.sort();
+    (!dropped.is_empty()).then(|| format!(
+        "plugins and stdio MCP servers do not get {}, set here: they start through /usr/bin/env, which macOS protects, dropping `DYLD_*` variables (only while a credential yoagent reads is set)",
+        dropped.join(", ")
     ))
 }
 
@@ -1751,8 +1833,13 @@ pub(crate) fn withheld(manifest: &Manifest) -> Vec<String> {
 /// server's `env` (or an `env` name whose value is a reference:
 /// `OPENAI_API_KEY = "${MINE}"` hands a key over under that name), `args`,
 /// URL or headers. `check` notes each (what
-/// it spends with it is not metered).
-pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
+/// it spends with it is not metered). A `keys` grant counts only for a
+/// name `set` here (a reference to an unset name is refused anyway):
+/// [`keys_unset`] says the others.
+pub(crate) fn keys_given(
+    manifest: &Manifest,
+    set: impl Fn(&str) -> bool,
+) -> Vec<(String, Vec<String>)> {
     let keys = manifest.key_variables();
     let given = |names: Vec<&str>| -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
@@ -1765,7 +1852,8 @@ pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
     };
     let plugins = manifest.plugins.iter().map(|plugin| {
         let names = plugin.config_references();
-        let names = plugin.grants.keys.iter().chain(&names);
+        let granted = plugin.grants.keys.iter().filter(|k| set(k));
+        let names = granted.chain(&names);
         (
             plugin.name.clone(),
             given(names.map(String::as_str).collect()),
@@ -1794,6 +1882,24 @@ pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
+/// The names each plugin's `keys` grant hands over that are not `set`
+/// here, by its name: it gets none of them, which `check` says (else its
+/// note would read as if it got them).
+pub(crate) fn keys_unset(
+    manifest: &Manifest,
+    set: impl Fn(&str) -> bool,
+) -> Vec<(String, Vec<String>)> {
+    manifest
+        .plugins
+        .iter()
+        .map(|plugin| {
+            let unset = plugin.grants.keys.iter().filter(|k| !set(k)).cloned();
+            (plugin.name.clone(), unset.collect::<Vec<_>>())
+        })
+        .filter(|(_, keys)| !keys.is_empty())
+        .collect()
+}
+
 /// A stdio server's program, arguments and added variables (those its
 /// `env` sets; off unix, the withheld ones set empty too).
 type StdioCommand = (String, Vec<String>, HashMap<String, String>);
@@ -1813,10 +1919,14 @@ fn without(
         .iter()
         .filter(|name| !env.contains_key(*name))
         .collect();
+    // yoagent's transport starts it in this process's folder, with the
+    // `PATH` its `env` sets, if any.
     let (program, argv) = crate::frontend::host::env_without(
         &names,
         command.as_os_str().to_owned(),
         args.iter().map(Into::into).collect(),
+        None,
+        env.get("PATH").map(std::ffi::OsStr::new),
     )?;
     // Every word was a `String` (the command a path the manifest or the
     // installed package names), so none is lost here.
@@ -2450,6 +2560,13 @@ mod tests {
             dir.path(),
         )
         .unwrap();
+        std::fs::write(dir.path().join("s.sh"), "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(dir.path().join("s.sh"), mode).unwrap();
+        }
         let withheld = ["OPENAI_API_KEY".to_owned(), "GROQ_API_KEY".to_owned()];
         let launch = super::launch(
             &m.mcp[0],
@@ -2481,6 +2598,83 @@ mod tests {
         // Nothing withheld: the command as it is.
         let (program, argv, _) = super::without(Path::new("/s"), &[], &env, &[]).unwrap();
         assert_eq!((program.as_str(), argv.len()), ("/s", 0));
+    }
+
+    #[test]
+    fn the_dyld_note_names_the_dyld_variables_only_on_macos_while_something_is_withheld() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = |entries: &str| {
+            Manifest::parse(
+                &format!("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n{entries}"),
+                &dir.path().join("a.toml"),
+                dir.path(),
+            )
+            .unwrap()
+        };
+        let server = m("[[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n");
+        let vars = || ["PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"].map(Into::into);
+        let key = ["DEEPSEEK_API_KEY".to_owned()];
+        let note = super::dyld_note(&server, &key, vars());
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                note.unwrap(),
+                "plugins and stdio MCP servers do not get `DYLD_FALLBACK_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, set here: they start through /usr/bin/env, which macOS protects, dropping `DYLD_*` variables (only while a credential yoagent reads is set)"
+            );
+        } else {
+            assert_eq!(note, None);
+        }
+        // Nothing withheld, nothing started through `env`, or no `DYLD_*`.
+        assert_eq!(super::dyld_note(&server, &[], vars()), None);
+        assert_eq!(super::dyld_note(&m(""), &key, vars()), None);
+        let http = m("[[mcp]]\nname = \"h\"\nurl = \"https://mcp.example/\"\n");
+        assert_eq!(super::dyld_note(&http, &key, vars()), None);
+        assert_eq!(super::dyld_note(&server, &key, ["PATH".into()]), None);
+    }
+
+    #[test]
+    fn each_entry_says_what_it_loses_only_when_they_lose_different_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = |entries: &str, withheld: &[&str]| {
+            let m = Manifest::parse(
+                &format!("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n{entries}"),
+                &dir.path().join("a.toml"),
+                dir.path(),
+            )
+            .unwrap();
+            let withheld: Vec<String> = withheld.iter().map(|k| k.to_string()).collect();
+            super::withheld_from(&m, &withheld)
+        };
+        let both = ["DEEPSEEK_API_KEY", "OPENAI_API_KEY"];
+        let plain = "[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\n\
+                     [[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n\
+                     [[mcp]]\nname = \"h\"\nurl = \"https://mcp.example/\"\n";
+        // All alike: the combined note says it.
+        assert!(from(plain, &both).is_empty());
+        let names = |n: &[&str]| n.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        // A server's `env` keeps one: each says its own (the HTTP server
+        // starts nothing).
+        assert_eq!(
+            from(
+                "[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\n\
+                 [[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n\
+                 env = { OPENAI_API_KEY = \"${MINE}\" }\n\
+                 [[mcp]]\nname = \"h\"\nurl = \"https://mcp.example/\"\n",
+                &both
+            ),
+            [
+                ("p".to_owned(), names(&both)),
+                ("s".to_owned(), names(&["DEEPSEEK_API_KEY"])),
+            ]
+        );
+        // A plugin keeping all it would lose is left out.
+        assert_eq!(
+            from(
+                "[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\ngrants = { keys = [\"OPENAI_API_KEY\"] }\n\
+                 [[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n",
+                &["OPENAI_API_KEY"]
+            ),
+            [("s".to_owned(), names(&["OPENAI_API_KEY"]))]
+        );
     }
 
     #[test]
@@ -2556,6 +2750,56 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout), "ran x=1 [home] []\n");
     }
 
+    /// Through `env`, a program that is not there or cannot run would only
+    /// show as `env` exiting 127 or 126: it is looked for first, as the
+    /// child will (a bare name on the `PATH` the server's `env` sets).
+    #[cfg(unix)]
+    #[test]
+    fn a_server_that_cannot_start_is_said_before_env_runs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let withheld = ["YOBUILD_T".to_owned()];
+        let start = |command: &Path, env: &[(&str, &Path)]| {
+            let env = env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.display().to_string()))
+                .collect();
+            super::without(command, &[], &env, &withheld).map(|(program, argv, _)| (program, argv))
+        };
+        let missing = dir.path().join("missing.sh");
+        assert_eq!(
+            start(&missing, &[]).unwrap_err().to_string(),
+            format!("cannot start {}: no such file", missing.display())
+        );
+        let script = dir.path().join("s.sh");
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            start(&script, &[]).unwrap_err().to_string(),
+            format!("cannot start {}: it is not executable", script.display())
+        );
+        // A folder is no program.
+        assert!(start(dir.path(), &[]).is_err());
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(start(&script, &[]).unwrap().0, "/usr/bin/env");
+        // A bare name: on the `PATH` the server's `env` sets, not this
+        // process's.
+        let name = Path::new("s.sh");
+        assert_eq!(
+            start(name, &[]).unwrap_err().to_string(),
+            "cannot start s.sh: it is not on PATH"
+        );
+        assert!(start(name, &[("PATH", dir.path())]).is_ok());
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            start(name, &[("PATH", dir.path())])
+                .unwrap_err()
+                .to_string(),
+            "cannot start s.sh: it is on PATH but not executable"
+        );
+        // Nothing withheld: not looked at (the spawn says it, as before).
+        assert!(super::without(&missing, &[], &HashMap::new(), &[]).is_ok());
+    }
+
     #[test]
     fn the_keys_handed_over_are_the_key_variables_an_entry_refers_to_or_is_filled_under() {
         let dir = tempfile::tempdir().unwrap();
@@ -2595,7 +2839,7 @@ headers = { Authorization = "Bearer ${ANTHROPIC_API_KEY}" }
         .unwrap();
         let given = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
         assert_eq!(
-            super::keys_given(&m),
+            super::keys_given(&m, |_| true),
             [
                 // Nested, each once; `HOME` is no key; the custom
                 // provider's own variable is one.
@@ -2611,5 +2855,17 @@ headers = { Authorization = "Bearer ${ANTHROPIC_API_KEY}" }
                 ("web".to_owned(), given(&["API_KEY", "ANTHROPIC_API_KEY"])),
             ]
         );
+        // A `keys` grant of a name not set here hands nothing over: said
+        // as such, not as given.
+        let set = |name: &str| name != "OPENAI_API_KEY";
+        assert_eq!(
+            super::keys_given(&m, set)[1],
+            ("granted".to_owned(), given(&["ACME_KEY"]))
+        );
+        assert_eq!(
+            super::keys_unset(&m, set),
+            [("granted".to_owned(), given(&["OPENAI_API_KEY"]))]
+        );
+        assert!(super::keys_unset(&m, |_| true).is_empty());
     }
 }

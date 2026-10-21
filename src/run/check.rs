@@ -434,7 +434,18 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     }
     // A credential handed over on purpose reaches the entry (design §12,
     // "Step 4"): what it spends with it is outside the budget.
-    for (name, keys) in super::keys_given(&manifest) {
+    let set = |name: &str| std::env::var_os(name).is_some();
+    for (name, keys) in super::keys_unset(&manifest, set) {
+        let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
+        entry_notes.push((
+            name,
+            format!(
+                "its `keys` grant names {}, not set here: it gets none of them",
+                keys.join(", ")
+            ),
+        ));
+    }
+    for (name, keys) in super::keys_given(&manifest, set) {
         let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
         entry_notes.push((
             name,
@@ -452,6 +463,18 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         .plugins
         .iter()
         .any(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_)));
+    for (name, lost) in super::withheld_from(&manifest, &withheld) {
+        let lost: Vec<String> = lost.iter().map(|k| format!("`{k}`")).collect();
+        entry_notes.push((
+            name,
+            format!("it has {} taken out of its environment", lost.join(", ")),
+        ));
+    }
+    agent_notes.extend(super::dyld_note(
+        &manifest,
+        &withheld,
+        std::env::vars_os().map(|(k, _)| k),
+    ));
     agent_notes.extend(
         super::withheld_note(&manifest, &withheld).map(|note| match probed {
             true => {

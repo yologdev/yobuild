@@ -115,3 +115,27 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pty-coding" && cd "$RUNNER_TEMP/pty-coding"
           python3 "$GITHUB_WORKSPACE/tests/terminal_pty.py" "$GITHUB_WORKSPACE/target/debug/yobuild" \
             run "$GITHUB_WORKSPACE/examples/coding.toml" --scripted "$GITHUB_WORKSPACE/examples/scripts/coding.json" --locked
+
+  # Credentials taken out of plugin runtimes and stdio servers go through
+  # `/usr/bin/env -u` (design §12 "Step 4"): on macOS that is BSD's `env`,
+  # protected by SIP (`DYLD_*` dropped). The unit tests (the `=` path, the
+  # program looked for first, the `DYLD_*` note) and the runtimes' test.
+  macos:
+    name: Credentials on macOS
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/plugins/package-lock.json
+      - name: Install the plugins' packages
+        run: npm ci --prefix frontend/plugins
+      - name: Unit tests
+        run: cargo test --locked --lib
+      - name: A withheld variable gone from every runtime
+        run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked --test host_test a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set

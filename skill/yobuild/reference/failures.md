@@ -118,6 +118,8 @@ what changed); `[builtins] ask_owner is off` (the error a plugin's own
 | `the DSH host did not start: …` <!-- hint: dsh-host --> | the DSH host (loaded for DSH plugins' `grants`) waits for what it names, or provides no host (its log says why): reinstall the DSH runtime's folder the error names (a `dsh` set's: delete it; `adapters/dsh`: `npm ci` there) and run again; else drop the DSH plugins' `grants` |
 | `… (waiting): nothing provides X` <!-- hint: nothing-provides --> | add the plugin that provides X, or remove the inject |
 | `a call judge (before_tool) from the policy plugin's row plugin:X (does it inject \`yoagent\`?)` <!-- hint: no-judge --> | the policy plugin must inject `yoagent` and register a handler with `before_tool`; or take `policy = true` off |
+| `cannot start /path/to/server: no such file` (or `it is not executable`, `it is not on PATH`) <!-- hint: cannot-start --> | the program a stdio MCP server or a plugin runtime (Node) runs: fix the server's path, install its package again, or install Node |
+| `cannot take X out of …'s environment: /usr/bin/env is not there, …` <!-- hint: no-env --> | install `env` at `/usr/bin/env` (and `/bin/sh`): yobuild starts plugin runtimes and stdio servers through it while a credential yoagent reads is set |
 | `mcp X: the server lists no tools` <!-- hint: mcp-no-tools --> | the server's arguments, or its version |
 | `mcp X: its \`allow\` names "x", which it does not offer (it offers: …)` <!-- hint: mcp-allow --> | use the server's own tool names in its `allow` |
 | `cannot make the scratch folder …` | the temp folder is not writable: fix `TMPDIR`, or `scratch = false` |

@@ -1440,8 +1440,19 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     };
     manifest("", "", "");
     std::fs::write(dir.path().join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
+    // On macOS cargo sets `DYLD_*` variables for the tests: removed, and
+    // one of ours set, which `run` and `check` name (`env` drops it).
+    let dyld: Vec<_> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| name.to_string_lossy().starts_with("DYLD_"))
+        .collect();
     let with_keys = |args: &[&str]| {
-        bin()
+        let mut command = bin();
+        for name in &dyld {
+            command.env_remove(name);
+        }
+        command
+            .env("DYLD_YOBUILD_TEST", "1")
             .env_remove("RUST_LOG")
             .env("DEEPSEEK_API_KEY", "sk-d")
             .env("OPENAI_API_KEY", "sk-o")
@@ -1481,6 +1492,12 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         stderr.contains(&format!("  Info: {withheld}\n")),
         "{stderr}"
     );
+    let dyld_note = "plugins and stdio MCP servers do not get `DYLD_YOBUILD_TEST`, set here: they start through /usr/bin/env, which macOS protects, dropping `DYLD_*` variables (only while a credential yoagent reads is set)";
+    assert_eq!(
+        stderr.contains(&format!("  Info: {dyld_note}\n")),
+        cfg!(target_os = "macos"),
+        "{stderr}"
+    );
 
     // `check` runs the plugins as `run` does, alone and together, and notes the
     // keys handed over on the entries given them.
@@ -1515,12 +1532,27 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     let given = |key: &str| {
         format!("it is given `{key}`, a credential yoagent reads: what it spends with it is not metered")
     };
-    assert_eq!(notes(&report, "server"), [given("OPENAI_API_KEY")]);
-    assert_eq!(notes(&report, "plug"), [given("DEEPSEEK_API_KEY")]);
-    assert!(
-        notes(&report, "pi").is_empty() && notes(&report, "dsh").is_empty(),
-        "{report}"
+    // The server keeps one the others lose: each entry says what it lost.
+    let taken = |keys: &[&str]| {
+        let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
+        format!("it has {} taken out of its environment", keys.join(", "))
+    };
+    let all = taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY"]);
+    assert_eq!(
+        notes(&report, "server"),
+        [
+            given("OPENAI_API_KEY"),
+            taken(&["DEEPSEEK_API_KEY", "ACME_KEY"])
+        ]
     );
+    // Its config refers to the key: handed over in its config, not left in
+    // its runtime.
+    assert_eq!(
+        notes(&report, "plug"),
+        [given("DEEPSEEK_API_KEY"), all.clone()]
+    );
+    assert_eq!(notes(&report, "pi"), std::slice::from_ref(&all), "{report}");
+    assert_eq!(notes(&report, "dsh"), [all], "{report}");
     // Beside the model's limits (`acme` has no preset), the keys withheld.
     let agent_notes = report["agent"]["notes"].as_array().unwrap();
     let said: Vec<_> = agent_notes
@@ -1528,9 +1560,14 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         .filter(|n| {
             n.as_str()
                 .unwrap()
-                .starts_with("plugins and stdio MCP servers")
+                .starts_with("plugins and stdio MCP servers have")
         })
         .collect();
+    assert_eq!(
+        agent_notes.iter().any(|n| n == dyld_note),
+        cfg!(target_os = "macos"),
+        "{report}"
+    );
     assert_eq!(
         said,
         [&serde_json::json!(format!(
@@ -1567,7 +1604,39 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     assert_eq!(lines("rutis", &stderr), [rutis_keeps, rutis_keeps]);
     lines("mcp", &stderr);
     // Noted as handed over; no "probed without the DSH host".
-    assert_eq!(notes(&report, "pi"), [given("ACME_KEY")]);
-    assert_eq!(notes(&report, "dsh"), [given("OPENAI_API_KEY")]);
-    assert_eq!(notes(&report, "plug"), [given("DEEPSEEK_API_KEY")]);
+    assert_eq!(
+        notes(&report, "pi"),
+        [
+            given("ACME_KEY"),
+            taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY"])
+        ]
+    );
+    assert_eq!(
+        notes(&report, "dsh"),
+        [
+            given("OPENAI_API_KEY"),
+            taken(&["DEEPSEEK_API_KEY", "ACME_KEY"])
+        ]
+    );
+    assert_eq!(
+        notes(&report, "plug"),
+        [
+            given("DEEPSEEK_API_KEY"),
+            taken(&["OPENAI_API_KEY", "ACME_KEY"])
+        ]
+    );
+
+    // A `keys` grant of a name not set here hands nothing over: said so.
+    manifest(
+        r#"keys = ["GROQ_API_KEY"]"#, r#"keys = ["OPENAI_API_KEY"]"#,
+        r#"keys = ["DEEPSEEK_API_KEY"]"#,
+    );
+    let (report, _) = check();
+    assert_eq!(
+        notes(&report, "pi"),
+        [
+            "its `keys` grant names `GROQ_API_KEY`, not set here: it gets none of them".to_owned(),
+            taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY"]),
+        ]
+    );
 }

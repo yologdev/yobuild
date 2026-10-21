@@ -208,6 +208,18 @@ pub(crate) const HINTS: &[Hint] = &[
         fix: "the plugin runtime died: the log says why; restart",
     },
     Hint {
+        id: "cannot-start",
+        scope: Scope::Start,
+        pattern: "cannot start ",
+        fix: "the program a stdio MCP server or a plugin runtime runs is missing or not executable: fix the server's path (or install its package again), or install Node for the plugin runtimes",
+    },
+    Hint {
+        id: "no-env",
+        scope: Scope::Start,
+        pattern: "is not there, and yobuild needs it to start plugin runtimes",
+        fix: "install `env` at /usr/bin/env (and /bin/sh), which a minimal image may lack: yobuild starts every plugin runtime and stdio server through it while a credential yoagent reads is set",
+    },
+    Hint {
         id: "mcp-no-tools",
         scope: Scope::Start,
         pattern: "the server lists no tools",
@@ -377,6 +389,23 @@ mod tests {
                 Scope::Start,
                 "the `dsh` runtime is not running (its plugins wait: plugin:x)".into(),
                 "runtime-down",
+            ),
+            // `frontend::host::startable`'s words, through `run::mcp`.
+            (
+                Scope::Start,
+                "mcp files: cannot start /p/s.sh: no such file".into(),
+                "cannot-start",
+            ),
+            (
+                Scope::Start,
+                "cannot start node: it is not on PATH".into(),
+                "cannot-start",
+            ),
+            // `frontend::host::env_without`'s.
+            (
+                Scope::Start,
+                "cannot take OPENAI_API_KEY out of node's environment: /usr/bin/env is not there, and yobuild needs it to start plugin runtimes and stdio MCP servers while a credential yoagent reads is set".into(),
+                "no-env",
             ),
             (Scope::Start, "mcp files: the server lists no tools".into(), "mcp-no-tools"),
             (

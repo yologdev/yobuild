@@ -274,13 +274,36 @@ impl Helper {
     }
 }
 
+/// `keys` as a refusal names them: `none`, else each in backticks.
+fn said(keys: &[String]) -> String {
+    match keys {
+        [] => "none".to_owned(),
+        keys => keys
+            .iter()
+            .map(|k| format!("`{k}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
 impl Plan {
-    /// The runtime `runtime` keeps `keys` (each plugin of one runtime is
-    /// granted the same: the manifest and `plan` see to it).
-    fn keep(&mut self, runtime: &str, keys: &[String]) {
+    /// The runtime `runtime` keeps `keys`. Each plugin of one runtime is
+    /// granted the same (the manifest and `plan` refuse otherwise, naming
+    /// the plugins); should those checks ever loosen, this refuses rather
+    /// than let one plugin's grant decide its runtime's environment.
+    fn keep(&mut self, runtime: &str, keys: &[String]) -> Result<(), BoxError> {
         match self.keys.iter().find(|(r, _)| r == runtime) {
-            Some((_, kept)) => debug_assert_eq!(kept, keys, "runtime `{runtime}`'s plugins' keys"),
-            None => self.keys.push((runtime.to_owned(), keys.to_vec())),
+            Some((_, kept)) if kept != keys => Err(format!(
+                "the `{runtime}` runtime's plugins are granted different `keys` ({} and {}): give each the same `keys` or none",
+                said(kept),
+                said(keys)
+            )
+            .into()),
+            Some(_) => Ok(()),
+            None => {
+                self.keys.push((runtime.to_owned(), keys.to_vec()));
+                Ok(())
+            }
         }
     }
 
@@ -325,7 +348,7 @@ pub(crate) fn plan(
         let config = plugin.config_with(lookup).map_err(|e| failed(e.into()))?;
         match &plugin.kind {
             PluginKind::Pi(source) => {
-                plan.keep("pi", &plugin.grants.keys);
+                plan.keep("pi", &plugin.grants.keys).map_err(failed)?;
                 if config.is_some() {
                     return Err(failed("a pi extension takes no config".into()));
                 }
@@ -369,7 +392,7 @@ pub(crate) fn plan(
                 plan.notes.extend(found.notes);
             }
             PluginKind::Dsh(source) => {
-                plan.keep("dsh", &plugin.grants.keys);
+                plan.keep("dsh", &plugin.grants.keys).map_err(failed)?;
                 let (rows, peers) =
                     dsh_rows_of(layout, &plan.dsh_dir, plugin, source, config, &keys)
                         .map_err(failed)?;
@@ -414,7 +437,8 @@ pub(crate) fn plan(
                         .into(),
                     ));
                 }
-                plan.keep(&rutis_runtime_name(at), &plugin.grants.keys);
+                plan.keep(&rutis_runtime_name(at), &plugin.grants.keys)
+                    .map_err(failed)?;
                 let mut row =
                     Row::new(row_id(&plugin.name), path.display()).runtime(rutis_runtime_name(at));
                 if let Some(config) = config {
@@ -841,6 +865,22 @@ mod tests {
             &|_: &str| None,
         )
         .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn a_runtime_whose_plugins_keep_different_keys_is_refused() {
+        let mut plan = Plan::default();
+        let key = |k: &str| vec![k.to_owned()];
+        plan.keep("pi", &key("OPENAI_API_KEY")).unwrap();
+        plan.keep("pi", &key("OPENAI_API_KEY")).unwrap();
+        plan.keep("dsh", &[]).unwrap();
+        assert_eq!(
+            plan.keep("pi", &[]).unwrap_err().to_string(),
+            "the `pi` runtime's plugins are granted different `keys` (`OPENAI_API_KEY` and none): give each the same `keys` or none"
+        );
+        assert!(plan.keep("dsh", &key("GROQ_API_KEY")).is_err());
+        assert_eq!(plan.kept("pi"), key("OPENAI_API_KEY"));
+        assert_eq!(plan.kept("dsh"), [] as [String; 0]);
     }
 
     #[test]
