@@ -1492,7 +1492,7 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         stderr.contains(&format!("  Info: {withheld}\n")),
         "{stderr}"
     );
-    let dyld_note = "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get `DYLD_YOBUILD_TEST`: macOS protects /usr/bin/env, which drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)";
+    let dyld_note = "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get `DYLD_YOBUILD_TEST`: with System Integrity Protection on (macOS's default), /usr/bin/env drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)";
     assert_eq!(
         stderr.contains(&format!("  Info: {dyld_note}\n")),
         cfg!(target_os = "macos"),

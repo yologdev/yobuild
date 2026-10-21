@@ -1465,8 +1465,9 @@ fn started_through_env(manifest: &Manifest, withheld: &[String]) -> bool {
 
 /// The `DYLD_*` variables that what yobuild starts through `/usr/bin/env`
 /// does not get, said when there are any and `on_macos`: there
-/// `/usr/bin/env` is protected (SIP), and the loader drops them as it runs
-/// it — so only while a credential is taken out of some runtime's or
+/// `/usr/bin/env` is protected while System Integrity Protection is on
+/// (the default; not looked up: the note says so), and the loader drops
+/// them as it runs it — so only while a credential is taken out of some runtime's or
 /// stdio server's environment ([`started_through_env`]). `vars` are this
 /// process's names; a stdio server's own `env` adds its `DYLD_*` names
 /// (dropped too, when that server is started through `env`). A native
@@ -1497,7 +1498,7 @@ pub(crate) fn dyld_note(
     dropped.sort();
     dropped.dedup();
     (!dropped.is_empty()).then(|| format!(
-        "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get {}: macOS protects /usr/bin/env, which drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)",
+        "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get {}: with System Integrity Protection on (macOS's default), /usr/bin/env drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)",
         dropped.join(", ")
     ))
 }
@@ -2683,7 +2684,7 @@ mod tests {
         };
         let said = |names: &str| {
             format!(
-                "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get {names}: macOS protects /usr/bin/env, which drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)"
+                "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get {names}: with System Integrity Protection on (macOS's default), /usr/bin/env drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)"
             )
         };
         let key = ["DEEPSEEK_API_KEY"];

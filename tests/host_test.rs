@@ -441,9 +441,10 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
         true => "null",
         false => r#""""#,
     };
-    // Through `env` on macOS, `DYLD_*` is gone with it; kept, nothing goes
-    // through `env`, and it arrives.
-    let dropped = match cfg!(target_os = "macos") {
+    // Through `env` on macOS with System Integrity Protection on (the
+    // default; GitHub's macOS runners have it off), `DYLD_*` is gone with
+    // it; kept, nothing goes through `env`, and it arrives.
+    let dropped = match cfg!(target_os = "macos") && sip_enabled() {
         true => "null",
         false => r#""1""#,
     };
@@ -454,6 +455,15 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
         format!("[{},\"1\"]", serde_json::to_string(&inherited).unwrap())
     );
     root.shutdown().await.unwrap();
+}
+
+/// macOS's System Integrity Protection is on (`csrutil status`), under
+/// which the protected `/usr/bin/env` drops `DYLD_*` variables.
+fn sip_enabled() -> bool {
+    std::process::Command::new("csrutil")
+        .arg("status")
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("status: enabled"))
 }
 
 /// The text of `path` once a plugin wrote it.

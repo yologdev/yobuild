@@ -2248,9 +2248,10 @@ With no `/usr/bin/env` (or `/bin/sh`, for a program whose path holds
 refused rather than the variables left in, saying that yobuild needs it
 (hint `no-env`; the agent's own key usually is set — not under
 `--scripted` or with a local provider — so on an image without it no
-plugin runtime, stdio server or terminal UI starts: install it). On macOS
-`/usr/bin/env` is protected, so `DYLD_*` variables do not reach what
-starts through it either — only while a credential is taken out of that
+plugin runtime, stdio server or terminal UI starts: install it). On macOS with
+System Integrity Protection on (the default; GitHub's macOS runners have
+it off) `/usr/bin/env` is protected, so `DYLD_*` variables do not reach
+what starts through it either — only while a credential is taken out of that
 runtime's or server's environment; not worked around, but said: `run` (an
 Info notice) and `check` (an agent note) name the `DYLD_*` variables it
 will not get (`run::dyld_note`: this process's, and a stdio server's own
@@ -2333,7 +2334,8 @@ every one, or the terminal UI, which keeps none.
   that runs winning, a symlink loop and a folder this user may not search
   said in the system's words. Host test: `node` not on a runtime's `PATH`
   refused at `start`; a runtime's `DYLD_*` entry gone through `env` on
-  macOS, arriving where nothing goes through it. `cli_test`
+  macOS with SIP on (`csrutil status`), arriving where nothing goes
+  through it. `cli_test`
   `a_server_that_cannot_start_is_said_with_what_to_do`: `check`'s problem
   and fix, with a key and without, `run`'s refusal with what to do, the
   `DYLD_*` note on macOS; the credentials test: `run`'s Warning for an

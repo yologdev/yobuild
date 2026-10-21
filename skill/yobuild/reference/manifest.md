@@ -216,8 +216,8 @@ credential yoagent reads: what it spends with it is not metered"); a
 `keys` grant naming a variable that is unset or empty gets nothing, which
 `check` and `run` say ("its `keys` grant names `X`, unset or empty here:
 it gets no key from it"). When entries lose different credentials,
-`check` notes on each what it has taken out. On macOS, `DYLD_*` variables
-do not reach what starts through `/usr/bin/env` (a plugin runtime or
+`check` notes on each what it has taken out. On macOS (with System Integrity Protection on, the
+default), `DYLD_*` variables do not reach what starts through `/usr/bin/env` (a plugin runtime or
 stdio server with a credential taken out, the terminal UI) either:
 `check` and `run` name them. Tell the person before you hand one over. This is not a sandbox: a plugin can
 still read a key from a file the person keeps it in (`~/.aws/credentials`,
