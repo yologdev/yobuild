@@ -1810,8 +1810,7 @@ the probe" for those asked only in a tool call. A `hints` row and its
 - **Mediated** — calls through the host: `pi.exec` judged by the gate,
   `llm` charged to the budget, wake bounded, approvals naming the plugin.
   Metering holds only once plugin runtimes lose the provider key variables:
-  a step of its own (`PluginHost::env` can add variables, not yet remove
-  them), worth doing apart from this layer.
+  step 4, below ("Step 4: plugins without the provider keys").
 - **Never granted**: provider routing and payload rewriting, context
   rewriting, DSH's `loader` (plugins loading plugins past the lock),
   plugins' own model adapters reaching yoagent, DSH's app plugins
@@ -2093,6 +2092,109 @@ asked ctx.isProjectTrusted(): answered false (grant `trust = true` to
 change it)"; a `pi.exec` refused for want of `exec`, or by the gate's other
 refusals (not the owner's Block); a pi wake the host never got; the DSH
 host's warnings. Not yet: `check` (no session watches there).
+
+### Step 4: plugins without the provider keys (proposed 2026-10-21)
+
+**Why.** Every process yobuild starts inherits its environment, and with it
+every model key the owner has exported: `DEEPSEEK_API_KEY` for the agent,
+and `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, … left over from other work. A
+plugin that finds one can call that provider itself. The call is outside
+the run: no budget stops it, `Cost:` and facts do not count it, and the
+owner sees nothing. Honest code does this too: an SDK that reads
+`OPENAI_API_KEY` when it is there, a search plugin that summarises with
+Gemini when `GEMINI_API_KEY` is set. M3c's metered `llm` is a plugin's way
+to a model; this step closes the unmetered way for honest code.
+
+**What it is not.** Not a boundary against hostile code. A plugin runs as
+the owner, so it can read the key where the owner keeps it (a shell
+profile, `~/.dskey`, pi's `~/.pi/agent/auth.json`). On Linux it can also
+read it from `/proc/<yobuild's pid>/environ`. It is the honour-system kind
+of rule ("What a grant hands a plugin"): it changes what honest code does,
+and §6 says so.
+
+**Which variables** (`KEY_VARIABLES`, one list in `manifest.rs` beside
+`PROVIDERS`):
+- yoagent's key variables for every provider it knows (yoagent 0.25.11's
+  `resolve_api_key`), not only the manifest's model's: `PROVIDERS`' 13,
+  plus `OPENROUTER_API_KEY`, `CEREBRAS_API_KEY`, `OPENCODE_API_KEY`,
+  `AZURE_OPENAI_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, and its fallbacks
+  `YOAGENT_API_KEY` and `API_KEY`;
+- the manifest's `api_key_env`, when it names one.
+
+AWS's own `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` stay: they are
+general cloud credentials (an S3 server needs them), not only Bedrock's.
+A unit test checks that the list holds every `PROVIDERS` variable. A
+later yoagent could export its list (`provider::KEY_VARIABLES`), so it is
+never copied. Asked of the yoagent session, not waited for.
+
+**Which processes.** Each third-party process yobuild starts:
+- the plugin runtimes (`ui`, `pi`, `dsh`, `rutis-<n>`), in `run`, and in
+  `check` (alone and together);
+- the stdio MCP servers;
+- the adapters' helper scripts (`inspect-package.mjs` imports a DSH
+  bundle's code).
+
+Not npm (`--ignore-scripts`: no package code runs). Not the agent's own
+`bash` either. Its commands are the agent's, judged by the gate, and a
+project's build or test may need a key. That stays as §6 says: "the
+environment they inherit is visible to them".
+
+**How.** rutis's `Launcher` and yoagent's stdio MCP transport can only add
+variables. So each variable on the list that is set in yobuild's
+environment is given to the process as the empty string. That is "no key":
+SDKs read an empty key as unset, or fail authentication. They do not
+fall back to another variable, since each on the list is blanked. Where
+yobuild builds the `Command` itself (the helper scripts), the variables
+are removed. `PluginHost::builder().blank(name)` blanks a name for every
+runtime the host starts. True removal for the runtimes would need
+`Launcher::env_remove` in rutis: asked for, not waited for. The difference
+shows only to code that tests whether the variable exists rather than its
+value.
+
+**Giving one back, on purpose.** A manifest can still pass a key, and then
+it is written down:
+- An MCP server's `env` naming a variable on the list
+  (`env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }`) sets it for that
+  server. `check` notes it on the entry: "server X is given `OPENAI_API_KEY`:
+  its model calls are not metered".
+- A DSH or rutis plugin's `config` already takes `${NAME}` references (the
+  `guard` rule), filled at start. The same note applies when a reference
+  names a variable on the list.
+- A pi extension has no config. It gets no key, and no grant hands one
+  back until an extension that needs one is wanted. Such a grant would be
+  runtime-wide: one rule, every pi plugin or none.
+
+**Said.** §6 ("Not covered") and the honour-system bullet say the keys are
+blanked. The skill's `manifest.md` says how to pass one to a server, and
+`parts.md` says which listed plugins lose a feature without a key. The
+owner is not told on every run: it is the default, not an event. A plugin
+that fails for want of a key says so in its own words; no hint can match
+them.
+
+**The yoagent-rutis half.** `probe::pi` / `probe::dsh` (`check`'s alone
+probes) start their own runtime with a fixed environment. They need an
+`env` argument, as `PluginHost` has, so `check` blanks the same list. That
+is a small 0.8.x change; the yobuild PR waits for it. Until then the alone
+probes would be the one place a key reaches a plugin.
+
+**Tests.** `cli_test`, the binary with `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`
+and a custom `api_key_env` set, scripted:
+- a rutis plugin, a pi extension and a DSH fixture file, each with a tool
+  reporting which of those names hold a value: none;
+- a stdio MCP fixture reporting the same: none, except the one its `env`
+  names;
+- `check --json` on the same manifest: the server's note.
+
+A host test: a blanked name for a runtime that is not started is an error,
+as `env` is. Unit tests: the list against `PROVIDERS` and the manifest's
+`api_key_env`.
+
+**Open, for the review:**
+1. Blank now, rather than wait for rutis's `env_remove`? Recommended: blank
+   now.
+2. The agent's `bash` left out? Recommended: yes. A project's tests may
+   need a key, and the gate already judges what bash runs.
+3. No key grant for pi until one is needed? Recommended: yes.
 
 ### What it unlocks, and the migration
 

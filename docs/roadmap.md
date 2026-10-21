@@ -192,7 +192,9 @@ plugin of it or none) and named by `check`.
 - Left: `check` saying fixed answers (no session watches there), and noting
   a pi extension's observer events (the adapter would have to report its
   handlers).
-- Plugin runtimes without the provider key variables (step 4).
+- Plugin runtimes without the provider key variables (step 4; design §12
+  "Step 4", proposed 2026-10-21): blanked for runtimes, MCP servers and
+  helpers, `check` noting a key given back on purpose.
 
 **Done when** `dsh-univer-office` and `pi-lens` work in a gallery agent,
 their tools' results checked (not only `✓`); the stand-in probe runs inside
