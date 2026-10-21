@@ -2189,12 +2189,9 @@ A host test: a blanked name for a runtime that is not started is an error,
 as `env` is. Unit tests: the list against `PROVIDERS` and the manifest's
 `api_key_env`.
 
-**Open, for the review:**
-1. Blank now, rather than wait for rutis's `env_remove`? Recommended: blank
-   now.
-2. The agent's `bash` left out? Recommended: yes. A project's tests may
-   need a key, and the gate already judges what bash runs.
-3. No key grant for pi until one is needed? Recommended: yes.
+**Decided in the review (2026-10-21):** blank now, without waiting for
+rutis's `env_remove`; the agent's `bash` left out; no key grant for pi
+until an extension that needs one is wanted.
 
 ### What it unlocks, and the migration
 
