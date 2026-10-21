@@ -1,0 +1,13 @@
+# An agent whose scripted answer carries terminal escape sequences and
+# deceptive links — in its answer, its question and its task:
+# `tests/terminal_text_pty.py` checks none reaches the pty as a sequence (design §5, "Untrusted text in the terminal UI").
+[agent]
+name = "hostile"
+model = "deepseek/x"
+
+[builtins]
+gate = "off"
+ask_owner = true   # its question carries hostile text too
+
+[frontend]
+terminal = true

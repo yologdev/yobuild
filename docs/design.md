@@ -918,7 +918,7 @@ terminal UI already draws answers with pi-tui's own Markdown component
   HTML as text, no image), and `app.js` holding no HTML sink; `web_test`
   unchanged (the protocol is).
 
-### Untrusted text in the terminal UI (proposed 2026-10-21)
+### Untrusted text in the terminal UI (built 2026-10-21)
 
 The terminal UI draws answers as Markdown (pi-tui's `Markdown`), but it
 prints the session's text as it comes, and a terminal runs the escape
@@ -938,12 +938,14 @@ code here (no `highlightCode`), and builds LaTeX from the text it is
 given.
 
 - **One rule, for display only** — every string drawn that did not
-  originate in `terminal-ui.ts` goes through `terminalText(s)` before
-  pi-tui gets it, at the few points everything passes: `say()`, the
-  tool line's `Text` (and its `setText` when a card title replaces it),
-  the answer's `Markdown` (given the whole accumulated answer each time,
-  not each delta), the editor's prefill (`editor.setText`: pi-tui's
-  `Editor` passes escapes too) and the status line. That covers the
+  originate in `terminal-ui.ts` goes through `terminalText(s)` (as
+  `t()`) at the call that draws it, before the UI's own styling — each
+  `say(…)` argument (`say` itself does not clean), the tool line's
+  `Text` (and its `setText` when a card title replaces it), the answer's
+  `Markdown` (given the whole accumulated answer each time, not each
+  delta), the editor's prefill (`editor.setText`: pi-tui's `Editor` passes
+  escapes too) and its one line on stderr; the status line holds only the
+  UI's own text. That covers the
   answer, a prompt from any frontend, tool names and arguments, a tool
   card's title (`viewTitle`, a plugin's), notices, a question's title,
   message and options, a `notify`, a run's end with its `error` (a
@@ -955,48 +957,69 @@ given.
   question's prefill is shown cleaned, so an answer typed from it is the
   cleaned text. Thinking is not printed by the terminal UI.
 - **`terminalText(s)`** — in `lib.js`, tested by `node --test`:
-  - escape sequences removed whole: CSI (`ESC [` … a final byte), OSC
-    (`ESC ]` … BEL or ST), DCS, SOS, PM and APC (`ESC P`, `X`, `^`, `_`
-    … ST), and any other `ESC` with its next character (`ESC ( B`); one
-    left unterminated ends at the next C0 control or after 4096
-    characters, past which only its introducer is removed and the rest
-    shown — injected text cannot hide what follows it;
+  - escape sequences removed whole, each within 4096 characters
+    (`TERMINAL_SEQUENCE_MAX`): CSI (`ESC [`, parameters, a final byte — one
+    cut by a control, DEL or a character past ASCII loses only `ESC [`),
+    OSC (`ESC ]` … BEL or ST), DCS, SOS, PM and APC (`ESC P`, `X`, `^`,
+    `_` … ST; BEL does not end these), nF (`ESC ( B`: intermediates, then a
+    final, at most 16 characters), and any other `ESC` with its next
+    character, a whole code point (`ESC c`); a string sequence left
+    unterminated ends at the next control or at the bound, only its
+    introducer removed and the rest shown — injected text cannot hide what
+    follows it; an `ESC` before a control goes alone, so a line break after
+    it stays;
   - the other C0 controls but `\n` and `\t` (BEL, BS, CR — which could
     overwrite a line — and the rest), DEL, and the C1 controls
-    (U+0080–U+009F, the one-byte CSI and OSC among them) removed;
+    (U+0080–U+009F, the one-byte CSI and OSC among them) removed, each on
+    its own (what followed a C1 CSI is shown as text);
   - the bidirectional embeddings, overrides and isolates (U+202A–U+202E,
     U+2066–U+2069) and marks (U+200E, U+200F, U+061C) removed, so text
     cannot reorder what is shown;
   - everything else kept, Unicode included. Its result has no control
-    character but `\n` and `\t`, so pieces cleaned apart join clean.
-- **Links in answers** — the answer's `Markdown` is a subclass whose
-  `render(width)` filters the lines pi-tui made, each line on its own
-  (pi-tui reopens a link on every wrapped line): every `OSC 8` there is
-  pi-tui's, as the input has none left. An opening `ESC]8;;<target>`
-  (ended by ST or BEL) whose target is not `https:` (compared without
-  case) is removed with its closing sequence, the text kept, and the
-  target printed after it as pi-tui's fallback does — as the page shows a
-  link it will not open whole, as written; a kept https link whose text
-  differs from its target gets the target printed after it too, so what is
-  shown is where it goes. Autolinks pi-tui makes from `www.…` (`http:`)
-  or an address (`mailto:`) are unlinked the same way, by intent.
+    character but `\n` and `\t`, so pieces cleaned apart join clean, and
+    cleaning it again changes nothing.
+- **Links in answers** — no terminal hyperlinks at all:
+  `setCapabilityOverrides({ hyperlinks: false })`, which outranks the
+  environment (`PI_HYPERLINKS=1` included). pi-tui then makes no `OSC 8`
+  link, and prints a link's target after its text whenever the two differ
+  — so `[x](javascript:…)` is the text `x (javascript:…)`, and
+  `[https://bank.example](https://evil.example)` shows where it goes; its
+  autolink of `www.…` shows `(http://www.…)` (an address's `mailto:` is
+  its text: nothing to add). (Proposed first: unlinking
+  non-https `OSC 8` links in pi-tui's rendered lines and printing targets
+  there — but pi-tui throws on a line wider than the terminal, and lines
+  it has fitted cannot grow; turning its links off gets the same, stricter
+  — no link opens without its target in view — and nothing is re-wrapped.)
+  A terminal that links bare URLs by itself still does, on text that shows
+  the URL.
 - **Not changed** — the page (its text is set as text, design §5
   "Answers as Markdown"; UI plugins are trusted code), the protocol, the
   plugins.
-- **Tests** — `lib.test.js`: each kind of sequence and control removed,
-  an unterminated one bounded, text and Unicode kept, the result's
-  joining; the link filter given rendered lines (wrapped, both
-  terminators, schemes in any case, a differing text). The pty check
-  (`tests/terminal_pty.py`, in its `yobuild run examples/coding.toml`
-  form) is given a scripted fixture of its own (`tests/fixtures/`), its
-  answer holding sentinels — an `OSC 0` title of a unique word, an
-  `ESC[2J` and a `javascript:` link between two text markers — and reads
-  until the answer's last marker: run with `PI_HYPERLINKS=1`, no byte
-  between the markers is ESC, BEL, U+009B or U+009D, the title word never
-  follows `ESC]0;`, and every `ESC]8;;` target in the stream is https;
-  run without it, the fallback shows the `javascript:` target as text
-  only. (pi-tui writes `ESC[2J` itself when it redraws, so the check is
-  the sentinels', not the bytes'.)
+- **Tests** — `lib.test.js`: each kind of sequence and each of its paths
+  (CSI with private parameters, cut by the end, a control, non-ASCII, DEL;
+  OSC by BEL and ST; DCS not ended by BEL; a string sequence cut by an
+  `ESC` or a control; nF with and without its final, past its 16; an `ESC`
+  before a control or an astral character), the one bound for CSI and OSC
+  at its edge, each C0, DEL, C1 edge and bidi character, text and Unicode
+  kept, and a seeded property test (20,000 random inputs: no control left
+  but `\n`/`\t`, no lone surrogate, cleaning again changes nothing).
+  `tests/terminal_text_pty.py` (in CI) runs a fixture agent
+  (`tests/fixtures/hostile-text`: terminal frontend, `ask_owner`) on a
+  pty in a 120-column window, with and without `PI_HYPERLINKS=1`: its task
+  holds an `OSC 0` title and a bidi override (the prompt line); its first
+  reply asks a question whose title, message and options hold sequences (the
+  question's lines, and the tool line's arguments); its answer holds an
+  `OSC 0` title with a unique word, an `OSC 52` clipboard write, a
+  title-report query `ESC[21t`, a screen clear, C1 controls, a bidi
+  override, a `javascript:` link, a link showing one address and going to
+  another, and a `www.` autolink. Checked: the payloads' words absent
+  (not only their `ESC`), the answer's exact text with each sequence gone
+  whole (the screen clear among them — pi-tui sends `ESC[2J` itself, so
+  bytes cannot tell), the task's and the question's lines cleaned, no
+  `OSC 0`, `OSC 52`, C1 or bidi byte, no `OSC 8` link with a target, the
+  answer read as Markdown (no link source left), the three targets shown
+  as text, and Ctrl+C quitting with 0. Against the UI before this, 9 of
+  its 16 checks fail without `PI_HYPERLINKS` and 13 with it.
 
 ## 6. Safety model
 

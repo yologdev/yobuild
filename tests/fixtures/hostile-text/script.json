@@ -1,0 +1,20 @@
+[
+ {
+  "tools": [
+   {
+    "name": "ask_owner",
+    "arguments": {
+     "question": "Q \u001b]0;QTITLE\u0007 end",
+     "why": "W \u001b]52;c;V0hZ\u0007 why",
+     "options": [
+      "\u001b[21t one",
+      "two \u009b2J \u202e"
+     ]
+    }
+   }
+  ]
+ },
+ {
+  "text": "BEGIN-MARK title \u001b]0;PWNEDTITLE\u0007 clipboard \u001b]52;c;cHduZWQ=\u0007 query \u001b[21t clear \u001b[2J c1 \u009b2J\u009d0;C1\u0007 bidi \u202eevil\u202c [click](javascript:alert(1)) and [https://bank.example](https://evil.example) and www.evil.example END-MARK"
+ }
+]

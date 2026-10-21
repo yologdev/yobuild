@@ -13,13 +13,15 @@
 import * as fs from 'node:fs'
 import * as tty from 'node:tty'
 import { definePlugin } from '@arcships/rutis'
-// The answer parsing the page's tests cover (`node --test web/`).
-import { jsonText, parseAnswer } from '../web/lib.js'
+// The answer parsing and the terminal's text cleaning the page's tests
+// cover (`node --test frontend/web/lib.test.js`).
+import { jsonText, parseAnswer, terminalText } from '../web/lib.js'
 import {
   Container,
   Editor,
   Markdown,
   ProcessTerminal,
+  setCapabilityOverrides,
   Text,
   TuiMainScreen,
   matchesKey,
@@ -34,6 +36,20 @@ interface Frontend {
 type Message = { type: string; [field: string]: any }
 
 const ansi = (code: string) => (text: string) => `\x1b[${code}m${text}\x1b[0m`
+
+// Text from the session, cleaned for the terminal (design §5, "Untrusted
+// text in the terminal UI"): every string drawn that did not originate here
+// — each `say(…)` argument, the tool line, the answer's `Markdown`, the
+// editor's prefill, stderr — goes through it at the call, before this file
+// styles it (`say` itself does not clean), so the escapes on screen are this
+// file's and pi-tui's only. For display only: answers use the request as
+// received.
+const t = (value: unknown) => terminalText(value)
+
+// No terminal hyperlinks (OSC 8): pi-tui then prints a link's target after
+// its text whenever they differ, so a `javascript:` link is text and a link
+// showing one address cannot open another.
+setCapabilityOverrides({ hyperlinks: false })
 const [dim, bold, cyan, green, red, yellow] = ['2', '1', '36', '32', '31', '33'].map(ansi)
 
 const markdownTheme = {
@@ -69,7 +85,7 @@ class MemoryTerminal implements Terminal {
 /** The title a tool's view (`details.view = {call?, result?}`) gives its call. */
 const viewTitle = (details: any): string | undefined => {
   const title = details?.view?.result?.title ?? details?.view?.call?.title
-  return typeof title === 'string' && title ? short(title, 60) : undefined
+  return typeof title === 'string' && title ? short(t(title), 60) : undefined
 }
 
 const short = (value: unknown, max = 70) => {
@@ -111,7 +127,7 @@ export default definePlugin<{ demo?: string }>({
     const say = (text: string) => log.addChild(new Text(text, 1, 0))
     const send = (message: Record<string, unknown>) =>
       frontend.send(message).catch((e: unknown) => {
-        say(red(`could not send: ${short(String(e))}`))
+        say(red(`could not send: ${short(t(String(e)))}`))
         tui.requestRender()
       })
     // The screen is gone by then: a failed quit is told on stderr.
@@ -119,7 +135,7 @@ export default definePlugin<{ demo?: string }>({
       tui.stop()
       frontend
         .send({ type: 'quit' })
-        .catch((e: unknown) => process.stderr.write(`yoagent: could not quit the session: ${String(e)}\n`))
+        .catch((e: unknown) => process.stderr.write(`yoagent: could not quit the session: ${t(String(e))}\n`))
     }
     // Text an `input` question put in the editor, cleared if the question
     // closes before the user answers.
@@ -132,11 +148,12 @@ export default definePlugin<{ demo?: string }>({
         return
       }
       const r = first.request
-      say(bold(`  ? ${r.title}`) + (r.message ? dim(` — ${r.message}`) : ''))
-      if (r.kind === 'select') r.options.forEach((o: string, i: number) => say(`    ${i + 1}. ${o}`))
+      say(bold(`  ? ${t(r.title)}`) + (r.message ? dim(` — ${t(r.message)}`) : ''))
+      if (r.kind === 'select') r.options.forEach((o: string, i: number) => say(`    ${i + 1}. ${t(o)}`))
+      // Shown cleaned: an answer typed from it is the cleaned text.
       if (r.kind === 'input' && r.value) {
-        editor.setText(r.value)
-        prefilled = r.value
+        prefilled = t(r.value)
+        editor.setText(prefilled)
       }
       status.setText(
         yellow(
@@ -151,10 +168,10 @@ export default definePlugin<{ demo?: string }>({
       )
     }
     const askUser = (id: number, r: Message) => {
-      if (r.kind === 'notify') return say(yellow(`  ! ${r.message}`))
+      if (r.kind === 'notify') return say(yellow(`  ! ${t(r.message)}`))
       if (headless) {
         // Nobody to ask: decline, as a user who walked away would.
-        say(bold(`  ? ${r.title}`) + (r.message ? dim(` — ${r.message}`) : ''))
+        say(bold(`  ? ${t(r.title)}`) + (r.message ? dim(` — ${t(r.message)}`) : ''))
         say(dim('  answered: null (headless demo)'))
         send({ type: 'uiResponse', id, value: r.kind === 'confirm' ? false : null })
         return
@@ -171,11 +188,11 @@ export default definePlugin<{ demo?: string }>({
       const parsed = parseAnswer(request, text)
       if ('error' in parsed) {
         // Not an answer: ask again rather than guess.
-        say(red(`  ${parsed.error}`))
+        say(red(`  ${t(parsed.error)}`))
         return true
       }
       const { value } = parsed
-      say(dim(`  answered: ${jsonText(value)}`))
+      say(dim(`  answered: ${t(jsonText(value))}`))
       prefilled = undefined
       questions.shift()
       send({ type: 'uiResponse', id, value })
@@ -206,14 +223,15 @@ export default definePlugin<{ demo?: string }>({
             answer = new Markdown('', 1, 0, markdownTheme)
             log.addChild(answer)
           }
+          // The whole answer so far, cleaned each time.
           answerText += e.delta.delta
-          answer.setText(answerText)
+          answer.setText(t(answerText))
           return
         case 'messageEnd':
           answer = undefined
           return
         case 'toolExecutionStart': {
-          const line = new Text(yellow('  ▶ ') + `${e.toolName} ${dim(short(e.args))}`, 1, 0)
+          const line = new Text(yellow('  ▶ ') + `${t(e.toolName)} ${dim(t(short(e.args)))}`, 1, 0)
           tools.set(e.toolCallId, line)
           log.addChild(line)
           return
@@ -222,7 +240,7 @@ export default definePlugin<{ demo?: string }>({
           // A tool's view (`details.view`) names the call better than its tool name.
           tools
             .get(e.toolCallId)
-            ?.setText(`${e.isError ? red('  ▶ ') : green('  ▶ ')}${viewTitle(e.result?.details) ?? e.toolName} ${e.isError ? red('✗') : green('✓')}`)
+            ?.setText(`${e.isError ? red('  ▶ ') : green('  ▶ ')}${viewTitle(e.result?.details) ?? t(e.toolName)} ${e.isError ? red('✗') : green('✓')}`)
           tools.delete(e.toolCallId)
           return
         case 'providerRetry':
@@ -237,11 +255,11 @@ export default definePlugin<{ demo?: string }>({
         case 'aborted':
           return yellow('  stopped')
         case 'rejected':
-          return red(`  refused: ${m.error ?? 'input rejected'}`)
+          return red(`  refused: ${t(m.error ?? 'input rejected')}`)
         case 'stopped':
-          return yellow(`  stopped early: ${m.error ?? 'a limit'}`)
+          return yellow(`  stopped early: ${t(m.error ?? 'a limit')}`)
         default:
-          return red(`  failed: ${m.error ?? 'unknown error'}`)
+          return red(`  failed: ${t(m.error ?? 'unknown error')}`)
       }
     }
 
@@ -249,7 +267,7 @@ export default definePlugin<{ demo?: string }>({
       switch (message.type) {
         case 'runStart':
           running = true
-          say(cyan('› ') + message.prompt)
+          say(cyan('› ') + t(message.prompt))
           status.setText(yellow('working…') + dim(' Ctrl+C to stop'))
           break
         case 'event':
@@ -269,7 +287,7 @@ export default definePlugin<{ demo?: string }>({
           break
         }
         case 'notice':
-          say(message.level === 'error' ? red(`  ! ${message.message}`) : yellow(`  ! ${message.message}`))
+          say(message.level === 'error' ? red(`  ! ${t(message.message)}`) : yellow(`  ! ${t(message.message)}`))
           break
         case 'hello':
           for (const { id, request } of message.uiRequests ?? []) askUser(id, request)
@@ -307,7 +325,7 @@ export default definePlugin<{ demo?: string }>({
       try {
         handle(message)
       } catch (e) {
-        say(red(`  (could not show a ${short(String(message?.type), 20)} message: ${short(String(e))})`))
+        say(red(`  (could not show a ${short(t(String(message?.type)), 20)} message: ${short(t(String(e)))})`))
       }
       tui.requestRender()
     }

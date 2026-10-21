@@ -755,6 +755,89 @@ function drawInline(doc, element, inlineParts) {
   return element
 }
 
+// Untrusted text for the terminal (design §5, "Untrusted text in the
+// terminal UI"): a terminal runs the escape sequences in what it prints, so
+// text from the session — a model's answer carries what it read — loses
+// them, and every control character but `\n` and `\t`, before the terminal
+// UI styles it. Removed whole, within `TERMINAL_SEQUENCE_MAX` characters:
+// CSI (`ESC [`, parameters, a final byte; one cut by a control, DEL or a
+// character past ASCII loses only `ESC [`), OSC (`ESC ]` … BEL or ST) and
+// DCS/SOS/PM/APC (`ESC P`, `X`, `^`, `_` … ST; BEL does not end these),
+// nF (`ESC ( B`, at most 16 characters) and any other `ESC` with its next
+// character (`ESC c`). A string sequence left unterminated ends at the next
+// control or at the bound, and only its introducer goes — injected text
+// cannot hide what follows it; an `ESC` before a control goes alone. Also
+// removed: the other C0 controls (BEL, BS, CR, …), DEL, the C1 controls
+// (U+0080–U+009F) and the bidirectional embeddings, overrides, isolates and
+// marks. The result has no control character but `\n` and `\t`, and
+// cleaning it again changes nothing.
+export const TERMINAL_SEQUENCE_MAX = 4096
+const BIDI = /[؜‎‏‪-‮⁦-⁩]/
+export function terminalText(value) {
+  const text = String(value ?? '')
+  let out = ''
+  let i = 0
+  const c0 = (code) => code < 0x20 || code === 0x7f
+  while (i < text.length) {
+    const ch = text[i]
+    const code = text.charCodeAt(i)
+    if (ch === '\x1b') {
+      const kind = text[i + 1]
+      if (kind === '[') {
+        // CSI: parameters and intermediates, then a final byte (@–~).
+        let j = i + 2
+        while (j < text.length && j - i < TERMINAL_SEQUENCE_MAX) {
+          const k = text.charCodeAt(j)
+          if (k >= 0x40 && k <= 0x7e) break
+          if (c0(k) || k > 0x7e) break
+          j++
+        }
+        // Its final byte within the bound, as a string sequence's terminator.
+        const k = text.charCodeAt(j)
+        i = j < text.length && j - i < TERMINAL_SEQUENCE_MAX && k >= 0x40 && k <= 0x7e ? j + 1 : i + 2
+        continue
+      }
+      if (kind === ']' || kind === 'P' || kind === 'X' || kind === '^' || kind === '_') {
+        // String sequences: to ST (`ESC \`), or BEL for OSC.
+        let j = i + 2
+        let end = -1
+        while (j < text.length && j - i < TERMINAL_SEQUENCE_MAX) {
+          if (text[j] === '\x07' && kind === ']') {
+            end = j + 1
+            break
+          }
+          if (text[j] === '\x1b') {
+            if (text[j + 1] === '\\') end = j + 2
+            break
+          }
+          if (c0(text.charCodeAt(j)) && text[j] !== '\x07') break
+          j++
+        }
+        // Unterminated: only the introducer goes, the rest is shown.
+        i = end > 0 ? end : i + 2
+        continue
+      }
+      // nF (`ESC ( B`: intermediates 0x20–0x2F, at most 16, then a final
+      // byte); an ESC before a control or the end goes alone (a line break
+      // after it stays); any other ESC with its next character (`ESC c`),
+      // a whole code point.
+      let j = i + 1
+      while (j < text.length && j - i < 16 && text.charCodeAt(j) >= 0x20 && text.charCodeAt(j) <= 0x2f) j++
+      if (j > i + 1) i = j < text.length && text.charCodeAt(j) >= 0x30 && text.charCodeAt(j) <= 0x7e ? j + 1 : j
+      else if (kind === undefined || c0(text.charCodeAt(i + 1))) i += 1
+      else i += 1 + (text.codePointAt(i + 1) > 0xffff ? 2 : 1)
+      continue
+    }
+    if ((c0(code) && ch !== '\n' && ch !== '\t') || (code >= 0x80 && code <= 0x9f) || BIDI.test(ch)) {
+      i++
+      continue
+    }
+    out += ch
+    i++
+  }
+  return out
+}
+
 // Questions wait in order: one shown at a time, oldest first. A question
 // may arrive twice (in `hello` and as its own `uiRequest`): kept once.
 export class Questions {
