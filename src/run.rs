@@ -182,8 +182,20 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tracing::info!("{note}");
         session.notice(NoticeLevel::Warning, note.clone());
     }
+    // A `keys` grant that hands nothing over: the plugin fails at its first
+    // call, in its own words, which this says before then.
+    for (name, keys) in keys_unset(&manifest, key_is_set) {
+        let note = format!("plugin {name}: {}", unset_grant_note(&keys));
+        tracing::info!("{note}");
+        session.notice(NoticeLevel::Warning, note);
+    }
     let withheld = withheld(&manifest);
-    let dyld = dyld_note(&manifest, &withheld, std::env::vars_os().map(|(k, _)| k));
+    let dyld = dyld_note(
+        &manifest,
+        &withheld,
+        std::env::vars_os().map(|(k, _)| k),
+        cfg!(target_os = "macos"),
+    );
     let notes = withheld_note(&manifest, &withheld)
         .into_iter()
         .chain(dyld)
@@ -1402,41 +1414,90 @@ pub(crate) fn withheld_from(
 /// What happens to a withheld credential: on unix it is taken out
 /// (`/usr/bin/env -u`); elsewhere, with no `env` to exec through, it is set
 /// empty — which a plugin may read differently from unset (an SDK sends the
-/// empty key), so the notes say which.
+/// empty key), so the notes say which: [`TAKEN`] for all of them (the
+/// combined note), [`TAKEN_ONE`] for one entry (`check`'s).
 #[cfg(unix)]
 const TAKEN: &str = "taken out of their environment";
 #[cfg(not(unix))]
 const TAKEN: &str =
     "set empty in their environment (not taken out: there is no `env` here to start them through)";
+#[cfg(unix)]
+pub(crate) const TAKEN_ONE: &str = "taken out of its environment";
+#[cfg(not(unix))]
+pub(crate) const TAKEN_ONE: &str =
+    "set empty in its environment (not taken out: there is no `env` here to start it through)";
 
-/// The `DYLD_*` variables `vars` holds that plugin runtimes and stdio MCP
-/// servers do not get, said when there are any: on macOS `/usr/bin/env` is
-/// protected (SIP), and the loader drops them as it runs it — so only
-/// while a credential is withheld (`withheld`) and something starts through
-/// it (a plugin or a stdio server). A native module that needs one works
-/// or breaks by whether a key is set; this says why.
+/// A credential yoagent reads is set here, and not empty: one exported
+/// empty (`export OPENAI_API_KEY=`, to turn it off) hands a plugin nothing
+/// usable, so the notes do not call it given.
+pub(crate) fn key_is_set(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|value| !value.is_empty())
+}
+
+/// `check`'s note on a plugin whose `keys` grant names `keys`, none of
+/// them set here ([`keys_unset`]); `run` says it as a Warning, prefixed
+/// with the plugin.
+pub(crate) fn unset_grant_note(keys: &[String]) -> String {
+    let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
+    format!(
+        "its `keys` grant names {}, unset or empty here: it gets no key from it",
+        keys.join(", ")
+    )
+}
+
+/// Something is started through `/usr/bin/env` (design §12 "Step 4"): a
+/// runtime or stdio server that loses one of `withheld` — a plugin whose
+/// `keys` does not keep it, a stdio server whose `env` does not set it, or
+/// the terminal UI's runtime, which keeps none.
+fn started_through_env(manifest: &Manifest, withheld: &[String]) -> bool {
+    withheld.iter().any(|name| {
+        manifest.frontend.terminal
+            || manifest
+                .plugins
+                .iter()
+                .any(|p| !p.grants.keys.contains(name))
+            || manifest.mcp.iter().any(|s| match &s.transport {
+                Transport::Stdio { env, .. } => !env.contains_key(name),
+                _ => false,
+            })
+    })
+}
+
+/// The `DYLD_*` variables that what yobuild starts through `/usr/bin/env`
+/// does not get, said when there are any and `on_macos`: there
+/// `/usr/bin/env` is protected (SIP), and the loader drops them as it runs
+/// it — so only while a credential is taken out of some runtime's or
+/// stdio server's environment ([`started_through_env`]). `vars` are this
+/// process's names; a stdio server's own `env` adds its `DYLD_*` names
+/// (dropped too, when that server is started through `env`). A native
+/// module that needs one works or breaks by whether a key is set; this
+/// says why.
 pub(crate) fn dyld_note(
     manifest: &Manifest,
     withheld: &[String],
     vars: impl IntoIterator<Item = std::ffi::OsString>,
+    on_macos: bool,
 ) -> Option<String> {
-    let started = !manifest.plugins.is_empty()
-        || manifest
-            .mcp
-            .iter()
-            .any(|s| matches!(s.transport, Transport::Stdio { .. }));
-    if !cfg!(target_os = "macos") || withheld.is_empty() || !started {
+    if !on_macos || !started_through_env(manifest, withheld) {
         return None;
     }
+    let servers = manifest.mcp.iter().flat_map(|s| match &s.transport {
+        Transport::Stdio { env, .. } if withheld.iter().any(|n| !env.contains_key(n)) => {
+            env.keys().cloned().collect()
+        }
+        _ => Vec::new(),
+    });
     let mut dropped: Vec<String> = vars
         .into_iter()
         .map(|name| name.to_string_lossy().into_owned())
+        .chain(servers)
         .filter(|name| name.starts_with("DYLD_"))
         .map(|name| format!("`{name}`"))
         .collect();
     dropped.sort();
+    dropped.dedup();
     (!dropped.is_empty()).then(|| format!(
-        "plugins and stdio MCP servers do not get {}, set here: they start through /usr/bin/env, which macOS protects, dropping `DYLD_*` variables (only while a credential yoagent reads is set)",
+        "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get {}: macOS protects /usr/bin/env, which drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)",
         dropped.join(", ")
     ))
 }
@@ -1832,9 +1893,9 @@ pub(crate) fn withheld(manifest: &Manifest) -> Vec<String> {
 /// plugin's `keys` grant or one referenced in its `config`, or in an MCP
 /// server's `env` (or an `env` name whose value is a reference:
 /// `OPENAI_API_KEY = "${MINE}"` hands a key over under that name), `args`,
-/// URL or headers. `check` notes each (what
-/// it spends with it is not metered). A `keys` grant counts only for a
-/// name `set` here (a reference to an unset name is refused anyway):
+/// URL or headers. `check` notes each (what it spends with it is not
+/// metered). A `keys` grant counts only for a name `set` here
+/// ([`key_is_set`]; a reference to an unset name is refused anyway):
 /// [`keys_unset`] says the others.
 pub(crate) fn keys_given(
     manifest: &Manifest,
@@ -1907,7 +1968,9 @@ type StdioCommand = (String, Vec<String>, HashMap<String, String>);
 /// A stdio server's command with `withheld` taken out of its environment
 /// (`frontend::host::env_without`: `/usr/bin/env -u NAME … <command>
 /// <args>`; yoagent's transport can only add variables), but the names its
-/// own `env` sets: `env -u` removes a name whoever set it.
+/// own `env` sets: `env -u` removes a name whoever set it. Its program is
+/// looked for first whatever is withheld (`frontend::host::startable`), so
+/// a missing one is said in the same words with a key set or not.
 #[cfg(unix)]
 fn without(
     command: &Path,
@@ -1921,12 +1984,14 @@ fn without(
         .collect();
     // yoagent's transport starts it in this process's folder, with the
     // `PATH` its `env` sets, if any.
+    let path = env.get("PATH").map(std::ffi::OsStr::new);
+    crate::frontend::host::startable(command.as_os_str(), None, path)?;
     let (program, argv) = crate::frontend::host::env_without(
         &names,
         command.as_os_str().to_owned(),
         args.iter().map(Into::into).collect(),
         None,
-        env.get("PATH").map(std::ffi::OsStr::new),
+        path,
     )?;
     // Every word was a `String` (the command a path the manifest or the
     // installed package names), so none is lost here.
@@ -2596,12 +2661,13 @@ mod tests {
             assert_eq!(env.get("GROQ_API_KEY").map(String::as_str), Some(""));
         }
         // Nothing withheld: the command as it is.
-        let (program, argv, _) = super::without(Path::new("/s"), &[], &env, &[]).unwrap();
-        assert_eq!((program.as_str(), argv.len()), ("/s", 0));
+        let script = dir.path().join("s.sh");
+        let (program, argv, _) = super::without(&script, &[], &env, &[]).unwrap();
+        assert_eq!((program, argv.len()), (script.display().to_string(), 0));
     }
 
     #[test]
-    fn the_dyld_note_names_the_dyld_variables_only_on_macos_while_something_is_withheld() {
+    fn the_dyld_note_names_the_dyld_variables_only_on_macos_while_something_starts_through_env() {
         let dir = tempfile::tempdir().unwrap();
         let m = |entries: &str| {
             Manifest::parse(
@@ -2611,24 +2677,57 @@ mod tests {
             )
             .unwrap()
         };
+        let note = |m: &Manifest, withheld: &[&str], vars: &[&str]| {
+            let withheld: Vec<String> = withheld.iter().map(|k| k.to_string()).collect();
+            super::dyld_note(m, &withheld, vars.iter().map(Into::into), true)
+        };
+        let said = |names: &str| {
+            format!(
+                "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get {names}: macOS protects /usr/bin/env, which drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)"
+            )
+        };
+        let key = ["DEEPSEEK_API_KEY"];
+        let vars = ["PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"];
         let server = m("[[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n");
-        let vars = || ["PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"].map(Into::into);
-        let key = ["DEEPSEEK_API_KEY".to_owned()];
-        let note = super::dyld_note(&server, &key, vars());
-        if cfg!(target_os = "macos") {
-            assert_eq!(
-                note.unwrap(),
-                "plugins and stdio MCP servers do not get `DYLD_FALLBACK_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`, set here: they start through /usr/bin/env, which macOS protects, dropping `DYLD_*` variables (only while a credential yoagent reads is set)"
-            );
-        } else {
-            assert_eq!(note, None);
-        }
-        // Nothing withheld, nothing started through `env`, or no `DYLD_*`.
-        assert_eq!(super::dyld_note(&server, &[], vars()), None);
-        assert_eq!(super::dyld_note(&m(""), &key, vars()), None);
+        assert_eq!(
+            note(&server, &key, &vars),
+            Some(said("`DYLD_FALLBACK_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`"))
+        );
+        // Only on macOS.
+        let withheld = vec!["DEEPSEEK_API_KEY".to_owned()];
+        let elsewhere = super::dyld_note(&server, &withheld, vars.map(Into::into), false);
+        assert_eq!(elsewhere, None);
+        // Nothing withheld, no `DYLD_*`, nothing started, an HTTP server
+        // only.
+        assert_eq!(note(&server, &[], &vars), None);
+        assert_eq!(note(&server, &key, &["PATH"]), None);
+        assert_eq!(note(&m(""), &key, &vars), None);
         let http = m("[[mcp]]\nname = \"h\"\nurl = \"https://mcp.example/\"\n");
-        assert_eq!(super::dyld_note(&http, &key, vars()), None);
-        assert_eq!(super::dyld_note(&server, &key, ["PATH".into()]), None);
+        assert_eq!(note(&http, &key, &vars), None);
+        // Every entry keeps what is withheld: nothing goes through `env`.
+        let kept = m(
+            "[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\ngrants = { keys = [\"DEEPSEEK_API_KEY\"] }\n\
+             [[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n\
+             env = { DEEPSEEK_API_KEY = \"${DEEPSEEK_API_KEY}\", DYLD_X = \"1\" }\n",
+        );
+        assert_eq!(note(&kept, &key, &vars), None);
+        // One more withheld: the server goes through `env`, and its own
+        // `DYLD_*` with it.
+        assert_eq!(
+            note(
+                &kept,
+                &["DEEPSEEK_API_KEY", "OPENAI_API_KEY"],
+                &["DYLD_LIBRARY_PATH"]
+            ),
+            Some(said("`DYLD_LIBRARY_PATH`, `DYLD_X`"))
+        );
+        // The terminal UI's runtime keeps nothing: started through `env`
+        // with no plugin at all.
+        let terminal = m("[frontend]\nterminal = true\n");
+        assert_eq!(
+            note(&terminal, &key, &vars),
+            Some(said("`DYLD_FALLBACK_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`"))
+        );
     }
 
     #[test]
@@ -2752,7 +2851,8 @@ mod tests {
 
     /// Through `env`, a program that is not there or cannot run would only
     /// show as `env` exiting 127 or 126: it is looked for first, as the
-    /// child will (a bare name on the `PATH` the server's `env` sets).
+    /// child will (a bare name on the `PATH` the server's `env` sets), and
+    /// for a server whatever is withheld.
     #[cfg(unix)]
     #[test]
     fn a_server_that_cannot_start_is_said_before_env_runs() {
@@ -2769,16 +2869,25 @@ mod tests {
         let missing = dir.path().join("missing.sh");
         assert_eq!(
             start(&missing, &[]).unwrap_err().to_string(),
-            format!("cannot start {}: no such file", missing.display())
+            format!("{} cannot be started: no such file", missing.display())
         );
         let script = dir.path().join("s.sh");
         std::fs::write(&script, "#!/bin/sh\n").unwrap();
         assert_eq!(
             start(&script, &[]).unwrap_err().to_string(),
-            format!("cannot start {}: it is not executable", script.display())
+            format!(
+                "{} cannot be started: it is not executable",
+                script.display()
+            )
         );
-        // A folder is no program.
-        assert!(start(dir.path(), &[]).is_err());
+        // A folder is no program, and not said to be missing.
+        assert_eq!(
+            start(dir.path(), &[]).unwrap_err().to_string(),
+            format!(
+                "{} cannot be started: it is not a file",
+                dir.path().display()
+            )
+        );
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(start(&script, &[]).unwrap().0, "/usr/bin/env");
         // A bare name: on the `PATH` the server's `env` sets, not this
@@ -2786,7 +2895,7 @@ mod tests {
         let name = Path::new("s.sh");
         assert_eq!(
             start(name, &[]).unwrap_err().to_string(),
-            "cannot start s.sh: it is not on PATH"
+            "s.sh cannot be started: it is not on PATH"
         );
         assert!(start(name, &[("PATH", dir.path())]).is_ok());
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -2794,10 +2903,15 @@ mod tests {
             start(name, &[("PATH", dir.path())])
                 .unwrap_err()
                 .to_string(),
-            "cannot start s.sh: it is on PATH but not executable"
+            "s.sh cannot be started: it is on PATH but not executable"
         );
-        // Nothing withheld: not looked at (the spawn says it, as before).
-        assert!(super::without(&missing, &[], &HashMap::new(), &[]).is_ok());
+        // Nothing withheld: looked at all the same, in the same words.
+        assert_eq!(
+            super::without(&missing, &[], &HashMap::new(), &[])
+                .unwrap_err()
+                .to_string(),
+            format!("{} cannot be started: no such file", missing.display())
+        );
     }
 
     #[test]

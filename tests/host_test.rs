@@ -389,7 +389,7 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
             .start(&root)
             .await;
         assert!(
-            matches!(&missing, Err(e) if e.to_string() == "cannot start node: it is not on PATH"),
+            matches!(&missing, Err(e) if e.to_string() == "node cannot be started: it is not on PATH"),
             "{:?}",
             missing.err().map(|e| e.to_string())
         );
@@ -405,7 +405,7 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
             format!(
                 "import {{ writeFileSync }} from 'node:fs'\n\
                  export const name = '{name}'\n\
-                 export function apply() {{ writeFileSync({:?}, JSON.stringify(process.env.{NAME} ?? null)) }}\n",
+                 export function apply() {{ writeFileSync({:?}, JSON.stringify([process.env.{NAME} ?? null, process.env.DYLD_YOBUILD_TEST ?? null])) }}\n",
                 out.display().to_string()
             ),
         )
@@ -422,6 +422,10 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
         .withhold(NAME)
         .env("two", NAME, "given")
         .keep("three", NAME)
+        // A runtime's own `DYLD_*` entry: dropped by the protected
+        // `/usr/bin/env` on macOS, where the runtime starts through it.
+        .env("one", "DYLD_YOBUILD_TEST", "1")
+        .env("three", "DYLD_YOBUILD_TEST", "1")
         .start(&root)
         .await
         .unwrap();
@@ -437,11 +441,17 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
         true => "null",
         false => r#""""#,
     };
-    assert_eq!(written(&a_out).await, gone);
-    assert_eq!(written(&b_out).await, r#""given""#);
+    // Through `env` on macOS, `DYLD_*` is gone with it; kept, nothing goes
+    // through `env`, and it arrives.
+    let dropped = match cfg!(target_os = "macos") {
+        true => "null",
+        false => r#""1""#,
+    };
+    assert_eq!(written(&a_out).await, format!("[{gone},{dropped}]"));
+    assert_eq!(written(&b_out).await, r#"["given",null]"#);
     assert_eq!(
         written(&c_out).await,
-        serde_json::to_string(&inherited).unwrap()
+        format!("[{},\"1\"]", serde_json::to_string(&inherited).unwrap())
     );
     root.shutdown().await.unwrap();
 }

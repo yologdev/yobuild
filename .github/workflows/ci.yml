@@ -119,7 +119,10 @@ jobs:
   # Credentials taken out of plugin runtimes and stdio servers go through
   # `/usr/bin/env -u` (design §12 "Step 4"): on macOS that is BSD's `env`,
   # protected by SIP (`DYLD_*` dropped). The unit tests (the `=` path, the
-  # program looked for first, the `DYLD_*` note) and the runtimes' test.
+  # program looked for first, the `DYLD_*` note), host_test's
+  # withheld-variable test (`node` not on a runtime's `PATH`; a runtime's
+  # `DYLD_*` dropped through `env`, kept without it) and cli_test's server
+  # that cannot start (its problem, fix and the `DYLD_*` note end to end).
   macos:
     name: Credentials on macOS
     runs-on: macos-latest
@@ -133,9 +136,14 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: frontend/plugins/package-lock.json
+      # Some unit tests read the adapters' row lists (`adapters/dsh/*.json`).
+      - name: Copy the adapters of the yoagent-rutis crate (adapters/)
+        run: scripts/copy-adapters.sh
       - name: Install the plugins' packages
         run: npm ci --prefix frontend/plugins
       - name: Unit tests
         run: cargo test --locked --lib
       - name: A withheld variable gone from every runtime
         run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked --test host_test a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set
+      - name: A server that cannot start, and the DYLD_* note, through the binary
+        run: cargo test --locked --test cli_test a_server_that_cannot_start_is_said_with_what_to_do

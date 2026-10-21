@@ -1492,7 +1492,7 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         stderr.contains(&format!("  Info: {withheld}\n")),
         "{stderr}"
     );
-    let dyld_note = "plugins and stdio MCP servers do not get `DYLD_YOBUILD_TEST`, set here: they start through /usr/bin/env, which macOS protects, dropping `DYLD_*` variables (only while a credential yoagent reads is set)";
+    let dyld_note = "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get `DYLD_YOBUILD_TEST`: macOS protects /usr/bin/env, which drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)";
     assert_eq!(
         stderr.contains(&format!("  Info: {dyld_note}\n")),
         cfg!(target_os = "macos"),
@@ -1537,6 +1537,9 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
         format!("it has {} taken out of its environment", keys.join(", "))
     };
+    // A pi or DSH plugin's probe alone gets them empty, which its note
+    // adds.
+    let probed = |note: String| format!("{note}; its probe alone gets them empty");
     let all = taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY"]);
     assert_eq!(
         notes(&report, "server"),
@@ -1546,13 +1549,16 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         ]
     );
     // Its config refers to the key: handed over in its config, not left in
-    // its runtime.
+    // its runtime, which the note says.
     assert_eq!(
         notes(&report, "plug"),
-        [given("DEEPSEEK_API_KEY"), all.clone()]
+        [
+            given("DEEPSEEK_API_KEY"),
+            format!("{all} (its `config` still gets `DEEPSEEK_API_KEY`, filled in at start)")
+        ]
     );
-    assert_eq!(notes(&report, "pi"), std::slice::from_ref(&all), "{report}");
-    assert_eq!(notes(&report, "dsh"), [all], "{report}");
+    assert_eq!(notes(&report, "pi"), [probed(all.clone())], "{report}");
+    assert_eq!(notes(&report, "dsh"), [probed(all)], "{report}");
     // Beside the model's limits (`acme` has no preset), the keys withheld.
     let agent_notes = report["agent"]["notes"].as_array().unwrap();
     let said: Vec<_> = agent_notes
@@ -1608,14 +1614,14 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         notes(&report, "pi"),
         [
             given("ACME_KEY"),
-            taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY"])
+            probed(taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY"]))
         ]
     );
     assert_eq!(
         notes(&report, "dsh"),
         [
             given("OPENAI_API_KEY"),
-            taken(&["DEEPSEEK_API_KEY", "ACME_KEY"])
+            probed(taken(&["DEEPSEEK_API_KEY", "ACME_KEY"]))
         ]
     );
     assert_eq!(
@@ -1631,12 +1637,116 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         r#"keys = ["GROQ_API_KEY"]"#, r#"keys = ["OPENAI_API_KEY"]"#,
         r#"keys = ["DEEPSEEK_API_KEY"]"#,
     );
+    let unset =
+        "its `keys` grant names `GROQ_API_KEY`, unset or empty here: it gets no key from it";
     let (report, _) = check();
     assert_eq!(
         notes(&report, "pi"),
         [
-            "its `keys` grant names `GROQ_API_KEY`, not set here: it gets none of them".to_owned(),
-            taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY"]),
+            unset.to_owned(),
+            probed(taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY"])),
         ]
     );
+    // `run` says it too, as a Warning: the plugin fails at its first call.
+    let out = with_keys(&run);
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!("  Warning: plugin pi: {unset}\n")),
+        "{stderr}"
+    );
+    for name in ["pi", "dsh", "rutis", "mcp"] {
+        lines(name, &stderr);
+    }
+}
+
+/// A stdio server whose program cannot run is said before anything starts
+/// through `/usr/bin/env` (design §12 "Step 4", found after the merge):
+/// `check` names it as the server's problem, with its fix, and `run`
+/// refuses with what to do — in the same words whether a key is set or not.
+/// With a key set, on macOS, the `DYLD_*` variables it would lose are named
+/// (run on macOS by CI's `macos` job).
+#[cfg(unix)]
+#[test]
+fn a_server_that_cannot_start_is_said_with_what_to_do() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
+         [[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
+    let server = dir.path().join("s.sh");
+    std::fs::write(&server, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let said = format!(
+        "{} cannot be started: it is not executable",
+        server.display()
+    );
+    let fix = "the program a stdio MCP server or a plugin runtime (Node) runs is missing";
+    // On macOS cargo sets `DYLD_*` variables for the tests: removed, and
+    // one of ours set.
+    let dyld: Vec<_> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| name.to_string_lossy().starts_with("DYLD_"))
+        .collect();
+    let yobuild = |key: Option<&str>, args: &[&str]| {
+        let mut command = bin();
+        for name in &dyld {
+            command.env_remove(name);
+        }
+        if let Some(key) = key {
+            command.env("DEEPSEEK_API_KEY", key);
+        }
+        command
+            .env("DYLD_YOBUILD_TEST", "1")
+            .env_remove("RUST_LOG")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+    };
+    for key in [Some("sk-d"), None] {
+        let out = yobuild(key, &["check", "agent.toml", "--json"]);
+        let stderr = text(&out.stderr);
+        assert!(!out.status.success(), "{stderr}");
+        let report: serde_json::Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {stderr}"));
+        let problem = &report["entries"][0]["problems"][0];
+        assert_eq!(report["entries"][0]["name"], "s", "{report}");
+        assert!(
+            problem["message"].as_str().unwrap().contains(&said),
+            "{report}"
+        );
+        assert!(
+            problem["fix"].as_str().unwrap().starts_with(fix),
+            "{report}"
+        );
+        let dyld_said = report["agent"]["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| {
+                n.as_str()
+                    .unwrap()
+                    .contains("does not get `DYLD_YOBUILD_TEST`")
+            });
+        assert_eq!(
+            dyld_said,
+            key.is_some() && cfg!(target_os = "macos"),
+            "{report}"
+        );
+    }
+    let out = yobuild(
+        Some("sk-d"),
+        &[
+            "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+        ],
+    );
+    let stderr = text(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains(&said), "{stderr}");
+    assert!(stderr.contains(&format!("  what to do: {fix}")), "{stderr}");
 }

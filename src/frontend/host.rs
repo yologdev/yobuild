@@ -273,6 +273,7 @@ const SH: &str = "/bin/sh";
 /// looked for first ([`startable`]), as the child will — a path from `cwd`
 /// (the child's folder; `None`: this process's), a bare name on `path`
 /// (the child's `PATH` when the launch sets one; `None`: this process's).
+/// `/bin/sh` is needed only for a program whose path holds `=`.
 #[cfg(unix)]
 pub(crate) fn env_without(
     names: &[impl AsRef<std::ffi::OsStr>],
@@ -294,7 +295,7 @@ pub(crate) fn env_without(
     {
         let names: Vec<_> = names.iter().map(|n| n.as_ref().to_string_lossy()).collect();
         return Err(format!(
-            "cannot take {} out of {}'s environment: {missing} is not there, and yobuild needs it to start plugin runtimes and stdio MCP servers while a credential yoagent reads is set",
+            "cannot take {} out of {}'s environment: {missing} is not there, and yobuild needs it to start a plugin runtime or stdio MCP server while a credential yoagent reads is taken out of its environment",
             names.join(", "),
             Path::new(&program).display()
         )
@@ -316,55 +317,104 @@ pub(crate) fn env_without(
     Ok((ENV.into(), wrapped))
 }
 
-/// `program` names a file the child can execute, found as `execvp` finds
-/// it: a name holding `/` from `cwd`, else each folder of `path` (unset:
-/// `/bin:/usr/bin`, `execvp`'s default; an empty entry is the child's
-/// folder). The error says which program and why, in the words of a spawn
-/// that fails.
+/// `program` names a file this user may execute (`access(X_OK)`, the
+/// kernel's answer for the real user, so an ACL counts and another
+/// user's 0744 file does not; a `noexec` mount is not seen), found as
+/// `execvp` finds it: a name holding `/` from `cwd`, else each folder of
+/// `path`, else of this process's `PATH`, else of `/bin:/usr/bin` (an
+/// empty entry is the child's folder). The error says which program and
+/// why: "X cannot be started: no such file", "it is not a file", "it is
+/// not executable", "it is not on PATH", "it is on PATH but not
+/// executable", "it is not on PATH where it could be looked at (…)", or
+/// the system's own error (a folder it may not search, a symlink loop) —
+/// never "no such file" for a file that is there.
 #[cfg(unix)]
-fn startable(
+pub(crate) fn startable(
     program: &std::ffi::OsStr,
     cwd: Option<&Path>,
     path: Option<&std::ffi::OsStr>,
 ) -> Result<(), BoxError> {
-    use std::os::unix::fs::PermissionsExt;
     let from = |p: &Path| match cwd {
         Some(cwd) if p.is_relative() => cwd.join(p),
         _ => p.to_path_buf(),
     };
-    // Some(true): there and executable; Some(false): there, not
-    // executable; None: not there (or not a file).
-    let state = |p: &Path| {
-        std::fs::metadata(p)
-            .ok()
-            .filter(|m| m.is_file())
-            .map(|m| m.permissions().mode() & 0o111 != 0)
-    };
     let shown = Path::new(program).display();
+    let failed = |why: &dyn std::fmt::Display| -> BoxError {
+        format!("{shown} cannot be started: {why}").into()
+    };
     if program.as_encoded_bytes().contains(&b'/') {
-        return match state(&from(Path::new(program))) {
-            Some(true) => Ok(()),
-            Some(false) => Err(format!("cannot start {shown}: it is not executable").into()),
-            None => Err(format!("cannot start {shown}: no such file").into()),
+        return match runnable(&from(Path::new(program))) {
+            Ok(()) => Ok(()),
+            Err(Unrunnable::Missing) => Err(failed(&"no such file")),
+            Err(Unrunnable::NotFile) => Err(failed(&"it is not a file")),
+            Err(Unrunnable::NotExecutable) => Err(failed(&"it is not executable")),
+            Err(Unrunnable::Failed(e)) => Err(failed(&e)),
         };
     }
     let search = path
         .map(OsString::from)
         .or_else(|| std::env::var_os("PATH"))
         .unwrap_or_else(|| "/bin:/usr/bin".into());
-    let mut found = false;
+    // As `execvp`: the first that runs; else what kept the others from it.
+    let mut not_executable = false;
+    let mut error: Option<(PathBuf, std::io::Error)> = None;
     for dir in std::env::split_paths(&search) {
-        match state(&from(&dir.join(program))) {
-            Some(true) => return Ok(()),
-            Some(false) => found = true,
-            None => {}
+        let candidate = from(&dir.join(program));
+        match runnable(&candidate) {
+            Ok(()) => return Ok(()),
+            Err(Unrunnable::NotExecutable) => not_executable = true,
+            Err(Unrunnable::Failed(e)) => {
+                error.get_or_insert((candidate, e));
+            }
+            Err(Unrunnable::Missing | Unrunnable::NotFile) => {}
         }
     }
-    Err(match found {
-        true => format!("cannot start {shown}: it is on PATH but not executable"),
-        false => format!("cannot start {shown}: it is not on PATH"),
+    Err(match (not_executable, error) {
+        (true, _) => failed(&"it is on PATH but not executable"),
+        (false, Some((at, e))) => failed(&format!(
+            "it is not on PATH where it could be looked at ({}: {e})",
+            at.display()
+        )),
+        (false, None) => failed(&"it is not on PATH"),
+    })
+}
+
+/// Why [`runnable`] refused a path.
+#[cfg(unix)]
+enum Unrunnable {
+    /// Nothing there (`ENOENT`, `ENOTDIR`).
+    Missing,
+    /// A folder, a socket, …
+    NotFile,
+    /// A file this user may not execute.
+    NotExecutable,
+    /// The system's error (`EACCES` on a folder in the way, `ELOOP`, …).
+    Failed(std::io::Error),
+}
+
+/// `path` is a file this user may execute.
+#[cfg(unix)]
+fn runnable(path: &Path) -> Result<(), Unrunnable> {
+    use std::os::unix::ffi::OsStrExt;
+    match std::fs::metadata(path) {
+        Ok(meta) if !meta.is_file() => return Err(Unrunnable::NotFile),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Unrunnable::Missing),
+        Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => return Err(Unrunnable::Missing),
+        Err(e) => return Err(Unrunnable::Failed(e)),
     }
-    .into())
+    let Ok(text) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        // A NUL in the path: nothing can start it.
+        return Err(Unrunnable::Missing);
+    };
+    // SAFETY: `text` is a valid NUL-terminated string that outlives the call.
+    match unsafe { libc::access(text.as_ptr(), libc::X_OK) } {
+        0 => Ok(()),
+        _ => match std::io::Error::last_os_error() {
+            e if e.raw_os_error() == Some(libc::EACCES) => Err(Unrunnable::NotExecutable),
+            e => Err(Unrunnable::Failed(e)),
+        },
+    }
 }
 
 /// The type [`PluginHostBuilder::local`] names its services for: never
@@ -860,6 +910,74 @@ enum Started {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `startable` looks for a program as `execvp` will, from the child's
+    /// folder, and says why one cannot start without calling a file that is
+    /// there missing.
+    #[cfg(unix)]
+    #[test]
+    fn a_program_is_looked_for_as_the_child_will_and_its_errors_kept_apart() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let bin = cwd.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let tool = bin.join("tool");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start = |program: &str, cwd: Option<&Path>, path: Option<&str>| {
+            startable(
+                std::ffi::OsStr::new(program),
+                cwd,
+                path.map(std::ffi::OsStr::new),
+            )
+            .map_err(|e| e.to_string())
+        };
+        // A relative path and a relative `PATH` entry: from the child's
+        // folder, not this process's.
+        assert_eq!(start("bin/tool", Some(cwd), None), Ok(()));
+        assert_eq!(start("tool", Some(cwd), Some("bin")), Ok(()));
+        // An empty entry is the child's folder.
+        assert_eq!(start("bin/tool", Some(cwd), Some("")), Ok(()));
+        assert_eq!(start("tool", Some(&bin), Some(":/nowhere")), Ok(()));
+        // A later entry that runs wins over an earlier one that does not.
+        let early = cwd.join("early");
+        std::fs::create_dir(&early).unwrap();
+        std::fs::write(early.join("tool"), "").unwrap();
+        let both = format!("{}:{}", early.display(), bin.display());
+        assert_eq!(start("tool", None, Some(&both)), Ok(()));
+        // A symlink loop is the system's error, not "no such file".
+        let looped = cwd.join("loop");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        let e = start(looped.to_str().unwrap(), None, None).unwrap_err();
+        assert!(
+            e.starts_with(&format!("{} cannot be started: ", looped.display()))
+                && !e.ends_with("no such file"),
+            "{e}"
+        );
+        // A folder this user may not search: said, the file not called
+        // missing. (Root searches it anyway.)
+        // SAFETY: `geteuid` has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            let shut = cwd.join("shut");
+            std::fs::create_dir(&shut).unwrap();
+            std::fs::write(shut.join("tool"), "").unwrap();
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let e = start(shut.join("tool").to_str().unwrap(), None, None).unwrap_err();
+            let e2 = start("tool", None, Some(shut.to_str().unwrap())).unwrap_err();
+            std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(
+                !e.ends_with("no such file") && e.contains("ermission denied"),
+                "{e}"
+            );
+            assert!(
+                e2.starts_with(
+                    "tool cannot be started: it is not on PATH where it could be looked at ("
+                ) && e2.contains("ermission denied"),
+                "{e2}"
+            );
+        }
+    }
 
     #[test]
     fn rows_from_file_reads_ids_names_and_configs_and_names_the_file_on_errors() {

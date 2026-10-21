@@ -213,12 +213,13 @@ through its `url` or `headers`, a DSH or rutis plugin through a `${NAME}`
 in its `config`, any plugin through `grants = { keys = [...] }` (its
 whole runtime gets it). `check` notes each ("it is given `X`, a
 credential yoagent reads: what it spends with it is not metered"); a
-`keys` grant naming a variable that is not set gets nothing, which `check`
-says ("its `keys` grant names `X`, not set here: it gets none of them").
-When entries lose different credentials, `check` notes on each what it
-has taken out. On macOS, while a credential is withheld, `DYLD_*`
-variables do not reach plugins or stdio servers either (`check` and `run`
-name them). Tell the person before you hand one over. This is not a sandbox: a plugin can
+`keys` grant naming a variable that is unset or empty gets nothing, which
+`check` and `run` say ("its `keys` grant names `X`, unset or empty here:
+it gets no key from it"). When entries lose different credentials,
+`check` notes on each what it has taken out. On macOS, `DYLD_*` variables
+do not reach what starts through `/usr/bin/env` (a plugin runtime or
+stdio server with a credential taken out, the terminal UI) either:
+`check` and `run` name them. Tell the person before you hand one over. This is not a sandbox: a plugin can
 still read a key from a file the person keeps it in (`~/.aws/credentials`,
 a shell profile), and other secrets (`GITHUB_TOKEN`, `NPM_TOKEN`) still
 pass. A plugin that fails with an authentication error, or says a feature

@@ -2243,35 +2243,57 @@ no hint can match them.
 **Where `env` falls short** (unix; found in review). `env` reads a word
 holding `=` before the program as an assignment, so a program whose path
 holds one runs through `/bin/sh -c 'exec "$0" "$@"'` (still one process).
-With no `/usr/bin/env`, starting a runtime or server is refused rather
-than the variables left in, saying that yobuild needs it while a credential
-is set (hint `no-env`; the agent's own key always is, so on an image
-without it nothing with a plugin starts: install it). On macOS
-`/usr/bin/env` is protected, so `DYLD_*` variables do not reach a runtime
-or server either — only while a credential is withheld; not worked around,
-but said: `run` (an Info notice) and `check` (an agent note) name the
-`DYLD_*` variables set here that plugins and stdio servers will not get
-(`run::dyld_note`), when one would start.
+With no `/usr/bin/env` (or `/bin/sh`, for a program whose path holds
+`=`), starting a runtime or server that has a credential taken out is
+refused rather than the variables left in, saying that yobuild needs it
+(hint `no-env`; the agent's own key usually is set — not under
+`--scripted` or with a local provider — so on an image without it no
+plugin runtime, stdio server or terminal UI starts: install it). On macOS
+`/usr/bin/env` is protected, so `DYLD_*` variables do not reach what
+starts through it either — only while a credential is taken out of that
+runtime's or server's environment; not worked around, but said: `run` (an
+Info notice) and `check` (an agent note) name the `DYLD_*` variables it
+will not get (`run::dyld_note`: this process's, and a stdio server's own
+`env` entries), when something does start through `env` — a plugin whose
+`keys` do not keep every one, a stdio server whose `env` does not set
+every one, or the terminal UI, which keeps none.
 
-**Found after the merge** (the yoagent session's review of #55).
+**Found after the merge** (the yoagent session's review of #55, then
+#56's own review).
 - Spawning `env` succeeds whatever the program is, so a server or runtime
   program that is not there or cannot run showed only as `env` exiting
   127 or 126 ("MCP server '/usr/bin/env' exited …", "Cordis process exited
-  before connecting …"). `env_without` now looks for it first, as `execvp`
-  will — a path from the child's folder, a bare name (`node`) on the
-  child's `PATH` (the launch's own when it sets one) — and refuses with
-  "cannot start X: no such file" / "it is not executable" / "it is not on
-  PATH" (hint `cannot-start`). Nothing withheld: not looked at; the spawn
-  says it, as before.
-- A `keys` grant naming a variable not set here hands nothing over: `check`
-  says so on the entry ("its `keys` grant names `X`, not set here: it gets
-  none of them", `run::keys_unset`) instead of "it is given `X`".
+  before connecting …"). `frontend::host::startable` now looks for it
+  first, as `execvp` will — a path from the child's folder, a bare name
+  (`node`) on the child's `PATH` (the launch's own when it sets one, else
+  this process's, else `/bin:/usr/bin`; an empty or relative entry from
+  the child's folder) — asking the system whether this user may run it
+  (`access(X_OK)`: an ACL counts, another user's 0744 file does not; a
+  `noexec` mount is not seen), and refuses with "X cannot be started: no
+  such file" / "it is not a file" / "it is not executable" / "it is not on
+  PATH" / "it is on PATH but not executable" / "it is not on PATH where it
+  could be looked at (…)", or the system's own error (a folder it may not
+  search, a symlink loop) — never "no such file" for a file that is there
+  (hint `cannot-start`, matching these words only: rutis says its own spawn
+  failures as "cannot start X: …", whose cause may be anything, and gets
+  no hint). A runtime's program is looked for only when it starts through
+  `env`; a stdio server's always, so a missing one is said alike with a
+  key set or not.
+- A `keys` grant naming only what is unset or empty here
+  (`run::key_is_set`: one exported empty hands over nothing usable) hands
+  nothing over: `check` says so on the entry ("its `keys` grant names `X`,
+  unset or empty here: it gets no key from it", `run::keys_unset`) instead
+  of "it is given `X`", and `run` as a Warning ("plugin P: …").
 - When the entries lose different credentials (a `keys` grant or a
   server's `env` keeps some for one), `check` notes on each plugin and
-  stdio server what it has taken out (`run::withheld_from`), beside the
-  combined note; alike, the combined note alone.
-- `Plan::keep`'s rule (one runtime, one `keys`) is an error, not only a
-  debug assertion, should the manifest's checks ever loosen.
+  stdio server what it has taken out (`run::withheld_from`; "set empty"
+  off unix, `TAKEN_ONE`), beside the combined note — a pi or DSH plugin's
+  adding that its probe alone gets them empty, and a plugin whose `config`
+  refers to one that it still gets it there; alike, the combined note
+  alone.
+- `Plan::keep`'s rule (one runtime, one `keys`) is an error naming the
+  plugins, not only a debug assertion, should the manifest's checks ever
+  loosen.
 
 **Tests.**
 - `cli_test`, the binary with `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, a
@@ -2300,16 +2322,29 @@ but said: `run` (an Info notice) and `check` (an agent note) name the
   rutis plugins of one package refused with different `keys` (two
   packages may differ).
 - `src/run.rs`: a server's command in a folder named with `=` runs, each
-  name taken out once; a program missing, not executable, or not on the
-  `PATH` its `env` sets refused before `env` runs (and not looked at with
-  nothing withheld); the `DYLD_*` note only on macOS, with something
-  withheld and started through `env`; each entry's losses said only when
-  they differ; a `keys` grant of an unset name said as such. Host test:
-  `node` not on a runtime's `PATH` refused at `start`.
+  name taken out once; a program missing, not a file, not executable, or
+  not on the `PATH` its `env` sets refused before `env` runs (and with
+  nothing withheld too); the `DYLD_*` note only on macOS and only when
+  something starts through `env` (not when every entry keeps what is
+  withheld; with the terminal UI and no plugin; a server's own `DYLD_*`
+  `env` entry named); each entry's losses said only when they differ; a
+  `keys` grant of an unset name said as such. `src/frontend/host.rs`:
+  relative and empty `PATH` entries from the child's folder, a later entry
+  that runs winning, a symlink loop and a folder this user may not search
+  said in the system's words. Host test: `node` not on a runtime's `PATH`
+  refused at `start`; a runtime's `DYLD_*` entry gone through `env` on
+  macOS, arriving where nothing goes through it. `cli_test`
+  `a_server_that_cannot_start_is_said_with_what_to_do`: `check`'s problem
+  and fix, with a key and without, `run`'s refusal with what to do, the
+  `DYLD_*` note on macOS; the credentials test: `run`'s Warning for an
+  unset grant. `src/hints.rs`: `cannot-start` not given for rutis's own
+  spawn failure or a server's words.
 - `src/run/plugins.rs`: `Plan::keep` refuses a runtime whose plugins keep
-  different `keys`.
-- CI job `macos`: the unit tests and the runtimes' host test on macOS (BSD
-  `env`, SIP).
+  different `keys`, naming them.
+- CI job `macos`: the unit tests, host_test's
+  `a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set` and
+  cli_test's `a_server_that_cannot_start_is_said_with_what_to_do` on
+  macOS (BSD `env`, SIP).
 
 **History.** Proposed 2026-10-21 as *blanked* (set empty everywhere, true
 removal waiting for rutis's `Launcher::env_remove`), AWS's and Cloudflare's
@@ -2333,7 +2368,8 @@ every launch made before a runtime is registered), `Plan::keys` / `kept` (the ru
 `plan`'s, which knows the packages), `run::withheld`, the MCP launch's
 `withheld`, `run::withheld_note` (`run`'s notice, `check`'s note),
 `run::keys_given`; after the merge `frontend::host::startable`,
-`run::keys_unset`, `run::withheld_from`, `run::dyld_note`, the hints
+`run::key_is_set`, `run::keys_unset`, `run::unset_grant_note`,
+`run::withheld_from`, `run::dyld_note`, `run::TAKEN_ONE`, the hints
 `cannot-start` and `no-env`, the `macos` CI job; the tests listed above,
 `cli_test` `plugins_and_servers_have_the_credentials_taken_out_unless_handed_one`
 and host_test

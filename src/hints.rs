@@ -210,13 +210,16 @@ pub(crate) const HINTS: &[Hint] = &[
     Hint {
         id: "cannot-start",
         scope: Scope::Start,
-        pattern: "cannot start ",
-        fix: "the program a stdio MCP server or a plugin runtime runs is missing or not executable: fix the server's path (or install its package again), or install Node for the plugin runtimes",
+        // `frontend::host::startable`'s words only: rutis says its own spawn
+        // failures as "cannot start X: …", whose cause may be anything (the
+        // terminal not there), and a server's own text may say it too.
+        pattern: " cannot be started: ",
+        fix: "the program a stdio MCP server or a plugin runtime (Node) runs is missing, not executable for you, or behind a folder you cannot read: fix the server's path or the permissions, install its package again, or install Node",
     },
     Hint {
         id: "no-env",
         scope: Scope::Start,
-        pattern: "is not there, and yobuild needs it to start plugin runtimes",
+        pattern: "is not there, and yobuild needs it to start a plugin runtime or stdio MCP server",
         fix: "install `env` at /usr/bin/env (and /bin/sh), which a minimal image may lack: yobuild starts every plugin runtime and stdio server through it while a credential yoagent reads is set",
     },
     Hint {
@@ -393,18 +396,18 @@ mod tests {
             // `frontend::host::startable`'s words, through `run::mcp`.
             (
                 Scope::Start,
-                "mcp files: cannot start /p/s.sh: no such file".into(),
+                "mcp files: /p/s.sh cannot be started: no such file".into(),
                 "cannot-start",
             ),
             (
                 Scope::Start,
-                "cannot start node: it is not on PATH".into(),
+                "node cannot be started: it is not on PATH".into(),
                 "cannot-start",
             ),
             // `frontend::host::env_without`'s.
             (
                 Scope::Start,
-                "cannot take OPENAI_API_KEY out of node's environment: /usr/bin/env is not there, and yobuild needs it to start plugin runtimes and stdio MCP servers while a credential yoagent reads is set".into(),
+                "cannot take OPENAI_API_KEY out of node's environment: /usr/bin/env is not there, and yobuild needs it to start a plugin runtime or stdio MCP server while a credential yoagent reads is taken out of its environment".into(),
                 "no-env",
             ),
             (Scope::Start, "mcp files: the server lists no tools".into(), "mcp-no-tools"),
@@ -453,6 +456,14 @@ mod tests {
         }
         // A provider's error text inside a check problem: not the model's key.
         assert!(hint(Scope::Start, "mcp api: Auth error: HTTP 401").is_none());
+        // rutis's own spawn failure (here the terminal not there), and a
+        // server's own words: not a program yobuild looked for.
+        assert!(hint(
+            Scope::Start,
+            "cannot start node: Device not configured (os error 6)"
+        )
+        .is_none());
+        assert!(hint(Scope::Start, "mcp db: cannot start database: locked").is_none());
         // The session budget before the run's.
         assert_eq!(
             hint(

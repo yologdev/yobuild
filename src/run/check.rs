@@ -432,19 +432,14 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             None => agent_notes.push(note.clone()),
         }
     }
+    // A `keys` grant naming only what is unset (or empty) here hands
+    // nothing over: said, so the plugin is not taken to have it.
+    let set = super::key_is_set;
+    for (name, keys) in super::keys_unset(&manifest, set) {
+        entry_notes.push((name, super::unset_grant_note(&keys)));
+    }
     // A credential handed over on purpose reaches the entry (design §12,
     // "Step 4"): what it spends with it is outside the budget.
-    let set = |name: &str| std::env::var_os(name).is_some();
-    for (name, keys) in super::keys_unset(&manifest, set) {
-        let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
-        entry_notes.push((
-            name,
-            format!(
-                "its `keys` grant names {}, not set here: it gets none of them",
-                keys.join(", ")
-            ),
-        ));
-    }
     for (name, keys) in super::keys_given(&manifest, set) {
         let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
         entry_notes.push((
@@ -463,17 +458,34 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         .plugins
         .iter()
         .any(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_)));
+    // Each entry's, when they differ: a plugin whose `config` refers to one
+    // still gets it there (beside "it is given"), and a pi or DSH plugin's
+    // probe alone gets them empty.
     for (name, lost) in super::withheld_from(&manifest, &withheld) {
+        let plugin = manifest.plugins.iter().find(|p| p.name == name);
+        let filled: Vec<String> = lost
+            .iter()
+            .filter(|k| plugin.is_some_and(|p| p.config_references().contains(k)))
+            .map(|k| format!("`{k}`"))
+            .collect();
         let lost: Vec<String> = lost.iter().map(|k| format!("`{k}`")).collect();
-        entry_notes.push((
-            name,
-            format!("it has {} taken out of its environment", lost.join(", ")),
-        ));
+        let mut note = format!("it has {} {}", lost.join(", "), super::TAKEN_ONE);
+        if !filled.is_empty() {
+            note.push_str(&format!(
+                " (its `config` still gets {}, filled in at start)",
+                filled.join(", ")
+            ));
+        }
+        if plugin.is_some_and(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_))) {
+            note.push_str("; its probe alone gets them empty");
+        }
+        entry_notes.push((name, note));
     }
     agent_notes.extend(super::dyld_note(
         &manifest,
         &withheld,
         std::env::vars_os().map(|(k, _)| k),
+        cfg!(target_os = "macos"),
     ));
     agent_notes.extend(
         super::withheld_note(&manifest, &withheld).map(|note| match probed {
