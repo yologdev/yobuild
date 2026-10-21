@@ -353,15 +353,31 @@ async fn env_reaches_only_its_runtime_and_an_unknown_one_is_an_error() {
     root.shutdown().await.unwrap();
 }
 
-#[tokio::test]
-async fn a_blanked_variable_reaches_every_runtime_empty_unless_its_env_sets_it() {
+/// A withheld variable is taken out of every runtime's environment (the
+/// runtime started through `env -u`), but where `keep` or an `env` entry of
+/// that name says otherwise; `keep` for a runtime that is not started is an
+/// error.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
     if !runtime_installed() {
         return;
     }
     // Set by cargo for the tests: what a runtime would inherit.
     const NAME: &str = "CARGO_MANIFEST_DIR";
-    assert!(std::env::var_os(NAME).is_some_and(|v| !v.is_empty()));
+    let inherited = std::env::var(NAME).unwrap();
+    assert!(!inherited.is_empty());
     let root = Ctx::root().unwrap();
+    let wrong = PluginHost::builder()
+        .node("ui", plugins())
+        .withhold(NAME)
+        .keep("iu", NAME)
+        .start(&root)
+        .await;
+    assert!(
+        matches!(&wrong, Err(e) if e.to_string().contains("`iu`")),
+        "a typo must not pass"
+    );
+
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
     let writer = |name: &str| {
@@ -372,7 +388,7 @@ async fn a_blanked_variable_reaches_every_runtime_empty_unless_its_env_sets_it()
             format!(
                 "import {{ writeFileSync }} from 'node:fs'\n\
                  export const name = '{name}'\n\
-                 export function apply() {{ writeFileSync({:?}, JSON.stringify(process.env.{NAME})) }}\n",
+                 export function apply() {{ writeFileSync({:?}, JSON.stringify(process.env.{NAME} ?? null)) }}\n",
                 out.display().to_string()
             ),
         )
@@ -381,22 +397,35 @@ async fn a_blanked_variable_reaches_every_runtime_empty_unless_its_env_sets_it()
     };
     let (a, a_out) = writer("a");
     let (b, b_out) = writer("b");
+    let (c, c_out) = writer("c");
     let mut host = PluginHost::builder()
         .node("one", plugins())
         .node("two", plugins())
-        .blank(NAME)
+        .node("three", plugins())
+        .withhold(NAME)
         .env("two", NAME, "given")
+        .keep("three", NAME)
         .start(&root)
         .await
         .unwrap();
     host.load([
         Row::new("a", a.display()).runtime("one"),
         Row::new("b", b.display()).runtime("two"),
+        Row::new("c", c.display()).runtime("three"),
     ])
     .await
     .unwrap();
-    assert_eq!(written(&a_out).await, r#""""#);
+    // Gone, not empty (set empty only where there is no `env` to exec).
+    let gone = match cfg!(unix) {
+        true => "null",
+        false => r#""""#,
+    };
+    assert_eq!(written(&a_out).await, gone);
     assert_eq!(written(&b_out).await, r#""given""#);
+    assert_eq!(
+        written(&c_out).await,
+        serde_json::to_string(&inherited).unwrap()
+    );
     root.shutdown().await.unwrap();
 }
 

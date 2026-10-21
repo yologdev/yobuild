@@ -173,6 +173,12 @@ And optionally:
   of a grant (not trusted, no model) and a `pi.exec` refused are Warning
   notices naming the grant. Every pi extension sees the conversation
   (`message_end`, `context`, observer events): there is no grant for it.
+  On any plugin, `keys = ["OPENAI_API_KEY", …]`: those credentials are
+  left in its runtime's environment (below, **Model keys**) — only names
+  yoagent reads a credential from (and the agent's `api_key_env`), each
+  once, and the same on every pi plugin or none, every DSH plugin or none,
+  every rutis plugin of one package or none (they share one runtime). It
+  starts no DSH host.
 - `config = { ... }`: a table; every string in it may hold `${NAME}`
   references, and a key named like a secret (`token`, `key`, `password`,
   `auth`, …) must hold only references, plus at most a scheme word
@@ -193,19 +199,24 @@ A server may want absolute paths (`check --json` shows its parameters):
 the prompt builds them from `{cwd}`, and the reply files write
 `"{cwd}/…"`.
 
-**Model keys.** Plugins and MCP servers get each model key variable set
-in the environment (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, …, `API_KEY`,
-the agent's `api_key_env`) empty, in `run` and in `check` alike, so they
-cannot call a model outside the run's budget. `check` says which, as an
-agent note. AWS's own credentials stay, so a plugin can still reach
-Bedrock with them. A server or plugin that truly needs a key is handed it
-on purpose: a stdio server through its `env`
+**Model keys.** Plugins and stdio MCP servers have every credential
+yoagent reads that is set in the environment (`DEEPSEEK_API_KEY`,
+`OPENAI_API_KEY`, …, AWS's `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
+`AWS_SESSION_TOKEN`, Cloudflare's tokens, `API_KEY`, the agent's
+`api_key_env`) taken out of their environment, in `run` and in `check`
+alike, so they cannot call a model outside the run's budget. `check` says
+which, as an agent note. A server or plugin that truly needs one is handed
+it on purpose: a stdio server through its `env`
 (`OPENAI_API_KEY = "${OPENAI_API_KEY}"`) or its `args`, an HTTP server
 through its `url` or `headers`, a DSH or rutis plugin through a `${NAME}`
-in its `config`. A pi extension cannot be handed one. `check` notes each
-key handed over ("its model calls are not metered"). Tell the person
-before you hand one over. A plugin that fails with an authentication
-error, or says a feature is off, may be one that wanted a key.
+in its `config`, any plugin through `grants = { keys = [...] }` (its
+whole runtime gets it). `check` notes each ("it is given `X`, a
+credential yoagent reads: what it spends with it is not metered"). Tell
+the person before you hand one over. This is not a sandbox: a plugin can
+still read a key from a file the person keeps it in (`~/.aws/credentials`,
+a shell profile), and other secrets (`GITHUB_TOKEN`, `NPM_TOKEN`) still
+pass. A plugin that fails with an authentication error, or says a feature
+is off, may be one that wanted a key.
 
 **Pins.** Every package is `name@1.2.3` (exact; `1.2.3-beta.1` too) or a
 local path (`./`, `../`, `/`). Tags, ranges, `git`, URLs and `file:` are

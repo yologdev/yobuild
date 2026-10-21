@@ -432,39 +432,44 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             None => agent_notes.push(note.clone()),
         }
     }
-    // A model's key handed over on purpose reaches the entry (design §12,
-    // "Step 4"): what it calls with it is outside the budget.
+    // A credential handed over on purpose reaches the entry (design §12,
+    // "Step 4"): what it spends with it is outside the budget.
     for (name, keys) in super::keys_given(&manifest) {
         let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
         entry_notes.push((
             name,
             format!(
-                "it is given {}, a model's key: its model calls are not metered",
+                "it is given {}, a credential yoagent reads: what it spends with it is not metered",
                 keys.join(", ")
             ),
         ));
     }
-    // Plugins and stdio servers get the model keys set here empty (design
-    // §12, "Step 4"): one that needs a key fails at its first call, which
-    // this says before then.
-    let blanked = super::blanked(&manifest);
+    // Plugins and stdio servers have the credentials set here taken out
+    // (design §12, "Step 4"): one that needs a key fails at its first call,
+    // which this says before then.
+    let withheld = super::withheld(&manifest);
     let any_stdio = manifest
         .mcp
         .iter()
         .any(|s| matches!(s.transport, crate::manifest::Transport::Stdio { .. }));
-    if !blanked.is_empty() && (!manifest.plugins.is_empty() || any_stdio) {
-        let names: Vec<String> = blanked.iter().map(|k| format!("`{k}`")).collect();
+    if !withheld.is_empty() && (!manifest.plugins.is_empty() || any_stdio) {
+        let names: Vec<String> = withheld.iter().map(|k| format!("`{k}`")).collect();
         agent_notes.push(format!(
-            "plugins and MCP servers get the model keys set here empty ({}): one that needs a key gets it only from its entry (`\"${{NAME}}\"` in its `config`, or a server's `env`), and its model calls are not metered",
+            "plugins and MCP servers have the credentials yoagent reads set here taken out of their environment ({}): one that needs one gets it only from its entry (a `keys` grant, `\"${{NAME}}\"` in its `config`, or a server's `env`), and what it spends with it is not metered",
             names.join(", ")
         ));
     }
-    // The probes alone run as `run` runs plugins: those keys empty.
-    let probe_options = blanked
-        .iter()
-        .fold(yoagent_rutis::probe::ProbeOptions::default(), |o, name| {
-            o.env(name, "")
-        });
+    // The pi and DSH probes alone run as `run` runs plugins, but for the
+    // launch, which yoagent-rutis builds: what is withheld from the plugin
+    // set empty instead.
+    let probe_options = |plugin: &crate::manifest::Plugin| {
+        withheld
+            .iter()
+            .filter(|name| !plugin.grants.keys.contains(name))
+            .fold(yoagent_rutis::probe::ProbeOptions::default(), |o, name| {
+                o.env(name, "")
+            })
+    };
     // The DSH host's session log goes to the DSH home: the user's own when
     // they set one.
     agent_notes.extend(super::dsh_home_note(
@@ -537,7 +542,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                     &files,
                     &[],
                     None,
-                    &probe_options,
+                    &probe_options(plugin),
                 )
                 .await;
                 entry.problems.extend(report.problem().map(Problem::new));
@@ -575,13 +580,13 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                         &serde_json::Value::Array(rows),
                         &[],
                         None,
-                        &probe_options,
+                        &probe_options(plugin),
                     )
                     .await;
                     entry.problems.extend(report.problem().map(Problem::new));
                     entry.guidance_chars = Some(report.guidance_chars);
                     // The probe's base has no DSH host: together has it.
-                    if !plugin.grants.is_empty() {
+                    if !plugin.grants.hosts_nothing() {
                         entry.notes.push(
                             "probed without the DSH host: its grants are not exercised alone"
                                 .into(),
@@ -908,8 +913,11 @@ async fn rutis_alone(
         for service in super::SHARED {
             builder = builder.share(service);
         }
-        for name in super::blanked(manifest) {
-            builder = builder.blank(name);
+        for name in super::withheld(manifest) {
+            builder = builder.withhold(name);
+        }
+        for key in plan.kept(&runtime) {
+            builder = builder.keep(&runtime, key);
         }
         let mut host = builder.start(&root).await?;
         host.load([row]).await?;

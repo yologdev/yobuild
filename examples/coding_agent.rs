@@ -174,11 +174,11 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     let mut builder = PluginHost::builder()
         .node("ui", here().join("plugins"))
         .node("pi", rutis_plugins().join("pi"));
-    // The model keys set here reach the plugins empty, as under `yobuild
-    // run` (design §12, "Step 4").
+    // The credentials set here are taken out of the plugins' environment,
+    // as under `yobuild run` (design §12, "Step 4").
     for name in yobuild::manifest::KEY_VARIABLES {
         if std::env::var_os(name).is_some() {
-            builder = builder.blank(name);
+            builder = builder.withhold(name);
         }
     }
     // DSH's own host services, on request: in a home of their own, never

@@ -138,7 +138,7 @@ fn manifest_md_names_every_provider_and_key() {
         "max_minutes", "budget_usd", "session_budget_usd", "pi", "dsh", "rutis", "runtime",
         "config", "allow", "policy", "npm", "bin", "url", "args", "env", "headers", "ask_owner",
         "report", "facts", "gate", "scratch", "tools", "host_services", "web", "phone", "terminal",
-        "grants", "workspace", "trust", "wake", "exec",
+        "grants", "workspace", "trust", "wake", "exec", "keys",
     ] {
         let in_toml = text.lines().any(|l| {
             let l = l.trim_start();

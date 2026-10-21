@@ -866,8 +866,13 @@ async fn start(
     for service in LOCAL {
         builder = builder.local(service);
     }
-    for name in blanked(manifest) {
-        builder = builder.blank(name);
+    for name in withheld(manifest) {
+        builder = builder.withhold(name);
+    }
+    for (runtime, keys) in &plan.keys {
+        for key in keys {
+            builder = builder.keep(runtime, key);
+        }
     }
     let mut host = builder.start(root).await?;
     if !plan.rows.is_empty() {
@@ -956,13 +961,13 @@ fn prepare(
     }
     let installed = install::install(manifest, &layout.adapters, home, locked)?;
     let plan = plugins::plan(manifest, layout, &installed, cwd, &lookup)?;
-    let blank = blanked(manifest);
+    let withheld = withheld(manifest);
     notes.extend(plan.notes.iter().cloned());
     let servers = manifest
         .mcp
         .iter()
         .map(|server| {
-            let launch = launch(server, &installed, &lookup, &blank)?;
+            let launch = launch(server, &installed, &lookup, &withheld)?;
             Ok((server.name.clone(), launch))
         })
         .collect::<Result<_, BoxError>>()?;
@@ -1620,6 +1625,9 @@ enum Launch {
         command: PathBuf,
         args: Vec<String>,
         env: HashMap<String, String>,
+        /// The credentials taken out of its environment: [`withheld`] but
+        /// what its `env` sets.
+        withheld: Vec<String>,
     },
     Http {
         url: String,
@@ -1627,13 +1635,14 @@ enum Launch {
     },
 }
 
-/// How to start `server`; a stdio server gets each of `blank` (the model
-/// key variables set here) empty, unless its own `env` sets it.
+/// How to start `server`; a stdio server has each of `withheld` (the
+/// credentials set here) taken out of its environment, unless its own `env`
+/// sets it.
 fn launch(
     server: &Mcp,
     installed: &install::Installed,
     lookup: &dyn Fn(&str) -> Option<String>,
-    blank: &[String],
+    withheld: &[String],
 ) -> Result<Launch, BoxError> {
     let failed =
         |e: &dyn std::fmt::Display| -> BoxError { format!("mcp {}: {e}", server.name).into() };
@@ -1667,15 +1676,16 @@ fn launch(
                     .map(|a| a.resolve_with(lookup))
                     .collect::<Result<_, _>>()
                     .map_err(|e| failed(&e))?,
-                env: blank
+                env: env
                     .iter()
-                    .map(|k| Ok((k.clone(), String::new())))
-                    .chain(
-                        env.iter()
-                            .map(|(k, v)| Ok((k.clone(), v.resolve_with(lookup)?))),
-                    )
+                    .map(|(k, v)| Ok((k.clone(), v.resolve_with(lookup)?)))
                     .collect::<Result<_, crate::manifest::Unset>>()
                     .map_err(|e| failed(&e))?,
+                withheld: withheld
+                    .iter()
+                    .filter(|k| !env.contains_key(*k))
+                    .cloned()
+                    .collect(),
             }
         }
         Transport::Http { url, headers } => Launch::Http {
@@ -1689,11 +1699,12 @@ fn launch(
     })
 }
 
-/// The model key variables set in this process (design §12, "Step 4"),
-/// which plugin runtimes and stdio MCP servers get empty: a plugin could
+/// The credentials yoagent reads that are set in this process (design §12,
+/// "Step 4"), which plugin runtimes and stdio MCP servers have taken out of
+/// their environment but where their entry hands one over: a plugin could
 /// otherwise call a model past the budget, unmetered. (The adapters' helper
-/// scripts have every one removed instead: `plugins::node_json`.)
-pub(crate) fn blanked(manifest: &Manifest) -> Vec<String> {
+/// scripts have every one removed: `plugins::node_json`.)
+pub(crate) fn withheld(manifest: &Manifest) -> Vec<String> {
     manifest
         .key_variables()
         .into_iter()
@@ -1701,11 +1712,11 @@ pub(crate) fn blanked(manifest: &Manifest) -> Vec<String> {
         .collect()
 }
 
-/// The model key variables the manifest hands an entry on purpose, by its
-/// name: one referenced in a plugin's `config`, or in an MCP server's `env`
-/// (or filled by it: `OPENAI_API_KEY = "${MINE}"` hands a key over under
-/// that name), `args`, URL or headers. `check` notes each (its model calls are not
-/// metered).
+/// The credentials the manifest hands an entry on purpose, by its name: a
+/// plugin's `keys` grant or one referenced in its `config`, or in an MCP
+/// server's `env` (or filled by it: `OPENAI_API_KEY = "${MINE}"` hands a key
+/// over under that name), `args`, URL or headers. `check` notes each (what
+/// it spends with it is not metered).
 pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
     let keys = manifest.key_variables();
     let given = |names: Vec<&str>| -> Vec<String> {
@@ -1719,9 +1730,10 @@ pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
     };
     let plugins = manifest.plugins.iter().map(|plugin| {
         let names = plugin.config_references();
+        let names = plugin.grants.keys.iter().chain(&names);
         (
             plugin.name.clone(),
-            given(names.iter().map(String::as_str).collect()),
+            given(names.map(String::as_str).collect()),
         )
     });
     let servers = manifest.mcp.iter().map(|server| {
@@ -1747,14 +1759,60 @@ pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
+/// A stdio server's command with `withheld` taken out of its environment:
+/// `/usr/bin/env -u NAME … <command> <args>` (yoagent's transport can only
+/// add variables). `withheld` holds none of `env`'s names: `env -u` removes
+/// a name whoever set it.
+#[cfg(unix)]
+fn without(
+    command: &Path,
+    args: &[String],
+    env: &HashMap<String, String>,
+    withheld: &[String],
+) -> (String, Vec<String>, HashMap<String, String>) {
+    let command = command.display().to_string();
+    if withheld.is_empty() {
+        return (command, args.to_vec(), env.clone());
+    }
+    let mut wrapped: Vec<String> = Vec::new();
+    for name in withheld {
+        wrapped.push("-u".into());
+        wrapped.push(name.clone());
+    }
+    wrapped.push(command);
+    wrapped.extend(args.iter().cloned());
+    ("/usr/bin/env".into(), wrapped, env.clone())
+}
+
+/// No `env` to exec through: the variables are set empty instead.
+#[cfg(not(unix))]
+fn without(
+    command: &Path,
+    args: &[String],
+    env: &HashMap<String, String>,
+    withheld: &[String],
+) -> (String, Vec<String>, HashMap<String, String>) {
+    let mut env = env.clone();
+    for name in withheld {
+        env.insert(name.clone(), String::new());
+    }
+    (command.display().to_string(), args.to_vec(), env)
+}
+
 /// An MCP server's tools, each `<server>__<tool>` (the server is called with
 /// its own names); those its `allow` names must be among them.
 async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, BoxError> {
     let failed = |e: &dyn std::fmt::Display| format!("mcp {}: {e}", server.name);
     let client = match launch {
-        Launch::Stdio { command, args, env } => {
+        Launch::Stdio {
+            command,
+            args,
+            env,
+            withheld,
+        } => {
+            let (command, args, env) = without(command, args, env, withheld);
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            McpClient::connect_stdio(&command.display().to_string(), &args, Some(env.clone()))
+            McpClient::connect_stdio(&command, &args, Some(env))
                 .await
                 .map_err(|e| failed(&e))?
         }
@@ -2333,6 +2391,53 @@ mod tests {
         assert_eq!(bin(None).unwrap_err(), "@s/srv has no bin");
     }
 
+    /// A stdio server has the credentials set here taken out but those its
+    /// `env` sets (`env -u` would remove those too): through `env` on unix.
+    #[test]
+    fn a_server_has_the_withheld_credentials_taken_out_but_what_its_env_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = Manifest::parse(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
+             [[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\nargs = [\"--x\"]\n\
+             env = { OPENAI_API_KEY = \"${MINE}\" }\n",
+            &dir.path().join("a.toml"),
+            dir.path(),
+        )
+        .unwrap();
+        let withheld = ["OPENAI_API_KEY".to_owned(), "GROQ_API_KEY".to_owned()];
+        let launch = super::launch(
+            &m.mcp[0],
+            &install::Installed::default(),
+            &|_: &str| Some("v".to_owned()),
+            &withheld,
+        )
+        .unwrap();
+        let Launch::Stdio {
+            command,
+            args,
+            env,
+            withheld,
+        } = launch
+        else {
+            panic!("stdio")
+        };
+        assert_eq!(withheld, ["GROQ_API_KEY"]);
+        let (program, argv, env) = super::without(&command, &args, &env, &withheld);
+        assert_eq!(env.get("OPENAI_API_KEY").map(String::as_str), Some("v"));
+        let command = command.display().to_string();
+        if cfg!(unix) {
+            assert_eq!(program, "/usr/bin/env");
+            assert_eq!(argv, ["-u", "GROQ_API_KEY", command.as_str(), "--x"]);
+            assert!(!env.contains_key("GROQ_API_KEY"));
+        } else {
+            assert_eq!((program, argv), (command, vec!["--x".to_owned()]));
+            assert_eq!(env.get("GROQ_API_KEY").map(String::as_str), Some(""));
+        }
+        // Nothing withheld: the command as it is.
+        let (program, argv, _) = super::without(Path::new("/s"), &[], &env, &[]);
+        assert_eq!((program.as_str(), argv.len()), ("/s", 0));
+    }
+
     #[test]
     fn the_keys_handed_over_are_the_key_variables_an_entry_refers_to_or_is_filled_under() {
         let dir = tempfile::tempdir().unwrap();
@@ -2350,6 +2455,12 @@ config = { apiKey = "${OPENAI_API_KEY}", deep = { list = ["x ${ACME_KEY}", "${OP
 name = "plain"
 dsh = "./e.ts"
 config = { home = "${HOME}" }
+[[plugin]]
+name = "granted"
+rutis = "./g.ts"
+runtime = "node"
+config = { key = "${ACME_KEY}" }
+grants = { keys = ["OPENAI_API_KEY"] }
 [[mcp]]
 name = "stdio"
 npm = "./s.sh"
@@ -2371,6 +2482,8 @@ headers = { Authorization = "Bearer ${ANTHROPIC_API_KEY}" }
                 // Nested, each once; `HOME` is no key; the custom
                 // provider's own variable is one.
                 ("nested".to_owned(), given(&["OPENAI_API_KEY", "ACME_KEY"])),
+                // Its `keys` grant first, then its config's.
+                ("granted".to_owned(), given(&["OPENAI_API_KEY", "ACME_KEY"])),
                 // Filled under a key's name, and in its arguments; a name
                 // that only starts like a key's is none.
                 (
