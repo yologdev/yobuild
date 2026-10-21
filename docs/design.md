@@ -2100,7 +2100,9 @@ Expected (measured afterwards, as the matrix is): univer's 13 file tools;
 the DSH tool plugins whose only DSH-specific reads are the agent and session
 (dsh-ops, dsh-remote, dsh-tiddlywiki, dsh-mnemosyne, and the cwd reads of
 dsh-palimpsest, dsh-mcp-connector, browser-skill and the image generators —
-each still needing what else it injects); pi-lens; pi's observers (langfuse,
+each still needing what else it injects); pi-lens (measured 2026-10-21: with
+`trust = true` its TypeScript server finds a type error, without it no
+server starts and its diagnostics say "unavailable"); pi's observers (langfuse,
 langsmith); likely pi-background-tasks (model info); with L3, visualize's and
 univer's views.
 
