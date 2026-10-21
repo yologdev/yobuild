@@ -1047,7 +1047,7 @@ Not covered, and said so: plugins run with the process's rights; the
 environment they inherit is visible to them — but the credentials yoagent
 reads, which are taken out of plugin runtimes' and stdio MCP servers'
 unless the manifest hands one over, and out of the adapters' helpers'
-always (design §12, "Step 4"; the agent's own `bash` keeps them): against honest code calling a
+always (§12, "Step 4"; the agent's own `bash` keeps them): against honest code calling a
 model unmetered, not a sandbox — a plugin can read a key where the owner
 keeps it (`~/.aws/credentials` too), and `GITHUB_TOKEN` and the like still
 pass; the gate judges command
@@ -2251,9 +2251,12 @@ credential is withheld; known, not worked around.
   recording which of those names it sees and how (unset, empty, a value).
   In `run` and in `check` together: the listed ones unset, the unrelated
   one kept, the server's `env` key handed over; in `check` alone: pi and
-  DSH empty, rutis unset. Each with a `keys` grant on one: that runtime
-  sees the granted key, the others do not. `check --json`: the notes on
-  the entries and the agent note.
+  DSH empty, rutis unset. Then a different `keys` grant on each plugin:
+  every runtime keeps only its own. `check --json`: the notes on the
+  entries and the agent note; `run`'s Info notice.
+- `src/run.rs`: the note names only what some plugin or stdio server
+  loses, and nothing when none does (no plugin, an HTTP server only,
+  every name granted).
 - `src/manifest/tests.rs`: `keys` refused with a name not on the list, a
   repeat, a list that differs between two pi plugins or two DSH plugins
   (each list said); `keys` on a DSH plugin accepted with or without
@@ -2286,10 +2289,12 @@ against the gallery.
 
 **Built** (2026-10-21): `manifest::KEY_VARIABLES` (26, yoagent 0.25.12's
 list), `Manifest::key_variables`, `Grants::keys` / `hosts_nothing`,
-`PluginHostBuilder::withhold` / `keep` (`env -u` through the private
-`without`), `Plan::keys` / `kept` (the rutis same-per-package refusal is
+`PluginHostBuilder::withhold` / `keep` and `run::without`, both through
+`frontend::host::env_without` (`env -u`; `/bin/sh` for a path with `=`;
+every launch made before a runtime is registered), `Plan::keys` / `kept` (the rutis same-per-package refusal is
 `plan`'s, which knows the packages), `run::withheld`, the MCP launch's
-`withheld` and `run::without`, `run::keys_given`; the tests listed above,
+`withheld`, `run::withheld_note` (`run`'s notice, `check`'s note),
+`run::keys_given`; the tests listed above,
 `cli_test` `plugins_and_servers_have_the_credentials_taken_out_unless_handed_one`
 and host_test
 `a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set`

@@ -872,14 +872,14 @@ async fn start(
     for service in LOCAL {
         builder = builder.local(service);
     }
-    for name in withheld(manifest) {
-        builder = builder.withhold(name);
-    }
+    let withheld = withheld(manifest);
     tracing::debug!(
-        "withheld from plugin runtimes: {:?}; kept: {:?}",
-        withheld(manifest),
+        "withheld from plugin runtimes: {withheld:?}; kept: {:?}",
         plan.keys
     );
+    for name in withheld {
+        builder = builder.withhold(name);
+    }
     for (runtime, keys) in &plan.keys {
         for key in keys {
             builder = builder.keep(runtime, key);
@@ -1332,22 +1332,30 @@ async fn dsh_services(
     Err(dsh_missing(&missing, plan, host_services))
 }
 
-/// What plugins and stdio MCP servers have taken out of their environment
-/// (`withheld`), when one runs: said by `run` (an Info notice) and by
-/// `check` (an agent note), since one that needs a key fails at its first
-/// call, and nothing else says why.
+/// What plugins and stdio MCP servers have taken out of their environment:
+/// those of `withheld` some plugin's runtime or stdio server does not keep
+/// (a `keys` grant, a server's `env`), when there are any. Said by `run`
+/// (an Info notice) and by `check` (an agent note), since one that needs a
+/// key fails at its first call, and nothing else says why.
 pub(crate) fn withheld_note(manifest: &Manifest, withheld: &[String]) -> Option<String> {
-    let stdio = manifest
-        .mcp
+    let taken: Vec<String> = withheld
         .iter()
-        .any(|s| matches!(s.transport, Transport::Stdio { .. }));
-    if withheld.is_empty() || (manifest.plugins.is_empty() && !stdio) {
-        return None;
-    }
-    let names: Vec<String> = withheld.iter().map(|k| format!("`{k}`")).collect();
-    Some(format!(
+        .filter(|name| {
+            let plugins = manifest
+                .plugins
+                .iter()
+                .any(|p| !p.grants.keys.contains(name));
+            let servers = manifest.mcp.iter().any(|s| match &s.transport {
+                Transport::Stdio { env, .. } => !env.contains_key(*name),
+                _ => false,
+            });
+            plugins || servers
+        })
+        .map(|k| format!("`{k}`"))
+        .collect();
+    (!taken.is_empty()).then(|| format!(
         "plugins and stdio MCP servers have the credentials yoagent reads set here taken out of their environment ({}): one that needs one gets it only from its entry (a `keys` grant, or a `\"${{NAME}}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered",
-        names.join(", ")
+        taken.join(", ")
     ))
 }
 
@@ -1655,8 +1663,8 @@ enum Launch {
         command: PathBuf,
         args: Vec<String>,
         env: HashMap<String, String>,
-        /// The credentials taken out of its environment ([`withheld`]):
-        /// all but what its `env` sets ([`without`]).
+        /// The credentials set here ([`withheld`]); [`without`] leaves
+        /// out those its `env` sets.
         withheld: Vec<String>,
     },
     Http {
@@ -1786,7 +1794,8 @@ pub(crate) fn keys_given(manifest: &Manifest) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-/// A stdio server's program, arguments and added variables.
+/// A stdio server's program, arguments and added variables (those its
+/// `env` sets; off unix, the withheld ones set empty too).
 type StdioCommand = (String, Vec<String>, HashMap<String, String>);
 
 /// A stdio server's command with `withheld` taken out of its environment
@@ -1800,12 +1809,10 @@ fn without(
     env: &HashMap<String, String>,
     withheld: &[String],
 ) -> Result<StdioCommand, BoxError> {
-    let names: Vec<std::ffi::OsString> = withheld
+    let names: Vec<&String> = withheld
         .iter()
         .filter(|name| !env.contains_key(*name))
-        .map(Into::into)
         .collect();
-    let names: Vec<&std::ffi::OsString> = names.iter().collect();
     let (program, argv) = crate::frontend::host::env_without(
         &names,
         command.as_os_str().to_owned(),
@@ -2474,6 +2481,51 @@ mod tests {
         // Nothing withheld: the command as it is.
         let (program, argv, _) = super::without(Path::new("/s"), &[], &env, &[]).unwrap();
         assert_eq!((program.as_str(), argv.len()), ("/s", 0));
+    }
+
+    #[test]
+    fn the_withheld_note_names_only_what_some_plugin_or_stdio_server_loses() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = |entries: &str, withheld: &[&str]| {
+            let m = Manifest::parse(
+                &format!("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n{entries}"),
+                &dir.path().join("a.toml"),
+                dir.path(),
+            )
+            .unwrap();
+            let withheld: Vec<String> = withheld.iter().map(|k| k.to_string()).collect();
+            super::withheld_note(&m, &withheld)
+        };
+        let keys = ["OPENAI_API_KEY", "GROQ_API_KEY"];
+        let stdio = "[[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n";
+        // Nothing runs that could lose one, or nothing is set.
+        assert_eq!(note("", &keys), None);
+        assert_eq!(
+            note(
+                "[[mcp]]\nname = \"h\"\nurl = \"https://h.example/mcp\"\n",
+                &keys
+            ),
+            None
+        );
+        assert_eq!(note(stdio, &[]), None);
+        // A stdio server loses both; one whose `env` sets one loses the other.
+        let said = note(stdio, &keys).unwrap();
+        assert!(
+            said.contains("(`OPENAI_API_KEY`, `GROQ_API_KEY`)"),
+            "{said}"
+        );
+        let said = note(
+            &format!("{stdio}env = {{ OPENAI_API_KEY = \"${{MINE}}\" }}\n"),
+            &keys,
+        )
+        .unwrap();
+        assert!(said.contains("environment (`GROQ_API_KEY`)"), "{said}");
+        // Every plugin granted all of them: nothing lost, nothing said.
+        let granted = "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\n\
+                       grants = { keys = [\"GROQ_API_KEY\", \"OPENAI_API_KEY\"] }\n";
+        assert_eq!(note(granted, &keys), None);
+        let other = "[[plugin]]\nrutis = \"./q.ts\"\nruntime = \"node\"\n";
+        assert!(note(&format!("{granted}{other}"), &keys).is_some());
     }
 
     /// A command whose path holds `=` (which `env` would read as an

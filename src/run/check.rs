@@ -448,9 +448,18 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     // (design §12, "Step 4"): one that needs a key fails at its first call,
     // which this says before then.
     let withheld = super::withheld(&manifest);
-    agent_notes.extend(super::withheld_note(&manifest, &withheld).map(|note| {
-        format!("{note} (`check`'s pi and DSH plugins probed alone get them empty instead)")
-    }));
+    let probed = manifest
+        .plugins
+        .iter()
+        .any(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_)));
+    agent_notes.extend(
+        super::withheld_note(&manifest, &withheld).map(|note| match probed {
+            true => {
+                format!("{note} (`check`'s pi and DSH plugins probed alone get them empty instead)")
+            }
+            false => note,
+        }),
+    );
     // The pi and DSH probes alone run as `run` runs plugins, but for the
     // launch, which yoagent-rutis builds: what is withheld from the plugin
     // set empty instead.

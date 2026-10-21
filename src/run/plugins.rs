@@ -73,7 +73,8 @@ pub(crate) struct Plan {
     /// Start the `dsh` runtime, in `dsh_dir`.
     pub dsh: bool,
     /// Load the DSH host (its stand-in agent; design §12, "Step 2"): the DSH
-    /// plugins have grants. Its rows are in `rows`.
+    /// plugins have a grant the host serves (`keys` alone is none). Its rows
+    /// are in `rows`.
     pub dsh_host: bool,
     /// The DSH host's session log row, by id: `start` gives it its folder
     /// (set whenever `dsh_host` is).
@@ -113,7 +114,8 @@ pub(crate) struct Plan {
     /// names back to the host services.
     pub pi_spelled: Vec<(String, Vec<PathBuf>)>,
     /// The credentials each runtime is granted (`keys`; design §12, "Step
-    /// 4"), by runtime name: left in its environment.
+    /// 4"), by runtime name, for every runtime a plugin runs in (none
+    /// granted: an empty list): left in its environment.
     pub keys: Vec<(String, Vec<String>)>,
 }
 
@@ -278,8 +280,7 @@ impl Plan {
     fn keep(&mut self, runtime: &str, keys: &[String]) {
         match self.keys.iter().find(|(r, _)| r == runtime) {
             Some((_, kept)) => debug_assert_eq!(kept, keys, "runtime `{runtime}`'s plugins' keys"),
-            None if !keys.is_empty() => self.keys.push((runtime.to_owned(), keys.to_vec())),
-            None => {}
+            None => self.keys.push((runtime.to_owned(), keys.to_vec())),
         }
     }
 
@@ -1217,7 +1218,10 @@ mod tests {
         let granted = keys(r#""API_KEY""#, "", r#""API_KEY""#).unwrap();
         assert_eq!(
             granted.keys,
-            [("rutis-0".to_owned(), vec!["API_KEY".to_owned()])]
+            [
+                ("rutis-0".to_owned(), vec!["API_KEY".to_owned()]),
+                ("rutis-1".to_owned(), vec![])
+            ]
         );
         assert!(granted.kept("rutis-1").is_empty());
         let e = keys(r#""API_KEY""#, "", "").err().unwrap();

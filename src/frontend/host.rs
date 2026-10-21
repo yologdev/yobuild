@@ -237,32 +237,42 @@ fn without(launcher: Launcher, names: &[&OsString]) -> Result<Launcher, BoxError
         .fold(launcher, |launcher, name| launcher.env(*name, "")))
 }
 
-/// Where [`env_without`] finds `env`.
+/// Where [`env_without`] finds `env`, and the shell it runs a program
+/// through when `env` would misread its path.
 #[cfg(unix)]
 const ENV: &str = "/usr/bin/env";
+#[cfg(unix)]
+const SH: &str = "/bin/sh";
 
 /// `program args` started with the variables `names` taken out of its
 /// environment (design §12 "Step 4"): `/usr/bin/env -u NAME … program
-/// args` — `env` execs it, the same process (pid, process group, inherited
-/// descriptors). A launcher can only add variables. `env` reads a word
-/// holding `=` before the program as an assignment, `--` or not, so such a
-/// program goes through `/bin/sh -c 'exec "$0" "$@"'`. Nothing withheld:
-/// as it is; no `/usr/bin/env`: an error, not the variables left in. (On
-/// macOS `env` is protected, so `DYLD_*` variables do not reach the
-/// program either — only when something is withheld.)
+/// args`, each name once — `env` execs it, the same process (pid, process
+/// group, inherited descriptors). A launcher can only add variables. `env`
+/// reads a word holding `=` before the program as an assignment, `--` or
+/// not, so such a program goes through `/bin/sh -c 'exec "$0" "$@"'`.
+/// Nothing withheld: as it is; no `/usr/bin/env` (or `/bin/sh` when
+/// needed): an error, not the variables left in. (On macOS `env` is
+/// protected, so `DYLD_*` variables do not reach the program either — only
+/// when something is withheld.)
 #[cfg(unix)]
 pub(crate) fn env_without(
-    names: &[&OsString],
+    names: &[impl AsRef<std::ffi::OsStr>],
     program: OsString,
     args: Vec<OsString>,
 ) -> Result<(OsString, Vec<OsString>), BoxError> {
     if names.is_empty() {
         return Ok((program, args));
     }
-    if !Path::new(ENV).is_file() {
-        let names: Vec<_> = names.iter().map(|n| n.to_string_lossy()).collect();
+    let shell = program.to_string_lossy().contains('=');
+    let needed = [Some(ENV), shell.then_some(SH)];
+    if let Some(missing) = needed
+        .into_iter()
+        .flatten()
+        .find(|p| !Path::new(p).is_file())
+    {
+        let names: Vec<_> = names.iter().map(|n| n.as_ref().to_string_lossy()).collect();
         return Err(format!(
-            "cannot take {} out of {}'s environment: {ENV} is not there",
+            "cannot take {} out of {}'s environment: {missing} is not there (unset them before starting yobuild, or set them only where they are needed)",
             names.join(", "),
             Path::new(&program).display()
         )
@@ -270,13 +280,14 @@ pub(crate) fn env_without(
     }
     let mut wrapped: Vec<OsString> = Vec::new();
     for (at, name) in names.iter().enumerate() {
-        if !names[..at].contains(name) {
+        let name = name.as_ref();
+        if !names[..at].iter().any(|n| n.as_ref() == name) {
             wrapped.push("-u".into());
-            wrapped.push((*name).clone());
+            wrapped.push(name.to_owned());
         }
     }
-    if program.to_string_lossy().contains('=') {
-        wrapped.extend(["/bin/sh".into(), "-c".into(), r#"exec "$0" "$@""#.into()]);
+    if shell {
+        wrapped.extend([SH.into(), "-c".into(), r#"exec "$0" "$@""#.into()]);
     }
     wrapped.push(program);
     wrapped.extend(args);
@@ -395,6 +406,9 @@ impl PluginHostBuilder {
         }
         let routes: Arc<Mutex<HashMap<String, String>>> = Arc::default();
         let mut resolvers = Vec::new();
+        // Every launch first: one that cannot withhold what it must fails
+        // `start` before any runtime is registered.
+        let mut launchers = Vec::new();
         for (name, dir) in &self.runtimes {
             let env: Vec<_> = self.env.iter().filter(|(r, ..)| r == name).collect();
             let withheld: Vec<&OsString> = self
@@ -407,7 +421,9 @@ impl PluginHostBuilder {
                 Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
                 |launcher, (_, key, value)| launcher.env(key, value),
             );
-            let launcher = without(launcher, &withheld)?;
+            launchers.push((name, dir, without(launcher, &withheld)?));
+        }
+        for (name, dir, launcher) in launchers {
             let mut runtime =
                 LocalRuntime::launcher(name.clone(), launcher, dir.join("package.json"));
             if self.terminal.as_ref() == Some(name) {

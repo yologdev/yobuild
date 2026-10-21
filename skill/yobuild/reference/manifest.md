@@ -150,8 +150,8 @@ And optionally:
   true, judged: false }` with `gate = "off"`); a rutis plugin also
   `host_approval.ask(question, details?)` (Allow/Block put to the owner,
   naming the plugin, answered `"allow"`, `"block"` or `"unanswered"`).
-  On a DSH plugin, `workspace` and `wake` only, `wake` with `workspace`,
-  and **the same on every DSH plugin** (else refused): one DSH host — a
+  On a DSH plugin, `workspace`, `wake` and `keys` only, `wake` with
+  `workspace`, and **the same on every DSH plugin** (else refused): one DSH host — a
   stand-in DSH agent in the agent's folder — serves them all. It is what
   DSH plugins that read the calling agent need (`dsh-univer-office`'s
   file tools fail `SESSION_SCOPE_UNAVAILABLE` without it); once loaded,

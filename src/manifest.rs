@@ -361,8 +361,8 @@ impl Grants {
         .collect()
     }
 
-    /// The grants as `check` says them: the keys, `exec` with its value
-    /// (`"gate"` and `"free"` are worlds apart).
+    /// The grants as `check` says them: their names, `exec` with its value
+    /// (`"gate"` and `"free"` are worlds apart) and `keys` with its names.
     pub fn said(&self) -> Vec<String> {
         self.names()
             .into_iter()

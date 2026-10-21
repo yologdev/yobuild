@@ -169,7 +169,8 @@ impl Host {
     }
 
     /// The caller and its grants, by its row: a rutis plugin's, or the DSH
-    /// host's when DSH plugins have grants; `None` for any other caller (the
+    /// host's when DSH plugins have a grant it serves (not `keys` alone);
+    /// `None` for any other caller (the
     /// `pi` and `dsh` rows, a DSH plugin's own, or no row). A pi extension is
     /// found by its file instead (`pi_caller`).
     fn caller<'a>(&'a self, row: Option<&'a str>) -> Option<Caller<'a>> {
