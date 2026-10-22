@@ -49,7 +49,7 @@ const SETTLE: Duration = Duration::from_secs(3);
 const STILL: Duration = Duration::from_millis(500);
 
 /// The report's shape, for whoever reads `--json`.
-const REPORT_VERSION: u32 = 2;
+const REPORT_VERSION: u32 = 3;
 
 /// The run id `check` starts its one run with.
 const RUN: &str = "yobuild-check";
@@ -230,6 +230,11 @@ pub struct Entry {
     /// design §12), as the manifest names them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<String>,
+    /// What its process gets beyond the kept environment (design §12 "Step
+    /// 5"): its `env` grant's names and prefixes, or a stdio server's `env`
+    /// names.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub environment: Vec<String>,
 }
 
 /// Whether the agent was started together.
@@ -263,6 +268,9 @@ pub struct Agent {
     /// The DSH base's packages with install scripts, which were not run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub install_scripts: Vec<String>,
+    /// The variables set here that one or more of the plugins and stdio
+    /// servers do not get (`run::left_out`; design §12 "Step 5"), sorted.
+    pub left_out: Vec<String>,
 }
 
 /// What `check` found.
@@ -351,6 +359,12 @@ impl Report {
             }
             if !entry.grants.is_empty() {
                 out.push_str(&format!("  grants: {}\n", entry.grants.join(", ")));
+            }
+            if !entry.environment.is_empty() {
+                out.push_str(&format!(
+                    "  environment beyond the kept set: {}\n",
+                    entry.environment.join(", ")
+                ));
             }
             if !entry.install_scripts.is_empty() {
                 out.push_str(&format!(
@@ -487,17 +501,40 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         std::env::vars_os().map(|(k, _)| k),
         cfg!(target_os = "macos"),
     ));
+    // What plugins and stdio servers do not get (design §12 "Step 5"): the
+    // count, its names in `leftOut`; a proxy setting holding a password.
+    let vars = || std::env::vars_os().map(|(k, _)| k);
+    let left_out = super::left_out(&manifest, vars(), cfg!(unix));
     agent_notes.extend(
-        super::withheld_note(&manifest, &withheld).map(|note| match probed {
-            true if cfg!(unix) => {
-                format!("{note} (`check`'s pi and DSH plugins probed alone get them, and every other variable the kept environment leaves out, empty instead)")
-            }
-            true => {
-                format!("{note} (`check`'s pi and DSH plugins probed alone get them empty instead)")
-            }
+        super::environment_note(&manifest, vars(), cfg!(unix)).map(|note| match probed {
+            true => format!(
+                "{note} (`check`'s pi and DSH plugins probed alone get what is left out set empty instead)"
+            ),
             false => note,
         }),
     );
+    agent_notes.extend(super::proxy_note(&manifest, std::env::vars_os()));
+    // An entry's own code reads a variable it does not get, or its grant
+    // hands over one that looks like a secret or loads code: on the entry.
+    let credentials = manifest.key_variables();
+    for entry in super::starts(&manifest) {
+        if let Some(path) = entry_code(entry, &installed) {
+            let read = crate::environment::names_read(&path);
+            for note in super::reads_notes(entry, &read, set, &credentials, cfg!(unix)) {
+                entry_notes.push((entry.name().to_owned(), note));
+            }
+        }
+        if let super::Starts::Plugin(plugin) = entry {
+            for note in super::given_notes(
+                plugin,
+                std::env::vars_os().map(|(k, _)| k),
+                set,
+                &credentials,
+            ) {
+                entry_notes.push((plugin.name.clone(), note));
+            }
+        }
+    }
     // The pi and DSH probes alone run as `run` runs plugins, but for the
     // launch, which yoagent-rutis builds and can only add to: what `run`
     // takes out of the plugin's runtime — the credentials, and on unix every
@@ -579,6 +616,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             guidance_chars: None,
             install_scripts: Vec::new(),
             grants: plugin.grants.said(),
+            environment: plugin.grants.env.clone(),
         };
         let names = match &plugin.kind {
             PluginKind::Pi(source) => {
@@ -721,6 +759,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             guidance_chars: None,
             install_scripts: Vec::new(),
             grants: Vec::new(),
+            environment: super::Starts::Server(server).environment(),
         };
         if let Transport::Stdio {
             source: Source::Package(p),
@@ -768,6 +807,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         name: manifest.agent.name.clone(),
         notes: agent_notes,
         install_scripts: scripts.base.clone(),
+        left_out,
         ..Agent::default()
     };
     if entries.iter().all(|e| e.problems.is_empty()) {
@@ -803,6 +843,28 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     }
     fill(&mut agent.tools);
     Ok(Report::new(entries, agent))
+}
+
+/// The code `entry` runs, for the scan of what it reads
+/// (`environment::names_read`): a pi or DSH package's folder in its set (not
+/// its dependencies), a local file or folder, a stdio server's package or
+/// program. None when it cannot be found (`run` says why elsewhere).
+fn entry_code(entry: super::Starts<'_>, installed: &install::Installed) -> Option<PathBuf> {
+    let package = |set: Set, source: &Source| match source {
+        Source::Package(p) => plugins::in_set(installed, set, p).ok(),
+        Source::Path(path) => Some(path.clone()),
+    };
+    match entry {
+        super::Starts::Plugin(plugin) => match &plugin.kind {
+            PluginKind::Pi(source) => package(Set::Pi, source),
+            PluginKind::Dsh(source) => package(Set::Dsh, source),
+            PluginKind::Rutis { path, .. } => Some(path.clone()),
+        },
+        super::Starts::Server(server) => match &server.transport {
+            Transport::Stdio { source, .. } => package(Set::Mcp, source),
+            Transport::Http { .. } => None,
+        },
+    }
 }
 
 fn source_text(source: &Source) -> String {
@@ -1219,6 +1281,7 @@ mod tests {
             guidance_chars: None,
             install_scripts: Vec::new(),
             grants: Vec::new(),
+            environment: Vec::new(),
         }
     }
 
@@ -1331,7 +1394,7 @@ mod tests {
             },
         );
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["version"], 2);
+        assert_eq!(json["version"], 3);
         assert_eq!(json["ok"], true);
         assert_eq!(json["agent"]["together"], "started");
         assert_eq!(json["entries"][0]["kind"], "plugin");

@@ -75,6 +75,106 @@ pub(crate) fn kept(name: &OsStr) -> bool {
     inherit().keeps(name)
 }
 
+/// The proxy variables of [`KEPT`]: one whose value holds a password
+/// reaches every plugin and stdio server ([`proxy_password`]).
+pub(crate) const PROXIES: &[&str] = &[
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
+];
+
+/// A proxy setting whose URL holds a written password, with a scheme
+/// (`http://user:pw@proxy:3128`) or without (`user:pw@proxy:3128`, which
+/// curl and Node's proxy agents read as `http://`).
+pub(crate) fn proxy_password(value: &str) -> bool {
+    match value.contains("://") {
+        true => crate::manifest::written_password(value),
+        false => crate::manifest::written_password(&format!("http://{value}")),
+    }
+}
+
+/// The most files and bytes [`names_read`] reads of one entry: a package
+/// is its own files, not its dependencies, but some ship a lot.
+const SCAN_FILES: usize = 5000;
+const SCAN_BYTES: u64 = 4 << 20;
+
+/// The environment variables the code at `path` (a file, or a package's
+/// folder without its `node_modules`) names: `process.env.X` and
+/// `process.env["X"]` (or `'X'`, `` `X` ``) in its `.js`, `.mjs`, `.cjs`,
+/// `.ts`, `.mts` and `.cts` files (design §12 "Step 5", the measurement's
+/// scan). A hint, not a proof: a name a dependency reads, one destructured
+/// (`const { X } = process.env`), computed, or looked up through another
+/// object is not seen; one in dead code is. What cannot be read is skipped.
+pub(crate) fn names_read(path: &std::path::Path) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut files = 0;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let Ok(meta) = std::fs::metadata(&at) else {
+            continue;
+        };
+        if meta.is_dir() {
+            if at.file_name().is_some_and(|n| n == "node_modules") && at != path {
+                continue;
+            }
+            if let Ok(read) = std::fs::read_dir(&at) {
+                stack.extend(read.flatten().map(|e| e.path()));
+            }
+            continue;
+        }
+        let code = at
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| ["js", "mjs", "cjs", "ts", "mts", "cts"].contains(&e));
+        if !code || meta.len() > SCAN_BYTES {
+            continue;
+        }
+        files += 1;
+        if files > SCAN_FILES {
+            break;
+        }
+        if let Ok(text) = std::fs::read_to_string(&at) {
+            names.extend(env_names(&text));
+        }
+    }
+    names
+}
+
+/// The names `text` reads as `process.env.X` or `process.env["X"]`.
+fn env_names(text: &str) -> Vec<String> {
+    let name = |s: &str| -> Option<String> {
+        let end = s
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(s.len());
+        let n = &s[..end];
+        (!n.is_empty() && !n.starts_with(|c: char| c.is_ascii_digit())).then(|| n.to_owned())
+    };
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices("process.env") {
+        let rest = &text[at + "process.env".len()..];
+        if let Some(after) = rest.strip_prefix('.') {
+            out.extend(name(after));
+        } else if let Some(after) = rest.strip_prefix('[') {
+            let after = after.trim_start();
+            let Some(quote) = after
+                .chars()
+                .next()
+                .filter(|c| matches!(c, '"' | '\'' | '`'))
+            else {
+                continue;
+            };
+            let inner = &after[1..];
+            if let Some(n) =
+                name(inner).filter(|n| inner[n.len()..].trim_start().starts_with(quote))
+            {
+                let close = inner[n.len()..].trim_start()[1..].trim_start();
+                if close.starts_with(']') {
+                    out.push(n);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +208,40 @@ mod tests {
         assert!(!kept(OsStr::new("AWS_PROFILE")));
         assert!(kept(OsStr::new("LC_ALL")));
         assert!(kept(OsStr::new("HTTPS_PROXY")));
+    }
+
+    #[test]
+    fn the_scan_finds_process_env_names_but_not_in_node_modules() {
+        let text = "a = process.env.TAVILY_API_KEY; b = process.env[\"X_1\"]; c = process.env[ 'Y' ];\n\
+                    d = process.env[`Z`]; e = process.env[name]; f = process.env.1BAD; g = process.envy;\n\
+                    h = process.env['A' + b];";
+        assert_eq!(env_names(text), ["TAVILY_API_KEY", "X_1", "Y", "Z"]);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.ts"), "process.env.OWN").unwrap();
+        std::fs::write(dir.path().join("b.md"), "process.env.DOC").unwrap();
+        std::fs::create_dir_all(dir.path().join("lib")).unwrap();
+        std::fs::write(dir.path().join("lib/c.mjs"), "process.env['NESTED']").unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/dep")).unwrap();
+        std::fs::write(dir.path().join("node_modules/dep/d.js"), "process.env.DEP").unwrap();
+        let names: Vec<String> = names_read(dir.path()).into_iter().collect();
+        assert_eq!(names, ["NESTED", "OWN"]);
+        assert_eq!(
+            names_read(&dir.path().join("a.ts"))
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["OWN"]
+        );
+    }
+
+    #[test]
+    fn a_proxy_password_is_seen_with_or_without_a_scheme() {
+        assert!(proxy_password("http://me:pw@proxy:3128"));
+        assert!(proxy_password("me:pw@proxy:3128"));
+        assert!(!proxy_password("http://proxy:3128"));
+        assert!(!proxy_password("proxy:3128"));
+        assert!(!proxy_password("http://me@proxy:3128"));
+        for name in PROXIES {
+            assert!(KEPT.contains(name));
+        }
     }
 }

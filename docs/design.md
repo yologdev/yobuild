@@ -1043,14 +1043,17 @@ Inherited from yoagent and the handoff work, and kept on by default:
   the scratch folder is the agent's.
 - **Message size**: calls to plugins stay under rutis's 16 MiB limit.
 
-Not covered, and said so: plugins run with the process's rights; the
-environment they inherit is visible to them — but the credentials yoagent
-reads, which are taken out of plugin runtimes' and stdio MCP servers'
-unless the manifest hands one over, and out of the adapters' helpers'
-always (§12, "Step 4"; the agent's own `bash` keeps them): against honest code calling a
-model unmetered, not a sandbox — a plugin can read a key where the owner
-keeps it (`~/.aws/credentials` too), and `GITHUB_TOKEN` and the like still
-pass; the gate judges command
+Not covered, and said so: plugins run with the process's rights. On unix
+plugin runtimes and stdio MCP servers start with a kept environment — the
+path, home, locale, terminal, proxies and the like — and what their
+entries grant, not the owner's whole environment; every credential
+yoagent reads and every other variable (`GITHUB_TOKEN`, a search API's
+key) is left out unless the manifest hands it over, and the adapters'
+helpers get the kept set only (§12, "Step 4", "Step 5"; off unix only
+the credentials, set empty; the agent's own `bash` keeps everything):
+against honest code acting on the owner's accounts unasked, not a sandbox
+— a plugin can read a key where the owner keeps it (`~/.aws/credentials`,
+a shell profile, a `.env`); the gate judges command
 lines and file tools, not what code does once it runs (a build or a test
 runs the project's code, including what the agent edited); and it guards
 the owner's files against being deleted or replaced (not against edits),
@@ -1811,8 +1814,8 @@ the probe" for those asked only in a tool call. A `hints` row and its
 - **Honour-system** — `trust`, network, installs, and also what goes around
   `exec` and `llm`: a plugin already has Node's whole power; it can spawn
   through `child_process`, or read a key where the owner keeps it (the
-  credentials yoagent reads are taken out of the runtimes' environment:
-  step 4, below; §6). A grant changes how honest code behaves (pi-lens installs
+  runtimes start with the kept environment, every credential and other
+  variable left out unless granted: steps 4 and 5, below; §6). A grant changes how honest code behaves (pi-lens installs
   language servers into `~/.pi-lens` and runs the project's code); nothing
   enforces it. Said by `check` and in §6.
 - **Mediated** — calls through the host: `pi.exec` judged by the gate,
@@ -2827,12 +2830,24 @@ server's `env`, a name `env -u` can take). In the probes a name set empty
 is not quite unset for a few programs (`UV_THREADPOOL_SIZE` empty is 0
 threads, then 1; `NODE_DISABLE_COLORS` and `OPENSSL_CONF` are read when
 present): nothing that changes what loads. `withheld_note`, `TAKEN` and
-`withheld_from` stay as step 4 made them until 5b. *5b*, still to build:
-what `check` says — the scan and the "its code reads" notes,
-`environment` and `leftOut`, the secret, code-loading and proxy-password
-notes; the one counted note under "Said", made of `withheld_note` and
-`run`'s count (`kept_note`) and said by `check` too; the skill's
-`parts.md` and `failures.md` entries.
+`withheld_from` stay as step 4 made them until 5b. *5b* (2026-10-23):
+`environment::names_read` (the scan, capped at 5000 files and 4 MiB a
+file), `environment::proxy_password` (a proxy written without a scheme
+too) and `PROXIES`; `run::Starts` (a plugin or stdio server: `gets`,
+`environment`), `run::left_out`, `run::environment_note` (the one note,
+replacing `withheld_note` and 5a's `kept_note`: a count of what one or
+more entries do not get, the credentials named; said by `run` and
+`check`), `run::reads_notes`, `run::given_notes`, `run::proxy_note`;
+`check`'s report version 3 — `Entry::environment`, `Agent::left_out`
+(`leftOut`), the entry's code scanned where `run` finds it
+(`check::entry_code`: a package's folder in its set, a local file, a
+server's package or program); the skill's `manifest.md`, `parts.md`
+(pi-web-access's engines, the langfuse observer, `dsh-free-search`'s
+`RESEARCH_CACHE_DIR`, pi-lens's settings) and `failures.md`; tests: unit
+tests for each, `cli_test`
+`check_says_what_a_plugins_code_reads_and_what_it_is_given`, and the
+gallery and examples accepting the environment note. `withheld_from`
+stays (each entry's lost credentials when they differ).
 
 ### What it unlocks, and the migration
 

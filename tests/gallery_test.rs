@@ -239,13 +239,21 @@ fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str]) {
     // No note, but the one a DSH plugin with grants always gets (alone it
     // is probed without the DSH host; the scripted runs exercise it).
     const GRANTED_DSH: &str = "probed without the DSH host: its grants are not exercised alone";
+    // And the kept environment's: this process's own variables are left
+    // out of the plugins and servers (design §12 "Step 5").
+    const KEPT: &str = "plugins and stdio MCP servers start with the kept environment (";
     for notes in entries
         .iter()
         .chain([&report["agent"]])
         .map(|e| &e["notes"])
     {
         let notes = notes.as_array().map(Vec::as_slice).unwrap_or_default();
-        assert!(notes.iter().all(|n| n == GRANTED_DSH), "{report:#}");
+        assert!(
+            notes
+                .iter()
+                .all(|n| n == GRANTED_DSH || n.as_str().is_some_and(|n| n.starts_with(KEPT))),
+            "{report:#}"
+        );
     }
     let kinds: HashMap<&str, &str> = report["agent"]["tools"]
         .as_array()

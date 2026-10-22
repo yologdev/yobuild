@@ -204,11 +204,11 @@ plugin of it or none) and named by `check`.
   environment — every inherited variable left out but a fixed kept set
   (the path, home, locale, terminal, session, proxies, standard folders
   and toolchains) and what an `env` grant (replacing `keys`) names: built
-  (5a). Next (5b): `check` naming a variable a plugin's code reads that it
-  does not get, and the rest of what it says. Measured first, on macOS:
-  every plugin the matrix found loading, the gallery and the examples load
-  alike with only `PATH`, `HOME`, `TMPDIR`, `TERM`, the locale, `USER`,
-  `LOGNAME`, `SHELL` and the model key.
+  (5a, #58), and `check` naming a variable a plugin's code reads that it
+  does not get, `environment` and `leftOut`, one counted note (5b).
+  Measured first, on macOS: every plugin the matrix found loading, the
+  gallery and the examples load alike with only `PATH`, `HOME`, `TMPDIR`,
+  `TERM`, the locale, `USER`, `LOGNAME`, `SHELL` and the model key.
 
 **Done when** `dsh-univer-office` and `pi-lens` work in a gallery agent,
 their tools' results checked (not only `✓`); the stand-in probe runs inside
