@@ -16,6 +16,7 @@
 //! Not published yet and without an API promise.
 
 pub mod builtins;
+pub(crate) mod environment;
 pub mod frontend;
 pub(crate) mod hints;
 pub mod install;

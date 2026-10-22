@@ -87,8 +87,9 @@ jobs:
             --scripted tests/fixtures/echo/script.json --once "echo hi" | tee run-out.txt
           grep -qx Completed run-out.txt
       - name: The terminal UI on a pty, given an answer with escape sequences and deceptive links (none reaches the terminal as one)
-        # A credential set, so the plugin runtimes start through `env -u`
-        # (design §12, "Step 4"); scripted, so never sent anywhere.
+        # The plugin runtimes start through `env -u` with the kept
+        # environment (design §12, "Step 5"), a credential among what is
+        # taken out; scripted, so never sent anywhere.
         env:
           OPENAI_API_KEY: not-a-real-key
         timeout-minutes: 5
@@ -96,8 +97,9 @@ jobs:
           cargo build --locked
           python3 tests/terminal_text_pty.py target/debug/yobuild
       - name: yobuild run with the terminal UI on a pty (a typed task, Ctrl+C quits with 0, a dead UI is an error)
-        # A credential set, so the plugin runtimes start through `env -u`
-        # (design §12, "Step 4"); scripted, so never sent anywhere.
+        # The plugin runtimes start through `env -u` with the kept
+        # environment (design §12, "Step 5"), a credential among what is
+        # taken out; scripted, so never sent anywhere.
         env:
           OPENAI_API_KEY: not-a-real-key
         timeout-minutes: 5
@@ -105,8 +107,9 @@ jobs:
           cargo build --locked
           python3 tests/run_terminal_pty.py target/debug/yobuild
       - name: The coding example (yobuild run examples/coding.toml) on a pty (its pi policy asks before rm -rf build, Block from the keyboard)
-        # A credential set, so the plugin runtimes start through `env -u`
-        # (design §12, "Step 4"); scripted, so never sent anywhere.
+        # The plugin runtimes start through `env -u` with the kept
+        # environment (design §12, "Step 5"), a credential among what is
+        # taken out; scripted, so never sent anywhere.
         env:
           OPENAI_API_KEY: not-a-real-key
         shell: bash
@@ -116,13 +119,14 @@ jobs:
           python3 "$GITHUB_WORKSPACE/tests/terminal_pty.py" "$GITHUB_WORKSPACE/target/debug/yobuild" \
             run "$GITHUB_WORKSPACE/examples/coding.toml" --scripted "$GITHUB_WORKSPACE/examples/scripts/coding.json" --locked
 
-  # Credentials taken out of plugin runtimes and stdio servers go through
-  # `/usr/bin/env -u` (design §12 "Step 4"): on macOS that is BSD's `env`.
-  # The unit tests (the `=` path, the program looked for first, the
-  # `DYLD_*` note), host_test's withheld-variable test (`node` not on a
-  # runtime's `PATH`; a runtime's `DYLD_*`: the runners have System
+  # Plugin runtimes and stdio servers start with the kept environment
+  # through `/usr/bin/env -u` (design §12 "Step 4", "Step 5"): on macOS that
+  # is BSD's `env`. The unit tests (the `=` path, the program looked for
+  # first, the `DYLD_*` note), host_test's withheld-variable test (`node`
+  # not on a runtime's `PATH`; a runtime's `DYLD_*`: the runners have System
   # Integrity Protection off, so it checks that `DYLD_*` arrives — the drop
-  # itself, under SIP, only on a machine with it on) and cli_test's server
+  # itself, under SIP, only on a machine with it on), kept_env_test (the
+  # kept set, grants, rutis's loopback channel token) and cli_test's server
   # that cannot start (its problem, fix and the `DYLD_*` note end to end).
   macos:
     name: Credentials on macOS
@@ -146,5 +150,7 @@ jobs:
         run: cargo test --locked --lib
       - name: A withheld variable gone from every runtime
         run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked --test host_test a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set
+      - name: The kept environment, rutis's loopback channel token among what arrives
+        run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked --test kept_env_test
       - name: A server that cannot start, and the DYLD_* note, through the binary
         run: cargo test --locked --test cli_test a_server_that_cannot_start_is_said_with_what_to_do

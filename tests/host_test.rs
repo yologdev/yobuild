@@ -356,7 +356,8 @@ async fn env_reaches_only_its_runtime_and_an_unknown_one_is_an_error() {
 /// A withheld variable is taken out of every runtime's environment (the
 /// runtime started through `env -u`), but where `keep` or an `env` entry of
 /// that name says otherwise; `keep` for a runtime that is not started is an
-/// error.
+/// error. (The kept environment, which takes out everything else too:
+/// `kept_env_test`.)
 #[tokio::test(flavor = "multi_thread")]
 async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
     if !runtime_installed() {
@@ -423,7 +424,7 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
         .env("two", NAME, "given")
         .keep("three", NAME)
         // A runtime's own `DYLD_*` entry: dropped by the protected
-        // `/usr/bin/env` on macOS, where the runtime starts through it.
+        // `/usr/bin/env` on macOS, which every runtime starts through.
         .env("one", "DYLD_YOBUILD_TEST", "1")
         .env("three", "DYLD_YOBUILD_TEST", "1")
         .start(&root)
@@ -442,8 +443,8 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
         false => r#""""#,
     };
     // Through `env` on macOS with System Integrity Protection on (the
-    // default; GitHub's macOS runners have it off), `DYLD_*` is gone with
-    // it; kept, nothing goes through `env`, and it arrives.
+    // default; GitHub's macOS runners have it off), `DYLD_*` is gone,
+    // kept or not.
     let dropped = match cfg!(target_os = "macos") && sip_enabled() {
         true => "null",
         false => r#""1""#,
@@ -452,7 +453,7 @@ async fn a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set() {
     assert_eq!(written(&b_out).await, r#"["given",null]"#);
     assert_eq!(
         written(&c_out).await,
-        format!("[{},\"1\"]", serde_json::to_string(&inherited).unwrap())
+        format!("[{},{dropped}]", serde_json::to_string(&inherited).unwrap())
     );
     root.shutdown().await.unwrap();
 }

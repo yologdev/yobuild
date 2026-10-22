@@ -150,7 +150,7 @@ And optionally:
   true, judged: false }` with `gate = "off"`); a rutis plugin also
   `host_approval.ask(question, details?)` (Allow/Block put to the owner,
   naming the plugin, answered `"allow"`, `"block"` or `"unanswered"`).
-  On a DSH plugin, `workspace`, `wake` and `keys` only, `wake` with
+  On a DSH plugin, `workspace`, `wake` and `env` only, `wake` with
   `workspace`, and **the same on every DSH plugin** (else refused): one DSH host — a
   stand-in DSH agent in the agent's folder — serves them all. It is what
   DSH plugins that read the calling agent need (`dsh-univer-office`'s
@@ -173,12 +173,16 @@ And optionally:
   of a grant (not trusted, no model) and a `pi.exec` refused are Warning
   notices naming the grant. Every pi extension sees the conversation
   (`message_end`, `context`, observer events): there is no grant for it.
-  On any plugin, `keys = ["OPENAI_API_KEY", …]`: those credentials are
-  left in its runtime's environment (below, **Model keys**) — only names
-  yoagent reads a credential from (and the agent's `api_key_env`), each
-  once, and the same on every pi plugin or none, every DSH plugin or none,
-  every rutis plugin of one package or none (they share one runtime). It
-  starts no DSH host.
+  On any plugin, `env = ["TAVILY_API_KEY", "PI_LENS_*"]`: those variables
+  are left in its runtime's environment (below, **The environment**) —
+  names, or a prefix (at least two characters — letters, digits or `_` —
+  then `_*`), each once, and the same on every pi plugin or none, every
+  DSH plugin or none, every rutis plugin of one package or none (they
+  share one runtime). A
+  credential yoagent reads (and the agent's `api_key_env`) and what loads
+  code (`NODE_OPTIONS`, `NODE_PATH`, `LD_PRELOAD`, `DYLD_*`) pass only by
+  their full name: a prefix that would match one is refused. It starts no
+  DSH host.
 - `config = { ... }`: a table; every string in it may hold `${NAME}`
   references, and a key named like a secret (`token`, `key`, `password`,
   `auth`, …) must hold only references, plus at most a scheme word
@@ -199,32 +203,40 @@ A server may want absolute paths (`check --json` shows its parameters):
 the prompt builds them from `{cwd}`, and the reply files write
 `"{cwd}/…"`.
 
-**Model keys.** Plugins and stdio MCP servers have every credential
-yoagent reads that is set in the environment (`DEEPSEEK_API_KEY`,
-`OPENAI_API_KEY`, …, AWS's `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
-`AWS_SESSION_TOKEN`, Cloudflare's tokens, `API_KEY`, the agent's
-`api_key_env`) taken out of their environment, in `run` and in `check`
-alike (`check`'s pi and DSH plugins probed alone get them empty), so they
-cannot call a model outside the run's budget. `check` says which, as an
-agent note, and `run` as an Info notice. A server or plugin that truly needs one is handed
-it on purpose: a stdio server through its `env`
-(`OPENAI_API_KEY = "${OPENAI_API_KEY}"`) or its `args`, an HTTP server
-through its `url` or `headers`, a DSH or rutis plugin through a `${NAME}`
-in its `config`, any plugin through `grants = { keys = [...] }` (its
-whole runtime gets it). `check` notes each ("it is given `X`, a
-credential yoagent reads: what it spends with it is not metered"). A
-`keys` grant naming a variable that is unset or empty hands nothing over
-under that name, which `check` and `run` say ("its `keys` grant names
-`X`, unset or empty here: …"). When entries lose different credentials,
-`check` notes on each what it has taken out. On macOS (with System
-Integrity Protection on, the default), `DYLD_*` variables do not reach
-what starts through `/usr/bin/env` (a plugin runtime or stdio server
-with a credential taken out, the terminal UI) either: `check` and `run`
-name them. Tell the person before you hand one over. This is not a
-sandbox: a plugin can still read a key from a file the person keeps it
-in (`~/.aws/credentials`, a shell profile), and other secrets
-(`GITHUB_TOKEN`, `NPM_TOKEN`) still pass. A plugin that fails with an authentication error, or says a feature
-is off, may be one that wanted a key.
+**The environment.** Plugins and stdio MCP servers start with a kept
+environment, in `run` and in `check` alike (on unix): the path, home,
+user, shell, working folder, temp folders, time zone, `LD_LIBRARY_PATH`,
+the locale (`LANG`, `LC_*`), the terminal's variables, `BROWSER`, `CI`,
+the proxies (`HTTPS_PROXY`, …, `NODE_USE_ENV_PROXY`) and CA settings,
+the `XDG_*` folders and where toolchains live (`GOPATH`, `CARGO_HOME`,
+`JAVA_HOME`, `VIRTUAL_ENV`, …, asdf's and mise's homes). Everything else
+the person has exported is left out: every credential yoagent reads
+(`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, …, AWS's and Cloudflare's,
+`API_KEY`, the agent's `api_key_env`), so a plugin cannot call a model
+outside the run's budget, and every other secret or setting
+(`GITHUB_TOKEN`, `TAVILY_API_KEY`, `AWS_PROFILE`, a plugin's own
+`PI_LENS_*` settings, `NODE_OPTIONS`). `check`'s pi and DSH plugins
+probed alone get what is left out set empty instead. `check` names the
+credentials taken out, as an agent note, and `run` as an Info notice,
+and in another how many other variables set here reach no plugin or
+server. A server or plugin that truly needs a variable is handed it on
+purpose: a stdio server through its `env` (`TAVILY_API_KEY =
+"${TAVILY_API_KEY}"`) or its `args`, an HTTP server through its `url` or
+`headers`, a DSH or rutis plugin through a `${NAME}` in its `config`,
+any plugin through `grants = { env = [...] }` (its whole runtime gets
+it). `check` notes each credential yoagent reads handed over ("it is
+given `X`, a credential yoagent reads: what it spends with it is not
+metered"). An `env` grant naming a variable that is unset or empty hands
+nothing over under that name, which `check` and `run` say ("its `env`
+grant names `X`, unset or empty here: …"). When entries lose different
+credentials, `check` notes on each what it has taken out. On macOS (with
+System Integrity Protection on, the default), a `DYLD_*` variable an
+entry is handed does not reach it (everything starts through the
+protected `/usr/bin/env`): `check` and `run` name it. Tell the person
+before you hand anything over. This is not a sandbox: a plugin can still
+read a key from a file the person keeps it in (`~/.aws/credentials`, a
+shell profile, a `.env`). A plugin that fails with an authentication
+error, or says a feature is off, may be one that wanted a variable.
 
 **Pins.** Every package is `name@1.2.3` (exact; `1.2.3-beta.1` too) or a
 local path (`./`, `../`, `/`). Tags, ranges, `git`, URLs and `file:` are

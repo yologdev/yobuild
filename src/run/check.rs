@@ -432,10 +432,10 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             None => agent_notes.push(note.clone()),
         }
     }
-    // Each name of a `keys` grant that is unset (or empty) here hands
+    // Each name of an `env` grant that is unset (or empty) here hands
     // nothing over: said, so the plugin is not taken to have it.
     let set = super::key_is_set;
-    for unset in super::keys_unset(&manifest, set) {
+    for unset in super::env_unset(&manifest, set) {
         let note = super::unset_grant_note(&unset);
         entry_notes.push((unset.plugin, note));
     }
@@ -484,17 +484,14 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     }
     agent_notes.extend(super::dyld_note(
         &manifest,
-        &withheld,
         std::env::vars_os().map(|(k, _)| k),
-        // What a `run` would start: the terminal UI on a terminal
-        // manifest (`check` itself starts none).
-        super::Platform {
-            macos: cfg!(target_os = "macos"),
-            terminal: manifest.frontend.terminal,
-        },
+        cfg!(target_os = "macos"),
     ));
     agent_notes.extend(
         super::withheld_note(&manifest, &withheld).map(|note| match probed {
+            true if cfg!(unix) => {
+                format!("{note} (`check`'s pi and DSH plugins probed alone get them, and every other variable the kept environment leaves out, empty instead)")
+            }
             true => {
                 format!("{note} (`check`'s pi and DSH plugins probed alone get them empty instead)")
             }
@@ -502,12 +499,28 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         }),
     );
     // The pi and DSH probes alone run as `run` runs plugins, but for the
-    // launch, which yoagent-rutis builds: what is withheld from the plugin
-    // set empty instead.
+    // launch, which yoagent-rutis builds and can only add to: what `run`
+    // takes out of the plugin's runtime — the credentials, and on unix every
+    // name the kept set and its `env` grant leave out — set empty instead
+    // (the probe's own `DSH_HOME` and the like are set after these and win).
     let probe_options = |plugin: &crate::manifest::Plugin| {
+        let passes =
+            |name: &std::ffi::OsStr| name.to_str().is_some_and(|n| plugin.grants.passes(n));
+        #[cfg(unix)]
+        let left_out = crate::frontend::host::not_inherited(
+            std::env::vars_os().map(|(k, _)| k),
+            |name| crate::environment::kept(name) || passes(name),
+            // rutis sets its own token after these when it hands over by
+            // loopback, so one here is this process's: set empty.
+            false,
+        );
+        #[cfg(not(unix))]
+        let left_out: Vec<std::ffi::OsString> = Vec::new();
         withheld
             .iter()
-            .filter(|name| !plugin.grants.keys.contains(name))
+            .map(std::ffi::OsString::from)
+            .filter(|name| !passes(name))
+            .chain(left_out)
             .fold(yoagent_rutis::probe::ProbeOptions::default(), |o, name| {
                 o.env(name, "")
             })
@@ -955,12 +968,8 @@ async fn rutis_alone(
         for service in super::SHARED {
             builder = builder.share(service);
         }
-        for name in super::withheld(manifest) {
-            builder = builder.withhold(name);
-        }
-        for key in plan.kept(&runtime) {
-            builder = builder.keep(&runtime, key);
-        }
+        let runtimes = [(runtime.clone(), dir.clone())];
+        builder = super::kept_environment(builder, manifest, plan, &runtimes);
         let mut host = builder.start(&root).await?;
         host.load([row]).await?;
         let handlers = settled(|| {

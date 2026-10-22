@@ -221,7 +221,8 @@ pub(crate) const HINTS: &[Hint] = &[
         id: "no-node",
         scope: Scope::Start,
         // rutis's spawn failure for the one cause it can name: no `node`
-        // (nothing withheld, so `startable` did not look first).
+        // (off unix, where nothing starts through `env`, so `startable`
+        // did not look first).
         pattern: "cannot start node: No such file or directory",
         fix: "the plugin runtimes run on Node, which is not on PATH: install Node 22.19 or later",
     },
@@ -229,7 +230,7 @@ pub(crate) const HINTS: &[Hint] = &[
         id: "no-env",
         scope: Scope::Start,
         pattern: "is not there, and yobuild needs it to start a plugin runtime or stdio MCP server",
-        fix: "install `env` at /usr/bin/env, which a minimal image may lack (and /bin/sh, needed for a program whose path holds `=`): yobuild starts a plugin runtime or stdio server through it while a credential yoagent reads is taken out of its environment",
+        fix: "install `env` at /usr/bin/env, which a minimal image may lack (and /bin/sh, needed for a program whose path holds `=`): yobuild starts every plugin runtime and stdio server through it, with the kept environment",
     },
     Hint {
         id: "mcp-no-tools",
@@ -424,7 +425,10 @@ mod tests {
             // `frontend::host::env_without`'s.
             (
                 Scope::Start,
-                "cannot take OPENAI_API_KEY out of node's environment: /usr/bin/env is not there, and yobuild needs it to start a plugin runtime or stdio MCP server while a credential yoagent reads is taken out of its environment".into(),
+                format!(
+                    "runtime `pi`: {}",
+                    crate::frontend::host::no_env(std::path::Path::new("node"), "/usr/bin/env")
+                ),
                 "no-env",
             ),
             (Scope::Start, "mcp files: the server lists no tools".into(), "mcp-no-tools"),
