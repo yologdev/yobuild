@@ -2116,7 +2116,7 @@ to a model; this step closes the unmetered way for honest code.
 **What it is not: a sandbox.** A plugin runs as the owner. It can read a
 key where the owner keeps it (a shell profile, a key file, pi's
 `~/.pi/agent/auth.json`, `~/.aws/credentials`), use `AWS_PROFILE` (not a
-key: kept), reach a cloud machine's metadata endpoint, and on Linux read
+key: kept — until step 5, which leaves it out), reach a cloud machine's metadata endpoint, and on Linux read
 `/proc/<yobuild's pid>/environ`. And the list holds only what yoagent
 knows: `GITHUB_TOKEN`, `NPM_TOKEN` and the like still pass. It is the
 honour-system kind of rule ("What a grant hands a plugin"): taking the
@@ -2375,12 +2375,16 @@ before the code, asked by the yoagent session's owner and checked with the
 prototype: removed through `env -u` (no rutis change), every credential
 yoagent lists, the `keys` grant. yoagent-rutis 0.8.1 added
 `ProbeOptions::env` for the alone probes, and yoagent 0.25.12
-`api_key_variables()`. The stronger step is an allowlist — a runtime
+`api_key_variables()`. After the merge (2026-10-21), yoagent's owner chose
+to keep `ProbeOptions` setting names empty rather than removing them: the
+alone probes get the credentials empty, `check` says so ("its probe alone
+gets them empty"), and a plugin that `check` misjudges because of it is
+to be sent to yoagent. The stronger step is an allowlist — a runtime
 started with `PATH`, `HOME`, `TMPDIR`, the locale, `TERM`, the proxy
-settings and what is granted — which the same `env` gives (`env -i`)
-without a rutis change: its own design, "Step 5" below (proposed
-2026-10-22), the kept set measured against the gallery and the matrix's
-plugins.
+settings and what is granted — which the same `env` gives without a rutis
+change (`-u` every name not kept, not `env -i`, which would drop what the
+launch sets): its own design, "Step 5" below (proposed 2026-10-22), the
+kept set measured against the gallery and the matrix's plugins.
 
 **Built** (2026-10-21): `manifest::KEY_VARIABLES` (26, yoagent 0.25.12's
 list), `Manifest::key_variables`, `Grants::keys` / `hosts_nothing`,
@@ -2412,141 +2416,219 @@ runtime started with a small kept set and what the manifest grants.
 
 **What it is not: a sandbox**, as step 4: a plugin runs as the owner and
 can read what the owner's files hold. It stops a plugin from picking up
-what the owner exported for something else, nothing more.
+what the owner exported for something else, nothing more. Files are not
+covered: DSH's launch environment (`dsh-launch-environment`) reads a
+`.env` in the folder it starts in and in its Harness home into
+`process.env`, and any plugin can read the owner's dotfiles.
 
-**Measured** (2026-10-22, `yobuild check --json` at 96e20a2, a scratch
-`YOBUILD_HOME`; the method is step 4's question asked of every variable).
-Every plugin the compatibility matrix lists as giving yoagent something —
-pi's 15 (works, works partly, nothing to use), DSH's `dsh-univer-office`
-— both MCP servers the gallery uses, the four gallery agents and the three
-examples, each checked twice: **A**, the environment as it is (with a
-dummy model key and `GITHUB_TOKEN` set), and **B**, `env -i` with only
-`PATH`, `HOME`, `TMPDIR`, `TERM`, the locale, `USER`, `LOGNAME`, `SHELL`
-and the model key. In B, as in A, each one loads with the same tools,
-entries, problems and notes (the agent notes differ only by the
-credentials step 4 names — one more was exported in A — and the lock A
-wrote first): **nothing a plugin does to load needs more**. (Also
-tried: `dsh-free-search@0.9.1`, refused alike in A and B — the DSH base
-pins 0.8.1, which the gallery uses and which passes; `dsh-visualize` does
-not install, as `parts.md` says.)
+**Measured** (2026-10-22, on macOS only, `yobuild check --json` at
+96e20a2, a scratch `YOBUILD_HOME`; the method is step 4's question asked
+of every variable). Every plugin the compatibility matrix does not refuse
+— pi's 15 (works, works partly, and three with nothing to use), DSH's
+`dsh-univer-office` — both MCP servers the gallery uses, the four gallery
+agents and the three examples, each checked twice: **A**, the environment
+as it is (with a dummy model key and `GITHUB_TOKEN` set), and **B**, `env
+-i` with only `PATH`, `HOME`, `TMPDIR`, `TERM`, the locale, `USER`,
+`LOGNAME`, `SHELL` and the model key. In B, as in A, each one loads with
+the same tools, entries, problems and notes (the agent notes differ only
+by the credentials step 4 names — one more was exported in A — and the
+lock A wrote first): **nothing a plugin does to load needs more**, on
+macOS. `dsh-free-search` was measured at 0.8.1, the version the DSH base
+pins, through the gallery's `web-research` and the handoff example; 0.9.1,
+the matrix's, is refused alike in A and B (the base pins 0.8.1).
+`dsh-visualize` does not install, as `parts.md` says. Linux was not
+measured: what a Linux `node` or native addon needs from the environment
+(`LD_LIBRARY_PATH`, below) is the kept set's guess, checked by CI's Linux
+job once built.
 
 Loading is not calling: `check` calls no tool. So each installed package's
 own files (not its dependencies) were also read for the variables they
 name (`process.env.X`, `process.env["X"]`). What the kept set below would
 take from them, by kind:
-- *Credentials of their own services* — pi-web-access names about 35
-  (`TAVILY_API_KEY`, `BRAVE_API_KEY`, `EXA_API_KEY`, `FIRECRAWL_API_KEY`,
-  `SERPER_API_KEY`, `PERPLEXITY_API_KEY`, `JINA_API_KEY`, …) and
+- *Credentials of their own services* — pi-web-access names 36 (`TAVILY_API_KEY`,
+  `BRAVE_API_KEY`, `EXA_API_KEY`, `FIRECRAWL_API_KEY`, `SERPER_API_KEY`,
+  `PERPLEXITY_API_KEY`, `JINA_API_KEY`, …; five of them —
+  `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `XAI_API_KEY`,
+  `ZAI_API_KEY` — step 4 already takes out) and
   `GOOGLE_APPLICATION_CREDENTIALS`; the langfuse observer
   `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST`; openwiki
   `LANGSMITH_API_KEY` and Azure's `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` /
   `AZURE_FEDERATED_TOKEN_FILE`; plannotator `JINA_API_KEY`; univer
   `UNIVER_LICENSE`. This is what the step is for: each such plugin needs a
   grant to use the owner's account with that service.
-- *Their own settings* — `PI_LENS_*` (about 150 tunables), `PLANNOTATOR_*`,
+- *Their own settings* — `PI_LENS_*` (about 120 tunables), `PLANNOTATOR_*`,
   `PI_SUBAGENT_*`, `CONTEXT_MODE_*`, `PONYTAIL_*`, `BIGPOWERS_*`,
   `OPENWIKI_*`, `PI_MCP_*`, `PI_WEB_ACCESS_*`, `POWERLINE_NERD_FONTS`.
   Left out, each plugin does what it does when the owner never set it; an
   owner who did set one grants it.
 - *Where programs live* — pi-lens finds language servers and scanners
   through `GOPATH`, `GOBIN`, `CARGO_HOME`, `JAVA_HOME`, `JDTLS_PATH`,
-  `VIRTUAL_ENV`, `CONDA_PREFIX`, `UV_PROJECT_ENVIRONMENT`, `BUN_INSTALL`.
-  Not secrets; without them it looks in fewer places and finds less.
+  `VIRTUAL_ENV`, `CONDA_PREFIX`, `UV_PROJECT_ENVIRONMENT`, `BUN_INSTALL`
+  (context-mode reads `BUN_INSTALL` too). Not secrets; kept below.
 - *Other agents' homes, to detect their host* — `CLAUDE_CONFIG_DIR`,
   `CODEX_HOME`, `CURSOR_*`, `VSCODE_*` (context-mode, ponytail,
   plannotator) — read to tell which agent app it runs in; left out, they
   read as they would in a plain pi.
-- *The terminal and the network* — `TERM_PROGRAM`, `NO_COLOR`, proxies
-  (pi-web-access, context-mode): kept below.
+- *The terminal, the network and the session* — `TERM_PROGRAM`
+  (powerline-footer), `NO_COLOR` and `CI` (context-mode), the proxies
+  (pi-web-access, context-mode), `BROWSER` (pi-mcp-adapter, plannotator:
+  to open a sign-in page), `PWD` (plannotator, context-mode): kept below.
+
+The scan sees only those two spellings in the package's own files: not a
+name read by a dependency (an SDK the plugin imports reads its own key —
+the langfuse and LangSmith SDKs do), not `const { X } = process.env`, not
+a computed name, and not code that copies `process.env` whole
+(`dsh-launch-environment` does, so whatever a DSH plugin starts gets what
+the DSH runtime got). It does see names in dead code.
 
 And the code yobuild itself runs in the runtimes: pi-tui (the terminal
 UI) reads the terminal's variables (`TERM`, `COLORTERM`, `TERM_PROGRAM`,
 `COLUMNS`, `LINES`, `TMUX`, `STY`, `ZELLIJ`, `WT_SESSION`,
 `KITTY_WINDOW_ID`, `ITERM_SESSION_ID`, `WEZTERM_PANE`,
-`GHOSTTY_RESOURCES_DIR`, `WARP_*`, `TERMINAL_EMULATOR`, `SSH_*`,
-`DISPLAY`) and its own `PI_HYPERLINKS`, `PI_TRUE_COLOR`,
+`GHOSTTY_RESOURCES_DIR`, `WARP_*`, `TERMINAL_EMULATOR`, `TERMUX_VERSION`,
+`SSH_*`, `DISPLAY`) and its own `PI_HYPERLINKS`, `PI_TRUE_COLOR`,
 `PI_IMAGE_PROTOCOL`, `PI_PROGRAM_STATUS`, `PI_TUI_*`; the rutis runtime
-`RUTIS_*` (rutis sets `RUTIS_CHANNEL_TOKEN` on the child as it spawns
-it); tsx `NODE_OPTIONS`, `TSX_*`; the DSH base `DSH_*` (yobuild sets
-`DSH_HOME` / `DSH_AGENTS_HOME` through the launcher); pi (the pi
-adapter's) its `PI_*` settings, `EDITOR` / `VISUAL`, the proxies, and its
+`RUTIS_*` (its settings, such as `RUTIS_SHUTDOWN_TIMEOUT`; in loopback
+handover — off unix, or with `RUTIS_LOCAL_HANDOVER=loopback` — rutis sets
+`RUTIS_CHANNEL_TOKEN` on the child as it spawns it; on unix the channel
+is otherwise file descriptor 3, which the environment does not touch);
+tsx `NODE_OPTIONS`, `TSX_*`; the DSH base `DSH_*` (yobuild sets
+`DSH_HOME` / `DSH_AGENTS_HOME` through the launcher when it gives DSH a
+home; the base also reads `DSH_WEB_SEARCH_PROVIDER`,
+`DSH_BUNDLED_SKILL_DIR`) and Cordis `CORDIS_SHARED` (state a Cordis
+loader hands its own restarted child); pi (the pi adapter's) its `PI_*`
+settings, `EDITOR` / `VISUAL`, `WAYLAND_DISPLAY`, the proxies, and its
 model providers' variables, which the adapter does not use (yoagent is
 the model).
 
 **How: `-u` every inherited name not kept, not `env -i`.** `env -i`
-would drop what the launch adds as it starts the process — rutis's
-`RUTIS_CHANNEL_TOKEN` (the runtime could not connect back), the
-launcher's `env` entries (`DSH_HOME`), a stdio server's `env` table. So
-the list `env_without` is given becomes every name in yobuild's own
-environment that is neither kept nor granted (nor set by that launch, as
-now): `/usr/bin/env -u A -u B … <program>`. Nothing else changes —
-`frontend::host::env_without`, `startable`, `/bin/sh` for a path with
-`=`, the `no-env` refusal, the `DYLD_*` note (now whenever a variable is
-left out, which with an allowlist is nearly always). A name in `environ`
-may hold anything but `=` (`BASH_FUNC_x%%`); `env -u` takes it whole. The
-command line grows with the environment — about 100 names, a few
-kilobytes, far below `ARG_MAX`.
+would drop what the launch adds as it starts the process — the launcher's
+`env` entries (`DSH_HOME`), a stdio server's `env` table, and in loopback
+handover rutis's `RUTIS_CHANNEL_TOKEN` (the runtime could not connect
+back). So the list `env_without` is given becomes every name in yobuild's
+own environment that is neither kept nor granted (nor set by that launch,
+as now): `/usr/bin/env -u A -u B … <program>`. A name is what precedes
+the first `=` of an `environ` entry after its first character, so it may
+hold anything else (`BASH_FUNC_x%%`), which `env -u` takes whole; a name
+that is empty or holds `=` (an entry `=x=1`, made by a parent that wrote
+`environ` by hand) `env -u` refuses, failing the start: it is skipped,
+passes as it is, and is logged at warn. The command line grows with the
+environment — about 100 names, a few kilobytes, far below `ARG_MAX`.
+
+What changes beside the list:
+- **Every plugin runtime and stdio server on unix starts through
+  `/usr/bin/env`**, not only while a credential is set: a machine without
+  it starts none. `env_without`'s error and the `no-env` hint drop "while
+  a credential yoagent reads is taken out of its environment" for "to
+  start it with the kept environment".
+- `startable` looks for every program first (it already does for a
+  server, and for a runtime whenever something is withheld — from now on,
+  always), so rutis's own "cannot start node: No such file or directory"
+  is reached only off unix: the `no-node` hint stays for that, its comment
+  saying so.
+- **The `DYLD_*` note narrows.** `DYLD_*` are not kept, so the rule itself
+  drops them whatever System Integrity Protection does. What SIP still
+  decides is a `DYLD_*` name an entry grants or a server's `env` sets: it
+  reaches the program only with SIP off. `dyld_note` says only those, and
+  `started_through_env` goes (everything starts through `env`).
+- The helper scripts (`node_json`) clear their environment
+  (`Command::env_clear`) and set the kept set's values, on every platform:
+  they are started by `Command`, not through `env`.
 
 **The kept set** (`run::KEPT`, fixed names and a few prefixes; none is a
 credential yoagent reads, and a test says so):
-- *the process*: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`,
-  `TMP`, `TEMP`, `TZ`;
+- *the process*: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `PWD`,
+  `TMPDIR`, `TMP`, `TEMP`, `TZ`, `LD_LIBRARY_PATH` (a `node` installed
+  through Nix, Linuxbrew, conda or an HPC module, and a native addon linked
+  against such libraries, may not start without it; on macOS `DYLD_*`
+  stay out, above);
 - *the locale*: `LANG`, `LANGUAGE`, `LC_*`;
 - *the terminal*: `TERM`, `COLORTERM`, `TERM_PROGRAM`,
   `TERM_PROGRAM_VERSION`, `NO_COLOR`, `FORCE_COLOR`, `COLUMNS`, `LINES`,
   and pi-tui's detection list above (`TMUX`, `STY`, `ZELLIJ`, `WT_SESSION`,
   `KITTY_WINDOW_ID`, `ITERM_SESSION_ID`, `WEZTERM_PANE`,
   `GHOSTTY_RESOURCES_DIR`, `WARP_SESSION_ID`, `WARP_TERMINAL_SESSION_UUID`,
-  `TERMINAL_EMULATOR`, `SSH_TTY`, `SSH_CONNECTION`, `SSH_CLIENT`, `DISPLAY`,
-  `WAYLAND_DISPLAY`) — none a secret, and a plugin that draws output reads
-  them;
+  `TERMINAL_EMULATOR`, `TERMUX_VERSION`, `SSH_TTY`, `SSH_CONNECTION`,
+  `SSH_CLIENT`, `DISPLAY`), and pi's `WAYLAND_DISPLAY` — none a secret,
+  and a plugin that draws output reads them;
+- *the session*: `BROWSER` (where a sign-in page opens), `CI` (a plugin
+  under CI behaves as it would there);
 - *the network*: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and
-  their lowercase forms, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`,
-  `SSL_CERT_DIR` — a plugin behind the owner's proxy or corporate CA must
-  reach the network as the owner does (a proxy URL may hold a password: it
-  is the owner's network setting, kept as such, and said);
+  their lowercase forms, `NODE_USE_ENV_PROXY` (Node's built-in `fetch`
+  uses the proxy variables only with it), `NODE_EXTRA_CA_CERTS`,
+  `SSL_CERT_FILE`, `SSL_CERT_DIR` — a plugin behind the owner's proxy or
+  corporate CA must reach the network as the owner does (a proxy URL may
+  hold a password: it is the owner's network setting, kept as such, and
+  said, below);
 - *standard folders*: `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
   `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`;
-- *where programs live*: `GOPATH`, `GOROOT`, `GOBIN`, `CARGO_HOME`,
-  `RUSTUP_HOME`, `JAVA_HOME`, `VIRTUAL_ENV`, `CONDA_PREFIX`, `PNPM_HOME`,
-  `BUN_INSTALL`, `NVM_DIR`, `VOLTA_HOME`, `DENO_INSTALL` (measured: pi-lens);
-- *the terminal UI's runtime only* (`ui`, yobuild's own code): `PI_HYPERLINKS`,
+- *where programs live*: those pi-lens reads (`GOPATH`, `GOBIN`,
+  `CARGO_HOME`, `JAVA_HOME`, `JDTLS_PATH`, `VIRTUAL_ENV`, `CONDA_PREFIX`,
+  `UV_PROJECT_ENVIRONMENT`, `BUN_INSTALL`) and their kin, by the same
+  reasoning, not measured (`GOROOT`, `RUSTUP_HOME`, `PNPM_HOME`, `NVM_DIR`,
+  `VOLTA_HOME`, `DENO_INSTALL`);
+- *yobuild's own runtimes*: `RUTIS_*` (the rutis runtime's settings, every
+  runtime); and in the terminal UI's runtime only (`ui`): `PI_HYPERLINKS`,
   `PI_TRUE_COLOR`, `PI_IMAGE_PROTOCOL`, `PI_PROGRAM_STATUS`, `PI_TUI_*`.
 
-Not kept: `NODE_OPTIONS` (it can `--require` code into every runtime; an
-owner's debugging flag is not a plugin's), `NODE_PATH`, `npm_config_*`,
-every other program's settings, and every secret. What the launch sets
-(rutis's channel, `DSH_HOME`, a server's `env`) is the launch's, as now.
+Not kept, on purpose:
+- `NODE_OPTIONS` (it can `--require` code into every runtime; an owner's
+  debugging flag is not a plugin's — decision 4), `NODE_PATH`,
+  `LD_PRELOAD` and `DYLD_*` (code into every process), `TSX_*` (the
+  owner's tsx settings; yobuild's runtimes need none);
+- `npm_config_*` (`npm_config_proxy` among them: an owner whose proxy is
+  set only there, for npm, sets `HTTPS_PROXY` for plugins);
+- `DSH_*` and `CORDIS_SHARED`: the DSH runtime gets what yobuild's
+  launcher sets; an owner's `DSH_WEB_SEARCH_PROVIDER` is granted on the DSH
+  plugins;
+- `EDITOR` / `VISUAL`: no plugin opens an editor — the terminal belongs to
+  the terminal UI, and another runtime touching it is stopped;
+- `AWS_PROFILE`, which step 4 kept (not a key): it selects the owner's
+  cloud account, so a plugin that should use it is granted it;
+- every other program's settings, and every secret.
+
+What the launch sets (rutis's channel, `DSH_HOME`, a server's `env`) is
+the launch's, as now.
 
 **Granting more.** One grant, replacing step 4's `keys` (unreleased;
 nothing to migrate): `grants = { env = ["TAVILY_API_KEY", "PI_LENS_*"] }`
-on a `[[plugin]]` — names, or a prefix ending in `_*` (at least two
-characters before it). The rules are `keys`'s: on any plugin, the same on
-every pi plugin, every DSH plugin and every rutis plugin of one package
-(one runtime, one environment), each name once, sorted; a credential
-yoagent reads only by its full name — a prefix never matches one, so
-`check`'s "not metered" note stays exact. `check` notes a credential yoagent
-reads as now ("it is given `X`, … not metered"), and any other granted name
-that is set here and looks like a secret (`manifest::secret`'s words: key,
-token, secret, password, auth, credential, …) as "it is given `X`, set
-here" — the owner's account, used as the plugin sees fit. A granted name
-not set here: said as `keys` is now ("unset or empty here: not handed
-over"). An MCP server needs no grant: its `env` table already hands over a
-value (`env = { TAVILY_API_KEY = "${TAVILY_API_KEY}" }`), under any name.
+on a `[[plugin]]` — names, or a prefix: at least two characters, then
+`_*` (`PI_LENS_*`; `A_*` and `*` refused). The rules are `keys`'s: on any
+plugin, the same on every pi plugin, every DSH plugin and every rutis
+plugin of one package (one runtime, one environment), each name once,
+sorted. A credential yoagent reads passes only by its full name: a prefix
+that would match one is refused ("`AWS_*` would hand over
+`AWS_ACCESS_KEY_ID`, a credential yoagent reads: name it"), so `check`'s
+"not metered" note stays exact. An `env`-only grant, as `keys` now, starts
+no DSH host (`hosts_nothing`). `check` notes a credential yoagent reads as
+now ("it is given `X`, … not metered"), and any other granted name that
+is set here and looks like a secret (`manifest::secret`'s words, the
+function made crate-visible: key, token, secret, password, auth,
+credential, …) as "it is given `X`, set here" — the owner's account, used
+as the plugin sees fit. A granted name not set here: said as `keys` is
+now ("unset or empty here: not handed over"). An MCP server needs no
+grant: its `env` table already hands over a value (`env = {
+TAVILY_API_KEY = "${TAVILY_API_KEY}" }`), under any name.
 
 **Said.**
 - `check`, per entry: `--json` gains `environment` — the names it gets
   beyond the kept set (its grants, a server's `env`) — and a note for each
-  variable **its own code names, set here, that it does not get**: "its
-  code reads `TAVILY_API_KEY`, which is set here but left out of its
-  environment: grant it (`grants = { env = [\"TAVILY_API_KEY\"] }`) if it
-  should have it". The names come from the measurement's scan, run on the
-  entry's own files: a pi or DSH package's folder in its set (not its
-  dependencies), a local file, a stdio server's package. Only names set
-  here, and not kept or granted, are said, so a plugin's hundred tunables
-  say nothing unless the owner set one. It is a hint, not a proof:
-  `process.env[name]` with a computed name is not seen, and a name in dead
-  code is.
+  variable **its own code names, set here, that it does not get**. For a
+  plugin: "its code reads `TAVILY_API_KEY`, which is set here but left out
+  of its environment: grant it (`grants = { env = [\"TAVILY_API_KEY\"]
+  }`) if it should have it"; for a stdio server: "…: hand it over in its
+  `env` table (`TAVILY_API_KEY = \"${TAVILY_API_KEY}\"`) if it should have
+  it"; for a credential yoagent reads, never a suggestion to grant: "its
+  code reads `OPENAI_API_KEY`, a credential yoagent reads, taken out:
+  granted, what it spends with it is not metered". The names come from
+  the scan above, run on the entry's own files: a pi or DSH package's
+  folder in its set (not its dependencies), a local file, a stdio
+  server's package. Only names set here, and not kept or granted, are
+  said, so a plugin's hundred tunables say nothing unless the owner set
+  one. It is a hint, not a proof, with the scan's limits above.
+- `check`, for the agent, when a kept proxy variable holds a password
+  (`written_password`): "`HTTPS_PROXY` holds a password, and every plugin
+  and stdio server gets it as the owner's network setting".
 - `run` and `check` replace step 4's combined note with one that names the
   rule and counts: "plugins and stdio MCP servers start with the kept
   environment (the path, home, locale, terminal, proxies, standard
@@ -2554,56 +2636,71 @@ value (`env = { TAVILY_API_KEY = "${TAVILY_API_KEY}" }`), under any name.
   are left out, among them the credentials yoagent reads (`X`, …)" — the
   credentials named as now, the rest counted (their names are in `check
   --json`'s agent `leftOut`).
+- §6 ("Not covered") and the honour-system bullet: plugins start with the
+  kept environment and what is granted, not the owner's whole
+  environment; still not a sandbox (files, dotfiles, `.env`s).
 - The skill's `manifest.md` (the `env` grant, what is kept), `parts.md`
   (pi-web-access's paid engines and the langfuse observer need `env`
   grants; pi-lens's toolchains are kept) and `failures.md` (a plugin's
-  authentication error when its key is left out: the note above).
+  authentication error when its key is left out: the note above; the
+  reworded `no-env`), and `CLAUDE.md`.
 
 **Where it applies.** As step 4: the plugin runtimes (`ui`, `pi`, `dsh`,
 `rutis-<n>`) in `run` and in `check` (alone and together), the stdio MCP
 servers, the helper scripts (`node_json`: the kept set, no grants; they
 import a package's code). `check`'s pi and DSH probes alone keep step 4's
 behaviour — yoagent-rutis builds their launch and can only add or set
-empty, and yoagent's owner chose not to add removal (2026-10-21) — so
-alone they get the full environment less the credentials, said as now.
-Not npm (its own `npm_config_*` filtering, step M2b), not the agent's
-`bash`. Off unix: no `env` to start through — step 4's credentials set
-empty, nothing else; said.
+empty, and yoagent's owner chose not to add removal (2026-10-21, step 4's
+History) — so alone they get the full environment less the credentials,
+said as now. Not npm (its own `npm_config_*` filtering, step M2b), not the
+agent's `bash`. Off unix: the runtimes and servers have no `env` to start
+through — step 4's credentials set empty, nothing else; said. The helpers
+get the kept set there too.
 
 **Decisions for review.**
 1. *`env` replaces `keys`* (recommended: one list of what passes, a
    credential among them noted as now) — or `env` beside `keys`.
-2. *Where programs live is kept by default* (recommended, measured on
-   pi-lens: not secrets, and a missing one fails quietly) — or each
-   plugin grants its own.
+2. *Where programs live is kept by default* (recommended: not secrets,
+   and without them pi-lens looks in fewer places — expected to find less
+   without saying why; not measured) — or each plugin grants its own.
 3. *No opt-out* (recommended: a plugin that needs a variable is granted
    it, named in the manifest and said by `check`) — or a manifest-wide
    `[builtins] environment = "inherit"` for debugging.
-4. *`NODE_OPTIONS` left out* (recommended) — or kept, as the owner's
-   Node setting.
+4. *`NODE_OPTIONS` left out* (recommended) — or kept, as the owner's Node
+   setting. Left out loses what an owner sets there for every Node
+   program: `--use-env-proxy` (kept instead as `NODE_USE_ENV_PROXY`),
+   `--use-system-ca` (the system's certificates; `NODE_EXTRA_CA_CERTS` is
+   kept), a memory limit. An owner who needs one of these for plugins says
+   so, and a narrow kept form is found for it.
 
 **Tests.**
-- Host test: a runtime sees the kept names, a launcher `env` entry and
-  rutis's channel (it connects), and not an unrelated variable; a granted
-  name and a granted prefix reach only that runtime.
+- Host test: a runtime sees the kept names, a launcher `env` entry and,
+  with `RUTIS_LOCAL_HANDOVER=loopback` set in the test, rutis's
+  `RUTIS_CHANNEL_TOKEN` (it connects), and not an unrelated variable; a
+  granted name and a granted prefix reach only that runtime.
 - `cli_test`: step 4's test with `UNRELATED` now unset everywhere,
   `HTTPS_PROXY` and `LANG` kept, an `env` grant (a name and a prefix) on
   the pi, DSH and rutis plugins each reaching only its runtime, a server's
   `env` handing one over; `check`'s `environment`, `leftOut` and the
-  "its code reads" note on a fixture plugin that names
-  `YOBUILD_TEST_TOKEN`; the terminal UI on a pty (`tests/terminal_pty.py`,
+  "its code reads" notes (a plugin's, a server's, a credential yoagent
+  reads) on fixtures naming `YOBUILD_TEST_TOKEN` and `OPENAI_API_KEY`; the
+  terminal UI on a pty (`tests/terminal_pty.py`,
   `tests/run_terminal_pty.py`) with the allowlist on.
 - `src/manifest/tests.rs`: `env` refused with a bad name, a short or
-  misplaced `*`, a prefix that would match a credential yoagent reads
-  only by naming it, a repeat, a list that differs within a runtime.
+  misplaced `*`, a prefix that would match a credential yoagent reads, a
+  repeat, a list that differs within a runtime; an `env`-only DSH grant
+  starts no DSH host.
 - Unit: `KEPT` holds no credential yoagent reads; the `-u` list is every
-  inherited name not kept, granted or set by the launch; the code scan
-  (`process.env.X`, `process.env["X"]`, nothing in `node_modules`).
-- The gallery and the examples keep passing in CI (they did in B above).
+  inherited name not kept, granted or set by the launch, an empty name or
+  one holding `=` skipped; the code scan (`process.env.X`,
+  `process.env["X"]`, nothing in `node_modules`); the proxy-password note;
+  `node_json`'s cleared environment.
+- The gallery and the examples keep passing in CI, on Linux and in the
+  `macos` job (they did in B above, on macOS).
 
 **Measured again after** the code: the same harness (A against the
-allowlist) over the same plugins, the table above re-checked, and a live
-run of the handoff example.
+allowlist) over the same plugins, on macOS and Linux, the table above
+re-checked, and a live run of the handoff example.
 
 ### What it unlocks, and the migration
 

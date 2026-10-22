@@ -204,10 +204,10 @@ plugin of it or none) and named by `check`.
   kept environment — every inherited variable left out but the path,
   home, locale, terminal, proxies, standard folders and toolchains, and
   what an `env` grant (replacing `keys`) names; `check` naming a variable
-  a plugin's code reads that it does not get. Measured first: every
-  matrix plugin that gives yoagent something, the gallery and the
-  examples load alike with only `PATH`, `HOME`, `TMPDIR`, `TERM` and the
-  locale.
+  a plugin's code reads that it does not get. Measured first, on macOS:
+  every plugin the matrix does not refuse, the gallery and the examples
+  load alike with only `PATH`, `HOME`, `TMPDIR`, `TERM`, the locale,
+  `USER`, `LOGNAME`, `SHELL` and the model key.
 
 **Done when** `dsh-univer-office` and `pi-lens` work in a gallery agent,
 their tools' results checked (not only `✓`); the stand-in probe runs inside
@@ -220,10 +220,12 @@ the `.xlsx`'s totals); `pi-lens` works with `trust = true`, checked by
 hand (a type error found), not yet in a gallery agent — its language
 servers come from GitHub and npm on first use, which a CI run would fetch
 each time; the stand-in probe is a test in yoagent-rutis; the matrix's
-plugins re-checked through `yobuild check` on 2026-10-22 (each that gave
-yoagent something loads with the tools listed, also with only `PATH`,
-`HOME`, `TMPDIR`, `TERM` and the locale: design §12 "Step 5"; yoagent's
-own matrix, its script, not re-run); `check` names every grant, not yet
+plugins re-checked through `yobuild check` on 2026-10-22, on macOS (each
+the matrix does not refuse loads with the tools listed, also with only
+`PATH`, `HOME`, `TMPDIR`, `TERM`, the locale, `USER`, `LOGNAME`, `SHELL`
+and the model key: design §12 "Step 5"; `dsh-free-search` at the base's
+0.8.1, not the matrix's 0.9.1; yoagent's own matrix, its script, not
+re-run); `check` names every grant, not yet
 the fixed answers.
 
 ## M3c — Plugin web output and model calls (design §12, L3 and `llm`)
