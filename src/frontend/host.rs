@@ -293,11 +293,7 @@ pub(crate) fn env_without(
         .find(|p| !Path::new(p).is_file())
     {
         // Not the names: with the kept environment there are about 100.
-        return Err(format!(
-            "cannot start {} with the kept environment: {missing} is not there, and yobuild needs it to start a plugin runtime or stdio MCP server",
-            Path::new(&program).display()
-        )
-        .into());
+        return Err(no_env(Path::new(&program), missing).into());
     }
     let mut wrapped: Vec<OsString> = Vec::new();
     for (at, name) in names.iter().enumerate() {
@@ -464,33 +460,68 @@ pub(crate) fn matches(entry: &std::ffi::OsStr, name: &std::ffi::OsStr) -> bool {
     }
 }
 
-/// What rutis sets on the command it spawns in loopback handover: never
-/// taken out (a `-u` of it would remove rutis's fresh token).
-const CHANNEL_TOKEN: &str = "RUTIS_CHANNEL_TOKEN";
+/// [`env_without`]'s error when `missing` (`/usr/bin/env`, or `/bin/sh`
+/// for a path holding `=`) is not there: the `no-env` hint's words, which
+/// must not begin as `startable`'s ("yobuild cannot start …", the
+/// `cannot-start` hint's, earlier in the table).
+pub(crate) fn no_env(program: &Path, missing: &str) -> String {
+    format!(
+        "cannot start {} with the kept environment: {missing} is not there, and yobuild needs it to start a plugin runtime or stdio MCP server",
+        program.display()
+    )
+}
 
 /// The names in `vars` (this process's environment, as `vars_os` reads it)
 /// not `kept`: what `env -u` takes out of a runtime's or stdio server's
-/// environment (design §12 "Step 5"). Never [`CHANNEL_TOKEN`]; a name
-/// holding `=` (an entry `=x=1` reads as the name `=x`), which `env -u`
-/// refuses, failing the start, passes as it is, logged. (An entry with no
-/// `=` after its first byte `vars_os` does not return: it passes too.)
+/// environment (design §12 "Step 5"). Not `RUTIS_CHANNEL_TOKEN` while
+/// rutis hands its channel over by loopback (`loopback`; then it sets a
+/// fresh token on the command it spawns, which a `-u` would remove) —
+/// otherwise this process's own, say from a rutis parent, is taken out like
+/// any other. A name holding `=` (an entry `=x=1` reads as the name `=x`),
+/// which `env -u` refuses, failing the start, passes as it is, warned once
+/// a process. (An entry with no `=` after its first byte `vars_os` does not
+/// return: it passes too.)
+#[cfg(unix)]
 pub(crate) fn not_inherited(
     vars: impl IntoIterator<Item = OsString>,
     kept: impl Fn(&std::ffi::OsStr) -> bool,
+    loopback: bool,
 ) -> Vec<OsString> {
+    use rutis_bridge::transport::local::CHANNEL_TOKEN;
     vars.into_iter()
-        .filter(|name| name != CHANNEL_TOKEN && !kept(name))
+        .filter(|name| !(kept(name) || loopback && name == CHANNEL_TOKEN))
         .filter(|name| {
             let odd = name.is_empty() || name.as_encoded_bytes().contains(&b'=');
             if odd {
-                tracing::warn!(
-                    "the environment variable {:?} cannot be taken out (`env -u` refuses its name): it passes as it is",
-                    name
-                );
+                warn_once(name);
             }
             !odd
         })
         .collect()
+}
+
+/// rutis hands a spawned runtime its channel by loopback (with a token in
+/// its environment): as rutis decides it — off unix, or with
+/// `RUTIS_LOCAL_HANDOVER=loopback` in this process.
+#[cfg(unix)]
+pub(crate) fn loopback() -> bool {
+    std::env::var_os(rutis_bridge::transport::local::HANDOVER_VARIABLE)
+        .is_some_and(|value| value == "loopback")
+}
+
+/// Says once a process that the variable `name` passes to every plugin
+/// runtime and stdio MCP server.
+#[cfg(unix)]
+fn warn_once(name: &std::ffi::OsStr) {
+    static SAID: Mutex<Vec<OsString>> = Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if !said.iter().any(|n| n == name) {
+        said.push(name.to_owned());
+        tracing::warn!(
+            "the environment variable {:?} cannot be taken out (`env -u` refuses its name): every plugin runtime and stdio MCP server gets it",
+            name
+        );
+    }
 }
 
 /// The type [`PluginHostBuilder::local`] names its services for: never
@@ -590,6 +621,27 @@ impl PluginHostBuilder {
         self
     }
 
+    /// What [`inherit`](Self::inherit) takes out of a runtime's environment
+    /// beside what it `kept`: on unix every name of this process's not
+    /// inherited; off unix nothing (there is no `env` to start through).
+    #[cfg(unix)]
+    fn not_inherited(&self, kept: &dyn Fn(&std::ffi::OsStr) -> bool) -> Vec<OsString> {
+        match &self.inherit {
+            Some(inherit) => not_inherited(
+                std::env::vars_os().map(|(k, _)| k),
+                |key| inherit.keeps(key) || kept(key),
+                loopback(),
+            ),
+            None => Vec::new(),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn not_inherited(&self, _kept: &dyn Fn(&std::ffi::OsStr) -> bool) -> Vec<OsString> {
+        let _ = &self.inherit;
+        Vec::new()
+    }
+
     /// Start the runtimes and the loader on `root`.
     pub async fn start(self, root: &Ctx) -> Result<PluginHost, BoxError> {
         let started = |runtime: &String| self.runtimes.iter().any(|(r, _)| r == runtime);
@@ -631,18 +683,13 @@ impl PluginHostBuilder {
                 self.keep.iter().any(|(r, k)| r == name && matches(k, key))
                     || env.iter().any(|(_, k, _)| k == key)
             };
-            let mut withheld: Vec<OsString> = self
+            let withheld: Vec<OsString> = self
                 .withhold
                 .iter()
                 .filter(|key| !kept(key))
                 .cloned()
+                .chain(self.not_inherited(&kept))
                 .collect();
-            #[cfg(unix)]
-            if let Some(inherit) = &self.inherit {
-                withheld.extend(not_inherited(std::env::vars_os().map(|(k, _)| k), |key| {
-                    inherit.keeps(key) || kept(key)
-                }));
-            }
             let withheld: Vec<&OsString> = withheld.iter().collect();
             let launcher = env.iter().fold(
                 Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
@@ -1022,19 +1069,53 @@ mod tests {
     #[test]
     fn what_is_not_inherited_skips_the_channel_token_and_names_env_refuses() {
         let inherit = Inherit::only(["PATH"], ["LC_"]);
-        let vars = [
-            "PATH", "LC_ALL", "SECRET", "RUTIS_CHANNEL_TOKEN", "=x", "", "PI_TUI_X",
-        ]
-        .map(OsString::from);
+        let vars = || {
+            [
+                "PATH", "LC_ALL", "SECRET", "RUTIS_CHANNEL_TOKEN", "=x", "", "PI_TUI_X",
+            ]
+            .map(OsString::from)
+        };
         let granted = |name: &std::ffi::OsStr| matches("PI_TUI_*".as_ref(), name);
+        let kept = |name: &std::ffi::OsStr| inherit.keeps(name) || granted(name);
+        // In loopback handover rutis sets a fresh token: never taken out.
+        assert_eq!(not_inherited(vars(), kept, true), ["SECRET"]);
+        // Otherwise one here is this process's own: taken out.
         assert_eq!(
-            not_inherited(vars, |name| inherit.keeps(name) || granted(name)),
-            ["SECRET"]
+            not_inherited(vars(), kept, false),
+            ["SECRET", "RUTIS_CHANNEL_TOKEN"]
         );
         assert!(matches("A_B".as_ref(), "A_B".as_ref()));
         assert!(!matches("A_B".as_ref(), "A_BC".as_ref()));
         assert!(matches("A_*".as_ref(), "A_BC".as_ref()));
         assert!(!matches("A_*".as_ref(), "B_A".as_ref()));
+    }
+
+    /// The `no-env` hint's words, which no other hint takes first.
+    #[test]
+    fn the_missing_env_error_is_the_no_env_hints() {
+        let message = format!(
+            "runtime `pi`: {}",
+            no_env(Path::new("node"), "/usr/bin/env")
+        );
+        let hint = crate::hints::hint(crate::hints::Scope::Start, &message);
+        assert_eq!(hint.map(|h| h.id), Some("no-env"), "{message}");
+    }
+
+    /// With nothing to take out, a missing program is still said as
+    /// `startable` says it (no early return).
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_program_with_nothing_to_take_out_is_said() {
+        let error = env_without(
+            &[] as &[&str],
+            "/nonexistent/x".into(),
+            Vec::new(),
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(error, "yobuild cannot start /nonexistent/x: no such file");
     }
 
     /// A program goes through `env` even with nothing to take out, so what

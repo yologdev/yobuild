@@ -425,7 +425,10 @@ mod tests {
             // `frontend::host::env_without`'s.
             (
                 Scope::Start,
-                "runtime `pi`: cannot start node with the kept environment: /usr/bin/env is not there, and yobuild needs it to start a plugin runtime or stdio MCP server".into(),
+                format!(
+                    "runtime `pi`: {}",
+                    crate::frontend::host::no_env(std::path::Path::new("node"), "/usr/bin/env")
+                ),
                 "no-env",
             ),
             (Scope::Start, "mcp files: the server lists no tools".into(), "mcp-no-tools"),

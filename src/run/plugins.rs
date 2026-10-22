@@ -1299,7 +1299,7 @@ mod tests {
             .collect();
         assert_eq!(runtimes, ["rutis-0", "rutis-1", "rutis-0"]);
         // One runtime's environment is its plugins' together: the same
-        // `keys` on the plugins of one package; another package's its own.
+        // `env` grant on the plugins of one package; another package's its own.
         let keys = |p: &str, q: &str, r: &str| {
             plan_of(
                 dir.path(),
@@ -1446,7 +1446,7 @@ mod tests {
         assert!(!has(&plan, "dsh-host") && services.iter().all(|id| has(&plan, id)));
         let plan = loaded("", false);
         assert!(!has(&plan, "dsh-host") && !services.iter().any(|id| has(&plan, id)));
-        // `keys` alone: no host, the `dsh` runtime keeping them.
+        // `env` alone: no host, the `dsh` runtime keeping them.
         let plan = loaded("grants = { env = [\"API_KEY\"] }\n", false);
         assert!(!plan.dsh_host && !has(&plan, "dsh-host"));
         assert_eq!(plan.kept("dsh"), ["API_KEY"]);
@@ -1563,7 +1563,13 @@ mod tests {
              console.log(JSON.stringify({ name: v('CARGO_PKG_NAME'), path: v('PATH') }))\n",
         )
         .unwrap();
-        let found = node_json(&script, &[], &["CARGO_PKG_NAME".to_owned()]).unwrap();
+        // On unix no name to drop is needed: only the kept set gets there.
+        // Elsewhere only the names given are removed.
+        let keys: Vec<String> = match cfg!(unix) {
+            true => Vec::new(),
+            false => vec!["CARGO_PKG_NAME".to_owned()],
+        };
+        let found = node_json(&script, &[], &keys).unwrap();
         assert_eq!(found.field("name").unwrap(), "unset");
         assert_eq!(
             found.field("path").unwrap(),

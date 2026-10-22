@@ -1504,7 +1504,7 @@ fn env_entry(entry: &str, credentials: &[String]) -> Option<String> {
     };
     if !name(prefix) || !prefix.ends_with('_') || prefix.len() < 3 {
         return Some(format!(
-            "`{entry}`: a prefix is at least two letters or digits, then `_*` (`PI_LENS_*`)"
+            "`{entry}`: a prefix is at least two characters (letters, digits or `_`), then `_*` (`PI_LENS_*`)"
         ));
     }
     if let Some(credential) = credentials.iter().find(|c| c.starts_with(prefix)) {

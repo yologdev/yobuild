@@ -1351,9 +1351,9 @@ fn env_names_variables_the_same_on_every_plugin_of_a_runtime() {
     for (entry, m) in [
         ("A B", "`A B`: a variable's name (letters, digits and `_`), or a prefix ending in `_*`"),
         ("1X", "`1X`: a variable's name (letters, digits and `_`), or a prefix ending in `_*`"),
-        ("*", "`*`: a prefix is at least two letters or digits, then `_*` (`PI_LENS_*`)"),
-        ("A_*", "`A_*`: a prefix is at least two letters or digits, then `_*` (`PI_LENS_*`)"),
-        ("PI*", "`PI*`: a prefix is at least two letters or digits, then `_*` (`PI_LENS_*`)"),
+        ("*", "`*`: a prefix is at least two characters (letters, digits or `_`), then `_*` (`PI_LENS_*`)"),
+        ("A_*", "`A_*`: a prefix is at least two characters (letters, digits or `_`), then `_*` (`PI_LENS_*`)"),
+        ("PI*", "`PI*`: a prefix is at least two characters (letters, digits or `_`), then `_*` (`PI_LENS_*`)"),
         ("P*I_", "`P*I_`: a variable's name (letters, digits and `_`), or a prefix ending in `_*`"),
         ("AWS_*", "`AWS_*` would hand over `AWS_BEARER_TOKEN_BEDROCK`, a credential yoagent reads: name it"),
         ("NODE_*", "`NODE_*` would hand over `NODE_OPTIONS`, which loads code into the runtime: name it"),

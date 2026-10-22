@@ -490,18 +490,32 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     agent_notes.extend(
         super::withheld_note(&manifest, &withheld).map(|note| match probed {
             true => {
-                format!("{note} (`check`'s pi and DSH plugins probed alone get them empty instead)")
+                format!("{note} (`check`'s pi and DSH plugins probed alone get them, and every other variable the kept environment leaves out, empty instead)")
             }
             false => note,
         }),
     );
     // The pi and DSH probes alone run as `run` runs plugins, but for the
-    // launch, which yoagent-rutis builds: what is withheld from the plugin
-    // set empty instead.
+    // launch, which yoagent-rutis builds and can only add to: what `run`
+    // takes out of the plugin's runtime — the credentials, and on unix every
+    // name the kept set and its `env` grant leave out — set empty instead
+    // (the probe's own `DSH_HOME` and the like are set after these and win).
     let probe_options = |plugin: &crate::manifest::Plugin| {
+        let passes =
+            |name: &std::ffi::OsStr| name.to_str().is_some_and(|n| plugin.grants.passes(n));
+        #[cfg(unix)]
+        let left_out = crate::frontend::host::not_inherited(
+            std::env::vars_os().map(|(k, _)| k),
+            |name| crate::environment::kept(name) || passes(name),
+            crate::frontend::host::loopback(),
+        );
+        #[cfg(not(unix))]
+        let left_out: Vec<std::ffi::OsString> = Vec::new();
         withheld
             .iter()
-            .filter(|name| !plugin.grants.passes(name))
+            .map(std::ffi::OsString::from)
+            .filter(|name| !passes(name))
+            .chain(left_out)
             .fold(yoagent_rutis::probe::ProbeOptions::default(), |o, name| {
                 o.env(name, "")
             })

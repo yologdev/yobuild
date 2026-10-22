@@ -3,7 +3,8 @@
 //! environment — a fixed set of names and prefixes, and what an entry's
 //! `env` grant (or a server's `env` table) adds. Everything else is taken
 //! out (`/usr/bin/env -u`, `frontend::host::env_without`), on unix; off
-//! unix only the credentials yoagent reads are set empty (step 4).
+//! unix only the credentials yoagent reads, set empty (removed, for the
+//! helpers; step 4).
 
 use std::ffi::OsStr;
 
@@ -12,27 +13,36 @@ use crate::frontend::host::Inherit;
 /// The names every runtime, stdio server and helper keeps. None is a
 /// credential yoagent reads nor a name `manifest::secret` flags but `PWD`
 /// (the working folder, whose name is a password's abbreviation) (tested).
+#[rustfmt::skip]
 pub(crate) const KEPT: &[&str] = &[
     // The process.
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "TMPDIR", "TMP", "TEMP", "TZ",
     // A `node` from Nix, Linuxbrew, conda or an HPC module, and a native
     // addon linked against such libraries, may not start without it.
-    "LD_LIBRARY_PATH", // The locale (and `LC_*`, below).
-    "LANG", "LANGUAGE", // The terminal, and pi-tui's detection list.
+    "LD_LIBRARY_PATH",
+    // The locale (and `LC_*`, below).
+    "LANG", "LANGUAGE",
+    // The terminal, and pi-tui's detection list.
     "TERM", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "NO_COLOR", "FORCE_COLOR",
     "COLUMNS", "LINES", "TMUX", "STY", "ZELLIJ", "WT_SESSION", "KITTY_WINDOW_ID",
     "ITERM_SESSION_ID", "WEZTERM_PANE", "GHOSTTY_RESOURCES_DIR", "WARP_SESSION_ID",
     "WARP_TERMINAL_SESSION_UUID", "TERMINAL_EMULATOR", "TERMUX_VERSION", "SSH_TTY",
-    "SSH_CONNECTION", "SSH_CLIENT", "DISPLAY", "WAYLAND_DISPLAY", // The session.
-    "BROWSER", "CI", // The network.
-    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy",
-    "no_proxy", "NODE_USE_ENV_PROXY", "NODE_USE_SYSTEM_CA", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE",
-    "SSL_CERT_DIR", // Standard folders.
+    "SSH_CONNECTION", "SSH_CLIENT", "DISPLAY", "WAYLAND_DISPLAY",
+    // The session.
+    "BROWSER", "CI",
+    // The network.
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy",
+    "all_proxy", "no_proxy", "NODE_USE_ENV_PROXY", "NODE_USE_SYSTEM_CA",
+    "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    // Standard folders.
     "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
     // Where programs live: those pi-lens reads, and their kin.
     "GOPATH", "GOBIN", "CARGO_HOME", "JAVA_HOME", "JDTLS_PATH", "VIRTUAL_ENV", "CONDA_PREFIX",
     "UV_PROJECT_ENVIRONMENT", "BUN_INSTALL", "GOROOT", "RUSTUP_HOME", "PNPM_HOME", "NVM_DIR",
     "VOLTA_HOME", "DENO_INSTALL",
+    // Version managers' homes: a `node` on `PATH` that is an asdf or mise
+    // shim finds its versions through them.
+    "ASDF_DIR", "ASDF_DATA_DIR", "MISE_DATA_DIR", "MISE_CONFIG_DIR",
     // The rutis Node runtime's one setting (its `RUTIS_TOKEN` and TLS
     // files are a remote link's credentials: not kept).
     "RUTIS_SHUTDOWN_TIMEOUT",

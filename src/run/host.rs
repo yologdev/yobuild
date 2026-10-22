@@ -169,7 +169,7 @@ impl Host {
     }
 
     /// The caller and its grants, by its row: a rutis plugin's, or the DSH
-    /// host's when DSH plugins have a grant it serves (not `keys` alone);
+    /// host's when DSH plugins have a grant it serves (not `env` alone);
     /// `None` for any other caller (the
     /// `pi` and `dsh` rows, a DSH plugin's own, or no row). A pi extension is
     /// found by its file instead (`pi_caller`).

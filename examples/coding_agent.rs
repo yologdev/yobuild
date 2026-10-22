@@ -174,8 +174,9 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     let mut builder = PluginHost::builder()
         .node("ui", here().join("plugins"))
         .node("pi", rutis_plugins().join("pi"));
-    // The credentials set here are taken out of the plugins' environment,
-    // as under `yobuild run` (design §12, "Step 4").
+    // Step 4's withholding only — the credentials set here taken out of the
+    // plugins' environment: a library example, not `yobuild run`, which
+    // starts its runtimes with the kept environment (design §12, "Step 5").
     for name in yobuild::manifest::KEY_VARIABLES {
         if std::env::var_os(name).is_some() {
             builder = builder.withhold(name);

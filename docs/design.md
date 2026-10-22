@@ -2519,9 +2519,11 @@ handover rutis's `RUTIS_CHANNEL_TOKEN` (the runtime could not connect
 back). So the list `env_without` is given becomes every name in yobuild's
 own environment that is neither kept nor granted (nor set by that launch,
 as now): `/usr/bin/env -u A -u B … <program>`. `RUTIS_CHANNEL_TOKEN` is
-never in it whatever yobuild's own environment holds: rutis sets it on
+not in it while rutis hands over by loopback (off unix, or
+`RUTIS_LOCAL_HANDOVER=loopback`, as rutis decides it): rutis sets it on
 the `/usr/bin/env` command itself, so a `-u` would remove rutis's fresh
-token. A name is what `std::env::vars_os` reads: what precedes the first
+token. Otherwise one in yobuild's environment is its own (from a rutis
+parent, say) and is taken out like any other (found in review). A name is what `std::env::vars_os` reads: what precedes the first
 `=` after an entry's first byte, so it may hold anything else
 (`BASH_FUNC_x%%`), which `env -u` takes whole. Two kinds pass untouched,
 logged at warn: a name holding `=` (an entry `=x=1`, made by a parent
@@ -2549,8 +2551,8 @@ What changes beside the list:
   `env_without`'s error names no variables (it would list about 100):
   "cannot start X with the kept environment: /usr/bin/env is not there,
   and yobuild needs it to start a plugin runtime or stdio MCP server"
-  (not "yobuild cannot start X: …", which the `cannot-start` hint, first
-  in the table, would take); the `no-env` hint's fix follows, and its
+  (not "yobuild cannot start X: …", which the `cannot-start` hint,
+  earlier in the table, would take); the `no-env` hint's fix follows, and its
   test.
 - `startable` looks for every program first (it already does for a
   server, and for a runtime whenever something is withheld — from now on,
@@ -2574,7 +2576,8 @@ What changes beside the list:
   `keys_given` (a grant's names, set here); the grants table's row (§12
   "What a grant hands a plugin"); host_test's
   `a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set`
-  becomes the kept-environment test below.
+  stays, and the kept environment gets a test of its own
+  (`kept_env_test`).
 - `withheld_from` stays for the credentials yoagent reads only — each
   entry's note names those it loses when the entries differ, as now; the
   other names left out are `check --json`'s `leftOut` (the agent's), not a
@@ -2800,8 +2803,20 @@ is taken out), the unit tests above, `cli_test`'s
 `plugins_and_servers_have_the_credentials_taken_out_unless_handed_one`
 (an unrelated variable gone, `LANG` kept, a prefix grant) and
 `a_server_that_cannot_start_is_said_with_what_to_do` (a server's own
-`DYLD_*`). `withheld_note`, `TAKEN` and `withheld_from` stay as step 4
-made them until 5b. *5b*, still to build: what `check` says — the scan
+`DYLD_*`). After the review of #58: a stdio server whose `-u` list
+would hold a name that is not UTF-8 is refused (yoagent's transport takes
+the command as text, and a lossy name would let the variable through);
+`RUTIS_CHANNEL_TOKEN` kept only in loopback handover; `check`'s pi and
+DSH probes alone get every name the kept environment leaves out set
+empty too (`ProbeOptions::env`; the probe's own settings win), so they
+see what `run` gives; `run` says, as an Info notice, how many variables
+set here the kept environment leaves out (off unix: that only the
+credentials are) — which ones, and who reads them, is 5b's; asdf's and
+mise's homes kept (`ASDF_DIR`, `ASDF_DATA_DIR`, `MISE_DATA_DIR`,
+`MISE_CONFIG_DIR`: a `node` shim finds its versions through them); a
+name `env -u` refuses warned once a process; `kept_env_test` checks the
+runtime's channel came by loopback. `withheld_note`, `TAKEN` and
+`withheld_from` stay as step 4 made them until 5b. *5b*, still to build: what `check` says — the scan
 and the "its code reads" notes, `environment` and `leftOut`, the secret,
 code-loading and proxy-password notes, the counted note, the skill's
 `parts.md` and `failures.md` entries.

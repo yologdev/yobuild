@@ -201,8 +201,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         std::env::vars_os().map(|(k, _)| k),
         cfg!(target_os = "macos"),
     );
+    let kept = kept_note(&manifest, std::env::vars_os().map(|(k, _)| k), cfg!(unix));
     let notes = withheld_note(&manifest, &withheld)
         .into_iter()
+        .chain(kept)
         .chain(dyld)
         .chain(dsh_home_note(
             &checked.plan,
@@ -1093,16 +1095,11 @@ impl Tools {
     }
 }
 
-/// yoagent's tools the manifest asks for (`[builtins] tools`): all six —
-/// bash and search start in `cwd` (the file tools read relative paths from
-/// the process's working folder, which is `cwd`) — or reading only, its
-/// paths confined to `cwd`.
 /// `builder` with the kept environment (design §12 "Step 5"): every
-/// runtime inherits `environment::KEPT` and what its plugins' `env` grant
-/// passes (`Plan::env`), the terminal UI's runtime its own settings too;
-/// the credentials yoagent reads set here are withheld besides (off unix,
-/// where nothing else is taken out, they are set empty). `runtimes` are
-/// the runtimes `builder` starts.
+/// runtime inherits the kept set (`environment::KEPT`, `KEPT_PREFIXES`)
+/// and what [`kept_for`] says for it; the credentials yoagent reads set
+/// here are withheld besides (off unix, where nothing else is taken out,
+/// they are set empty). `runtimes` are the runtimes `builder` starts.
 pub(crate) fn kept_environment(
     mut builder: PluginHostBuilder,
     manifest: &Manifest,
@@ -1119,18 +1116,32 @@ pub(crate) fn kept_environment(
         builder = builder.withhold(name);
     }
     for (runtime, _) in runtimes {
-        for entry in plan.kept(runtime) {
+        for entry in kept_for(runtime, plan) {
             builder = builder.keep(runtime, entry);
-        }
-        if runtime == "ui" {
-            for entry in crate::environment::UI_KEPT {
-                builder = builder.keep(runtime, *entry);
-            }
         }
     }
     builder
 }
 
+/// What the runtime `runtime` keeps beyond the kept set: its plugins'
+/// `env` grant (`Plan::kept`), and for the terminal UI's runtime (`ui`,
+/// yobuild's own code) pi-tui's settings (`environment::UI_KEPT`).
+pub(crate) fn kept_for(runtime: &str, plan: &plugins::Plan) -> Vec<String> {
+    let ui = match runtime {
+        "ui" => crate::environment::UI_KEPT,
+        _ => &[],
+    };
+    plan.kept(runtime)
+        .iter()
+        .cloned()
+        .chain(ui.iter().map(|e| (*e).to_owned()))
+        .collect()
+}
+
+/// yoagent's tools the manifest asks for (`[builtins] tools`): all six —
+/// bash and search start in `cwd` (the file tools read relative paths from
+/// the process's working folder, which is `cwd`) — or reading only, its
+/// paths confined to `cwd`.
 fn tools_for(set: ToolSet, cwd: &Path) -> Vec<Box<dyn AgentTool>> {
     let here = cwd.display().to_string();
     match set {
@@ -1376,7 +1387,7 @@ async fn dsh_services(
 
 /// What plugins and stdio MCP servers have taken out of their environment:
 /// those of `withheld` some plugin's runtime or stdio server does not keep
-/// (a `keys` grant, a server's `env`), when there are any. Said by `run`
+/// (an `env` grant, a server's `env`), when there are any. Said by `run`
 /// (an Info notice) and by `check` (an agent note), since one that needs a
 /// key fails at its first call, and nothing else says why.
 pub(crate) fn withheld_note(manifest: &Manifest, withheld: &[String]) -> Option<String> {
@@ -1459,7 +1470,7 @@ pub(crate) fn key_is_set(name: &str) -> bool {
 }
 
 /// `check`'s note on a plugin whose `env` grant names some unset or empty
-/// here ([`env_unset`]): "it gets no key from it" when none of its names
+/// here ([`env_unset`]): "it gets nothing from it" when none of its names
 /// is set, else only those names said. `run` says it prefixed with the
 /// plugin, a Warning when none is set, else Info.
 pub(crate) fn unset_grant_note(unset: &UnsetGrant) -> String {
@@ -1486,6 +1497,37 @@ pub(crate) struct UnsetGrant {
     /// None of the grant's names is set, and it holds no prefix: it hands
     /// nothing over.
     pub all: bool,
+}
+
+/// What `run` says of the kept environment as the session starts, when a
+/// plugin or stdio MCP server starts (design §12 "Step 5"): on unix how
+/// many of `vars` (this process's names) the kept set leaves out (none:
+/// nothing said), since a plugin that needs one fails in its own words;
+/// off unix (`unix` false) that only the credentials yoagent reads are.
+/// Which ones, and which plugin's code reads them, is `check`'s (step 5b).
+pub(crate) fn kept_note(
+    manifest: &Manifest,
+    vars: impl IntoIterator<Item = std::ffi::OsString>,
+    unix: bool,
+) -> Option<String> {
+    let starts = !manifest.plugins.is_empty()
+        || manifest
+            .mcp
+            .iter()
+            .any(|s| matches!(s.transport, Transport::Stdio { .. }));
+    if !starts {
+        return None;
+    }
+    if !unix {
+        return Some("plugins and stdio MCP servers inherit the whole environment here but the credentials yoagent reads (there is no /usr/bin/env to start them through): an `env` grant changes nothing else".to_owned());
+    }
+    let left_out = vars
+        .into_iter()
+        .filter(|name| !crate::environment::kept(name))
+        .count();
+    (left_out > 0).then(|| format!(
+        "plugins and stdio MCP servers start with the kept environment (the path, home, locale, terminal, proxies, standard folders, toolchains): {left_out} variable(s) set here are left out — an `env` grant on a plugin, or a stdio server's `env` table, passes one it needs"
+    ))
 }
 
 /// The `DYLD_*` variables handed to an entry on purpose — an `env`
@@ -1846,7 +1888,7 @@ enum Launch {
 
 /// How to start `server`; a stdio server has each of `withheld` (the
 /// credentials set here) taken out of its environment, unless its own `env`
-/// sets it.
+/// sets it — and on unix every name not in the kept set ([`without`]).
 fn launch(
     server: &Mcp,
     installed: &install::Installed,
@@ -2023,16 +2065,39 @@ fn without(
     env: &HashMap<String, String>,
     withheld: &[String],
 ) -> Result<StdioCommand, BoxError> {
-    let set_here = |name: &std::ffi::OsStr| env.contains_key(&*name.to_string_lossy());
+    let vars = std::env::vars_os().map(|(k, _)| k);
+    without_from(command, args, env, withheld, vars)
+}
+
+/// [`without`] with `vars` as this process's environment's names. yoagent's
+/// transport takes the command as text, so a name to take out that is not
+/// UTF-8 (which a lossy `-u` would miss, letting it through) refuses the
+/// start, naming it.
+#[cfg(unix)]
+fn without_from(
+    command: &Path,
+    args: &[String],
+    env: &HashMap<String, String>,
+    withheld: &[String],
+    vars: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<StdioCommand, BoxError> {
+    let set_here = |name: &std::ffi::OsStr| name.to_str().is_some_and(|n| env.contains_key(n));
     let names: Vec<std::ffi::OsString> = withheld
         .iter()
         .filter(|name| !env.contains_key(*name))
         .map(Into::into)
         .chain(crate::frontend::host::not_inherited(
-            std::env::vars_os().map(|(k, _)| k),
+            vars,
             |name| crate::environment::kept(name) || set_here(name),
+            crate::frontend::host::loopback(),
         ))
         .collect();
+    if let Some(name) = names.iter().find(|n| n.to_str().is_none()) {
+        return Err(format!(
+            "the environment variable {name:?} has a name that is not UTF-8: yobuild cannot take it out of a stdio MCP server's environment (the server's command is text): unset it"
+        )
+        .into());
+    }
     // yoagent's transport starts it in this process's folder, with the
     // `PATH` its `env` sets, if any.
     let path = env.get("PATH").map(std::ffi::OsStr::new);
@@ -2044,8 +2109,9 @@ fn without(
         None,
         path,
     )?;
-    // Every word was a `String` (the command a path the manifest or the
-    // installed package names), so none is lost here.
+    // Every word is UTF-8 (the command a path the manifest or the
+    // installed package names, the names checked above), so none is lost
+    // here.
     let text = |word: std::ffi::OsString| word.to_string_lossy().into_owned();
     Ok((
         text(program),
@@ -2726,6 +2792,112 @@ mod tests {
             assert_eq!((program, argv), (command, vec!["--x".to_owned()]));
             assert_eq!(env.get("GROQ_API_KEY").map(String::as_str), Some(""));
         }
+    }
+
+    /// Each runtime keeps its own plugins' grant; only the terminal UI's
+    /// runtime keeps pi-tui's settings.
+    #[test]
+    fn each_runtime_keeps_its_own_grant_and_only_ui_the_terminal_settings() {
+        let plan = plugins::Plan {
+            env: vec![
+                ("pi".to_owned(), vec!["TAVILY_API_KEY".to_owned()]),
+                ("rutis-0".to_owned(), vec!["PI_LENS_*".to_owned()]),
+            ],
+            ..plugins::Plan::default()
+        };
+        let ui = super::kept_for("ui", &plan);
+        assert_eq!(ui, crate::environment::UI_KEPT);
+        assert!(ui.iter().any(|e| e == "PI_HYPERLINKS"));
+        assert_eq!(super::kept_for("pi", &plan), ["TAVILY_API_KEY"]);
+        assert_eq!(super::kept_for("rutis-0", &plan), ["PI_LENS_*"]);
+        assert!(super::kept_for("dsh", &plan).is_empty());
+    }
+
+    /// A stdio server's `-u` list, exactly: the withheld credentials once,
+    /// every name not kept, but what its own `env` sets and the kept set.
+    #[cfg(unix)]
+    #[test]
+    fn a_stdio_servers_list_is_every_name_not_kept_but_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("s.sh");
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env: HashMap<String, String> = [("SERVER_TOKEN".to_owned(), "t".to_owned())].into();
+        let vars = [
+            "PATH", "LANG", "OPENAI_API_KEY", "UNRELATED", "SERVER_TOKEN",
+        ]
+        .map(std::ffi::OsString::from);
+        let withheld = ["OPENAI_API_KEY".to_owned()];
+        let (program, argv, _) = super::without_from(&script, &[], &env, &withheld, vars).unwrap();
+        assert_eq!(program, "/usr/bin/env");
+        let script = script.display().to_string();
+        assert_eq!(
+            argv,
+            ["-u", "OPENAI_API_KEY", "-u", "UNRELATED", script.as_str()]
+        );
+        // A name to take out that is not UTF-8 refuses the start.
+        use std::os::unix::ffi::OsStringExt;
+        let odd = std::ffi::OsString::from_vec(b"BAD\xffNAME".to_vec());
+        let error = super::without_from(Path::new(&script), &[], &env, &[], [odd])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("has a name that is not UTF-8"), "{error}");
+    }
+
+    /// `run`'s note of the kept environment: a count on unix, the
+    /// credentials only off unix, nothing when nothing starts.
+    #[test]
+    fn the_kept_note_counts_what_is_left_out_when_something_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = |entries: &str| {
+            Manifest::parse(
+                &format!("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n{entries}"),
+                &dir.path().join("a.toml"),
+                dir.path(),
+            )
+            .unwrap()
+        };
+        let vars = || ["PATH", "LC_ALL", "GITHUB_TOKEN", "UNRELATED"].map(Into::into);
+        let plugin = m("[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\n");
+        let said = super::kept_note(&plugin, vars(), true).unwrap();
+        assert!(
+            said.contains(": 2 variable(s) set here are left out"),
+            "{said}"
+        );
+        assert!(super::kept_note(&plugin, ["PATH".into()], true).is_none());
+        assert!(super::kept_note(&plugin, vars(), false)
+            .unwrap()
+            .contains("inherit the whole environment here but the credentials"));
+        assert!(super::kept_note(&m(""), vars(), true).is_none());
+        let http = m("[[mcp]]\nname = \"h\"\nurl = \"https://mcp.example/\"\n");
+        assert!(super::kept_note(&http, vars(), true).is_none());
+    }
+
+    /// An `env` grant's prefix is never said unset, and a grant holding one
+    /// is not "nothing handed over".
+    #[test]
+    fn an_env_grants_prefix_is_not_said_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = |grant: &str| {
+            Manifest::parse(
+                &format!("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\ngrants = {{ env = {grant} }}\n"),
+                &dir.path().join("a.toml"),
+                dir.path(),
+            )
+            .unwrap()
+        };
+        let unset = |_: &str| false;
+        let both = super::env_unset(&m(r#"["GROQ_API_KEY", "PI_LENS_*"]"#), unset);
+        assert_eq!(
+            both,
+            [super::UnsetGrant {
+                plugin: "p".to_owned(),
+                names: vec!["GROQ_API_KEY".to_owned()],
+                all: false,
+            }]
+        );
+        assert!(super::env_unset(&m(r#"["PI_LENS_*"]"#), unset).is_empty());
     }
 
     #[test]

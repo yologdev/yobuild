@@ -395,8 +395,9 @@ mod web {
         }
 
         /// `yobuild <args> <web>` in `dir`, connected `late` after it serves.
-        /// A credential is set, so the plugin runtimes start through
-        /// `/usr/bin/env -u` (design §12 "Step 4"), as a user's would.
+        /// The plugin runtimes start through `/usr/bin/env -u` with the kept
+        /// environment (design §12 "Step 5"), a credential among what is
+        /// taken out, as a user's would.
         pub async fn start(
             dir: &std::path::Path,
             args: &[&str],
@@ -1358,8 +1359,8 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     // environment — the agent's own (a custom provider's `api_key_env`) and
     // any other provider's — but `check`'s pi and DSH probes alone, which
     // get them empty; one not set stays unset. Of the rest only the kept
-    // set arrives (`LANG`), an unrelated variable not (but in those probes,
-    // which yoagent-rutis launches). What the manifest hands over on
+    // set arrives (`LANG`), an unrelated variable not (empty in those
+    // probes, which yoagent-rutis launches). What the manifest hands over on
     // purpose gets there (a server's `env`, an `env` grant — a name or a
     // prefix — to its runtime alone), and `check` notes it. Each load
     // appends a line: `check` loads each plugin alone, then all together.
@@ -1470,9 +1471,10 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     };
     let with_keys = |args: &[&str]| with_env(&[], args);
     let gone = r#"["unset","unset","unset","unset","unset","C"]"#;
-    // `check`'s pi and DSH probes alone: set empty, the rest as it is
-    // (yoagent-rutis builds their launch).
-    let blank = r#"["","","","unset","other","C"]"#;
+    // `check`'s pi and DSH probes alone: what `run` leaves out set empty
+    // instead (yoagent-rutis builds their launch and can only add), the
+    // kept set as it is.
+    let blank = r#"["","","","unset","","C"]"#;
     // The server's own `env` hands it `OPENAI_API_KEY`.
     let handed = r#"["unset","sk-o","unset","unset","unset","C"]"#;
     // Each file's lines, the file removed for the next command.
@@ -1584,7 +1586,7 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     assert_eq!(
         said,
         [&serde_json::json!(format!(
-            "{withheld} (`check`'s pi and DSH plugins probed alone get them empty instead)"
+            "{withheld} (`check`'s pi and DSH plugins probed alone get them, and every other variable the kept environment leaves out, empty instead)"
         ))],
         "{report}"
     );
@@ -1612,11 +1614,11 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     let (report, stderr) = check();
     assert_eq!(
         lines("pi", &stderr),
-        [r#"["","","sk-a","unset","other","C"]"#, pi_keeps]
+        [r#"["","","sk-a","unset","","C"]"#, pi_keeps]
     );
     assert_eq!(
         lines("dsh", &stderr),
-        [r#"["","sk-o","","unset","other","C"]"#, dsh_keeps]
+        [r#"["","sk-o","","unset","","C"]"#, dsh_keeps]
     );
     assert_eq!(lines("rutis", &stderr), [rutis_keeps, rutis_keeps]);
     lines("mcp", &stderr);
@@ -1683,7 +1685,8 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
 }
 
 /// A stdio server whose program cannot run is said before anything starts
-/// through `/usr/bin/env` (design §12 "Step 4", found after the merge):
+/// through `/usr/bin/env` (design §12 "Step 4", found after the merge;
+/// "Step 5"):
 /// `check` names it as the server's problem, with its fix, and `run`
 /// refuses with what to do — in the same words whether a key is set or not.
 /// On macOS the `DYLD_*` variable its own `env` sets, which the protected
