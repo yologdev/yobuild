@@ -489,8 +489,11 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     ));
     agent_notes.extend(
         super::withheld_note(&manifest, &withheld).map(|note| match probed {
-            true => {
+            true if cfg!(unix) => {
                 format!("{note} (`check`'s pi and DSH plugins probed alone get them, and every other variable the kept environment leaves out, empty instead)")
+            }
+            true => {
+                format!("{note} (`check`'s pi and DSH plugins probed alone get them empty instead)")
             }
             false => note,
         }),
@@ -507,7 +510,9 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         let left_out = crate::frontend::host::not_inherited(
             std::env::vars_os().map(|(k, _)| k),
             |name| crate::environment::kept(name) || passes(name),
-            crate::frontend::host::loopback(),
+            // rutis sets its own token after these when it hands over by
+            // loopback, so one here is this process's: set empty.
+            false,
         );
         #[cfg(not(unix))]
         let left_out: Vec<std::ffi::OsString> = Vec::new();

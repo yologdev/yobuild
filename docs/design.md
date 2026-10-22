@@ -2520,13 +2520,15 @@ back). So the list `env_without` is given becomes every name in yobuild's
 own environment that is neither kept nor granted (nor set by that launch,
 as now): `/usr/bin/env -u A -u B … <program>`. `RUTIS_CHANNEL_TOKEN` is
 not in it while rutis hands over by loopback (off unix, or
-`RUTIS_LOCAL_HANDOVER=loopback`, as rutis decides it): rutis sets it on
-the `/usr/bin/env` command itself, so a `-u` would remove rutis's fresh
-token. Otherwise one in yobuild's environment is its own (from a rutis
-parent, say) and is taken out like any other (found in review). A name is what `std::env::vars_os` reads: what precedes the first
-`=` after an entry's first byte, so it may hold anything else
+`RUTIS_LOCAL_HANDOVER=loopback`, as rutis decides it) for a runtime rutis
+spawns: rutis sets it on the `/usr/bin/env` command itself, so a `-u`
+would remove rutis's fresh token. Otherwise — and always for a stdio
+server, which rutis does not start — one in yobuild's environment is its
+own (from a rutis parent, say) and is taken out like any other (found in
+review). A name is what `std::env::vars_os` reads: what precedes the
+first `=` after an entry's first byte, so it may hold anything else
 (`BASH_FUNC_x%%`), which `env -u` takes whole. Two kinds pass untouched,
-logged at warn: a name holding `=` (an entry `=x=1`, made by a parent
+warned once a process: a name holding `=` (an entry `=x=1`, made by a parent
 that wrote `environ` by hand, reads as the name `=x`), which GNU and BSD
 `env -u` both refuse, failing the start — skipped; and an entry with no
 `=` after its first byte, which `vars_os` does not return, so it cannot
@@ -2538,7 +2540,8 @@ What changes beside the list:
   no `run::KEPT`. `PluginHostBuilder` gains `inherit(Inherit)` — the names
   and prefixes every runtime keeps (`Inherit::only(names, prefixes)`;
   absent, today's behaviour) — and `keep(runtime, name_or_prefix)` takes
-  a prefix too, for a runtime's extras (the `ui`-only `PI_*`, a grant).
+  a prefix too, for a runtime's extras (the `ui`-only
+  `environment::UI_KEPT`: `PI_HYPERLINKS`, …, `PI_TUI_*`; a grant).
   The list is built by the builder at `start` from yobuild's environment.
   `withhold` stays for off unix (step 4's set-empty). `KEPT` lives in a
   new `src/environment.rs` (`yobuild::environment`, crate-private), which
@@ -2582,7 +2585,7 @@ What changes beside the list:
   entry's note names those it loses when the entries differ, as now; the
   other names left out are `check --json`'s `leftOut` (the agent's), not a
   note per entry. `withheld_note` and `TAKEN` give way to the counted note
-  under "Said".
+  under "Said" (5b).
 - `examples/coding_agent.rs` keeps step 4's withholding of
   `KEY_VARIABLES`: a library example, not `yobuild run`; its doc comment
   says so.
@@ -2756,8 +2759,8 @@ credentials set empty or removed, nothing else; said.
   `RUTIS_CHANNEL_TOKEN` (it connects, a stale `RUTIS_CHANNEL_TOKEN` in
   the test's own environment notwithstanding), and not an unrelated
   variable nor `RUTIS_CA`; a granted name and a granted prefix reach only
-  that runtime; the `ui`-only `PI_*` reach `ui` alone; a program not there
-  said by `startable` with nothing withheld.
+  that runtime; `UI_KEPT` (pi-tui's `PI_*` settings) reach `ui` alone; a
+  program not there said by `startable` with nothing withheld.
 - `cli_test`: step 4's test with `UNRELATED` now unset everywhere,
   `HTTPS_PROXY` and `LANG` kept, an `env` grant (a name and a prefix) on
   the pi, DSH and rutis plugins each reaching only its runtime, a server's
@@ -2815,10 +2818,20 @@ credentials are) — which ones, and who reads them, is 5b's; asdf's and
 mise's homes kept (`ASDF_DIR`, `ASDF_DATA_DIR`, `MISE_DATA_DIR`,
 `MISE_CONFIG_DIR`: a `node` shim finds its versions through them); a
 name `env -u` refuses warned once a process; `kept_env_test` checks the
-runtime's channel came by loopback. `withheld_note`, `TAKEN` and
-`withheld_from` stay as step 4 made them until 5b. *5b*, still to build: what `check` says — the scan
-and the "its code reads" notes, `environment` and `leftOut`, the secret,
-code-loading and proxy-password notes, the counted note, the skill's
+runtime's channel came by loopback. After the second review: a stdio
+server's `-u` list holds this process's own `RUTIS_CHANNEL_TOKEN` in
+loopback handover too (rutis starts no server), as do the probes' empty
+names (rutis sets its token after them); `run`'s notice counts the
+variables that reach no entry (not kept, not passed by a grant or a
+server's `env`, a name `env -u` can take). In the probes a name set empty
+is not quite unset for a few programs (`UV_THREADPOOL_SIZE` empty is 0
+threads, then 1; `NODE_DISABLE_COLORS` and `OPENSSL_CONF` are read when
+present): nothing that changes what loads. `withheld_note`, `TAKEN` and
+`withheld_from` stay as step 4 made them until 5b. *5b*, still to build:
+what `check` says — the scan and the "its code reads" notes,
+`environment` and `leftOut`, the secret, code-loading and proxy-password
+notes; the one counted note under "Said", made of `withheld_note` and
+`run`'s count (`kept_note`) and said by `check` too; the skill's
 `parts.md` and `failures.md` entries.
 
 ### What it unlocks, and the migration

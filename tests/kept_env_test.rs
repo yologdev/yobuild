@@ -69,8 +69,9 @@ async fn kept() {
         // How the runtime's channel came (its spec is an argument: `tcp:…`
         // in loopback handover, which needs rutis's token, `fd:…`
         // otherwise), and the token as a plugin sees it: the runtime reads
-        // it and drops it, so never the stale one.
-        let token = "channel: process.argv.some((a) => a.startsWith('tcp:')) ? 'loopback' : 'other', token: process.env.RUTIS_CHANNEL_TOKEN ?? null";
+        // it, so never the stale one (whether it then drops it is the
+        // runtime's affair).
+        let token = "channel: process.argv.some((a) => a.startsWith('tcp:')) ? 'loopback' : 'other', stale: process.env.RUTIS_CHANNEL_TOKEN === 'stale'";
         let read: Vec<String> = names
             .iter()
             .map(|n| format!("{n}: process.env.{n} ?? null"))
@@ -114,14 +115,14 @@ async fn kept() {
     assert_eq!(
         written(&a_out).await,
         format!(
-            r#"{{"PATH":{path},"YOBUILD_KEPT_A":"a","YOBUILD_KEPT_B":null,"YOBUILD_UNRELATED":null,"YOBUILD_GRANTED_X":null,"YOBUILD_SET":null,"RUTIS_CA":null,"RUTIS_LOCAL_HANDOVER":null,"channel":"loopback","token":null}}"#
+            r#"{{"PATH":{path},"YOBUILD_KEPT_A":"a","YOBUILD_KEPT_B":null,"YOBUILD_UNRELATED":null,"YOBUILD_GRANTED_X":null,"YOBUILD_SET":null,"RUTIS_CA":null,"RUTIS_LOCAL_HANDOVER":null,"channel":"loopback","stale":false}}"#
         )
     );
     // Its grant (a prefix) and its own `env` entry: that runtime only.
     assert_eq!(
         written(&b_out).await,
         format!(
-            r#"{{"PATH":{path},"YOBUILD_KEPT_A":"a","YOBUILD_KEPT_B":null,"YOBUILD_UNRELATED":null,"YOBUILD_GRANTED_X":"x","YOBUILD_SET":"set","RUTIS_CA":null,"RUTIS_LOCAL_HANDOVER":null,"channel":"loopback","token":null}}"#
+            r#"{{"PATH":{path},"YOBUILD_KEPT_A":"a","YOBUILD_KEPT_B":null,"YOBUILD_UNRELATED":null,"YOBUILD_GRANTED_X":"x","YOBUILD_SET":"set","RUTIS_CA":null,"RUTIS_LOCAL_HANDOVER":null,"channel":"loopback","stale":false}}"#
         )
     );
     root.shutdown().await.unwrap();

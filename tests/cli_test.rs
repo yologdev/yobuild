@@ -1494,7 +1494,13 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         assert_eq!(lines(name, &stderr), [gone], "{name}");
     }
     assert_eq!(lines("mcp", &stderr), [handed]);
-    // Said as the session starts: what fails for want of a key says why.
+    // Said as the session starts: the kept environment (how many is the
+    // developer's environment's affair; `YOBUILD_OTHER` makes at least one),
+    // and what fails for want of a key says why.
+    assert!(
+        stderr.contains("  Info: plugins and stdio MCP servers start with the kept environment ("),
+        "{stderr}"
+    );
     let withheld = "plugins and stdio MCP servers have the credentials yoagent reads set here taken out of their environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ACME_KEY`): one that needs one gets it only from its entry (an `env` grant, or a `\"${NAME}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered";
     assert!(
         stderr.contains(&format!("  Info: {withheld}\n")),
@@ -1593,14 +1599,15 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
 
     // An `env` grant leaves those in its runtime only: the pi runtime keeps
     // the agent's key, the DSH runtime (no DSH host for `env`) OpenAI's,
-    // the rutis plugin's DeepSeek's and, by a prefix, the unrelated one.
+    // the rutis plugin's DeepSeek's; by a prefix, the unrelated one reaches
+    // the rutis and pi runtimes — and pi's probe alone, not set empty there.
     manifest(
-        r#"env = ["ACME_KEY"]"#,
+        r#"env = ["ACME_KEY", "YOBUILD_*"]"#,
         r#"env = ["OPENAI_API_KEY"]"#,
         r#"env = ["DEEPSEEK_API_KEY", "YOBUILD_*"]"#,
     );
     let rutis_keeps = r#"["sk-d","unset","unset","unset","other","C"]"#;
-    let pi_keeps = r#"["unset","unset","sk-a","unset","unset","C"]"#;
+    let pi_keeps = r#"["unset","unset","sk-a","unset","other","C"]"#;
     let dsh_keeps = r#"["unset","sk-o","unset","unset","unset","C"]"#;
     let out = with_keys(&run);
     let stderr = text(&out.stderr);
@@ -1614,7 +1621,7 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     let (report, stderr) = check();
     assert_eq!(
         lines("pi", &stderr),
-        [r#"["","","sk-a","unset","","C"]"#, pi_keeps]
+        [r#"["","","sk-a","unset","other","C"]"#, pi_keeps]
     );
     assert_eq!(
         lines("dsh", &stderr),

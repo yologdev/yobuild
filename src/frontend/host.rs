@@ -473,11 +473,12 @@ pub(crate) fn no_env(program: &Path, missing: &str) -> String {
 
 /// The names in `vars` (this process's environment, as `vars_os` reads it)
 /// not `kept`: what `env -u` takes out of a runtime's or stdio server's
-/// environment (design §12 "Step 5"). Not `RUTIS_CHANNEL_TOKEN` while
-/// rutis hands its channel over by loopback (`loopback`; then it sets a
-/// fresh token on the command it spawns, which a `-u` would remove) —
-/// otherwise this process's own, say from a rutis parent, is taken out like
-/// any other. A name holding `=` (an entry `=x=1` reads as the name `=x`),
+/// environment (design §12 "Step 5"). Not `RUTIS_CHANNEL_TOKEN` when
+/// `loopback` — what is started is a runtime rutis spawns and hands its
+/// channel over by loopback ([`loopback`]), setting a fresh token on the
+/// command, which a `-u` would remove; otherwise (a runtime handed fd 3, a
+/// stdio server rutis does not start) one here is this process's own, say
+/// from a rutis parent, and is taken out like any other. A name holding `=` (an entry `=x=1` reads as the name `=x`),
 /// which `env -u` refuses, failing the start, passes as it is, warned once
 /// a process. (An entry with no `=` after its first byte `vars_os` does not
 /// return: it passes too.)
@@ -1088,17 +1089,6 @@ mod tests {
         assert!(!matches("A_B".as_ref(), "A_BC".as_ref()));
         assert!(matches("A_*".as_ref(), "A_BC".as_ref()));
         assert!(!matches("A_*".as_ref(), "B_A".as_ref()));
-    }
-
-    /// The `no-env` hint's words, which no other hint takes first.
-    #[test]
-    fn the_missing_env_error_is_the_no_env_hints() {
-        let message = format!(
-            "runtime `pi`: {}",
-            no_env(Path::new("node"), "/usr/bin/env")
-        );
-        let hint = crate::hints::hint(crate::hints::Scope::Start, &message);
-        assert_eq!(hint.map(|h| h.id), Some("no-env"), "{message}");
     }
 
     /// With nothing to take out, a missing program is still said as

@@ -218,25 +218,25 @@ outside the run's budget, and every other secret or setting
 `PI_LENS_*` settings, `NODE_OPTIONS`). `check`'s pi and DSH plugins
 probed alone get what is left out set empty instead. `check` names the
 credentials taken out, as an agent note, and `run` as an Info notice,
-which also counts the other variables left out. A server or plugin that
-truly needs a variable is handed it on purpose: a stdio server through
-its `env` (`TAVILY_API_KEY = "${TAVILY_API_KEY}"`) or its `args`, an
-HTTP server through its `url` or `headers`, a DSH or rutis plugin
-through a `${NAME}` in its `config`, any plugin through `grants = { env
-= [...] }` (its whole runtime gets it). `check` notes each credential
-yoagent reads handed over ("it is given `X`, a credential yoagent reads:
-what it spends with it is not metered"). An `env` grant naming a
-variable that is unset or empty hands nothing over under that name,
-which `check` and `run` say ("its `env` grant names `X`, unset or empty
-here: …"). When entries lose different credentials, `check` notes on
-each what it has taken out. On macOS (with System Integrity Protection
-on, the default), a `DYLD_*` variable an entry is handed does not reach
-it (everything starts through the protected `/usr/bin/env`): `check` and
-`run` name it. Tell the person before you hand anything over. This is
-not a sandbox: a plugin can still read a key from a file the person
-keeps it in (`~/.aws/credentials`, a shell profile, a `.env`). A plugin
-that fails with an authentication error, or says a feature is off, may
-be one that wanted a variable.
+and in another how many other variables set here reach no plugin or
+server. A server or plugin that truly needs a variable is handed it on
+purpose: a stdio server through its `env` (`TAVILY_API_KEY =
+"${TAVILY_API_KEY}"`) or its `args`, an HTTP server through its `url` or
+`headers`, a DSH or rutis plugin through a `${NAME}` in its `config`,
+any plugin through `grants = { env = [...] }` (its whole runtime gets
+it). `check` notes each credential yoagent reads handed over ("it is
+given `X`, a credential yoagent reads: what it spends with it is not
+metered"). An `env` grant naming a variable that is unset or empty hands
+nothing over under that name, which `check` and `run` say ("its `env`
+grant names `X`, unset or empty here: …"). When entries lose different
+credentials, `check` notes on each what it has taken out. On macOS (with
+System Integrity Protection on, the default), a `DYLD_*` variable an
+entry is handed does not reach it (everything starts through the
+protected `/usr/bin/env`): `check` and `run` name it. Tell the person
+before you hand anything over. This is not a sandbox: a plugin can still
+read a key from a file the person keeps it in (`~/.aws/credentials`, a
+shell profile, a `.env`). A plugin that fails with an authentication
+error, or says a feature is off, may be one that wanted a variable.
 
 **Pins.** Every package is `name@1.2.3` (exact; `1.2.3-beta.1` too) or a
 local path (`./`, `../`, `/`). Tags, ranges, `git`, URLs and `file:` are

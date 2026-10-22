@@ -1521,12 +1521,24 @@ pub(crate) fn kept_note(
     if !unix {
         return Some("plugins and stdio MCP servers inherit the whole environment here but the credentials yoagent reads (there is no /usr/bin/env to start them through): an `env` grant changes nothing else".to_owned());
     }
+    // What reaches none of them: not kept, not passed by a plugin's `env`
+    // grant nor set by a stdio server's `env`, and a name `env -u` can take
+    // (one holding `=` passes as it is).
+    let passed = |name: &str| {
+        manifest.plugins.iter().any(|p| p.grants.passes(name))
+            || manifest.mcp.iter().any(|s| match &s.transport {
+                Transport::Stdio { env, .. } => env.contains_key(name),
+                _ => false,
+            })
+    };
     let left_out = vars
         .into_iter()
         .filter(|name| !crate::environment::kept(name))
+        .filter(|name| !name.is_empty() && !name.as_encoded_bytes().contains(&b'='))
+        .filter(|name| !passed(&name.to_string_lossy()))
         .count();
     (left_out > 0).then(|| format!(
-        "plugins and stdio MCP servers start with the kept environment (the path, home, locale, terminal, proxies, standard folders, toolchains): {left_out} variable(s) set here are left out — an `env` grant on a plugin, or a stdio server's `env` table, passes one it needs"
+        "plugins and stdio MCP servers start with the kept environment (the path, home, locale, terminal, session, proxies, standard folders, toolchains) and what their entries pass: {left_out} variable(s) set here reach none of them — an `env` grant on a plugin, or a stdio server's `env` table, passes one it needs"
     ))
 }
 
@@ -2089,7 +2101,9 @@ fn without_from(
         .chain(crate::frontend::host::not_inherited(
             vars,
             |name| crate::environment::kept(name) || set_here(name),
-            crate::frontend::host::loopback(),
+            // yoagent's transport starts it, not rutis: no fresh channel
+            // token is set on it, so one here is this process's own.
+            false,
         ))
         .collect();
     if let Some(name) = names.iter().find(|n| n.to_str().is_none()) {
@@ -2825,7 +2839,7 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let env: HashMap<String, String> = [("SERVER_TOKEN".to_owned(), "t".to_owned())].into();
         let vars = [
-            "PATH", "LANG", "OPENAI_API_KEY", "UNRELATED", "SERVER_TOKEN",
+            "PATH", "LANG", "OPENAI_API_KEY", "UNRELATED", "SERVER_TOKEN", "RUTIS_CHANNEL_TOKEN",
         ]
         .map(std::ffi::OsString::from);
         let withheld = ["OPENAI_API_KEY".to_owned()];
@@ -2834,7 +2848,16 @@ mod tests {
         let script = script.display().to_string();
         assert_eq!(
             argv,
-            ["-u", "OPENAI_API_KEY", "-u", "UNRELATED", script.as_str()]
+            // This process's own channel token too: rutis starts no server.
+            [
+                "-u",
+                "OPENAI_API_KEY",
+                "-u",
+                "UNRELATED",
+                "-u",
+                "RUTIS_CHANNEL_TOKEN",
+                script.as_str()
+            ]
         );
         // A name to take out that is not UTF-8 refuses the start.
         use std::os::unix::ffi::OsStringExt;
@@ -2862,7 +2885,18 @@ mod tests {
         let plugin = m("[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\n");
         let said = super::kept_note(&plugin, vars(), true).unwrap();
         assert!(
-            said.contains(": 2 variable(s) set here are left out"),
+            said.contains(": 2 variable(s) set here reach none of them"),
+            "{said}"
+        );
+        // What a grant passes, and a name `env -u` cannot take, are not
+        // counted.
+        let granted = m(
+            "[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\ngrants = { env = [\"GITHUB_TOKEN\"] }\n",
+        );
+        let odd = || ["GITHUB_TOKEN", "UNRELATED", "=x"].map(Into::into);
+        let said = super::kept_note(&granted, odd(), true).unwrap();
+        assert!(
+            said.contains(": 1 variable(s) set here reach none of them"),
             "{said}"
         );
         assert!(super::kept_note(&plugin, ["PATH".into()], true).is_none());
