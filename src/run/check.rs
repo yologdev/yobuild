@@ -432,10 +432,10 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             None => agent_notes.push(note.clone()),
         }
     }
-    // Each name of a `keys` grant that is unset (or empty) here hands
+    // Each name of an `env` grant that is unset (or empty) here hands
     // nothing over: said, so the plugin is not taken to have it.
     let set = super::key_is_set;
-    for unset in super::keys_unset(&manifest, set) {
+    for unset in super::env_unset(&manifest, set) {
         let note = super::unset_grant_note(&unset);
         entry_notes.push((unset.plugin, note));
     }
@@ -484,14 +484,8 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     }
     agent_notes.extend(super::dyld_note(
         &manifest,
-        &withheld,
         std::env::vars_os().map(|(k, _)| k),
-        // What a `run` would start: the terminal UI on a terminal
-        // manifest (`check` itself starts none).
-        super::Platform {
-            macos: cfg!(target_os = "macos"),
-            terminal: manifest.frontend.terminal,
-        },
+        cfg!(target_os = "macos"),
     ));
     agent_notes.extend(
         super::withheld_note(&manifest, &withheld).map(|note| match probed {
@@ -507,7 +501,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     let probe_options = |plugin: &crate::manifest::Plugin| {
         withheld
             .iter()
-            .filter(|name| !plugin.grants.keys.contains(name))
+            .filter(|name| !plugin.grants.passes(name))
             .fold(yoagent_rutis::probe::ProbeOptions::default(), |o, name| {
                 o.env(name, "")
             })
@@ -955,12 +949,8 @@ async fn rutis_alone(
         for service in super::SHARED {
             builder = builder.share(service);
         }
-        for name in super::withheld(manifest) {
-            builder = builder.withhold(name);
-        }
-        for key in plan.kept(&runtime) {
-            builder = builder.keep(&runtime, key);
-        }
+        let runtimes = [(runtime.clone(), dir.clone())];
+        builder = super::kept_environment(builder, manifest, plan, &runtimes);
         let mut host = builder.start(&root).await?;
         host.load([row]).await?;
         let handlers = settled(|| {

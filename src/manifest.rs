@@ -308,10 +308,12 @@ pub struct Grants {
     pub wake: bool,
     /// What a pi extension's `pi.exec` may run (`exec`; off by default).
     pub exec: ExecGrant,
-    /// The credentials yoagent reads left in its runtime's environment
-    /// (`keys`; design §12, "Step 4"), sorted: a runtime's environment is
-    /// the whole runtime's, so the same on every plugin that shares it.
-    pub keys: Vec<String>,
+    /// What its runtime's environment holds beyond the kept set (`env`;
+    /// design §12, "Step 5"): names, or prefixes ending in `_*`
+    /// (`PI_LENS_*`), sorted — a credential yoagent reads or a name that
+    /// loads code only by its full name. A runtime's environment is the
+    /// whole runtime's, so the same on every plugin that shares it.
+    pub env: Vec<String>,
 }
 
 /// [`Grants::exec`]: a pi extension's `pi.exec`.
@@ -346,7 +348,7 @@ impl Grants {
             model,
             wake,
             exec,
-            keys,
+            env,
         } = self;
         [
             (*workspace, "workspace"),
@@ -354,7 +356,7 @@ impl Grants {
             (model.is_some(), "model"),
             (*wake, "wake"),
             (*exec != ExecGrant::Off, "exec"),
-            (!keys.is_empty(), "keys"),
+            (!env.is_empty(), "env"),
         ]
         .into_iter()
         .filter_map(|(on, name)| on.then_some(name))
@@ -362,14 +364,14 @@ impl Grants {
     }
 
     /// The grants as `check` says them: their names, `exec` with its value
-    /// (`"gate"` and `"free"` are worlds apart) and `keys` with its names.
+    /// (`"gate"` and `"free"` are worlds apart) and `env` with its names.
     pub fn said(&self) -> Vec<String> {
         self.names()
             .into_iter()
             .map(|name| match (name, self.exec) {
                 ("exec", ExecGrant::Gate) => "exec = \"gate\"".to_owned(),
                 ("exec", ExecGrant::Free) => "exec = \"free\"".to_owned(),
-                ("keys", _) => format!("keys = [{}]", self.keys.join(", ")),
+                ("env", _) => format!("env = [{}]", self.env.join(", ")),
                 (name, _) => name.to_owned(),
             })
             .collect()
@@ -380,8 +382,8 @@ impl Grants {
         *self == Self::default()
     }
 
-    /// Nothing the host serves granted: `keys` aside, which only the
-    /// runtime's launch reads (so a DSH plugin granted only `keys` starts no
+    /// Nothing the host serves granted: `env` aside, which only the
+    /// runtime's launch reads (so a DSH plugin granted only `env` starts no
     /// DSH host).
     pub fn hosts_nothing(&self) -> bool {
         // Every field named: a grant added later is decided here.
@@ -391,9 +393,17 @@ impl Grants {
             model,
             wake,
             exec,
-            keys: _,
+            env: _,
         } = self;
         !workspace && !trust && model.is_none() && !wake && *exec == ExecGrant::Off
+    }
+
+    /// The `env` grant passes `name`: one of its names, or a name beginning
+    /// with one of its prefixes.
+    pub fn passes(&self, name: &str) -> bool {
+        self.env
+            .iter()
+            .any(|entry| crate::frontend::host::matches(entry.as_ref(), name.as_ref()))
     }
 }
 
@@ -761,7 +771,7 @@ struct RawGrants {
     model: Option<Spanned<String>>,
     wake: Option<Spanned<bool>>,
     exec: Option<Spanned<String>>,
-    keys: Option<Vec<Spanned<String>>>,
+    env: Option<Vec<Spanned<String>>>,
 }
 
 #[derive(Deserialize)]
@@ -834,7 +844,7 @@ impl Manifest {
 
     /// What every DSH plugin is granted — the same on each, which `parse`
     /// enforces (one DSH host serves them all) — when that is anything the
-    /// DSH host serves (`keys` alone is not: [`Grants::hosts_nothing`]).
+    /// DSH host serves (`env` alone is not: [`Grants::hosts_nothing`]).
     pub fn dsh_grants(&self) -> Option<&Grants> {
         self.plugins
             .iter()
@@ -951,10 +961,10 @@ impl Manifest {
                     );
                     return Err(located((grants_at.clone().unwrap_or(span), m)));
                 }
-                if let Some(first) = first.filter(|f| f.grants.keys != plugin.grants.keys) {
+                if let Some(first) = first.filter(|f| f.grants.env != plugin.grants.env) {
                     let m = format!(
-                        "every pi extension runs in one runtime, whose environment is theirs together: give each pi plugin the same `keys` or none ({})",
-                        keys_differ(first, &plugin)
+                        "every pi extension runs in one runtime, whose environment is theirs together: give each pi plugin the same `env` grant or none ({})",
+                        env_differ(first, &plugin)
                     );
                     return Err(located((grants_at.unwrap_or(span), m)));
                 }
@@ -966,10 +976,10 @@ impl Manifest {
                 let first = plugins
                     .iter()
                     .find(|p| matches!(p.kind, PluginKind::Dsh(_)));
-                if let Some(first) = first.filter(|f| f.grants.keys != plugin.grants.keys) {
+                if let Some(first) = first.filter(|f| f.grants.env != plugin.grants.env) {
                     let m = format!(
-                        "every DSH plugin runs in one runtime, whose environment is theirs together: give each DSH plugin the same `keys` or none ({})",
-                        keys_differ(first, &plugin)
+                        "every DSH plugin runs in one runtime, whose environment is theirs together: give each DSH plugin the same `env` grant or none ({})",
+                        env_differ(first, &plugin)
                     );
                     return Err(located((grants_at.unwrap_or(span), m)));
                 }
@@ -1356,17 +1366,19 @@ fn json(value: toml::Value) -> serde_json::Value {
     }
 }
 
-/// Two plugins' `keys` as a refusal says them: "`a` has X, Y, `b` none".
-pub(crate) fn keys_differ(first: &Plugin, other: &Plugin) -> String {
-    let said = |p: &Plugin| match p.grants.keys.is_empty() {
+/// Two plugins' `env` grants as a refusal says them: "`a` has X, Y, `b`
+/// none".
+pub(crate) fn env_differ(first: &Plugin, other: &Plugin) -> String {
+    let said = |p: &Plugin| match p.grants.env.is_empty() {
         true => format!("`{}` none", p.name),
-        false => format!("`{}` has {}", p.name, p.grants.keys.join(", ")),
+        false => format!("`{}` has {}", p.name, p.grants.env.join(", ")),
     };
     format!("{}, {}", said(first), said(other))
 }
 
 /// A plugin's `grants`, checked for its ecosystem (design §12's table);
-/// `credentials` are the names `keys` may hold ([`key_variables`]).
+/// `credentials` are the names an `env` prefix may not match
+/// ([`key_variables`]).
 fn grants(
     raw: Option<Spanned<RawGrants>>,
     kind: &PluginKind,
@@ -1376,21 +1388,20 @@ fn grants(
         return Ok(Grants::default());
     };
     let mut raw = raw.into_inner();
-    // Names only from the list, each once: anything else is not withheld.
-    let mut keys: Vec<String> = Vec::new();
-    for key in raw.keys.take().into_iter().flatten() {
-        let name = key.get_ref();
-        if !credentials.contains(name) {
-            let m = format!("`{name}` is not a credential yoagent reads: nothing withholds it");
-            return Err((key.span(), m));
+    // Names or prefixes, each once (design §12 "Step 5").
+    let mut env: Vec<String> = Vec::new();
+    for entry in raw.env.take().into_iter().flatten() {
+        if let Some(m) = env_entry(entry.get_ref(), credentials) {
+            return Err((entry.span(), m));
         }
-        if keys.contains(name) {
-            return Err((key.span(), format!("`{name}` is listed twice")));
+        let name = entry.get_ref();
+        if env.contains(name) {
+            return Err((entry.span(), format!("`{name}` is listed twice")));
         }
-        keys.push(name.clone());
+        env.push(name.clone());
     }
-    keys.sort();
-    let keys = keys;
+    env.sort();
+    let env = env;
     let model = |raw: Option<Spanned<String>>| match raw {
         None => Ok(None),
         Some(model) if model.get_ref() == "info" => Ok(Some(ModelGrant::Info)),
@@ -1407,7 +1418,7 @@ fn grants(
         // pi's host: the adapter's per-extension settings (design §12,
         // "Step 3"); a pi extension has its folder already (`ctx.cwd`).
         if let Some(workspace) = &raw.workspace {
-            let m = "a pi extension takes `trust`, `model`, `wake`, `exec` and `keys`, not `workspace` (it has the folder: `ctx.cwd`)";
+            let m = "a pi extension takes `trust`, `model`, `wake`, `exec` and `env`, not `workspace` (it has the folder: `ctx.cwd`)";
             return Err((workspace.span(), m.into()));
         }
         let exec = match raw.exec {
@@ -1427,7 +1438,7 @@ fn grants(
             model: model(raw.model)?,
             wake: on(raw.wake),
             exec,
-            keys,
+            env,
             ..Grants::default()
         });
     }
@@ -1440,7 +1451,7 @@ fn grants(
             raw.exec.as_ref().map(|e| (e.span(), "exec")),
         ];
         if let Some((at, key)) = other.into_iter().flatten().next() {
-            let m = format!("a DSH plugin takes `workspace`, `wake` and `keys`, not `{key}`");
+            let m = format!("a DSH plugin takes `workspace`, `wake` and `env`, not `{key}`");
             return Err((at, m));
         }
         let workspace = raw.workspace.is_some_and(|w| *w.get_ref());
@@ -1452,13 +1463,13 @@ fn grants(
             return Ok(Grants {
                 workspace,
                 wake: true,
-                keys,
+                env,
                 ..Grants::default()
             });
         }
         return Ok(Grants {
             workspace,
-            keys,
+            env,
             ..Grants::default()
         });
     }
@@ -1471,7 +1482,46 @@ fn grants(
         model: model(raw.model)?,
         wake: on(raw.wake),
         exec: ExecGrant::Off,
-        keys,
+        env,
+    })
+}
+
+/// Why an `env` grant's entry is refused, if it is: a name (letters,
+/// digits and `_`, not beginning with a digit) or a prefix — at least two
+/// such characters, then `_*` (`PI_LENS_*`). A prefix may not match a
+/// credential yoagent reads (`credentials`) nor a name that loads code
+/// (`NODE_OPTIONS`, `NODE_PATH`, `LD_PRELOAD`, `DYLD_*`): those pass only
+/// by their full name, so what `check` notes stays exact.
+fn env_entry(entry: &str, credentials: &[String]) -> Option<String> {
+    let name = |s: &str| {
+        s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && s.chars().next().is_some_and(|c| !c.is_ascii_digit())
+    };
+    let Some(prefix) = entry.strip_suffix('*') else {
+        return (!name(entry)).then(|| {
+            format!("`{entry}`: a variable's name (letters, digits and `_`), or a prefix ending in `_*`")
+        });
+    };
+    if !name(prefix) || !prefix.ends_with('_') || prefix.len() < 3 {
+        return Some(format!(
+            "`{entry}`: a prefix is at least two letters or digits, then `_*` (`PI_LENS_*`)"
+        ));
+    }
+    if let Some(credential) = credentials.iter().find(|c| c.starts_with(prefix)) {
+        return Some(format!(
+            "`{entry}` would hand over `{credential}`, a credential yoagent reads: name it"
+        ));
+    }
+    let dyld = crate::environment::CODE_LOADING_PREFIX;
+    let code = crate::environment::CODE_LOADING
+        .iter()
+        .find(|c| c.starts_with(prefix))
+        .map(|c| format!("`{c}`"))
+        .or_else(|| {
+            (dyld.starts_with(prefix) || prefix.starts_with(dyld)).then(|| format!("`{dyld}*`"))
+        });
+    code.map(|code| {
+        format!("`{entry}` would hand over {code}, which loads code into the runtime: name it")
     })
 }
 
@@ -1560,7 +1610,7 @@ fn plugin(
 
 /// A header or variable that carries a secret, by the words of its name
 /// (split at `_`, `-` and lower-to-upper case changes).
-fn secret(name: &str) -> bool {
+pub(crate) fn secret(name: &str) -> bool {
     const WORDS: [&str; 12] = [
         "key", "apikey", "token", "secret", "password", "passwd", "pwd", "auth", "authorization",
         "cookie", "credential", "credentials",

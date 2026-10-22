@@ -1207,7 +1207,7 @@ fn a_pi_extension_takes_trust_model_wake_and_exec_and_one_model_for_all() {
     );
     assert_eq!(
         error(&format!("{MINIMAL}{}", pi("e", "workspace = true"))),
-        "6:24: a pi extension takes `trust`, `model`, `wake`, `exec` and `keys`, not `workspace` (it has the folder: `ctx.cwd`)"
+        "6:24: a pi extension takes `trust`, `model`, `wake`, `exec` and `env`, not `workspace` (it has the folder: `ctx.cwd`)"
     );
     // Per extension but `model`: one for every pi extension, on each or none.
     let m = read(&format!(
@@ -1247,15 +1247,15 @@ fn a_dsh_plugin_takes_workspace_and_wake_the_same_on_every_dsh_plugin() {
     for (grants, at) in [
         (
             "trust = true",
-            "6:20: a DSH plugin takes `workspace`, `wake` and `keys`, not `trust`",
+            "6:20: a DSH plugin takes `workspace`, `wake` and `env`, not `trust`",
         ),
         (
             "model = \"info\"",
-            "6:20: a DSH plugin takes `workspace`, `wake` and `keys`, not `model`",
+            "6:20: a DSH plugin takes `workspace`, `wake` and `env`, not `model`",
         ),
         (
             "exec = \"gate\"",
-            "6:19: a DSH plugin takes `workspace`, `wake` and `keys`, not `exec`",
+            "6:19: a DSH plugin takes `workspace`, `wake` and `env`, not `exec`",
         ),
     ] {
         assert_eq!(error(&format!("{MINIMAL}{}", dsh(grants))), at);
@@ -1314,7 +1314,7 @@ fn the_key_variables_hold_every_providers_and_the_agents_own() {
 }
 
 #[test]
-fn keys_names_credentials_the_same_on_every_plugin_of_a_runtime() {
+fn env_names_variables_the_same_on_every_plugin_of_a_runtime() {
     let plugin = |kind: &str, file: &str, grants: &str| {
         format!("[[plugin]]\n{kind} = \"./{file}\"\ngrants = {{ {grants} }}\n")
     };
@@ -1323,97 +1323,144 @@ fn keys_names_credentials_the_same_on_every_plugin_of_a_runtime() {
         plugin(
             "pi",
             "a.ts",
-            "keys = [\"OPENAI_API_KEY\", \"AWS_ACCESS_KEY_ID\"]"
+            "env = [\"OPENAI_API_KEY\", \"AWS_ACCESS_KEY_ID\"]"
         )
     ))
     .unwrap();
     // Sorted, said with its names; nothing the host serves.
     let grants = &m.plugins[0].grants;
-    assert_eq!(grants.keys, ["AWS_ACCESS_KEY_ID", "OPENAI_API_KEY"]);
-    assert_eq!(
-        grants.said(),
-        ["keys = [AWS_ACCESS_KEY_ID, OPENAI_API_KEY]"]
-    );
+    assert_eq!(grants.env, ["AWS_ACCESS_KEY_ID", "OPENAI_API_KEY"]);
+    assert_eq!(grants.said(), ["env = [AWS_ACCESS_KEY_ID, OPENAI_API_KEY]"]);
     assert!(grants.hosts_nothing() && !grants.is_empty());
-    // Only what is withheld: yoagent's list and the agent's `api_key_env`.
-    assert_eq!(
+    // Any name, or a prefix; sorted with the names.
+    let m = read(&format!(
+        "{MINIMAL}{}",
+        plugin("pi", "a.ts", "env = [\"PI_LENS_*\", \"GITHUB_TOKEN\"]")
+    ))
+    .unwrap();
+    let grants = &m.plugins[0].grants;
+    assert_eq!(grants.env, ["GITHUB_TOKEN", "PI_LENS_*"]);
+    assert!(grants.passes("PI_LENS_X") && grants.passes("GITHUB_TOKEN"));
+    assert!(!grants.passes("PI_LENS") && !grants.passes("GITHUB_TOKENS"));
+    let refused = |entry: &str| {
         error(&format!(
             "{MINIMAL}{}",
-            plugin("pi", "a.ts", "keys = [\"GITHUB_TOKEN\"]")
-        )),
-        "6:20: `GITHUB_TOKEN` is not a credential yoagent reads: nothing withholds it"
+            plugin("pi", "a.ts", &format!("env = [\"{entry}\"]"))
+        ))
+    };
+    for (entry, m) in [
+        ("A B", "`A B`: a variable's name (letters, digits and `_`), or a prefix ending in `_*`"),
+        ("1X", "`1X`: a variable's name (letters, digits and `_`), or a prefix ending in `_*`"),
+        ("*", "`*`: a prefix is at least two letters or digits, then `_*` (`PI_LENS_*`)"),
+        ("A_*", "`A_*`: a prefix is at least two letters or digits, then `_*` (`PI_LENS_*`)"),
+        ("PI*", "`PI*`: a prefix is at least two letters or digits, then `_*` (`PI_LENS_*`)"),
+        ("P*I_", "`P*I_`: a variable's name (letters, digits and `_`), or a prefix ending in `_*`"),
+        ("AWS_*", "`AWS_*` would hand over `AWS_BEARER_TOKEN_BEDROCK`, a credential yoagent reads: name it"),
+        ("NODE_*", "`NODE_*` would hand over `NODE_OPTIONS`, which loads code into the runtime: name it"),
+        ("DYLD_*", "`DYLD_*` would hand over `DYLD_*`, which loads code into the runtime: name it"),
+        ("DYLD_X_*", "`DYLD_X_*` would hand over `DYLD_*`, which loads code into the runtime: name it"),
+    ] {
+        assert_eq!(refused(entry), format!("6:19: {m}"), "{entry}");
+    }
+    // A prefix that only begins like one is fine.
+    assert!(read(&format!(
+        "{MINIMAL}{}",
+        plugin("pi", "a.ts", "env = [\"DY_*\"]")
+    ))
+    .is_ok());
+    // Named in full, a credential or a code loader passes.
+    let m = read(&format!(
+        "{MINIMAL}{}",
+        plugin(
+            "pi",
+            "a.ts",
+            "env = [\"NODE_OPTIONS\", \"DYLD_LIBRARY_PATH\"]"
+        )
+    ))
+    .unwrap();
+    assert_eq!(
+        m.plugins[0].grants.env,
+        ["DYLD_LIBRARY_PATH", "NODE_OPTIONS"]
     );
     assert_eq!(
         error(&format!(
             "{MINIMAL}{}",
-            plugin("pi", "a.ts", "keys = [\"API_KEY\", \"API_KEY\"]")
+            plugin("pi", "a.ts", "env = [\"API_KEY\", \"API_KEY\"]")
         )),
-        "6:31: `API_KEY` is listed twice"
+        "6:30: `API_KEY` is listed twice"
     );
     let custom = "[agent]\nname = \"a\"\nmodel = \"acme/m1\"\nbase_url = \"https://acme.example/v1\"\napi_key_env = \"ACME_KEY\"\n";
     let m = read(&format!(
         "{custom}{}",
-        plugin("pi", "a.ts", "keys = [\"ACME_KEY\"]")
+        plugin("pi", "a.ts", "env = [\"ACME_KEY\"]")
     ))
     .unwrap();
-    assert_eq!(m.plugins[0].grants.keys, ["ACME_KEY"]);
+    assert_eq!(m.plugins[0].grants.env, ["ACME_KEY"]);
+    // A prefix may not match the agent's own key either.
+    assert_eq!(
+        error(&format!(
+            "{custom}{}",
+            plugin("pi", "a.ts", "env = [\"ACME_*\"]")
+        )),
+        "8:19: `ACME_*` would hand over `ACME_KEY`, a credential yoagent reads: name it"
+    );
     // One pi runtime: the same on every pi plugin or none.
     assert_eq!(
         error(&format!(
             "{MINIMAL}{}{}",
-            plugin("pi", "a.ts", "keys = [\"API_KEY\"]"),
+            plugin("pi", "a.ts", "env = [\"API_KEY\"]"),
             plugin("pi", "b.ts", "trust = true")
         )),
-        "9:10: every pi extension runs in one runtime, whose environment is theirs together: give each pi plugin the same `keys` or none (`a` has API_KEY, `b` none)"
+        "9:10: every pi extension runs in one runtime, whose environment is theirs together: give each pi plugin the same `env` grant or none (`a` has API_KEY, `b` none)"
     );
-    // One DSH runtime and host: the same grants on each; `keys` alone
+    // One DSH runtime and host: the same grants on each; `env` alone
     // starts no DSH host.
     let m = read(&format!(
         "{MINIMAL}{}{}",
-        plugin("dsh", "a.ts", "keys = [\"API_KEY\"]"),
-        plugin("dsh", "b.ts", "keys = [\"API_KEY\"]")
+        plugin("dsh", "a.ts", "env = [\"API_KEY\"]"),
+        plugin("dsh", "b.ts", "env = [\"API_KEY\"]")
     ))
     .unwrap();
     assert!(m.dsh_grants().is_none());
     let m = read(&format!(
         "{MINIMAL}{}",
-        plugin("dsh", "a.ts", "workspace = true, keys = [\"API_KEY\"]")
+        plugin("dsh", "a.ts", "workspace = true, env = [\"API_KEY\"]")
     ))
     .unwrap();
     assert_eq!(
         m.dsh_grants().map(Grants::names),
-        Some(vec!["workspace", "keys"])
+        Some(vec!["workspace", "env"])
     );
     assert_eq!(
         error(&format!(
             "{MINIMAL}{}{}",
-            plugin("dsh", "a.ts", "keys = [\"API_KEY\"]"),
+            plugin("dsh", "a.ts", "env = [\"API_KEY\"]"),
             plugin("dsh", "b.ts", "")
         )),
-        "9:10: every DSH plugin runs in one runtime, whose environment is theirs together: give each DSH plugin the same `keys` or none (`a` has API_KEY, `b` none)"
+        "9:10: every DSH plugin runs in one runtime, whose environment is theirs together: give each DSH plugin the same `env` grant or none (`a` has API_KEY, `b` none)"
     );
     assert_eq!(
         error(&format!(
             "{MINIMAL}{}{}",
-            plugin("dsh", "a.ts", "workspace = true, keys = [\"API_KEY\"]"),
-            plugin("dsh", "b.ts", "workspace = true, keys = [\"OPENAI_API_KEY\"]")
+            plugin("dsh", "a.ts", "workspace = true, env = [\"API_KEY\"]"),
+            plugin("dsh", "b.ts", "workspace = true, env = [\"OPENAI_API_KEY\"]")
         )),
-        "9:10: every DSH plugin runs in one runtime, whose environment is theirs together: give each DSH plugin the same `keys` or none (`a` has API_KEY, `b` has OPENAI_API_KEY)"
+        "9:10: every DSH plugin runs in one runtime, whose environment is theirs together: give each DSH plugin the same `env` grant or none (`a` has API_KEY, `b` has OPENAI_API_KEY)"
     );
-    // The same keys, other host grants: the DSH host's rule.
+    // The same `env`, other host grants: the DSH host's rule.
     assert_eq!(
         error(&format!(
             "{MINIMAL}{}{}",
-            plugin("dsh", "a.ts", "workspace = true, keys = [\"API_KEY\"]"),
-            plugin("dsh", "b.ts", "keys = [\"API_KEY\"]")
+            plugin("dsh", "a.ts", "workspace = true, env = [\"API_KEY\"]"),
+            plugin("dsh", "b.ts", "env = [\"API_KEY\"]")
         )),
-        "9:10: every DSH plugin shares the DSH host: give each the same grants (`a` has workspace, keys, `b` keys)"
+        "9:10: every DSH plugin shares the DSH host: give each the same grants (`a` has workspace, env, `b` env)"
     );
     // rutis: by package, which `plan` sees (`run/plugins.rs`); read here.
     let m = read(&format!(
         "{MINIMAL}{}runtime = \"node\"\n",
-        plugin("rutis", "p.ts", "keys = [\"API_KEY\"]")
+        plugin("rutis", "p.ts", "env = [\"API_KEY\"]")
     ))
     .unwrap();
-    assert_eq!(m.plugins[0].grants.keys, ["API_KEY"]);
+    assert_eq!(m.plugins[0].grants.env, ["API_KEY"]);
 }

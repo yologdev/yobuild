@@ -1353,15 +1353,16 @@ fn what_a_pi_extension_was_answered_for_want_of_a_grant_is_said() {
 
 #[test]
 fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
-    // Design §12, "Step 4": every credential yoagent reads that is set here
-    // is gone from a plugin runtime's or an MCP server's environment — the
-    // agent's own (a custom provider's `api_key_env`) and any other
-    // provider's — but `check`'s pi and DSH probes alone, which get them
-    // empty; one not set stays unset, and the rest of the environment is as
-    // it is. What the manifest hands over on purpose gets there (a server's
-    // `env`, a `keys` grant to its runtime alone), and `check` notes it. Each
-    // load appends a line: `check` loads each plugin alone, then all
-    // together.
+    // Design §12, "Step 4" and "Step 5": every credential yoagent reads
+    // that is set here is gone from a plugin runtime's or an MCP server's
+    // environment — the agent's own (a custom provider's `api_key_env`) and
+    // any other provider's — but `check`'s pi and DSH probes alone, which
+    // get them empty; one not set stays unset. Of the rest only the kept
+    // set arrives (`LANG`), an unrelated variable not (but in those probes,
+    // which yoagent-rutis launches). What the manifest hands over on
+    // purpose gets there (a server's `env`, an `env` grant — a name or a
+    // prefix — to its runtime alone), and `check` notes it. Each load
+    // appends a line: `check` loads each plugin alone, then all together.
     let rutis = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/plugins/node_modules");
     if !pi_installed()
         || !installed_dsh()
@@ -1374,7 +1375,7 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     }
     let dir = tempfile::tempdir().unwrap();
     let names = [
-        "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ACME_KEY", "GROQ_API_KEY", "UNRELATED",
+        "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ACME_KEY", "GROQ_API_KEY", "YOBUILD_OTHER", "LANG",
     ];
     let seen = format!("JSON.stringify({names:?}.map((n) => process.env[n] ?? 'unset')) + '\\n'");
     // The runtimes' own working folder is not the agent's: an absolute path.
@@ -1417,7 +1418,7 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         &server,
         format!(
             "#!/usr/bin/env bash\n\
-             printf '[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]\\n' \"${{DEEPSEEK_API_KEY-unset}}\" \"${{OPENAI_API_KEY-unset}}\" \"${{ACME_KEY-unset}}\" \"${{GROQ_API_KEY-unset}}\" \"${{UNRELATED-unset}}\" >> {:?}\n\
+             printf '[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]\\n' \"${{DEEPSEEK_API_KEY-unset}}\" \"${{OPENAI_API_KEY-unset}}\" \"${{ACME_KEY-unset}}\" \"${{GROQ_API_KEY-unset}}\" \"${{YOBUILD_OTHER-unset}}\" \"${{LANG-unset}}\" >> {:?}\n\
              exec bash \"$1\"\n",
             dir.path().join("mcp.seen").display().to_string()
         ),
@@ -1433,15 +1434,16 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
                  [[plugin]]\npi = \"./pi.ts\"\ngrants = {{ {pi} }}\n\
                  [[plugin]]\ndsh = \"./dsh.ts\"\ngrants = {{ {dsh} }}\n\
                  [[plugin]]\nname = \"plug\"\nrutis = \"./r/plug.ts\"\nruntime = \"node\"\ngrants = {{ {rutis} }}\nconfig = {{ apiKey = \"${{DEEPSEEK_API_KEY}}\" }}\n\
-                 [[mcp]]\nname = \"server\"\nnpm = \"./server.sh\"\nargs = [\"{FIXTURE}/server.sh\"]\nenv = {{ OPENAI_API_KEY = \"${{OPENAI_API_KEY}}\" }}\n",
+                 [[mcp]]\nname = \"server\"\nnpm = \"./server.sh\"\nargs = [\"{FIXTURE}/server.sh\"]\nenv = {{ OPENAI_API_KEY = \"${{OPENAI_API_KEY}}\", DYLD_YOBUILD_TEST = \"1\" }}\n",
             ),
         )
         .unwrap();
     };
     manifest("", "", "");
     std::fs::write(dir.path().join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
-    // On macOS cargo sets `DYLD_*` variables for the tests: removed, and
-    // one of ours set, which `run` and `check` name (`env` drops it).
+    // On macOS cargo sets `DYLD_*` variables for the tests: removed. The
+    // server's own `env` sets one, which `run` and `check` name (`env` drops
+    // it).
     let dyld: Vec<_> = std::env::vars_os()
         .map(|(name, _)| name)
         .filter(|name| name.to_string_lossy().starts_with("DYLD_"))
@@ -1455,24 +1457,24 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
             command.env(name, value);
         }
         command
-            .env("DYLD_YOBUILD_TEST", "1")
             .env_remove("RUST_LOG")
             .env("DEEPSEEK_API_KEY", "sk-d")
             .env("OPENAI_API_KEY", "sk-o")
             .env("ACME_KEY", "sk-a")
-            .env("UNRELATED", "kept")
+            .env("YOBUILD_OTHER", "other")
+            .env("LANG", "C")
             .args(args)
             .current_dir(dir.path())
             .output()
             .unwrap()
     };
     let with_keys = |args: &[&str]| with_env(&[], args);
-    let gone = r#"["unset","unset","unset","unset","kept"]"#;
-    // `check`'s pi and DSH probes alone: set empty (yoagent-rutis builds
-    // their launch).
-    let blank = r#"["","","","unset","kept"]"#;
+    let gone = r#"["unset","unset","unset","unset","unset","C"]"#;
+    // `check`'s pi and DSH probes alone: set empty, the rest as it is
+    // (yoagent-rutis builds their launch).
+    let blank = r#"["","","","unset","other","C"]"#;
     // The server's own `env` hands it `OPENAI_API_KEY`.
-    let handed = r#"["unset","sk-o","unset","unset","kept"]"#;
+    let handed = r#"["unset","sk-o","unset","unset","unset","C"]"#;
     // Each file's lines, the file removed for the next command.
     let lines = |name: &str, said: &str| -> Vec<String> {
         let file = dir.path().join(format!("{name}.seen"));
@@ -1491,12 +1493,12 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     }
     assert_eq!(lines("mcp", &stderr), [handed]);
     // Said as the session starts: what fails for want of a key says why.
-    let withheld = "plugins and stdio MCP servers have the credentials yoagent reads set here taken out of their environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ACME_KEY`): one that needs one gets it only from its entry (a `keys` grant, or a `\"${NAME}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered";
+    let withheld = "plugins and stdio MCP servers have the credentials yoagent reads set here taken out of their environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ACME_KEY`): one that needs one gets it only from its entry (an `env` grant, or a `\"${NAME}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered";
     assert!(
         stderr.contains(&format!("  Info: {withheld}\n")),
         "{stderr}"
     );
-    let dyld_note = "what yobuild starts through /usr/bin/env (plugin runtimes, stdio MCP servers, the terminal UI) does not get `DYLD_YOBUILD_TEST`: with System Integrity Protection on (macOS's default), starting the protected /usr/bin/env drops `DYLD_*` variables (only while a credential yoagent reads is taken out of its environment)";
+    let dyld_note = "`DYLD_YOBUILD_TEST`, handed to a plugin or stdio MCP server, does not reach it while System Integrity Protection is on (macOS's default): every plugin runtime and stdio server starts through the protected /usr/bin/env, which drops `DYLD_*` variables";
     assert_eq!(
         stderr.contains(&format!("  Info: {dyld_note}\n")),
         cfg!(target_os = "macos"),
@@ -1587,15 +1589,17 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         "{report}"
     );
 
-    // A `keys` grant leaves those in its runtime only: the pi runtime keeps
-    // the agent's key, the DSH runtime (no DSH host for `keys`) OpenAI's,
-    // the rutis plugin's DeepSeek's.
+    // An `env` grant leaves those in its runtime only: the pi runtime keeps
+    // the agent's key, the DSH runtime (no DSH host for `env`) OpenAI's,
+    // the rutis plugin's DeepSeek's and, by a prefix, the unrelated one.
     manifest(
-        r#"keys = ["ACME_KEY"]"#, r#"keys = ["OPENAI_API_KEY"]"#, r#"keys = ["DEEPSEEK_API_KEY"]"#,
+        r#"env = ["ACME_KEY"]"#,
+        r#"env = ["OPENAI_API_KEY"]"#,
+        r#"env = ["DEEPSEEK_API_KEY", "YOBUILD_*"]"#,
     );
-    let rutis_keeps = r#"["sk-d","unset","unset","unset","kept"]"#;
-    let pi_keeps = r#"["unset","unset","sk-a","unset","kept"]"#;
-    let dsh_keeps = r#"["unset","sk-o","unset","unset","kept"]"#;
+    let rutis_keeps = r#"["sk-d","unset","unset","unset","other","C"]"#;
+    let pi_keeps = r#"["unset","unset","sk-a","unset","unset","C"]"#;
+    let dsh_keeps = r#"["unset","sk-o","unset","unset","unset","C"]"#;
     let out = with_keys(&run);
     let stderr = text(&out.stderr);
     assert!(out.status.success(), "{stderr}");
@@ -1608,11 +1612,11 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     let (report, stderr) = check();
     assert_eq!(
         lines("pi", &stderr),
-        [r#"["","","sk-a","unset","kept"]"#, pi_keeps]
+        [r#"["","","sk-a","unset","other","C"]"#, pi_keeps]
     );
     assert_eq!(
         lines("dsh", &stderr),
-        [r#"["","sk-o","","unset","kept"]"#, dsh_keeps]
+        [r#"["","sk-o","","unset","other","C"]"#, dsh_keeps]
     );
     assert_eq!(lines("rutis", &stderr), [rutis_keeps, rutis_keeps]);
     lines("mcp", &stderr);
@@ -1639,13 +1643,12 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         ]
     );
 
-    // A `keys` grant of a name not set here hands nothing over: said so.
+    // An `env` grant of a name not set here hands nothing over: said so.
     manifest(
-        r#"keys = ["GROQ_API_KEY"]"#, r#"keys = ["OPENAI_API_KEY"]"#,
-        r#"keys = ["DEEPSEEK_API_KEY"]"#,
+        r#"env = ["GROQ_API_KEY"]"#, r#"env = ["OPENAI_API_KEY"]"#, r#"env = ["DEEPSEEK_API_KEY"]"#,
     );
     let unset =
-        "its `keys` grant names `GROQ_API_KEY`, unset or empty here: it gets no key from it";
+        "its `env` grant names `GROQ_API_KEY`, unset or empty here: it gets nothing from it";
     let (report, _) = check();
     assert_eq!(
         notes(&report, "pi"),
@@ -1683,8 +1686,8 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
 /// through `/usr/bin/env` (design §12 "Step 4", found after the merge):
 /// `check` names it as the server's problem, with its fix, and `run`
 /// refuses with what to do — in the same words whether a key is set or not.
-/// With a key set, on macOS, the `DYLD_*` variables it would lose are named
-/// (run on macOS by CI's `macos` job).
+/// On macOS the `DYLD_*` variable its own `env` sets, which the protected
+/// `env` drops, is named (run on macOS by CI's `macos` job).
 #[cfg(unix)]
 #[test]
 fn a_server_that_cannot_start_is_said_with_what_to_do() {
@@ -1693,7 +1696,7 @@ fn a_server_that_cannot_start_is_said_with_what_to_do() {
     std::fs::write(
         dir.path().join("agent.toml"),
         "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
-         [[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n",
+         [[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\nenv = { DYLD_YOBUILD_TEST = \"1\" }\n",
     )
     .unwrap();
     std::fs::write(dir.path().join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
@@ -1704,8 +1707,8 @@ fn a_server_that_cannot_start_is_said_with_what_to_do() {
     // macOS, where the temp folder is `/var/…`): only its end compared.
     let said = "/s.sh: it is not executable";
     let fix = "the program a stdio MCP server or a plugin runtime (Node) runs is missing";
-    // On macOS cargo sets `DYLD_*` variables for the tests: removed, and
-    // one of ours set.
+    // On macOS cargo sets `DYLD_*` variables for the tests: removed; the
+    // server's own `env` sets one.
     let dyld: Vec<_> = std::env::vars_os()
         .map(|(name, _)| name)
         .filter(|name| name.to_string_lossy().starts_with("DYLD_"))
@@ -1719,7 +1722,6 @@ fn a_server_that_cannot_start_is_said_with_what_to_do() {
             command.env("DEEPSEEK_API_KEY", key);
         }
         command
-            .env("DYLD_YOBUILD_TEST", "1")
             .env_remove("RUST_LOG")
             .args(args)
             .current_dir(dir.path())
@@ -1754,13 +1756,9 @@ fn a_server_that_cannot_start_is_said_with_what_to_do() {
             .any(|n| {
                 n.as_str()
                     .unwrap()
-                    .contains("does not get `DYLD_YOBUILD_TEST`")
+                    .starts_with("`DYLD_YOBUILD_TEST`, handed to a plugin or stdio MCP server")
             });
-        assert_eq!(
-            dyld_said,
-            key.is_some() && cfg!(target_os = "macos"),
-            "{report}"
-        );
+        assert_eq!(dyld_said, cfg!(target_os = "macos"), "{report}");
     }
     let out = yobuild(
         Some("sk-d"),

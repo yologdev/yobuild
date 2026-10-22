@@ -1779,7 +1779,7 @@ table read with `deny_unknown_fields`, every key off when absent:
 | `model` | `"info"` (later `"call"`) | yes | later (a model-info `llm`) | yes | `ctx.model`/`modelRegistry`; for rutis, `llm`'s model info |
 | `wake` | bool | yes | yes (the stand-in's `steer`/`followup`) | yes | `session` wake |
 | `exec` | `"off"` / `"gate"` / `"free"` | yes | — | — | `pi.exec` |
-| `keys` | names of credentials yoagent reads (step 4) | yes (every pi plugin or none) | yes (every DSH plugin or none) | yes (every plugin of its package or none) | those variables left in its runtime |
+| `env` | names, or prefixes ending in `_*` (step 5; a credential or code loader only by its full name) | yes (every pi plugin or none) | yes (every DSH plugin or none) | yes (every plugin of its package or none) | those variables left in its runtime |
 
 A key an ecosystem does not take is refused with its place; it goes in
 `src/manifest/tests.rs` and `skill/yobuild/reference/manifest.md` (whose
@@ -2547,9 +2547,11 @@ What changes beside the list:
   is), so a granted `DYLD_*` is decided by SIP in every case and the note
   below is exact. A machine without `/usr/bin/env` starts none.
   `env_without`'s error names no variables (it would list about 100):
-  "yobuild cannot start X: /usr/bin/env is not there, and yobuild needs
-  it to start a plugin runtime or stdio MCP server with the kept
-  environment"; the `no-env` hint's pattern and fix follow, and its test.
+  "cannot start X with the kept environment: /usr/bin/env is not there,
+  and yobuild needs it to start a plugin runtime or stdio MCP server"
+  (not "yobuild cannot start X: …", which the `cannot-start` hint, first
+  in the table, would take); the `no-env` hint's fix follows, and its
+  test.
 - `startable` looks for every program first (it already does for a
   server, and for a runtime whenever something is withheld — from now on,
   always), so rutis's own "cannot start node: No such file or directory"
@@ -2784,6 +2786,25 @@ credentials set empty or removed, nothing else; said.
 allowlist) over the same plugins, on macOS and Linux, with each gallery
 agent's and example's scripted runs too, the table above re-checked, and
 a live run of the handoff example.
+
+**Built in two parts.** *5a* (2026-10-22): `src/environment.rs`
+(`KEPT`, `KEPT_PREFIXES`, `UI_KEPT`, `CODE_LOADING`), `host::Inherit`,
+`PluginHostBuilder::inherit`, prefixes in `keep` (`host::matches`),
+`host::not_inherited`, `env_without` always through `env`,
+`run::kept_environment`, the stdio servers' `without`, `Grants::env` /
+`passes` (with `env_entry`'s refusals), `Plan::env`, `run::env_unset`,
+the narrowed `dyld_note`, `plugins::kept_only` for the helpers, the
+reworded `no-env`; tests: `kept_env_test` (a file of its own, for
+`RUTIS_LOCAL_HANDOVER=loopback`; checked to fail when the channel token
+is taken out), the unit tests above, `cli_test`'s
+`plugins_and_servers_have_the_credentials_taken_out_unless_handed_one`
+(an unrelated variable gone, `LANG` kept, a prefix grant) and
+`a_server_that_cannot_start_is_said_with_what_to_do` (a server's own
+`DYLD_*`). `withheld_note`, `TAKEN` and `withheld_from` stay as step 4
+made them until 5b. *5b*, still to build: what `check` says — the scan
+and the "its code reads" notes, `environment` and `leftOut`, the secret,
+code-loading and proxy-password notes, the counted note, the skill's
+`parts.md` and `failures.md` entries.
 
 ### What it unlocks, and the migration
 

@@ -73,7 +73,7 @@ pub(crate) struct Plan {
     /// Start the `dsh` runtime, in `dsh_dir`.
     pub dsh: bool,
     /// Load the DSH host (its stand-in agent; design §12, "Step 2"): the DSH
-    /// plugins have a grant the host serves (`keys` alone is none). Its rows
+    /// plugins have a grant the host serves (`env` alone is none). Its rows
     /// are in `rows`.
     pub dsh_host: bool,
     /// The DSH host's session log row, by id: `start` gives it its folder
@@ -113,11 +113,12 @@ pub(crate) struct Plan {
     /// The same files as `extensions` spells them, which the pi adapter
     /// names back to the host services.
     pub pi_spelled: Vec<(String, Vec<PathBuf>)>,
-    /// The credentials each runtime is granted (`keys`; design §12, "Step
-    /// 4"), by runtime name, for every runtime a plugin runs in (none
-    /// granted: an empty list): left in its environment.
-    pub keys: Vec<(String, Vec<String>)>,
-    /// The first plugin of each runtime in `keys`, by runtime name: the one
+    /// What each runtime's `env` grant passes (design §12, "Step 5"):
+    /// names, or prefixes ending in `*`, by runtime name, for every runtime
+    /// a plugin runs in (none granted: an empty list): kept in its
+    /// environment.
+    pub env: Vec<(String, Vec<String>)>,
+    /// The first plugin of each runtime in `env`, by runtime name: the one
     /// [`Plan::keep`]'s refusal names beside the plugin that differs.
     pub keepers: Vec<(String, String)>,
 }
@@ -176,21 +177,41 @@ pub(crate) fn in_set(sets: &Installed, set: Set, package: &Package) -> Result<Pa
     installed(package, &dir.join("node_modules"), &fix)
 }
 
+/// `command`'s environment: on unix only what of `vars` (this process's)
+/// the kept set holds; elsewhere every variable but `keys`.
+fn kept_only(
+    command: &mut std::process::Command,
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    keys: &[String],
+) {
+    if cfg!(unix) {
+        command.env_clear();
+        command.envs(
+            vars.into_iter()
+                .filter(|(name, _)| crate::environment::kept(name)),
+        );
+    } else {
+        for key in keys {
+            command.env_remove(key);
+        }
+    }
+}
+
 /// How long a helper script may take (it reads package files and imports
 /// a plugin's modules).
 const HELPER_TIME: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Runs one of the adapters' helper scripts with Node; its JSON output, an
-/// object (its stderr goes to the debug log). `keys` (the credentials
-/// yoagent reads) are removed from its environment: `inspect-package.mjs`
-/// imports a plugin's code.
+/// object (its stderr goes to the debug log). `inspect-package.mjs`
+/// imports a plugin's code, so on unix it gets only the kept environment
+/// (design §12 "Step 5"; no grants); elsewhere `keys` (the credentials
+/// yoagent reads) are removed — Node on Windows needs variables the kept
+/// set does not hold.
 fn node_json(script: &Path, args: &[&Path], keys: &[String]) -> Result<Helper, BoxError> {
     use std::io::Read;
     let failed = |e: &dyn std::fmt::Display| format!("node {}: {e}", script.display());
     let mut command = std::process::Command::new("node");
-    for key in keys {
-        command.env_remove(key);
-    }
+    kept_only(&mut command, std::env::vars_os(), keys);
     let mut child = command
         .arg(script)
         .args(args)
@@ -277,52 +298,54 @@ impl Helper {
     }
 }
 
-/// A plugin's `keys` as a refusal says them, as the manifest's
-/// (`manifest::keys_differ`): "`a` has X, Y" or "`b` none".
-fn said(plugin: &str, keys: &[String]) -> String {
-    match keys {
+/// A plugin's `env` grant as a refusal says it, as the manifest's
+/// (`manifest::env_differ`): "`a` has X, Y" or "`b` none".
+fn said(plugin: &str, env: &[String]) -> String {
+    match env {
         [] => format!("`{plugin}` none"),
-        keys => format!("`{plugin}` has {}", keys.join(", ")),
+        env => format!("`{plugin}` has {}", env.join(", ")),
     }
 }
 
 impl Plan {
-    /// The runtime `runtime` keeps `keys`, granted to its plugin `plugin`.
+    /// The runtime `runtime` keeps what `env` passes, granted to its plugin
+    /// `plugin`.
     /// Each plugin of one runtime is granted the same (the manifest and
     /// `plan` refuse otherwise, naming the plugins); should those checks
     /// ever loosen, this refuses rather than let one plugin's grant decide
     /// its runtime's environment — naming the plugin that came first, in
     /// their words.
-    fn keep(&mut self, runtime: &str, plugin: &str, keys: &[String]) -> Result<(), BoxError> {
-        match self.keys.iter().find(|(r, _)| r == runtime) {
-            Some((_, kept)) if kept != keys => {
+    fn keep(&mut self, runtime: &str, plugin: &str, env: &[String]) -> Result<(), BoxError> {
+        match self.env.iter().find(|(r, _)| r == runtime) {
+            Some((_, kept)) if kept != env => {
                 let first = self
                     .keepers
                     .iter()
                     .find(|(r, _)| r == runtime)
                     .map_or("another", |(_, p)| p.as_str());
                 Err(format!(
-                    "it runs in one runtime with plugin {first}, whose environment is theirs together: give each the same `keys` or none ({}, {})",
+                    "it runs in one runtime with plugin {first}, whose environment is theirs together: give each the same `env` grant or none ({}, {})",
                     said(first, kept),
-                    said(plugin, keys)
+                    said(plugin, env)
                 )
                 .into())
             }
             Some(_) => Ok(()),
             None => {
-                self.keys.push((runtime.to_owned(), keys.to_vec()));
+                self.env.push((runtime.to_owned(), env.to_vec()));
                 self.keepers.push((runtime.to_owned(), plugin.to_owned()));
                 Ok(())
             }
         }
     }
 
-    /// What the runtime `runtime` keeps of the withheld credentials.
+    /// What the runtime `runtime` keeps beyond the kept set: its `env`
+    /// grant's names and prefixes.
     pub fn kept(&self, runtime: &str) -> &[String] {
-        self.keys
+        self.env
             .iter()
             .find(|(r, _)| r == runtime)
-            .map_or(&[], |(_, keys)| keys.as_slice())
+            .map_or(&[], |(_, env)| env.as_slice())
     }
 }
 
@@ -358,7 +381,7 @@ pub(crate) fn plan(
         let config = plugin.config_with(lookup).map_err(|e| failed(e.into()))?;
         match &plugin.kind {
             PluginKind::Pi(source) => {
-                plan.keep("pi", &plugin.name, &plugin.grants.keys)
+                plan.keep("pi", &plugin.name, &plugin.grants.env)
                     .map_err(failed)?;
                 if config.is_some() {
                     return Err(failed("a pi extension takes no config".into()));
@@ -403,7 +426,7 @@ pub(crate) fn plan(
                 plan.notes.extend(found.notes);
             }
             PluginKind::Dsh(source) => {
-                plan.keep("dsh", &plugin.name, &plugin.grants.keys)
+                plan.keep("dsh", &plugin.name, &plugin.grants.env)
                     .map_err(failed)?;
                 let (rows, peers) =
                     dsh_rows_of(layout, &plan.dsh_dir, plugin, source, config, &keys)
@@ -431,25 +454,25 @@ pub(crate) fn plan(
                     }
                 };
                 // One runtime per package, its environment its plugins'
-                // together: the same `keys` on each.
+                // together: the same `env` grant on each.
                 let first = manifest.plugins.iter().find(|p| match &p.kind {
                     PluginKind::Rutis { path, .. } => {
                         package_of(path).is_ok_and(|p| p == plan.rutis[at])
                     }
                     _ => false,
                 });
-                if let Some(first) = first.filter(|f| f.grants.keys != plugin.grants.keys) {
+                if let Some(first) = first.filter(|f| f.grants.env != plugin.grants.env) {
                     return Err(failed(
                         format!(
-                            "it runs in one runtime with plugin {} (the package at {}), whose environment is theirs together: give each the same `keys` or none ({})",
+                            "it runs in one runtime with plugin {} (the package at {}), whose environment is theirs together: give each the same `env` grant or none ({})",
                             first.name,
                             plan.rutis[at].display(),
-                            crate::manifest::keys_differ(first, plugin)
+                            crate::manifest::env_differ(first, plugin)
                         )
                         .into(),
                     ));
                 }
-                plan.keep(&rutis_runtime_name(at), &plugin.name, &plugin.grants.keys)
+                plan.keep(&rutis_runtime_name(at), &plugin.name, &plugin.grants.env)
                     .map_err(failed)?;
                 let mut row =
                     Row::new(row_id(&plugin.name), path.display()).runtime(rutis_runtime_name(at));
@@ -879,8 +902,28 @@ mod tests {
         .map_err(|e| e.to_string())
     }
 
+    /// The helpers import a package's code: on unix they get only the
+    /// kept environment, a credential and an unrelated variable gone.
+    #[cfg(unix)]
     #[test]
-    fn a_runtime_whose_plugins_keep_different_keys_is_refused() {
+    fn the_helpers_get_only_the_kept_environment() {
+        let mut command = std::process::Command::new("/usr/bin/env");
+        let vars = [
+            ("PATH", "/usr/bin:/bin"),
+            ("LANG", "C"),
+            ("OPENAI_API_KEY", "k"),
+            ("UNRELATED", "u"),
+        ]
+        .map(|(k, v)| (k.into(), v.into()));
+        kept_only(&mut command, vars, &["OPENAI_API_KEY".to_owned()]);
+        let out = String::from_utf8(command.output().unwrap().stdout).unwrap();
+        let mut lines: Vec<&str> = out.lines().collect();
+        lines.sort();
+        assert_eq!(lines, ["LANG=C", "PATH=/usr/bin:/bin"]);
+    }
+
+    #[test]
+    fn a_runtime_whose_plugins_keep_different_env_grants_is_refused() {
         let mut plan = Plan::default();
         let key = |k: &str| vec![k.to_owned()];
         plan.keep("pi", "a", &key("OPENAI_API_KEY")).unwrap();
@@ -888,7 +931,7 @@ mod tests {
         plan.keep("dsh", "d", &[]).unwrap();
         assert_eq!(
             plan.keep("pi", "c", &[]).unwrap_err().to_string(),
-            "it runs in one runtime with plugin a, whose environment is theirs together: give each the same `keys` or none (`a` has OPENAI_API_KEY, `c` none)"
+            "it runs in one runtime with plugin a, whose environment is theirs together: give each the same `env` grant or none (`a` has OPENAI_API_KEY, `c` none)"
         );
         assert!(plan.keep("dsh", "e", &key("GROQ_API_KEY")).is_err());
         assert_eq!(plan.kept("pi"), key("OPENAI_API_KEY"));
@@ -1261,15 +1304,15 @@ mod tests {
             plan_of(
                 dir.path(),
                 &format!(
-                    "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\ngrants = {{ keys = [{p}] }}\n\
-                     [[plugin]]\nrutis = \"./other/q.ts\"\nruntime = \"node\"\ngrants = {{ keys = [{q}] }}\n\
-                     [[plugin]]\nrutis = \"./r.ts\"\nruntime = \"node\"\ngrants = {{ keys = [{r}] }}\n"
+                    "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\ngrants = {{ env = [{p}] }}\n\
+                     [[plugin]]\nrutis = \"./other/q.ts\"\nruntime = \"node\"\ngrants = {{ env = [{q}] }}\n\
+                     [[plugin]]\nrutis = \"./r.ts\"\nruntime = \"node\"\ngrants = {{ env = [{r}] }}\n"
                 ),
             )
         };
         let granted = keys(r#""API_KEY""#, "", r#""API_KEY""#).unwrap();
         assert_eq!(
-            granted.keys,
+            granted.env,
             [
                 ("rutis-0".to_owned(), vec!["API_KEY".to_owned()]),
                 ("rutis-1".to_owned(), vec![])
@@ -1280,7 +1323,7 @@ mod tests {
         assert_eq!(
             e,
             format!(
-                "plugin r: it runs in one runtime with plugin p (the package at {}), whose environment is theirs together: give each the same `keys` or none (`p` has API_KEY, `r` none)",
+                "plugin r: it runs in one runtime with plugin p (the package at {}), whose environment is theirs together: give each the same `env` grant or none (`p` has API_KEY, `r` none)",
                 canonical(dir.path()).display()
             )
         );
@@ -1404,7 +1447,7 @@ mod tests {
         let plan = loaded("", false);
         assert!(!has(&plan, "dsh-host") && !services.iter().any(|id| has(&plan, id)));
         // `keys` alone: no host, the `dsh` runtime keeping them.
-        let plan = loaded("grants = { keys = [\"API_KEY\"] }\n", false);
+        let plan = loaded("grants = { env = [\"API_KEY\"] }\n", false);
         assert!(!plan.dsh_host && !has(&plan, "dsh-host"));
         assert_eq!(plan.kept("dsh"), ["API_KEY"]);
         assert!(plan.kept("pi").is_empty());
@@ -1509,28 +1552,22 @@ mod tests {
     }
 
     #[test]
-    fn a_helper_runs_without_the_variables_it_is_told_to_drop() {
-        // `cargo test` sets `CARGO_PKG_NAME` and `CARGO_MANIFEST_DIR` for
-        // the test: a variable this process surely holds.
+    fn a_helper_runs_with_the_kept_environment_only() {
+        // `cargo test` sets `CARGO_PKG_NAME` for the test: a variable this
+        // process surely holds, which the kept set does not.
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("env.mjs");
         std::fs::write(
             &script,
             "const v = (n) => process.env[n] ?? 'unset'\n\
-             console.log(JSON.stringify({ name: v('CARGO_PKG_NAME'), dir: v('CARGO_MANIFEST_DIR') }))\n",
+             console.log(JSON.stringify({ name: v('CARGO_PKG_NAME'), path: v('PATH') }))\n",
         )
         .unwrap();
-        let seen = |keys: &[&str]| {
-            let keys: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
-            let found = node_json(&script, &[], &keys).unwrap();
-            (
-                found.field("name").unwrap().clone(),
-                found.field("dir").unwrap().clone(),
-            )
-        };
-        assert_eq!(seen(&[]).0, "yobuild");
-        let (name, dir) = seen(&["CARGO_PKG_NAME"]);
-        assert_eq!(name, "unset");
-        assert_eq!(dir, env!("CARGO_MANIFEST_DIR"));
+        let found = node_json(&script, &[], &["CARGO_PKG_NAME".to_owned()]).unwrap();
+        assert_eq!(found.field("name").unwrap(), "unset");
+        assert_eq!(
+            found.field("path").unwrap(),
+            &std::env::var("PATH").unwrap()
+        );
     }
 }
