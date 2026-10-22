@@ -201,13 +201,14 @@ plugin of it or none) and named by `check`.
   `keys` grant of an unset name said, the `DYLD_*` note on macOS, a macOS
   CI job (#56).
 - **Proposed (step 5, 2026-10-22; design §12 "Step 5"):** plugins with a
-  kept environment — every inherited variable left out but the path,
-  home, locale, terminal, proxies, standard folders and toolchains, and
-  what an `env` grant (replacing `keys`) names; `check` naming a variable
-  a plugin's code reads that it does not get. Measured first, on macOS:
-  every plugin the matrix does not refuse, the gallery and the examples
-  load alike with only `PATH`, `HOME`, `TMPDIR`, `TERM`, the locale,
-  `USER`, `LOGNAME`, `SHELL` and the model key.
+  kept environment — every inherited variable left out but a fixed kept
+  set (the path, home, locale, terminal, session, proxies, standard
+  folders and toolchains) and what an `env` grant (replacing `keys`)
+  names; `check` naming a variable a plugin's code reads that it does not
+  get. Measured first, on macOS: every plugin the matrix found loading,
+  the gallery and the examples load alike with only `PATH`, `HOME`,
+  `TMPDIR`, `TERM`, the locale, `USER`, `LOGNAME`, `SHELL` and the model
+  key.
 
 **Done when** `dsh-univer-office` and `pi-lens` work in a gallery agent,
 their tools' results checked (not only `✓`); the stand-in probe runs inside
@@ -221,12 +222,11 @@ hand (a type error found), not yet in a gallery agent — its language
 servers come from GitHub and npm on first use, which a CI run would fetch
 each time; the stand-in probe is a test in yoagent-rutis; the matrix's
 plugins re-checked through `yobuild check` on 2026-10-22, on macOS (each
-the matrix does not refuse loads with the tools listed, also with only
+the matrix found loading loads with the tools listed, also with only
 `PATH`, `HOME`, `TMPDIR`, `TERM`, the locale, `USER`, `LOGNAME`, `SHELL`
 and the model key: design §12 "Step 5"; `dsh-free-search` at the base's
 0.8.1, not the matrix's 0.9.1; yoagent's own matrix, its script, not
-re-run); `check` names every grant, not yet
-the fixed answers.
+re-run); `check` names every grant, not yet the fixed answers.
 
 ## M3c — Plugin web output and model calls (design §12, L3 and `llm`)
 

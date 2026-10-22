@@ -23,9 +23,9 @@ every change: use these versions. The rest are from yoagent's
 compatibility matrix (`docs/evals/plugin-compatibility.md`, run
 2026-10-16: each package loaded unchanged, its tools listed, none
 called), at the version it tested — re-checked through `yobuild check`
-on 2026-10-22, where each loads with the tools listed, but
-`dsh-free-search` only at 0.8.1, the version the DSH base pins (0.9.1 is
-refused). As of that date, so `yobuild check` decides. Tool names and
+on 2026-10-22, where each loads with the tools listed (the matrix's
+`dsh-free-search` 0.9.1 is refused: use the **CI** row's 0.8.1, the DSH
+base's pin). As of that date, so `yobuild check` decides. Tool names and
 arguments: `yobuild check --json` lists them (`agent.tools[].parameters`).
 
 ### pi (`[[plugin]] pi = "…"`)
