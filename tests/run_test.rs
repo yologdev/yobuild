@@ -611,6 +611,61 @@ async fn what_loads_only_in_part_is_a_warning_every_frontend_gets() {
     );
 }
 
+/// A scripted call's `expect` (design §11 "pi-lens in the gallery"):
+/// checked against the result as it comes back — met, missed, missed on an
+/// error result — and said "not checked" for a call that never ran.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scripted_calls_expect_is_checked_against_its_result() {
+    let script = r#"[
+      { "tools": [
+        { "name": "server__echo", "arguments": { "text": "hi" }, "expect": ["echoed hi", "loud"] },
+        { "name": "server__echo", "arguments": { "text": "ho" }, "expect": "echoed hi" },
+        { "name": "bash", "arguments": { "command": "echo nope; exit 3" }, "expect": "yes" }
+      ] },
+      { "text": "done" }
+    ]"#;
+    let dir = project_with("[builtins]\ngate = \"off\"\n", script);
+    let ended = run_once(dir.path()).await;
+    let got = results(&ended);
+    assert_eq!(
+        got[0],
+        ("echoed hi (loud, first)".to_owned(), false),
+        "{got:?}"
+    );
+    assert_eq!(
+        got[1],
+        (
+            "the reply file expected `echoed hi` in the result: echoed ho (loud, first)\nechoed ho (loud, first)".to_owned(),
+            true
+        ),
+        "{got:?}"
+    );
+    assert!(got[2].1, "{got:?}");
+    assert!(
+        got[2]
+            .0
+            .starts_with("the reply file expected `yes` in the result: "),
+        "{got:?}"
+    );
+    // Denied with nobody there (the gate asks for a server's tool): never
+    // ran, so its expectation is said unchecked.
+    let script = r#"[
+      { "tools": [{ "name": "server__echo", "arguments": { "text": "hi" }, "expect": "echoed" }] },
+      { "text": "done" }
+    ]"#;
+    let dir = project_with("", script);
+    let ended = run_once(dir.path()).await;
+    assert!(results(&ended)[0].1);
+    assert!(
+        ended.notices.iter().any(|(level, message)| {
+            *level == yobuild::frontend::NoticeLevel::Warning
+                && message == "the reply file's expectation for `server__echo` was not checked: the call did not run"
+        }),
+        "{:?}",
+        ended.notices
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pinned_mcp_server_runs_its_installed_bin() {
     let dir = project_with("", &SCRIPT.replace("server__echo", "srv__echo"));

@@ -19,7 +19,15 @@ A JSON list. Each reply is exactly one of:
 { "tools": [{ "name": "a_tool", "arguments": { "path": "notes.md" } }] }
 ```
 
-Nothing else: an unknown key is an error. `{cwd}` in an argument's text is
+A call may also say what its result must contain, with `expect` (a text,
+or a list of texts that must all appear):
+
+```json
+{ "tools": [{ "name": "files__read_text_file", "arguments": { "path": "{cwd}/notes.md" }, "expect": "groceries" }] }
+```
+
+Nothing else: an unknown key is an error, and an empty `expect` too.
+`{cwd}` in an argument's text is
 the folder the run starts in, as in the prompt — for a tool that takes
 absolute paths (`"{cwd}/src/index.ts"`), so the reply file runs in any
 folder. A `tools` reply may call several
@@ -56,9 +64,14 @@ plugins, an Info `Plugin time this run: …`; when the run
 ends, `  Cost: not priced (0 tokens in, 0 out; N turns)` (a reply file
 reports no usage; a live run says its dollars and tokens there); then the last answer and how the run ended on
 stdout (`Completed`, `Stopped: …`, `Error: …`). A `✓` says the tool ran,
-not what it found: to see results, run the reply file without `--once`
-and open the page — or make the files a run reads such that only the
-right one can succeed (a file only in the folder the run starts in shows
+not what it found: give the calls that matter an `expect`. A result
+without it becomes an error the model sees, printed `✗ the reply file
+expected \`X\` in the result: <its first line>` — the run goes on and can
+still end `Completed`, so read the `✗` lines. A call that never ran
+(denied, or no such tool) has its `expect` said as a Warning: `the reply
+file's expectation for \`x\` was not checked: the call did not run`. To see
+whole results, run the reply file without `--once` and open the page — or
+make the files a run reads such that only the right one can succeed (a file only in the folder the run starts in shows
 that a server's `"."` is that folder). A denied call also writes a log
 line (`WARN … tool call denied by middleware …`) beside its `✗`. A reply
 file's `text` is invented, sources and all

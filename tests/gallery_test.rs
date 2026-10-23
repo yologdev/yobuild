@@ -43,6 +43,10 @@ const BRIDGE: [&str; 4] = [
     "a required plugin handler failed",
 ];
 const DENIED: &str = "Tool call denied: ";
+
+/// A reply file's `expect` missed (`run/expect.rs`): the result was not
+/// what the reply file was written against — never a plugin's own `✗`.
+const MISSED: &str = "the reply file expected `";
 const NOBODY: &str = "Tool call denied: not allowed: the owner declined, or nobody answered";
 
 struct Ran {
@@ -190,6 +194,8 @@ fn scripted(manifest: &str, file: &Path, task: &str, rules: &Rules) {
     assert!(ran.ok, "{all}");
     assert_eq!(ran.stdout, format!("{last}\nCompleted\n"), "{all}");
     assert!(!ran.stderr.contains("\n  Error: "), "{all}");
+    // Every `expect` was checked: its call ran.
+    assert!(!ran.stderr.contains("expectation for `"), "{all}");
     // Each scripted call made, once (a reply's several calls may end in any
     // order).
     let made = calls(&ran.stderr);
@@ -212,6 +218,7 @@ fn scripted(manifest: &str, file: &Path, task: &str, rules: &Rules) {
             assert!(
                 rules.theirs.contains(tool)
                     && !why.starts_with(DENIED)
+                    && !why.starts_with(MISSED)
                     && !BRIDGE.iter().any(|b| why.contains(b)),
                 "{tool} ✗ {why}: {all}"
             );

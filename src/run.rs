@@ -15,6 +15,7 @@
 
 pub(crate) mod allowed;
 pub mod check;
+pub(crate) mod expect;
 pub(crate) mod host;
 pub(crate) mod measure;
 pub mod plugin_log;
@@ -167,8 +168,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         measure: options_measure,
         addr,
         layout,
+        scripted,
         ..
     } = options;
+    let options_scripted = scripted.is_some();
     let name = &manifest.agent.name;
     let terminal = manifest.frontend.terminal && !once;
 
@@ -343,6 +346,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             (plan.dsh_handler.clone(), "dsh-tools".to_owned()),
         ];
         agent = agent.with_extension(measure::Measure::new(say, registry, runtimes, names));
+    }
+    // Last of all, in a scripted run: each call's `expect`, checked against
+    // the result the model sees.
+    if options_scripted {
+        agent = agent.with_extension(expect::Expect::new(session.clone()));
     }
     eprintln!("{name}: ready in {:.1}s", started.elapsed().as_secs_f64());
 
