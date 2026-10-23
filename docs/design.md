@@ -1554,6 +1554,148 @@ examples are.
 **Order of PRs**: this design; then one PR per agent (web research, your
 MCP server, the third), each with the skill fixes its build found.
 
+#### pi-lens in the gallery (proposed 2026-10-23)
+
+**Why.** M3b's "Done when" asks that `pi-lens` work in a gallery agent,
+with its tools' results checked, not only `✓`. The code reviewer above
+left pi-lens because, under yobuild then, it was told the project is
+untrusted and so started no language server and reported every file
+clean. `grants = { trust = true }` (step 3, #46) changes that answer.
+pi-lens reads it at every `session_start`, and `check` now says when it
+is missing (#61). It was checked by hand on 2026-10-21, but no gallery
+agent uses it, and no test reads what a tool answered.
+
+**Measured on 2026-10-23** (macOS). The setup:
+- `pi-lens@4.4.3`, `trust = true`, read-only;
+- a two-file TypeScript project whose `src/sum.ts` passes `"2"` where a
+  `number` goes;
+- a fresh `HOME`, `--scripted … --once`.
+
+What happened:
+
+| | cold `HOME` | warm `HOME` |
+|---|---|---|
+| `yobuild check` | 15 s; `~/.pi-lens` 76 KB: nothing downloaded while loading | — |
+| `read_symbol`, `module_report` (tree-sitter, in process) | ~0.2 s each | the same |
+| `lens_diagnostics` `{source: "lsp", scope: "paths"}` | 23 s; `~/.pi-lens` grows to 87 MB | 17 s (the server starting) |
+| its finding | `typescript:2345` "Argument of type 'string' is not assignable to parameter of type 'number'", line 4 | the same |
+
+- **What the first LSP probe downloads.** Into `~/.pi-lens/tools` it puts
+  `typescript` and `typescript-language-server`, from npm, at `^` ranges
+  (not pinned). Into `~/.pi-lens/bin` it puts `opengrep` and `typos-lsp`,
+  from GitHub.
+- **`symbol_search` is not ready at first.** On a cold project its first
+  call may answer "Word index is building in the background for this
+  workspace — retry this query shortly" (✗). In another cold run it
+  answered at once.
+- **The kept environment held.** `PI_LENS_DISABLE_LSP_INSTALL=1`, set in
+  the parent but not granted, did not reach pi-lens, as step 5 means: it
+  installed all the same.
+- **A bug found along the way.** `run` said `ctx.model`'s fixed answer
+  twice, because the answer differs: `undefined` at `session_start`, the
+  model's id in a run. `Said` dedups on the whole note.
+
+**The agent: `gallery/code-health/`, new.** The code reviewer stays, as
+the pattern for a linter's MCP server. code-health is made through the
+skill by a coding agent, as the others are. The request: "a code-health
+checker for a TypeScript project: type errors and an outline of what is
+where, read-only". Expected parts, which the skill's `parts.md` leads to:
+- `pi-lens@4.4.3`, `grants = { trust = true }`;
+- its reading tools allowed: `lens_diagnostics`, `project_report`,
+  `module_report`, `read_symbol`, `read_enclosing`, `symbol_search`,
+  `effective_config`;
+- `pi_lens_activate_tools` left asking;
+- `tools = "read-only"`, `ask_owner`, a `report`, and a budget.
+
+Its README says what `trust` lets pi-lens do: download and run language
+servers and scanners, from npm at unpinned ranges and from GitHub, and
+run the project's own code among what they load. It also says the first
+diagnostic is slow.
+
+**Results checked: `expect` on a scripted call.** A reply file's call may
+say what its result must contain:
+
+```json
+{ "tools": [{ "name": "lens_diagnostics",
+              "arguments": { "source": "lsp", "scope": "paths", "paths": ["src/sum.ts"] },
+              "expect": "typescript:2345" }] }
+```
+
+- **Shape.** `expect` is a string or a list of strings, matched
+  case-sensitively against the result's text blocks joined.
+- **Who checks it.** In a scripted run only, an extension (`after_tool`)
+  holds each call's expectations by its id. A call whose result lacks one
+  becomes an error whose first line is "the reply file expected `X` in
+  the result: <its first line>". `--once` shows it as `✗`, and the run
+  goes on, as any refused call's does.
+- **Where it is documented.** `scripted.md` describes it.
+- **In the gallery.** `gallery_test` never tolerates this wording, which
+  is not a plugin's own `✗`.
+
+A scripted model cannot see results, and `run()` as a library works in
+the process's folder (no `cwd`), so a test cannot read them from outside.
+Checking the result as it comes back works for any reply file: the
+gallery's, the examples', and a person's own.
+
+**In CI, with the network.**
+- **The plan.** code-health's reply files run in CI like the others:
+  - `demo` calls `project_report`, `module_report`, `read_symbol` and
+    `read_enclosing` (each with an `expect` naming what it must find),
+    then `lens_diagnostics` with `source: "lsp"`, expecting
+    `typescript:2345`;
+  - `symbol_search` comes after the others, or not at all (its index may
+    still be building).
+- **A `HOME` shared across the agent's runs.** Its `yobuild` runs use one
+  `HOME` (`CARGO_TARGET_TMPDIR/pi-lens-home`, kept like the tests'
+  `YOBUILD_HOME`). So a CI job downloads pi-lens's tools once, about
+  25 s, and later local runs are warm (about 17 s for the LSP probe). The
+  other agents keep a temporary `HOME` each.
+- **The cost.** The network is already a CI dependency (npm, the web
+  researcher's Bing). Unlike a search, though, a failed download here
+  fails the test: pi-lens then says "unavailable" and the `expect`
+  misses. That is the point: the agent's whole value is that probe.
+- **The test's project.** The test puts the two-file TypeScript project
+  in the run's folder.
+
+**`Said` dedups fixed answers per question.** One note per extension and
+question, the first answer said. This applies in `run` and in `check`,
+with a unit test.
+
+**Said where.**
+- `parts.md`: pi-lens's row gets **CI**, plus:
+  - the first LSP probe's downloads and time;
+  - `symbol_search` warming up;
+  - `PI_LENS_DISABLE_*` passing only when granted.
+- `scripted.md`: `expect`.
+- CLAUDE.md, and the roadmap's M3b.
+
+**Tests.**
+- `run/script.rs`: `expect` read (a string, a list) and refused in any
+  other shape.
+- `run_test`: a scripted call through a real MCP server, with its
+  `expect` met and missed, the miss being a `✗` with the wording above.
+- `plugin_log`: one note per question.
+- `gallery_test` `code_health`: `holds` with the shared `HOME`, the
+  project's files, and the `expect` lines.
+
+**Decisions for review.**
+1. *A new agent, `code-health`* (recommended: the code reviewer stays the
+   linter-MCP pattern), or the code reviewer rebuilt on pi-lens.
+2. *`expect` in reply files, checked as results come back* (recommended:
+   works for every scripted run, written by the coding agent through the
+   skill), or a test-only reading of results (needs a way out of the
+   binary that `--once` lacks).
+3. *The LSP probe in CI, with a shared `HOME`* (recommended), or only
+   pi-lens's tree-sitter tools in CI and the LSP probe checked by a live
+   run. That second option would not meet "results checked" for the
+   tool that matters.
+
+**Order of PRs:**
+1. this design;
+2. `expect`, the `Said` dedup, and `scripted.md` / `parts.md`;
+3. the agent, built through the skill, with the skill fixes its build
+   finds.
+
 ## 12. The host layer: what a plugin's own app gives it (proposed 2026-10-19)
 
 The gallery's third agent found it twice in a day: a plugin that loads,

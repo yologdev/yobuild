@@ -222,8 +222,9 @@ Where it stands (2026-10-21): `dsh-univer-office` works in a gallery agent
 (`spreadsheet-clerk`: CI to its first asking tool, one live run checking
 the `.xlsx`'s totals); `pi-lens` works with `trust = true`, checked by
 hand (a type error found), not yet in a gallery agent — its language
-servers come from GitHub and npm on first use, which a CI run would fetch
-each time; the stand-in probe is a test in yoagent-rutis; the matrix's
+servers come from GitHub and npm on first use (proposed 2026-10-23, design
+§11 "pi-lens in the gallery": `gallery/code-health/`, results checked by a
+reply file's `expect`, the LSP probe in CI with a shared `HOME`); the stand-in probe is a test in yoagent-rutis; the matrix's
 plugins re-checked through `yobuild check` on 2026-10-22, on macOS (each
 the matrix found loading loads with the tools listed, also with only
 `PATH`, `HOME`, `TMPDIR`, `TERM`, the locale, `USER`, `LOGNAME`, `SHELL`
