@@ -1664,8 +1664,10 @@ say what its result must contain:
   in `before_tool` (the gate, a policy, nobody there) or for an unknown
   tool. Its expectation is said at the run's `finish`, as a Warning: "the
   reply file's expectation for `x` was not checked: the call did not
-  run". The extension learns which calls ran from `on_event`'s
-  `ToolExecutionEnd`.
+  run". The extension learns each turn's expected calls from its
+  `MessageEnd` (sent before its tools run) and strikes each off in
+  `after_tool`; what is left when the next turn's calls come, or at
+  `finish`, never ran.
 - **Its place.** Last among the extensions, so it sees the text the
   model sees. The gate's `after_tool` comes before it, so a file a call
   made is recorded as the agent's even if `expect` then fails the call.

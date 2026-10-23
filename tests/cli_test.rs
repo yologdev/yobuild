@@ -186,6 +186,38 @@ fn the_agent_works_in_the_current_folder_and_facts_say_what_it_made() {
 }
 
 #[test]
+fn once_prints_an_expect_miss_and_an_unchecked_expectation() {
+    // What `gallery_test` reads off `--once`'s stderr (design §11 "pi-lens
+    // in the gallery"): the miss as the call's `✗` line, and a call that
+    // never ran said as a Warning.
+    let dir = project(
+        "[builtins]\ngate = \"off\"\n",
+        r#"[{ "tools": [
+              { "name": "bash", "arguments": { "command": "echo hi" }, "expect": "bye" },
+              { "name": "no_such_tool", "arguments": {}, "expect": "x" }
+            ] },
+            { "text": "done" }]"#,
+    );
+    let out = yobuild(
+        &[
+            "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+        ],
+        dir.path(),
+    );
+    let stderr = text(&out.stderr);
+    // The run goes on and completes: read the `✗` lines.
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("\n  bash ✗ the reply file expected `bye` in the result: Exit code: 0\n"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("\n  Warning: the reply file's expectation for `no_such_tool` was not checked: the call did not run\n"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn the_gate_judges_the_current_folder() {
     // The gate is on: a new file inside the project is free; one outside asks
     // and, with nobody there, is refused.

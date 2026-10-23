@@ -611,6 +611,141 @@ async fn what_loads_only_in_part_is_a_warning_every_frontend_gets() {
     );
 }
 
+/// A scripted call's `expect` (design §11 "pi-lens in the gallery"):
+/// checked against the result as it comes back — met, missed, missed on an
+/// error result — and said "not checked" for a call that never ran.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scripted_calls_expect_is_checked_against_its_result() {
+    let script = r#"[
+      { "tools": [
+        { "name": "server__echo", "arguments": { "text": "hi" }, "expect": ["echoed hi", "loud"] },
+        { "name": "server__echo", "arguments": { "text": "ho" }, "expect": "echoed hi" },
+        { "name": "bash", "arguments": { "command": "echo nope; exit 3" }, "expect": "yes" },
+        { "name": "no_such_tool", "arguments": {}, "expect": "x" }
+      ] },
+      { "text": "done" }
+    ]"#;
+    let dir = project_with("[builtins]\ngate = \"off\"\n", script);
+    let ended = run_once(dir.path()).await;
+    let got = results(&ended);
+    assert_eq!(
+        got[0],
+        ("echoed hi (loud, first)".to_owned(), false),
+        "{got:?}"
+    );
+    assert_eq!(
+        got[1],
+        (
+            "the reply file expected `echoed hi` in the result: echoed ho (loud, first)\nechoed ho (loud, first)".to_owned(),
+            true
+        ),
+        "{got:?}"
+    );
+    assert!(got[2].1, "{got:?}");
+    assert!(
+        got[2]
+            .0
+            .starts_with("the reply file expected `yes` in the result: "),
+        "{got:?}"
+    );
+    // No such tool (the gate off): no `after_tool`, said unchecked.
+    assert!(got[3].1 && got[3].0.contains("no_such_tool"), "{got:?}");
+    assert!(
+        ended.notices.iter().any(|(_, m)| m
+            == "the reply file's expectation for `no_such_tool` was not checked: the call did not run"),
+        "{:?}",
+        ended.notices
+    );
+    // Denied with nobody there (the gate asks for a server's tool): never
+    // ran, so its expectation is said unchecked.
+    let script = r#"[
+      { "tools": [{ "name": "server__echo", "arguments": { "text": "hi" }, "expect": "echoed" }] },
+      { "text": "done" }
+    ]"#;
+    let dir = project_with("", script);
+    let ended = run_once(dir.path()).await;
+    assert!(results(&ended)[0].1);
+    assert!(
+        ended.notices.iter().any(|(level, message)| {
+            *level == yobuild::frontend::NoticeLevel::Warning
+                && message == "the reply file's expectation for `server__echo` was not checked: the call did not run"
+        }),
+        "{:?}",
+        ended.notices
+    );
+}
+
+/// `expect` across turns: the mock's ids repeat each turn (`mock-tool-0`),
+/// and a call is checked against its own turn's expectation; a call denied
+/// in one turn while later turns run, and a call to no such tool, are said
+/// "not checked"; a list names the text missing; an error result whose
+/// expectation is met stays the tool's own error, unprefixed.
+#[tokio::test(flavor = "multi_thread")]
+async fn expect_holds_across_turns_with_ids_reused() {
+    let script = r#"[
+      { "tools": [
+        { "name": "server__echo", "arguments": { "text": "hi" }, "expect": "echoed" },
+        { "name": "bash", "arguments": { "command": "echo one" }, "expect": "one" }
+      ] },
+      { "tools": [
+        { "name": "bash", "arguments": { "command": "echo two" }, "expect": "one" },
+        { "name": "nope", "arguments": {}, "expect": "x" }
+      ] },
+      { "tools": [
+        { "name": "read_file", "arguments": { "path": "missing.txt" }, "expect": "missing.txt" },
+        { "name": "bash", "arguments": { "command": "echo four" }, "expect": ["four", "absent"] }
+      ] },
+      { "text": "done" }
+    ]"#;
+    // The gate on: the server's tool asks, nobody answers; `echo` is free.
+    let dir = project_with("", script);
+    let ended = run_once(dir.path()).await;
+    let got = results(&ended);
+    assert_eq!(got.len(), 6, "{got:?}");
+    assert!(
+        got[0].1 && got[0].0.starts_with("Tool call denied: "),
+        "{got:?}"
+    );
+    assert_eq!(got[1], ("Exit code: 0\none\n".to_owned(), false), "{got:?}");
+    // Turn 2's `mock-tool-0`: its own expectation, not turn 1's.
+    assert!(
+        got[2].1
+            && got[2].0
+                == "the reply file expected `one` in the result: Exit code: 0\nExit code: 0\ntwo\n",
+        "{got:?}"
+    );
+    // No such tool: denied before it could be looked for (the gate asks).
+    assert!(got[3].1, "{got:?}");
+    // Met on an error result: the tool's own error, as it was.
+    assert!(
+        got[4].1 && got[4].0.contains("missing.txt") && !got[4].0.contains("the reply file"),
+        "{got:?}"
+    );
+    assert!(
+        got[5].1
+            && got[5]
+                .0
+                .starts_with("the reply file expected `absent` in the result: Exit code: 0\n"),
+        "{got:?}"
+    );
+    let unchecked: Vec<&String> = ended
+        .notices
+        .iter()
+        .filter(|(level, _)| *level == yobuild::frontend::NoticeLevel::Warning)
+        .map(|(_, message)| message)
+        .filter(|m| m.contains("was not checked"))
+        .collect();
+    assert_eq!(
+        unchecked,
+        [
+            "the reply file's expectation for `server__echo` was not checked: the call did not run",
+            "the reply file's expectation for `nope` was not checked: the call did not run",
+        ],
+        "{:?}",
+        ended.notices
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pinned_mcp_server_runs_its_installed_bin() {
     let dir = project_with("", &SCRIPT.replace("server__echo", "srv__echo"));

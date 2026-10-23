@@ -2,7 +2,10 @@
 //! a JSON list, each reply either `{ "text": "…" }` or `{ "tools": [{
 //! "name": "…", "arguments": { … } }] }`. `{cwd}` in an argument's text is
 //! the agent's folder, as in the prompt: for a tool that takes absolute
-//! paths, a reply file runs in any folder.
+//! paths, a reply file runs in any folder. A call's `expect` — a string or
+//! a list — is what its result must contain (design §11 "pi-lens in the
+//! gallery"): carried in the call's `provider_metadata` (the mock's ids
+//! repeat each turn) and checked by `run/expect.rs`.
 
 use std::path::Path;
 
@@ -23,6 +26,31 @@ struct Call {
     name: String,
     #[serde(default)]
     arguments: serde_json::Value,
+    /// Absent, or given: `null` is refused, as `""` and `[]` are.
+    #[serde(default, deserialize_with = "given")]
+    expect: Option<Expect>,
+}
+
+/// An `expect` given: a text or a list, not `null`.
+fn given<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Expect>, D::Error> {
+    Expect::deserialize(d).map(Some)
+}
+
+/// What a call's result must contain: one text, or several.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Expect {
+    One(String),
+    All(Vec<String>),
+}
+
+impl Expect {
+    fn texts(self) -> Vec<String> {
+        match self {
+            Expect::One(text) => vec![text],
+            Expect::All(texts) => texts,
+        }
+    }
 }
 
 /// Every `{cwd}` in `value`'s text replaced by `cwd`.
@@ -45,10 +73,30 @@ pub(crate) fn provider(path: &Path, cwd: &Path) -> Result<MockProvider, String> 
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let replies: Vec<Reply> = serde_json::from_str(&text).map_err(|e| {
         format!(
-            "{}: {e} (a list of {{ \"text\": … }} or {{ \"tools\": [{{ \"name\", \"arguments\" }}] }})",
+            "{}: {e} (a list of {{ \"text\": … }} or {{ \"tools\": [{{ \"name\", \"arguments\", \"expect\"? }}] }})",
             path.display()
         )
     })?;
+    for reply in &replies {
+        if let Reply::Tools { tools } = reply {
+            for call in tools {
+                let empty = match &call.expect {
+                    Some(Expect::One(text)) => text.is_empty(),
+                    Some(Expect::All(texts)) => {
+                        texts.is_empty() || texts.iter().any(String::is_empty)
+                    }
+                    None => false,
+                };
+                if empty {
+                    return Err(format!(
+                        "{}: `{}`'s `expect` is empty: give the text its result must contain",
+                        path.display(),
+                        call.name
+                    ));
+                }
+            }
+        }
+    }
     Ok(MockProvider::new(
         replies
             .into_iter()
@@ -60,7 +108,9 @@ pub(crate) fn provider(path: &Path, cwd: &Path) -> Result<MockProvider, String> 
                         .map(|c| MockToolCall {
                             name: c.name,
                             arguments: fill(c.arguments, &cwd),
-                            provider_metadata: None,
+                            provider_metadata: c
+                                .expect
+                                .map(|e| serde_json::json!({ super::expect::KEY: e.texts() })),
                         })
                         .collect(),
                 ),
@@ -121,5 +171,59 @@ mod tests {
         };
         assert!(e.contains("a list of"), "{e}");
         assert!(provider(&dir.path().join("none.json"), Path::new("/w")).is_err());
+    }
+
+    #[test]
+    fn a_calls_expect_is_one_text_or_several_and_never_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("r.json");
+        let read = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            provider(&file, Path::new("/w")).map(|_| ())
+        };
+        for good in [
+            r#"[{ "tools": [{ "name": "a", "expect": "x" }] }]"#,
+            r#"[{ "tools": [{ "name": "a", "expect": ["x", "y"] }] }]"#,
+        ] {
+            assert!(read(good).is_ok(), "{good}");
+        }
+        for (bad, says) in [
+            (
+                r#"[{ "tools": [{ "name": "a", "expect": 3 }] }]"#,
+                "a list of",
+            ),
+            (
+                r#"[{ "tools": [{ "name": "a", "expect": "" }] }]"#,
+                "`a`'s `expect` is empty",
+            ),
+            (
+                r#"[{ "tools": [{ "name": "a", "expect": [] }] }]"#,
+                "`a`'s `expect` is empty",
+            ),
+            (
+                r#"[{ "tools": [{ "name": "a", "expect": ["x", ""] }] }]"#,
+                "`a`'s `expect` is empty",
+            ),
+            (
+                r#"[{ "tools": [{ "name": "a", "expect": null }] }]"#,
+                "a list of",
+            ),
+            (
+                r#"[{ "tools": [{ "name": "a", "expects": "x" }] }]"#,
+                "a list of",
+            ),
+        ] {
+            let e = read(bad).unwrap_err();
+            assert!(e.contains(says), "{bad}: {e}");
+        }
+        // Carried in the call's metadata.
+        let Reply::Tools { tools } = serde_json::from_str::<Reply>(
+            r#"{ "tools": [{ "name": "a", "expect": ["x", "y"] }] }"#,
+        )
+        .unwrap() else {
+            panic!("tools")
+        };
+        let texts = tools.into_iter().next().unwrap().expect.unwrap().texts();
+        assert_eq!(texts, ["x", "y"]);
     }
 }

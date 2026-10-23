@@ -36,7 +36,10 @@ change my code."*
 - **It doesn't use pi-lens.** The skill's first choice for linting and
   types was the pi package `pi-lens`. Under yobuild it treats the project
   as untrusted, starts no language server, and reports every file clean.
-  The coding agent found this out and switched to ESLint's server.
+  The coding agent found this out and switched to ESLint's server. That
+  was before yobuild could grant `trust` (design §12, step 3): with
+  `grants = { trust = true }` (and `model = "info"`) pi-lens finds type errors (design §11,
+  "pi-lens in the gallery").
 
 ## What it needs
 

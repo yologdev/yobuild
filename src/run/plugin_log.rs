@@ -180,17 +180,20 @@ impl Said {
     /// a line from another row, one no grant changes or nobody needs told,
     /// or one already said.
     pub(crate) fn note(&self, line: &Line) -> Option<Note> {
-        let note = match line.row {
+        // Said once by its key: a fixed answer once per extension and
+        // question, whatever the answer (`ctx.model` is `undefined` as an
+        // extension starts, the model in a run); anything else by its text.
+        let (note, key) = match line.row {
             Some(PI_ROW) => self.pi(line.text),
             Some(DSH_HOST_ROW) if line.level <= Level::WARN => {
-                dsh_host(line.text).map(|text| (None, text))
+                dsh_host(line.text).and_then(|text| keyed(None, text))
             }
             _ => None,
         }?;
         self.said
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(note.1.clone())
+            .insert(key)
             .then_some(note)
     }
 
@@ -203,7 +206,8 @@ impl Said {
         Some(found.map_or((false, false), |g| (g.trust, g.exec)))
     }
 
-    fn pi(&self, line: &str) -> Option<Note> {
+    /// The note for a pi line, and the key it is said once by.
+    fn pi(&self, line: &str) -> Option<(Note, String)> {
         if let Some(rest) = line.strip_prefix("[pi] fixed answer") {
             // ` (<file>): <question> → <answer>`, or with no file.
             let ((plugin, who), rest) = match rest.strip_prefix(" (") {
@@ -223,10 +227,9 @@ impl Said {
                 "ctx.model" | "ctx.modelRegistry" if !self.model => "model = \"info\"",
                 _ => return None,
             };
-            return Some((
-                plugin,
-                format!("{who} asked {question}: answered {answer} (grant `{grant}` to change it)"),
-            ));
+            let note =
+                format!("{who} asked {question}: answered {answer} (grant `{grant}` to change it)");
+            return Some(((plugin, note), format!("{who}\0{question}")));
         }
         let rest = line.strip_prefix("[pi] ")?;
         // `<file>: refused pi.exec("<command>")<why>`
@@ -239,10 +242,10 @@ impl Said {
                 if granted.is_some_and(|(_, exec)| exec) {
                     return None;
                 }
-                return Some((
+                return keyed(
                     plugin,
                     format!("{who} ran pi.exec({command}): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)"),
-                ));
+                );
             }
             // The owner's own "Block", or a cancel: nothing to tell. In
             // `check`, what only its setting makes — nobody there to answer,
@@ -258,10 +261,10 @@ impl Said {
                 return None;
             }
             let why = why.trim_start_matches(':').trim();
-            return Some((
+            return keyed(
                 plugin,
                 format!("{who} ran pi.exec({command}): refused, {why}"),
-            ));
+            );
         }
         // `<file>: wake refused: <why>` — yobuild's own refusals are said
         // where it refuses (`host_session.wake…`). In `check` a wake
@@ -271,10 +274,10 @@ impl Said {
             return None;
         }
         let (plugin, who) = self.who(file);
-        Some((
+        keyed(
             plugin,
             format!("{who}'s wake did not reach the agent: {why}"),
-        ))
+        )
     }
 
     /// The plugin a file is, as planned or canonical, and how it is said;
@@ -290,6 +293,12 @@ impl Said {
             None => (None, format!("pi extension {file}")),
         }
     }
+}
+
+/// A note said once by its text.
+fn keyed(plugin: Option<String>, text: String) -> Option<(Note, String)> {
+    let key = text.clone();
+    Some(((plugin, text), key))
 }
 
 /// The DSH host's warnings, but its refusals yobuild made and says itself.
@@ -350,6 +359,28 @@ mod tests {
             said.note(&pi("[pi] fixed answer: ctx.modelRegistry → a read-only list of 0 model(s)")),
             Some((None, "a pi extension asked ctx.modelRegistry: answered a read-only list of 0 model(s) (grant `model = \"info\"` to change it)".into()))
         );
+        // Another extension asking the same: its own note.
+        let two = Said::new(
+            &[
+                ("lens".to_owned(), vec![PathBuf::from("/x/lens.ts")]),
+                ("other".to_owned(), vec![PathBuf::from("/x/other.ts")]),
+            ],
+            false,
+        );
+        for file in ["/x/lens.ts", "/x/other.ts"] {
+            assert!(two
+                .note(&pi(&format!(
+                    "[pi] fixed answer ({file}): ctx.isProjectTrusted() → false"
+                )))
+                .is_some());
+        }
+        // Once per question, whatever the answer: the first said.
+        assert_eq!(
+            said.note(&pi(&format!(
+                "[pi] fixed answer ({at}): ctx.model → deepseek/x"
+            ))),
+            None
+        );
         let told = Said::new(&[], true);
         assert_eq!(
             told.note(&pi("[pi] fixed answer (/x.ts): ctx.model → deepseek/x")),
@@ -360,6 +391,13 @@ mod tests {
                 "[pi] {at}: refused pi.exec(\"git\") is not allowed by the host (the adapter's `exec` / `execFor` setting)"
             ))),
             Some((Some("lens".into()), "pi extension lens ran pi.exec(\"git\"): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)".into()))
+        );
+        // A refused `pi.exec` repeated: once.
+        assert_eq!(
+            said.note(&pi(&format!(
+                "[pi] {at}: refused pi.exec(\"git\") is not allowed by the host (the adapter's `exec` / `execFor` setting)"
+            ))),
+            None
         );
         assert_eq!(said.note(&pi("[pi] something else")), None);
     }
@@ -548,6 +586,14 @@ mod tests {
                 None,
                 "The DSH host: writing the DSH session log failed: EACCES".into()
             ))
+        );
+        // Repeated: once.
+        assert_eq!(
+            said.note(&dsh(
+                Level::WARN,
+                "[dsh-host] writing the DSH session log failed: EACCES"
+            )),
+            None
         );
         assert_eq!(
             said.note(&dsh(Level::INFO, "[dsh-host] turn 1 opened")),
