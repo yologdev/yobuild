@@ -219,6 +219,8 @@ fn pins(
                 }
                 continue;
             }
+            // yobuild's own: nothing to install.
+            Source::Builtin(_) => continue,
         };
         if set == Set::Dsh {
             dsh_package.get_or_insert(&plugin.name);
@@ -1504,6 +1506,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let none = manifest(dir.path(), "");
         let installed = install(&none, Path::new("/nowhere"), None, true).unwrap();
+        assert!(installed.said().is_empty() && installed.get(Set::Pi).is_none());
+        assert!(!dir.path().join("agent.lock").exists());
+        // yobuild's own plugins pin nothing, resolved or not.
+        let own = manifest(
+            dir.path(),
+            "[[plugin]]\npi = \"yobuild:confirm-dangerous\"\n[[plugin]]\nrutis = \"yobuild:todo-plan\"\n",
+        );
+        let installed = install(&own, Path::new("/nowhere"), None, true).unwrap();
         assert!(installed.said().is_empty() && installed.get(Set::Pi).is_none());
         assert!(!dir.path().join("agent.lock").exists());
     }

@@ -12,13 +12,12 @@ model  = "deepseek/deepseek-flash"
 prompt = "./prompts/coding.md"
 
 [[plugin]]
-pi     = "../frontend/plugins/pi-extensions/confirm-dangerous.ts"
+pi     = "yobuild:confirm-dangerous"   # yobuild's own pi policy
 policy = true   # calls are denied, not run unjudged, while no plugin judges them
                 # (the pi runtime down, say; it counts any plugin that judges calls)
 
 [[plugin]]
-rutis   = "../frontend/plugins/search-links.ts"
-runtime = "node"
+rutis   = "yobuild:search-links"   # yobuild's own UI plugin (node)
 
 [[plugin]]
 dsh = "@deepseek-ai/dsh-user-questions@0.2.0-rc.2"

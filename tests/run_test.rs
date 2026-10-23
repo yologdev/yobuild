@@ -1361,6 +1361,32 @@ async fn check_dir(dir: &Path) -> yobuild::run::check::Report {
     check(options).await.unwrap()
 }
 
+/// A built-in plugin whose file is not in yobuild's frontend folder:
+/// refused before anything is installed or started.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_built_in_plugin_without_its_file_is_refused_first() {
+    use yobuild::run::check::{check, CheckOptions};
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[plugin]]\nrutis = \"yobuild:todo-plan\"\n",
+    )
+    .unwrap();
+    let manifest = Manifest::load(dir.path().join("agent.toml")).unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let mut options = CheckOptions::new(manifest);
+    options.layout.frontend = empty.path().to_path_buf();
+    options.home = Some(CACHE.into());
+    let e = check(options).await.err().unwrap().to_string();
+    assert_eq!(
+        e,
+        format!(
+            "`yobuild:todo-plan`: yobuild's own file is not there ({})",
+            empty.path().join("plugins/todo-plan.ts").display()
+        )
+    );
+}
+
 /// The kind of `tool` in `tools`, as JSON says it.
 fn kind(tools: &[yobuild::run::check::Tool], tool: &str) -> Option<String> {
     tools.iter().find(|t| t.name == tool).map(|t| {

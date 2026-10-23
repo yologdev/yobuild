@@ -223,6 +223,45 @@ pub enum Source {
     /// A local file or folder, absolute or relative to the manifest (`./`
     /// components removed).
     Path(PathBuf),
+    /// One of yobuild's own plugins, `yobuild:<name>` ([`BUILTIN_PLUGINS`]):
+    /// a pi plugin's, until `run`/`check` resolve it to its file
+    /// ([`Manifest::with_builtins`]).
+    Builtin(String),
+}
+
+/// yobuild's own plugins a manifest names as `yobuild:<name>` (design §13
+/// "Built-in plugins, by name"): name, kind (`pi`/`rutis`), file under
+/// yobuild's frontend folder (`Layout::frontend`).
+pub const BUILTIN_PLUGINS: &[(&str, &str, &str)] = &[
+    ("todo-plan", "rutis", "plugins/todo-plan.ts"),
+    ("search-links", "rutis", "plugins/search-links.ts"),
+    (
+        "confirm-dangerous",
+        "pi",
+        "plugins/pi-extensions/confirm-dangerous.ts",
+    ),
+];
+
+/// The built-in `name` of `kind`, or why not.
+fn builtin_of(name: &str, kind: &str) -> Result<(), String> {
+    let known = |k: &str| -> Vec<String> {
+        BUILTIN_PLUGINS
+            .iter()
+            .filter(|(_, kk, _)| *kk == k)
+            .map(|(n, _, _)| format!("`yobuild:{n}`"))
+            .collect()
+    };
+    match BUILTIN_PLUGINS.iter().find(|(n, _, _)| *n == name) {
+        Some((_, k, _)) if *k == kind => Ok(()),
+        Some((_, k, _)) => Err(format!(
+            "`yobuild:{name}` is a {k} plugin, not a {kind} one"
+        )),
+        None if known(kind).is_empty() => Err(format!("yobuild has no built-in {kind} plugin")),
+        None => Err(format!(
+            "`yobuild:{name}` is not a built-in {kind} plugin (there are: {})",
+            known(kind).join(", ")
+        )),
+    }
 }
 
 /// An npm package (`name`, `@scope/name`) at an exact semver version.
@@ -283,6 +322,10 @@ pub struct Plugin {
     /// or none); a DSH plugin `workspace` and `wake`, the same on every DSH
     /// plugin (one DSH host serves them all).
     pub grants: Grants,
+    /// The built-in it names (`yobuild:<name>`, [`BUILTIN_PLUGINS`]), kept
+    /// after [`Manifest::with_builtins`] gave it its file: `check` says it
+    /// by that name.
+    pub builtin: Option<String>,
 }
 
 /// What a plugin's host gives it (design §12, "The manifest: `grants`"),
@@ -458,7 +501,9 @@ pub enum PluginKind {
     Pi(Source),
     /// A DeepSeek Harness plugin.
     Dsh(Source),
-    /// A rutis plugin (TypeScript, Python, Go), from a local file.
+    /// A rutis plugin (TypeScript, Python, Go), from a local file — or one
+    /// of yobuild's own (`Plugin::builtin`; Node), its `path` empty until
+    /// `run`/`check` resolve it ([`Manifest::with_builtins`]).
     Rutis { path: PathBuf, runtime: Runtime },
 }
 
@@ -824,6 +869,39 @@ struct RawFrontend {
 type Located = (Range<usize>, String);
 
 impl Manifest {
+    /// This manifest with each built-in plugin (`yobuild:<name>`) given its
+    /// file under `frontend` (yobuild's frontend folder, `Layout::frontend`):
+    /// a pi plugin's source becomes that path, a rutis plugin's `path` is
+    /// set (`Plugin::builtin` kept). `run` and `check` call it first;
+    /// refused when the file is not there.
+    pub fn with_builtins(mut self, frontend: &Path) -> Result<Self, String> {
+        let file = |name: &str| -> Result<PathBuf, String> {
+            let (_, _, at) = BUILTIN_PLUGINS
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .ok_or_else(|| format!("`yobuild:{name}` is not a built-in plugin"))?;
+            let path = frontend.join(at);
+            match path.is_file() {
+                true => Ok(path),
+                false => Err(format!(
+                    "`yobuild:{name}`: yobuild's own file is not there ({})",
+                    path.display()
+                )),
+            }
+        };
+        for plugin in &mut self.plugins {
+            let Some(name) = &plugin.builtin else {
+                continue;
+            };
+            match &mut plugin.kind {
+                PluginKind::Pi(source) => *source = Source::Path(file(name)?),
+                PluginKind::Rutis { path, .. } => *path = file(name)?,
+                PluginKind::Dsh(_) => {}
+            }
+        }
+        Ok(self)
+    }
+
     /// Whether the pi plugins are told the model (`model = "info"`): on
     /// every pi plugin or none, which `parse` enforces (the pi adapter has
     /// one model for all its extensions).
@@ -1325,6 +1403,7 @@ fn default_name(source: &Source) -> String {
     match source {
         Source::Package(p) => p.name.rsplit('/').next().unwrap_or(&p.name).to_owned(),
         Source::Path(path) => stem(path),
+        Source::Builtin(name) => name.clone(),
     }
 }
 
@@ -1560,20 +1639,43 @@ fn plugin(
             }
         },
     };
+    let builtin = spec.get_ref().strip_prefix("yobuild:").map(str::to_owned);
     let kind = if let Some(rutis) = &raw.rutis {
         let text = rutis.get_ref();
-        if text.contains('@') && !text.contains('/') {
-            let m = format!("{text:?}: a rutis plugin is a local file (`./plugin.ts`)");
-            return Err((span, m));
+        if let Some(name) = text.strip_prefix("yobuild:") {
+            builtin_of(name, "rutis").map_err(|m| (span.clone(), m))?;
+            let runtime = match raw.runtime {
+                None | Some(Runtime::Node) => Runtime::Node,
+                Some(_) => {
+                    let m = format!("`yobuild:{name}` runs on node");
+                    return Err((span, m));
+                }
+            };
+            PluginKind::Rutis {
+                path: PathBuf::new(),
+                runtime,
+            }
+        } else {
+            if text.contains('@') && !text.contains('/') {
+                let m = format!("{text:?}: a rutis plugin is a local file (`./plugin.ts`)");
+                return Err((span, m));
+            }
+            let path = normal(&dir.join(text));
+            let Some(runtime) = raw.runtime else {
+                let m = "a rutis plugin needs a runtime: node, bun, python or go";
+                return Err((span, m.into()));
+            };
+            PluginKind::Rutis { path, runtime }
         }
-        let path = normal(&dir.join(text));
-        let Some(runtime) = raw.runtime else {
-            let m = "a rutis plugin needs a runtime: node, bun, python or go";
-            return Err((span, m.into()));
-        };
-        PluginKind::Rutis { path, runtime }
     } else {
-        let source = source(spec.get_ref(), dir).map_err(|m| (span.clone(), m))?;
+        let source = match spec.get_ref().strip_prefix("yobuild:") {
+            Some(name) => {
+                let kind = if raw.pi.is_some() { "pi" } else { "dsh" };
+                builtin_of(name, kind).map_err(|m| (span.clone(), m))?;
+                Source::Builtin(name.to_owned())
+            }
+            None => source(spec.get_ref(), dir).map_err(|m| (span.clone(), m))?,
+        };
         match raw.pi {
             Some(_) => PluginKind::Pi(source),
             None if raw.policy => {
@@ -1586,9 +1688,10 @@ fn plugin(
     let (name, name_span) = match &raw.name {
         Some(name) => explicit_name(name)?,
         None => {
-            let name = match &kind {
-                PluginKind::Pi(s) | PluginKind::Dsh(s) => default_name(s),
-                PluginKind::Rutis { path, .. } => stem(path),
+            let name = match (&builtin, &kind) {
+                (Some(name), _) => name.clone(),
+                (None, PluginKind::Pi(s) | PluginKind::Dsh(s)) => default_name(s),
+                (None, PluginKind::Rutis { path, .. }) => stem(path),
             };
             (name, span)
         }
@@ -1603,6 +1706,7 @@ fn plugin(
             allow,
             policy: raw.policy,
             grants,
+            builtin,
         },
         name_span,
     ))
@@ -1787,6 +1891,10 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
             let span = npm.span();
             if !raw.headers.is_empty() {
                 return Err((span, "headers are for an HTTP server (url)".into()));
+            }
+            if npm.get_ref().starts_with("yobuild:") {
+                let m = "`yobuild:` names yobuild's own plugins, and an MCP server is none: give a package (`name@1.2.3`) or a path";
+                return Err((span, m.into()));
             }
             let source = source(npm.get_ref(), dir).map_err(|m| (span.clone(), m))?;
             let default = default_name(&source);

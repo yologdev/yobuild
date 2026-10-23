@@ -160,6 +160,11 @@ pub struct Ended {
 pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     let started = Instant::now();
     let cwd = std::env::current_dir()?;
+    // yobuild's own plugins (`yobuild:<name>`), given their files first.
+    let options = Options {
+        manifest: options.manifest.with_builtins(&options.layout.frontend)?,
+        ..options
+    };
     let checked = check(&options, &cwd)?;
     let Options {
         manifest,
@@ -2123,6 +2128,10 @@ fn launch(
         } => {
             let command = match source {
                 Source::Path(path) => path.clone(),
+                // Refused when read: a server is a package or a path.
+                Source::Builtin(name) => {
+                    return Err(failed(&format!("`yobuild:{name}` is not an MCP server")))
+                }
                 Source::Package(package) => {
                     let dir = plugins::in_set(installed, install::Set::Mcp, package)
                         .map_err(|e| failed(&e))?;

@@ -886,6 +886,13 @@ fn check_passes_the_example_agents_and_gives_the_matrixs_verdict() {
             && out.contains("agent coding: ok"),
         "{out}"
     );
+    // yobuild's own plugins said by their names, not where their files are.
+    for line in [
+        "plugin confirm-dangerous  pi yobuild:confirm-dangerous",
+        "plugin search-links  rutis yobuild:search-links",
+    ] {
+        assert!(out.contains(line), "{line:?} in\n{out}");
+    }
     let (code, out, _) = check(&[&path("minimal.toml"), "--locked"], dir.path());
     assert_eq!(code, Some(0));
     assert_eq!(

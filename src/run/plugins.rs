@@ -436,7 +436,7 @@ pub(crate) fn plan(
                 plan.dsh_peers.extend(peers);
                 dsh_rows.extend(rows);
             }
-            PluginKind::Rutis { path, runtime } => {
+            PluginKind::Rutis { path, runtime, .. } => {
                 if *runtime != Runtime::Node {
                     return Err(failed(
                         format!("yobuild run starts Node runtimes only, for now ({runtime:?})")
@@ -623,6 +623,9 @@ fn pi_extensions(
             exists(path)?;
             path.clone()
         }
+        Source::Builtin(name) => {
+            return Err(format!("`yobuild:{name}` was not resolved to its file").into())
+        }
     };
     if dir.is_file() {
         return Ok(PiFound {
@@ -702,6 +705,8 @@ fn dsh_rows_of(
 ) -> Result<(Vec<Row>, Vec<String>), BoxError> {
     let id = row_id(&plugin.name);
     let p = match source {
+        // Refused when read: yobuild has no built-in DSH plugin.
+        Source::Builtin(name) => return Err(format!("`yobuild:{name}` is not a DSH plugin").into()),
         Source::Path(path) => {
             exists(path)?;
             let mut row = Row::new(id, path.display()).runtime("dsh");

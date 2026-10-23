@@ -112,6 +112,7 @@ phone = true
                 allow: Vec::new(),
                 policy: true,
                 grants: Grants::default(),
+                builtin: None,
             },
             Plugin {
                 name: "dsh-free-search".into(),
@@ -122,6 +123,7 @@ phone = true
                 allow: Vec::new(),
                 policy: false,
                 grants: Grants::default(),
+                builtin: None,
             },
             Plugin {
                 name: "words".into(),
@@ -133,6 +135,7 @@ phone = true
                 allow: Vec::new(),
                 policy: false,
                 grants: Grants::default(),
+                builtin: None,
             },
         ]
     );
@@ -337,12 +340,13 @@ fn a_plugin_names_one_ecosystem_and_a_rutis_one_its_runtime() {
             name: "x".into(),
             kind: PluginKind::Rutis {
                 path: "/agents/x.ts".into(),
-                runtime: Runtime::Go
+                runtime: Runtime::Go,
             },
             config: serde_json::json!({ "a": 1 }).as_object().cloned(),
             allow: Vec::new(),
             policy: false,
             grants: Grants::default(),
+            builtin: None,
         }
     );
 }
@@ -1463,4 +1467,118 @@ fn env_names_variables_the_same_on_every_plugin_of_a_runtime() {
     ))
     .unwrap();
     assert_eq!(m.plugins[0].grants.env, ["API_KEY"]);
+}
+
+/// yobuild's own plugins by name (design §13): read as names, each kind its
+/// own; given their files by `with_builtins`, the name kept; refused when
+/// unknown, of another kind, or for DSH or an MCP server.
+#[test]
+fn built_in_plugins_are_named_and_resolved_to_their_files() {
+    let m = read(&with(
+        "[[plugin]]\nrutis = \"yobuild:todo-plan\"\n\
+         [[plugin]]\npi = \"yobuild:confirm-dangerous\"\npolicy = true\n\
+         [[plugin]]\nrutis = \"yobuild:search-links\"\nruntime = \"node\"\nname = \"links\"\n",
+    ))
+    .unwrap();
+    assert_eq!(m.plugins[0].name, "todo-plan");
+    assert_eq!(m.plugins[0].builtin.as_deref(), Some("todo-plan"));
+    assert_eq!(
+        m.plugins[0].kind,
+        PluginKind::Rutis {
+            path: PathBuf::new(),
+            runtime: Runtime::Node,
+        }
+    );
+    assert_eq!(m.plugins[1].name, "confirm-dangerous");
+    assert_eq!(
+        m.plugins[1].kind,
+        PluginKind::Pi(Source::Builtin("confirm-dangerous".into()))
+    );
+    // A `name` of its own; `runtime = "node"` given.
+    assert_eq!(m.plugins[2].name, "links");
+    assert_eq!(m.plugins[2].builtin.as_deref(), Some("search-links"));
+    // Resolved under a frontend folder holding the files, the name kept.
+    let dir = tempfile::tempdir().unwrap();
+    for (_, _, at) in BUILTIN_PLUGINS {
+        let file = dir.path().join(at);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, "").unwrap();
+    }
+    let resolved = m.clone().with_builtins(dir.path()).unwrap();
+    assert_eq!(
+        resolved.plugins[0].kind,
+        PluginKind::Rutis {
+            path: dir.path().join("plugins/todo-plan.ts"),
+            runtime: Runtime::Node,
+        }
+    );
+    assert_eq!(
+        resolved.plugins[1].kind,
+        PluginKind::Pi(Source::Path(
+            dir.path()
+                .join("plugins/pi-extensions/confirm-dangerous.ts")
+        ))
+    );
+    assert_eq!(
+        resolved.plugins[1].builtin.as_deref(),
+        Some("confirm-dangerous")
+    );
+    assert_eq!(
+        resolved.plugins[2].kind,
+        PluginKind::Rutis {
+            path: dir.path().join("plugins/search-links.ts"),
+            runtime: Runtime::Node,
+        }
+    );
+    // A frontend folder without them.
+    let e = m.with_builtins(Path::new("/nowhere")).unwrap_err();
+    assert!(
+        e.starts_with(
+            "`yobuild:todo-plan`: yobuild's own file is not there (/nowhere/plugins/todo-plan.ts)"
+        ),
+        "{e}"
+    );
+    // The repository's own frontend has every one.
+    let frontend = Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend");
+    for (_, _, at) in BUILTIN_PLUGINS {
+        assert!(frontend.join(at).is_file(), "{at}");
+    }
+    // Refusals.
+    for (text, said) in [
+        (
+            "[[plugin]]\nrutis = \"yobuild:nope\"\n",
+            "5:9: `yobuild:nope` is not a built-in rutis plugin (there are: `yobuild:todo-plan`, `yobuild:search-links`)",
+        ),
+        (
+            "[[plugin]]\npi = \"yobuild:nope\"\n",
+            "5:6: `yobuild:nope` is not a built-in pi plugin (there are: `yobuild:confirm-dangerous`)",
+        ),
+        (
+            "[[plugin]]\npi = \"yobuild:todo-plan\"\n",
+            "5:6: `yobuild:todo-plan` is a rutis plugin, not a pi one",
+        ),
+        (
+            "[[plugin]]\ndsh = \"yobuild:confirm-dangerous\"\n",
+            "5:7: `yobuild:confirm-dangerous` is a pi plugin, not a dsh one",
+        ),
+        (
+            "[[plugin]]\ndsh = \"yobuild:x\"\n",
+            "5:7: yobuild has no built-in dsh plugin",
+        ),
+        (
+            "[[plugin]]\nrutis = \"yobuild:todo-plan\"\nruntime = \"go\"\n",
+            "5:9: `yobuild:todo-plan` runs on node",
+        ),
+        (
+            "[[mcp]]\nnpm = \"yobuild:x\"\n",
+            "5:7: `yobuild:` names yobuild's own plugins, and an MCP server is none: give a package (`name@1.2.3`) or a path",
+        ),
+        // Two naming one built-in: one name, refused as any repeat is.
+        (
+            "[[plugin]]\nrutis = \"yobuild:todo-plan\"\n[[plugin]]\nrutis = \"yobuild:todo-plan\"\n",
+            "7:9: two plugins or MCP servers are named \"todo-plan\": give one a `name`",
+        ),
+    ] {
+        assert_eq!(error(&with(text)), said, "{text}");
+    }
 }
