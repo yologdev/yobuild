@@ -1359,6 +1359,98 @@ fn what_a_pi_extension_was_answered_for_want_of_a_grant_is_said() {
 }
 
 #[test]
+fn check_says_what_a_pi_extension_was_answered_for_want_of_a_grant() {
+    // Design §12 "Fixed answers in `check`": asked as it starts, seen in
+    // the probe alone and together, said once on its entry; read with its
+    // grants (the probe alone runs with none); a tool's own questions and
+    // what nobody answers in `check` unsaid.
+    if !pi_installed() {
+        return;
+    }
+    let dir = project("", "[]");
+    let lens = |command: &str| {
+        format!(
+            "export default function (pi: any) {{\n\
+               pi.on('session_start', async (_e: unknown, ctx: any) => {{\n\
+                 ctx.isProjectTrusted()\n\
+                 await pi.exec({command})\n\
+               }})\n\
+             }}\n"
+        )
+    };
+    std::fs::write(
+        dir.path().join("quiet.ts"),
+        "export default function (pi: any) {\n\
+           pi.registerTool({\n\
+             name: 'quiet', label: 'Quiet', description: 'Asks only when called.',\n\
+             parameters: { type: 'object', properties: {} },\n\
+             async execute(_id: string, _p: unknown, _s: unknown, _u: unknown, ctx: any) {\n\
+               return { content: [{ type: 'text', text: `${ctx.isProjectTrusted()}` }], details: undefined }\n\
+             },\n\
+           })\n\
+         }\n",
+    )
+    .unwrap();
+    let check = |command: &str, grants: &str| {
+        std::fs::write(dir.path().join("lens.ts"), lens(command)).unwrap();
+        std::fs::write(
+            dir.path().join("agent.toml"),
+            format!(
+                "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
+                 [[plugin]]\npi = \"./lens.ts\"\n{grants}\
+                 [[plugin]]\npi = \"./quiet.ts\"\n"
+            ),
+        )
+        .unwrap();
+        let out = yobuild(&["check", "agent.toml", "--json"], dir.path());
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}", text(&out.stderr)));
+        assert_eq!(report["ok"], true, "{report:#}");
+        let notes = |i: usize| -> Vec<String> {
+            report["entries"][i]["notes"]
+                .as_array()
+                .map(|n| n.iter().map(|n| n.as_str().unwrap().to_owned()).collect())
+                .unwrap_or_default()
+        };
+        (notes(0), notes(1), report)
+    };
+    let trust = "pi extension lens asked ctx.isProjectTrusted(): answered false (grant `trust = true` to change it)";
+    let exec = "pi extension lens ran pi.exec(\"git\"): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)";
+    // Not granted: both, each once, though the probe and together both
+    // saw them; the tool that asks only when called, nothing.
+    let (lens_notes, quiet, report) = check("'git', ['status']", "");
+    for note in [trust, exec] {
+        assert_eq!(
+            lens_notes.iter().filter(|n| *n == note).count(),
+            1,
+            "{note}\n{report:#}"
+        );
+    }
+    assert!(
+        !quiet
+            .iter()
+            .any(|n| n.contains("asked") || n.contains("pi.exec")),
+        "{report:#}"
+    );
+    // Granted: the probe alone's answers dropped; together `git status`
+    // is freed by the gate and trust is answered true.
+    let granted = "grants = { trust = true, exec = \"gate\" }\n";
+    let (lens_notes, _, report) = check("'git', ['status']", granted);
+    assert!(
+        !lens_notes
+            .iter()
+            .any(|n| n.contains("asked ctx.") || n.contains("pi.exec")),
+        "{report:#}"
+    );
+    // A command the gate asks about, with nobody there in `check`: unsaid.
+    let (lens_notes, _, report) = check("'rm', ['-rf', 'x']", granted);
+    assert!(
+        !lens_notes.iter().any(|n| n.contains("pi.exec")),
+        "{report:#}"
+    );
+}
+
+#[test]
 fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     // Design §12, "Step 4" and "Step 5": every credential yoagent reads
     // that is set here is gone from a plugin runtime's or an MCP server's
