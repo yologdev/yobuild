@@ -844,6 +844,21 @@ fn check(args: &[&str], cwd: &Path) -> (Option<i32>, String, String) {
     (out.status.code(), text(&out.stdout), text(&out.stderr))
 }
 
+/// `check` with the checkout's runtime files (`YOBUILD_RUNTIMES=checkout`):
+/// for a DSH fixture in `adapters/dsh`, whose imports must resolve the
+/// runtime's own Cordis.
+fn check_from_checkout(args: &[&str], cwd: &Path) -> (Option<i32>, String, String) {
+    let out = bin()
+        .arg("check")
+        .args(args)
+        .current_dir(cwd)
+        .env_remove("RUST_LOG")
+        .env("YOBUILD_RUNTIMES", "checkout")
+        .output()
+        .unwrap();
+    (out.status.code(), text(&out.stdout), text(&out.stderr))
+}
+
 #[test]
 fn check_passes_the_example_agents_and_gives_the_matrixs_verdict() {
     let Some(ex) = examples() else { return };
@@ -939,7 +954,7 @@ fn check_says_what_run_would_refuse() {
         adapters.join("dsh/fixture-needs-services.ts").display()
     );
     write("needs.toml", needs.clone());
-    let (code, out, _) = check(&["needs.toml", "--json"], dir.path());
+    let (code, out, _) = check_from_checkout(&["needs.toml", "--json"], dir.path());
     assert_eq!(code, Some(1), "{out}");
     // As JSON: the problem and its fix.
     let report: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -956,7 +971,7 @@ fn check_says_what_run_would_refuse() {
         problem["fix"],
         "set [dsh] host_services = true for DSH's own services, or add the DSH plugin the hint names as a [[plugin]]"
     );
-    let (code, out, _) = check(&["needs.toml"], dir.path());
+    let (code, out, _) = check_from_checkout(&["needs.toml"], dir.path());
     assert_eq!(code, Some(1), "{out}");
     assert!(
         out.contains("plugin fixture-needs-services  dsh ")
@@ -969,7 +984,7 @@ fn check_says_what_run_would_refuse() {
         "needs.toml",
         format!("{needs}[dsh]\nhost_services = true\n"),
     );
-    let (code, out, _) = check(&["needs.toml", "--json"], dir.path());
+    let (code, out, _) = check_from_checkout(&["needs.toml", "--json"], dir.path());
     assert_eq!(code, Some(0), "{out}");
     let report: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(report["ok"], true);
@@ -1023,8 +1038,13 @@ fn check_refuses_what_run_refuses_before_anything_starts() {
     .unwrap();
     let (code, _, err) = check(&["agent.toml"], dir.path());
     assert_eq!(code, Some(1));
+    // (After a line saying yobuild's runtime is being installed, on a cold
+    // cache.)
     assert!(
-        err.starts_with("yobuild: plugin gone: ") && err.contains("does not exist"),
+        err.lines()
+            .find(|l| !l.starts_with("yobuild: installing yobuild's runtime"))
+            .is_some_and(|l| l.starts_with("yobuild: plugin gone: "))
+            && err.contains("does not exist"),
         "{err}"
     );
 }

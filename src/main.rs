@@ -43,7 +43,25 @@ use rutis::Ctx;
 use yoagent::{AgentMessage, Content, Message};
 use yobuild::frontend::RunOutcome;
 use yobuild::manifest::Manifest;
-use yobuild::run::{run, Options};
+use yobuild::run::{run, Layout, Options};
+
+/// What yobuild says on stderr while it gets ready (an install of its own
+/// runtime files).
+fn say(text: &str) {
+    eprintln!("yobuild: {text}");
+}
+
+/// yobuild's own runtime files: the cache's (design §13), or — with
+/// `YOBUILD_RUNTIMES=checkout`, for developing yobuild — the checkout it was
+/// built from, whose `adapters/` holds the fixtures a test loads beside the
+/// runtime that must resolve their imports.
+fn layout(manifest: &Manifest, terminal: bool) -> Result<Layout, BoxError> {
+    match std::env::var("YOBUILD_RUNTIMES").as_deref() {
+        Ok("checkout") => Ok(Layout::checkout()),
+        Ok(other) => Err(format!("YOBUILD_RUNTIMES={other:?}: only \"checkout\" is known").into()),
+        Err(_) => Layout::installed(manifest, None, terminal, &say),
+    }
+}
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -55,6 +73,9 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(e) => {
             eprintln!("yobuild: {e}");
+            if let Some(fix) = yobuild::run::what_to_do_at_start(&e.to_string()) {
+                eprintln!("  what to do: {fix}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -110,6 +131,8 @@ fn start() -> Result<ExitCode, BoxError> {
     if web && (options.once || terminal) {
         return Err("--web: this run has no web frontend (--once, or a terminal manifest)".into());
     }
+    // yobuild's own runtime files, from the cache (design §13).
+    options.layout = layout(&options.manifest, terminal)?;
     let log = logging(terminal.then_some(options.manifest.agent.name.as_str()))?;
     let once = options.once;
 
@@ -183,6 +206,7 @@ fn check(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
         _ => return Err(USAGE.into()),
     };
     let mut options = CheckOptions::new(Manifest::load(&path)?);
+    options.layout = layout(&options.manifest, false)?;
     let mut json = false;
     for arg in args {
         match arg.as_str() {

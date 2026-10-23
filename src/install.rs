@@ -33,7 +33,7 @@ use crate::manifest::{Manifest, PluginKind, Source, Transport};
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// The file an installed set's folder holds, last: its hash.
-const STAMP: &str = ".yobuild-installed";
+pub(crate) const STAMP: &str = ".yobuild-installed";
 /// The adapter files the `dsh` set holds at its root, where they resolve
 /// the set's Cordis: the runtime loads them from there. The DSH host's
 /// (`dsh-host.ts`) and the row lists `dsh_host_rows` reads beside it
@@ -61,7 +61,7 @@ fn lock_path(manifest: &Manifest) -> PathBuf {
 }
 
 /// The cache's home: `YOBUILD_HOME`, else `~/.yobuild`.
-fn home() -> Result<PathBuf, BoxError> {
+pub(crate) fn home() -> Result<PathBuf, BoxError> {
     match std::env::var_os("YOBUILD_HOME").filter(|v| !v.is_empty()) {
         Some(home) => Ok(PathBuf::from(home)),
         None => match std::env::var_os("HOME").filter(|v| !v.is_empty()) {
@@ -245,7 +245,7 @@ fn pins(
     }
     if let (Some(file), Some(package)) = (dsh_file, dsh_package) {
         return Err(format!(
-            "DSH files and DSH packages cannot run together yet (plugin {file}, a file; plugin {package}, a package): the packages run in the cache, the files in adapters/dsh"
+            "DSH files and DSH packages cannot run together yet (plugin {file}, a file; plugin {package}, a package): the packages run in their set, the files in yobuild's DSH runtime"
         )
         .into());
     }
@@ -300,7 +300,7 @@ fn read(path: &Path) -> Result<Vec<u8>, BoxError> {
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()).into())
 }
 
-fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<(), BoxError> {
+pub(crate) fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<(), BoxError> {
     std::fs::write(path, contents).map_err(|e| format!("{}: {e}", path.display()).into())
 }
 
@@ -414,7 +414,7 @@ fn npm_variable_kept(key: &str) -> bool {
 
 /// Runs npm in `dir`; its stdout. A failure carries npm's message
 /// (`npm_error`).
-fn npm(dir: &Path, args: &[String]) -> Result<String, BoxError> {
+pub(crate) fn npm(dir: &Path, args: &[String]) -> Result<String, BoxError> {
     let failed = |e: &dyn std::fmt::Display| format!("npm {} in {}: {e}", args[0], dir.display());
     let mut command = std::process::Command::new("npm");
     command
@@ -881,7 +881,7 @@ fn changes(old: Option<&SetLock>, new: &SetLock) -> String {
 
 /// Whether `dir` holds a set installed whole: its stamp names `hash`. No
 /// stamp (or no folder) is `false`; a stamp that cannot be read is an error.
-fn stamped(dir: &Path, hash: &str) -> Result<bool, BoxError> {
+pub(crate) fn stamped(dir: &Path, hash: &str) -> Result<bool, BoxError> {
     let path = dir.join(STAMP);
     match std::fs::read_to_string(&path) {
         Ok(text) => Ok(text.trim() == hash),
@@ -891,7 +891,7 @@ fn stamped(dir: &Path, hash: &str) -> Result<bool, BoxError> {
 }
 
 /// Removes a folder, logging (not failing on) what it cannot.
-fn remove_quietly(dir: &Path, why: &str) {
+pub(crate) fn remove_quietly(dir: &Path, why: &str) {
     if let Err(e) = std::fs::remove_dir_all(dir) {
         if e.kind() != std::io::ErrorKind::NotFound {
             tracing::warn!("removing {} ({why}): {e}", dir.display());
@@ -1001,7 +1001,7 @@ fn make(
 
 /// Removes `.partial-*` folders an install that died left (an hour old);
 /// what it cannot read or remove is logged.
-fn remove_old_partials(parent: &Path) {
+pub(crate) fn remove_old_partials(parent: &Path) {
     let entries = match std::fs::read_dir(parent) {
         Ok(entries) => entries,
         Err(e) => {
@@ -1491,7 +1491,7 @@ mod tests {
         );
         assert_eq!(
             pins(&mixed, adapters.path()).unwrap_err().to_string(),
-            "DSH files and DSH packages cannot run together yet (plugin mine, a file; plugin dsh-free-search, a package): the packages run in the cache, the files in adapters/dsh"
+            "DSH files and DSH packages cannot run together yet (plugin mine, a file; plugin dsh-free-search, a package): the packages run in their set, the files in yobuild's DSH runtime"
         );
         // Files alone install nothing.
         let files = manifest(

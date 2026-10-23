@@ -3631,6 +3631,18 @@ No key is needed.
 6. *Docs.* Recommended: README and `docs/guide.md` for 0.1; a rendered
    site, the video and posts later.
 
+**Built so far:** PR 2 (yoagent-rutis 0.8.2, `embedded-adapters`, the
+yoagent session's); PR 4, `yobuild:` built-ins (#66); PR 3, the runtime
+sets (`src/runtime.rs`, `Layout::installed`, the version constant, the
+Node and npm check). PR 3's findings:
+- a DSH plugin file resolves its imports from where it is, so the tests'
+  DSH fixture in the checkout's `adapters/dsh`, which imports Cordis,
+  cannot run beside the cache's runtime; the binary takes
+  `YOBUILD_RUNTIMES=checkout` for developing yobuild, which that test
+  sets (every other binary test, and CI's runs, use the cache);
+- on a cold cache the first runs say "installing yobuild's runtime …" on
+  stderr, which an assertion on stderr's first line must allow.
+
 ### Order of PRs
 
 1. this design;

@@ -151,7 +151,7 @@ pub(crate) const HINTS: &[Hint] = &[
         id: "dsh-host",
         scope: Scope::Start,
         pattern: "the DSH host did not start: ",
-        fix: "the DSH host (loaded for DSH plugins' grants) waits for what it names, or provides no host (its log says why): reinstall the DSH runtime's folder the error names (a `dsh` set's: delete it; adapters/dsh: `npm ci` there) and run again; else drop the DSH plugins' grants",
+        fix: "the DSH host (loaded for DSH plugins' grants) waits for what it names, or provides no host (its log says why): reinstall the DSH runtime's folder the error names (delete it: yobuild installs it again) and run again; else drop the DSH plugins' grants",
     },
     Hint {
         id: "nothing-provides",
@@ -216,6 +216,13 @@ pub(crate) const HINTS: &[Hint] = &[
         // server's own text may say a program "cannot be started".
         pattern: "yobuild cannot start ",
         fix: "the program a stdio MCP server or a plugin runtime (Node) runs is missing, not executable for you, or behind a folder you cannot search: fix the server's path or the permissions, install its package again, or install Node",
+    },
+    Hint {
+        id: "no-node-version",
+        scope: Scope::Start,
+        // `runtime::node_and_npm`'s, before anything uses Node or npm.
+        pattern: "yobuild needs Node 22.19+ and npm 11.19+: found ",
+        fix: "install Node 22.19 or later (it brings npm; `npm install -g npm@11` for a newer npm) and make it the `node` and `npm` on PATH",
     },
     Hint {
         id: "no-node",
@@ -413,6 +420,13 @@ mod tests {
                 Scope::Start,
                 "yobuild cannot start node: it is not on PATH".into(),
                 "cannot-start",
+            ),
+            // `runtime::node_and_npm`'s, as it makes it.
+            (
+                Scope::Start,
+                crate::runtime::check_versions(&Ok("v20.11.0".into()), &Ok("10.2.4".into()))
+                    .unwrap_err(),
+                "no-node-version",
             ),
             // rutis's own spawn failure for a missing `node`
             // (rutis-bridge's `runtime/spawn.rs`: "cannot start {program}:

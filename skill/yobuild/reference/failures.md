@@ -131,10 +131,11 @@ what changed); `[builtins] ask_owner is off` (the error a plugin's own
 | What it says | What to do |
 |---|---|
 | `DSH plugins wait for services nobody provides: …` <!-- hint: dsh-services --> | `[dsh] host_services = true` for DSH's own services, or add the DSH plugin the hint names as a `[[plugin]]` |
-| `the DSH host did not start: …` <!-- hint: dsh-host --> | the DSH host (loaded for DSH plugins' `grants`) waits for what it names, or provides no host (its log says why): reinstall the DSH runtime's folder the error names (a `dsh` set's: delete it; `adapters/dsh`: `npm ci` there) and run again; else drop the DSH plugins' `grants` |
+| `the DSH host did not start: …` <!-- hint: dsh-host --> | the DSH host (loaded for DSH plugins' `grants`) waits for what it names, or provides no host (its log says why): reinstall the DSH runtime's folder the error names (delete it: yobuild installs it again) and run again; else drop the DSH plugins' `grants` |
 | `… (waiting): nothing provides X` <!-- hint: nothing-provides --> | add the plugin that provides X, or remove the inject |
 | `a call judge (before_tool) from the policy plugin's row plugin:X (does it inject \`yoagent\`?)` <!-- hint: no-judge --> | the policy plugin must inject `yoagent` and register a handler with `before_tool`; or take `policy = true` off |
 | `yobuild cannot start /path/to/server: no such file` (or `it is not a file`, `it is not executable`, `it is not on PATH`, `it is on PATH but not executable`, `it is not on PATH where it could be looked at (…)`, or the system's error; a plugin runtime's prefixed with the runtime's name) <!-- hint: cannot-start --> | the program a stdio MCP server or a plugin runtime (Node) runs: fix the server's path or the permissions (a folder you cannot search), install its package again, or install Node |
+| `yobuild needs Node 22.19+ and npm 11.19+: found …` <!-- hint: no-node-version --> | install Node 22.19 or later (it brings npm; `npm install -g npm@11` for a newer npm), the `node` and `npm` on PATH |
 | `cannot start node: No such file or directory (os error 2)` <!-- hint: no-node --> | install Node 22.19 or later: the plugin runtimes run on it |
 | `cannot start X with the kept environment: /usr/bin/env is not there, …` <!-- hint: no-env --> | install `env` at `/usr/bin/env` (and `/bin/sh`, needed for a program whose path holds `=`): yobuild starts every plugin runtime and stdio server through it, with the kept environment |
 | `mcp X: the server lists no tools` <!-- hint: mcp-no-tools --> | the server's arguments, or its version |
