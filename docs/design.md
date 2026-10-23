@@ -1807,7 +1807,10 @@ trusted: answered no — grant `trust`"; how, against 0.7.1's log, in steps
 2 and 3 below); `probe::pi`/`probe::dsh` return those seen
 while loading, and `check` lists them per entry, or says "not exercised by
 the probe" for those asked only in a tool call. A `hints` row and its
-`failures.md` entry point at the grant.
+`failures.md` entry point at the grant. (As built for `run`: no `hints`
+row, `failures.md` carries them. For `check`, superseded by "Fixed
+answers in `check`", below: the binary's own watcher rather than the
+probe's return, and nothing said for a tool's own questions.)
 
 ### What a grant hands a plugin
 
@@ -2102,83 +2105,153 @@ extension and, where one would change it, the grant: "pi extension lens
 asked ctx.isProjectTrusted(): answered false (grant `trust = true` to
 change it)"; a `pi.exec` refused for want of `exec`, or by the gate's other
 refusals (not the owner's Block); a pi wake the host never got; the DSH
-host's warnings. Not yet: `check` (no session watches there).
+host's warnings. Not yet: `check` (no session watches there; proposed:
+"Fixed answers in `check`", below).
 
 #### Fixed answers in `check` (proposed 2026-10-23)
 
 **Why.** `check` names every grant an entry has, but not what a plugin
 was answered for want of one. pi-lens without `trust` loads, lists its
-tools and passes `check`, then every diagnostic says "unavailable": the
-owner learns why only from `run`'s Warning, after spending a run. The
+tools and passes `check`, then every diagnostic says "unavailable". It
+reads `ctx.isProjectTrusted()` at every `session_start` (its CHANGELOG,
+4.4.3: "pi-lens now reads `ctx.isProjectTrusted()` at every
+`session_start`"), and when told no it installs and spawns nothing. Today
+the owner learns why only from `run`'s Warning, after spending a run. The
 roadmap's M3b asks that `check` name every fixed answer.
 
-**What is there to see.** `check` already starts the pi adapter twice,
-and `run`'s watcher would read both (verified against yoagent-rutis
-0.8.1):
-- alone, `probe::pi_with` loads the plugin's extension files (as
+**What there is to see.** `check` already starts the pi adapter in two
+places. `run`'s watcher, `run::plugin_log`, would read both (verified
+against yoagent-rutis 0.8.1 and the adapter):
+- **Alone.** `probe::pi_with` loads the plugin's extension files (as
   planned: `Plan::pi_files`) in a row whose id is `pi`, as `run`'s is.
-  The adapter fires `session_start` as it starts;
-- together, `run::start` loads the `pi` row, and `offered` calls one
-  run's hooks: `start_run`, `tools`, one `before_model`, `finish`. pi's
-  `before_agent_start` handlers run in that `before_model`.
+  - The probe's root lives in `check`'s process, so its lines reach the
+    binary's `tracing` subscriber. `check` passes the probe no `Logs`
+    collector, so nothing competes.
+  - The adapter fires `session_start` as it starts.
+  - The probe then calls one run's hooks (`start_run`, `tools`,
+    `before_model`, `finish`), so `before_agent_start` handlers run too.
+  - On unloading it fires `session_shutdown`.
+  - It may restart the adapter (up to 6 times, on a tool name refused),
+    which repeats the same lines.
+  - **The probe gives the row no grants.** Its config is `extensions`,
+    `cwd` and `withoutBuiltins` only: no `projectTrustedFor`, `execFor`,
+    `wakeFor` or `model`. Alone, a plugin granted `trust = true` is still
+    answered `isProjectTrusted() → false`, and its `pi.exec` is refused
+    "not allowed by the host".
+- **Together.** Only when no entry has a problem. `run::start` loads the
+  `pi` row with the manifest's grants (as `run` does). `offered` then
+  calls one run's hooks, `before_agent_start` among them, and `shut`
+  unloads it, which fires `session_shutdown`.
 
-So a fixed answer given in `session_start`, in `before_agent_start` or as
-an extension loads reaches `check`'s process as a `tracing` event on the
-same target, from the same row, naming the same file. A question asked
-only in a tool call, or in a later hook (`tool_call`, `tool_result`,
-`input`), is not asked, since `check` calls no tool and sends no prompt.
+So a fixed answer given as an extension loads, or in `session_start`,
+`before_agent_start` or `session_shutdown`, reaches `check` as a
+`tracing` event on the same target, from the same row, naming the same
+file. A question asked only in a tool call or in `tool_call`,
+`tool_result` or `input` is not asked: `check` calls no tool and sends no
+prompt.
 
-**How.** `check` watches plugin lines for its whole span, as `run` does
-(`plugin_log::watch` with a `Said` built from `Plan::pi_names()` and
-`Manifest::pi_model()`). This covers the probes alone and the agent
-together.
-- **Where it goes.** Each line `Said` knows becomes a note. A pi line
-  goes on the entry of the plugin whose file it names (`Said` returns
-  that plugin's name beside the text). A line with no file, or naming a
-  file no pi plugin loads, goes on the agent, as do the DSH host's
-  warnings (the host starts only together).
-- **How it is said.** Each is said once: alone and together give the
-  same line, and `Said` drops a repeat. The wording is `run`'s, for
-  example "pi extension lens asked ctx.isProjectTrusted(): answered
-  false (grant `trust = true` to change it)", and the same goes for a
-  `pi.exec` refused for want of `exec` and a pi wake the host never got.
-- **A note, not a problem:** the plugin works as answered, and `ok` is
+**How.**
+- **Watching.** `check` holds a `plugin_log::watch` from before the first
+  probe until after the agent together has shut down, so a
+  `session_shutdown` line still counts.
+- **Collecting.** The sink runs on the runtimes' threads. It pushes each
+  `Said::note` into a shared list (a `Mutex<Vec<…>>`). Once everything
+  has shut down, `check` takes the list and appends each note to its
+  entry's `notes`, or to the agent's, after the notes `check` already
+  makes, in the order seen.
+- **Who it was.** `Said::note` returns the plugin's name beside the text,
+  as `(Option<String>, String)`:
+  - a pi line naming a file a pi plugin loads gives that plugin (`who`
+    already matches the file as planned or canonical);
+  - a line with no file, a file no pi plugin loads, or the DSH host's
+    warnings gives none, and the note goes on the agent. The DSH host
+    starts only together and serves every DSH plugin.
+- **Read with the grants.** `Said` learns each pi file's grants
+  (`Said::with_grants`, from the pi plugins' `grants`, matched by file as
+  `who` matches; `run` keeps `Said::new`, whose session runs granted). In
+  `check` it drops what the probe alone said for want of a grant the
+  plugin has:
+  - the `isProjectTrusted() → false` note when its plugin has `trust`;
+  - the "not allowed by the host" `pi.exec` refusal when it has `exec`
+    other than `"off"`;
+  - the model notes when the pi plugins have `model`, as now.
+
+  Together, a granted plugin is answered as granted, and then gives no
+  line or another one. Lines are deduplicated on the whole note, as now,
+  so the probe's repeats and alone-then-together say each once.
+- **What `check` leaves out.** It drops what only its own setting makes:
+  - the gate's refusals of a granted `pi.exec` ("unanswered", the judge
+    or the ask failing): nobody is there to answer;
+  - a pi wake: yobuild refuses every wake before the owner's first task,
+    as a plugin loads (`host_session.wake`, already filtered), and
+    alone there is no host. A wake reaches no one in `check`.
+
+  `check` keeps the fixed answers a grant would change (`trust`,
+  `model`) and a `pi.exec` refused for want of `exec`. The wording is
+  `run`'s, for example "pi extension lens asked
+  ctx.isProjectTrusted(): answered false (grant `trust = true` to change
+  it)", and "pi extension lens ran pi.exec("git"): refused (grant
+  `exec = "gate"` or `"free"` to allow it)".
+- **A note, not a problem.** The plugin works as answered, and `ok` is
   unchanged.
 - **What stays the same:** the report's shape (version 3: notes are
   text), the probes, and yoagent-rutis.
 
-**Limits, said.** The layer that sees these lines (`plugin_log::layer`)
-is the binary's: `check()` called as a library says them only if its
-caller installs the layer, so the tests use `cli_test`. A question asked
-only in a tool call goes unsaid by `check`, as before, and `run` says it.
-The skill's `failures.md` says so beside the note. This drops the earlier
-plan's "not exercised by the probe" per entry ("Fixed answers, said",
-above). The adapter cannot tell which questions a tool would ask, so the
-note would land on every pi plugin and say nothing.
+**Why the layer.** `plugin_log::layer` reads each line's row
+(`caller_row`): any plugin may call `yoagent.log`, and a forged line
+would be yobuild advising a grant. yoagent-rutis's own collector
+(`probe::Logs`) keeps level and text but no row, so `check` cannot use
+it.
+
+**Limits, said.**
+- The layer is the binary's. `check()` called as a library says these
+  notes only if its caller installs the layer, so the tests use
+  `cli_test`.
+- A question asked only in a tool call, or in a hook `check` does not
+  call, goes unsaid by `check`; `run` says it. `failures.md` says so beside
+  the note. This replaces the earlier plan's "not exercised by the probe"
+  on each entry ("Fixed answers, said", above): the adapter cannot tell
+  which questions a tool would ask, so that note would land on every pi
+  plugin and tell the owner nothing.
+- When an entry has a problem, `together` is skipped and only the probes'
+  lines exist.
 
 **Said where.**
-- `check`'s entry notes (text `  note: …`, JSON `notes`).
-- `failures.md`: the note, what to do (ask the person, then grant), and
-  the limit.
+- `check`'s notes (text `  note: …`, JSON `notes`).
+- `failures.md`: its two Warning rows (a fixed answer and a refused
+  `pi.exec`) gain "or a `check` note on the plugin", with what to do (ask
+  the person, then grant) and the limit. No new row, and no hint: `hints`
+  matches failures, and these are notes.
 - `CLAUDE.md`.
 
-**Tests.** `cli_test`:
-- an extension asking `ctx.isProjectTrusted()` in `session_start` and
-  calling `pi.exec` there gets both notes on its entry, each once,
-  `ok` still true;
-- one asking only in a tool gets neither;
-- with `trust = true` and `exec = "gate"`, the trust note goes.
-
-Unit tests: `Said` naming the plugin, for a file and for none.
+**Tests.**
+- `cli_test`, each `check --json`:
+  - an extension asking `ctx.isProjectTrusted()` in `session_start` and
+    running `pi.exec("git", ["status"])` there gets both notes on its
+    entry, each once (the probe and together seen alike), and `ok` stays
+    true;
+  - the same extension granted `trust = true` and `exec = "gate"` gets
+    neither. The probe alone's lines are dropped by the grants; together,
+    `git status` is freed by the gate, which runs it, and trust answers
+    true;
+  - with `exec = "gate"` and `rm -rf x` in place of `git status`: no
+    note (the gate asks, nobody answers: left out);
+  - an extension asking only in a tool gets no note.
+- Unit tests:
+  - `Said::note` naming the plugin for a planned and a canonical file,
+    and none for no file or an unknown file;
+  - the grant filters;
+  - `check`'s leaving out of the gate's refusals and wakes.
 
 **Decisions for review.**
 1. *A note, not a problem* (recommended: the plugin loads and works,
-   answered as without a host), or a problem (`ok` false until granted
-   or the plugin is removed). A problem would refuse every honest manifest
-   that leaves `trust` off on purpose.
-2. *Tool-only questions unsaid by `check`* (recommended: `run` says them,
-   and the adapter cannot predict them), or one generic note on every pi
-   plugin without `trust`/`model`.
+   answered as it would be without a host), or a problem (`ok` false
+   until granted or the plugin removed). A problem would refuse every
+   honest manifest that leaves `trust` off on purpose.
+2. *Probe-alone lines filtered by the plugin's grants in yobuild*
+   (recommended: nothing changes in yoagent-rutis), or yoagent-rutis's
+   `ProbeOptions` taking the pi grants. That is closer to `run`, but needs
+   a release there and the yoagent session's agreement.
 3. *The DSH host's warnings as agent notes* (recommended: one host serves
    every DSH plugin), or on each DSH plugin.
 
