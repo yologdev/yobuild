@@ -222,7 +222,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     let _watching = plugin_log::watch({
         let session = session.clone();
         move |line: &plugin_log::Line| {
-            if let Some(note) = said.note(line) {
+            if let Some((_, note)) = said.note(line) {
                 session.notice(NoticeLevel::Warning, note);
             }
         }

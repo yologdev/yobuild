@@ -644,6 +644,35 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         }
     };
 
+    // What the pi adapter and the DSH host only log, as `run` says it
+    // (design §12 "Fixed answers in `check`"): watched through the probes
+    // and the agent together, until both have shut down; read with each pi
+    // plugin's grants, since the probe alone runs with none. Seen only
+    // through `plugin_log::layer`, which the binary installs.
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<super::plugin_log::Note>>> =
+        std::sync::Arc::default();
+    let said = super::plugin_log::Said::checking(
+        &plan.pi_names(),
+        manifest.pi_model(),
+        manifest
+            .plugins
+            .iter()
+            .filter(|p| matches!(p.kind, PluginKind::Pi(_)))
+            .map(|p| super::plugin_log::PiGrants {
+                plugin: p.name.clone(),
+                trust: p.grants.trust,
+                exec: p.grants.exec != crate::manifest::ExecGrant::Off,
+            })
+            .collect(),
+    );
+    let watching = super::plugin_log::watch({
+        let seen = seen.clone();
+        move |line: &super::plugin_log::Line| {
+            if let Some(note) = said.note(line) {
+                seen.lock().unwrap_or_else(|e| e.into_inner()).push(note);
+            }
+        }
+    });
     // The session `run` would have, with no frontend: open (its driver
     // kept), so a plugin that greets or asks as it loads gets what it would
     // with nobody there.
@@ -888,6 +917,16 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         };
         together(&context, &mut agent).await;
         schemas.extend(context.schemas.lock().unwrap().drain());
+    }
+    // Everything has shut down: what was seen goes to its plugin's entry,
+    // else the agent's, after the notes made here.
+    drop(watching);
+    let seen = std::mem::take(&mut *seen.lock().unwrap_or_else(|e| e.into_inner()));
+    for (plugin, note) in seen {
+        match plugin.and_then(|name| entries.iter_mut().find(|e| e.name == name)) {
+            Some(entry) => entry.notes.push(note),
+            None => agent.notes.push(note),
+        }
     }
     // Each tool seen with its description and arguments' schema.
     let fill = |tools: &mut Vec<Tool>| {

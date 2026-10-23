@@ -121,91 +121,173 @@ pub(crate) struct Said {
     files: Vec<(PathBuf, String)>,
     /// The pi plugins are told the model (`model = "info"`, on all or none).
     model: bool,
+    /// `check`'s reading ([`Said::checking`]): each pi plugin's grants.
+    checking: Option<Vec<PiGrants>>,
     said: Mutex<HashSet<String>>,
 }
 
+/// A pi plugin's grants that change what its lines say: `trust`, and an
+/// `exec` other than `"off"`.
+pub(crate) struct PiGrants {
+    pub plugin: String,
+    pub trust: bool,
+    pub exec: bool,
+}
+
+/// A note: the plugin it is about, when a pi line names one's file; the
+/// text.
+pub(crate) type Note = (Option<String>, String);
+
 impl Said {
     pub(crate) fn new(pi_files: &[(String, Vec<PathBuf>)], model: bool) -> Self {
+        // Each file as given and canonical: a line names it either way.
         let files = pi_files
             .iter()
-            .flat_map(|(name, files)| files.iter().map(|f| (f.clone(), name.clone())))
+            .flat_map(|(name, files)| {
+                files.iter().flat_map(|f| {
+                    let canonical = std::fs::canonicalize(f).ok().filter(|c| c != f);
+                    std::iter::once(f.clone())
+                        .chain(canonical)
+                        .map(|f| (f, name.clone()))
+                })
+            })
             .collect();
         Said {
             files,
             model,
+            checking: None,
             said: Mutex::default(),
         }
     }
 
-    /// The notice for `line`, once: `None` for a line from another row, one
-    /// no grant changes or nobody needs told, or one already said.
-    pub(crate) fn note(&self, line: &Line) -> Option<String> {
+    /// As `check` reads lines (design §12 "Fixed answers in `check`"): its
+    /// pi probe alone runs with no grants, so what it says for want of one
+    /// the plugin has (`grants`) is dropped; and what only `check`'s setting
+    /// makes — the gate's refusals of a granted `pi.exec` with nobody there
+    /// to answer, a wake — is left out.
+    pub(crate) fn checking(
+        pi_files: &[(String, Vec<PathBuf>)],
+        model: bool,
+        grants: Vec<PiGrants>,
+    ) -> Self {
+        Said {
+            checking: Some(grants),
+            ..Said::new(pi_files, model)
+        }
+    }
+
+    /// The notice for `line`, once, with the plugin it is about: `None` for
+    /// a line from another row, one no grant changes or nobody needs told,
+    /// or one already said.
+    pub(crate) fn note(&self, line: &Line) -> Option<Note> {
         let note = match line.row {
             Some(PI_ROW) => self.pi(line.text),
-            Some(DSH_HOST_ROW) if line.level <= Level::WARN => dsh_host(line.text),
+            Some(DSH_HOST_ROW) if line.level <= Level::WARN => {
+                dsh_host(line.text).map(|text| (None, text))
+            }
             _ => None,
         }?;
         self.said
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(note.clone())
+            .insert(note.1.clone())
             .then_some(note)
     }
 
-    fn pi(&self, line: &str) -> Option<String> {
+    /// `plugin`'s grants as `check` reads them: `None` in `run`.
+    fn granted(&self, plugin: &Option<String>) -> Option<(bool, bool)> {
+        let grants = self.checking.as_ref()?;
+        let found = plugin
+            .as_ref()
+            .and_then(|name| grants.iter().find(|g| g.plugin == *name));
+        Some(found.map_or((false, false), |g| (g.trust, g.exec)))
+    }
+
+    fn pi(&self, line: &str) -> Option<Note> {
         if let Some(rest) = line.strip_prefix("[pi] fixed answer") {
             // ` (<file>): <question> → <answer>`, or with no file.
-            let (who, rest) = match rest.strip_prefix(" (") {
+            let ((plugin, who), rest) = match rest.strip_prefix(" (") {
                 Some(rest) => {
                     let (file, rest) = rest.split_once("): ")?;
                     (self.who(file), rest)
                 }
-                None => ("a pi extension".to_owned(), rest.strip_prefix(": ")?),
+                None => (
+                    (None, "a pi extension".to_owned()),
+                    rest.strip_prefix(": ")?,
+                ),
             };
             let (question, answer) = rest.rsplit_once(" → ")?;
+            let trusted = self.granted(&plugin).is_some_and(|(trust, _)| trust);
             let grant = match question {
-                "ctx.isProjectTrusted()" if answer == "false" => "trust = true",
+                "ctx.isProjectTrusted()" if answer == "false" && !trusted => "trust = true",
                 "ctx.model" | "ctx.modelRegistry" if !self.model => "model = \"info\"",
                 _ => return None,
             };
-            return Some(format!(
-                "{who} asked {question}: answered {answer} (grant `{grant}` to change it)"
+            return Some((
+                plugin,
+                format!("{who} asked {question}: answered {answer} (grant `{grant}` to change it)"),
             ));
         }
         let rest = line.strip_prefix("[pi] ")?;
         // `<file>: refused pi.exec("<command>")<why>`
         if let Some((file, rest)) = rest.split_once(": refused pi.exec(") {
             let (command, why) = rest.split_once(')')?;
-            let who = self.who(file);
+            let (plugin, who) = self.who(file);
+            let granted = self.granted(&plugin);
             if why.starts_with(" is not allowed by the host") {
-                return Some(format!(
-                    "{who} ran pi.exec({command}): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)"
+                // `check`'s probe alone: refused whatever the grant.
+                if granted.is_some_and(|(_, exec)| exec) {
+                    return None;
+                }
+                return Some((
+                    plugin,
+                    format!("{who} ran pi.exec({command}): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)"),
                 ));
             }
-            // The owner's own "Block", or a cancel: nothing to tell.
-            if why.contains("(block)") || why.contains(" was cancelled") {
+            // The owner's own "Block", or a cancel: nothing to tell. In
+            // `check`, what only its setting makes — nobody there to answer,
+            // the judge or the ask failing — is left out; a bad `cwd` or a
+            // missing approval service is said as in `run`.
+            let checks_own = why.contains(" was not approved by the host (")
+                || why.starts_with(": the host could not judge it: ")
+                || why.starts_with(": the host's approval failed: ");
+            if why.contains("(block)")
+                || why.contains(" was cancelled")
+                || (granted.is_some() && checks_own)
+            {
                 return None;
             }
             let why = why.trim_start_matches(':').trim();
-            return Some(format!("{who} ran pi.exec({command}): refused, {why}"));
+            return Some((
+                plugin,
+                format!("{who} ran pi.exec({command}): refused, {why}"),
+            ));
         }
         // `<file>: wake refused: <why>` — yobuild's own refusals are said
-        // where it refuses (`host_session.wake…`).
+        // where it refuses (`host_session.wake…`). In `check` a wake
+        // reaches no one: left out.
         let (file, why) = rest.split_once(": wake refused: ")?;
-        (!why.contains("host_session.wake"))
-            .then(|| format!("{}'s wake did not reach the agent: {why}", self.who(file)))
+        if why.contains("host_session.wake") || self.checking.is_some() {
+            return None;
+        }
+        let (plugin, who) = self.who(file);
+        Some((
+            plugin,
+            format!("{who}'s wake did not reach the agent: {why}"),
+        ))
     }
 
-    /// The plugin a file is, as planned or canonical; else the file.
-    fn who(&self, file: &str) -> String {
+    /// The plugin a file is, as planned or canonical, and how it is said;
+    /// else no plugin, and the file.
+    fn who(&self, file: &str) -> (Option<String>, String) {
         let canonical = std::fs::canonicalize(file).ok();
         let found = self
             .files
             .iter()
             .find(|(f, _)| f == Path::new(file) || Some(f) == canonical.as_ref());
         match found {
-            Some((_, name)) => format!("pi extension {name}"),
-            None => format!("pi extension {file}"),
+            Some((_, name)) => (Some(name.clone()), format!("pi extension {name}")),
+            None => (None, format!("pi extension {file}")),
         }
     }
 }
@@ -239,7 +321,7 @@ mod tests {
         let trusted = format!("[pi] fixed answer ({at}): ctx.isProjectTrusted() → false");
         assert_eq!(
             said.note(&pi(&trusted)),
-            Some("pi extension lens asked ctx.isProjectTrusted(): answered false (grant `trust = true` to change it)".into())
+            Some((Some("lens".into()), "pi extension lens asked ctx.isProjectTrusted(): answered false (grant `trust = true` to change it)".into()))
         );
         // Once.
         assert_eq!(said.note(&pi(&trusted)), None);
@@ -261,11 +343,12 @@ mod tests {
                 "[pi] fixed answer ({at}): ctx.model → yoagent/x"
             )))
             .unwrap()
+            .1
             .contains("grant `model = \"info\"`"));
         // No file: some extension.
         assert_eq!(
             said.note(&pi("[pi] fixed answer: ctx.modelRegistry → a read-only list of 0 model(s)")),
-            Some("a pi extension asked ctx.modelRegistry: answered a read-only list of 0 model(s) (grant `model = \"info\"` to change it)".into())
+            Some((None, "a pi extension asked ctx.modelRegistry: answered a read-only list of 0 model(s) (grant `model = \"info\"` to change it)".into()))
         );
         let told = Said::new(&[], true);
         assert_eq!(
@@ -276,7 +359,7 @@ mod tests {
             said.note(&pi(&format!(
                 "[pi] {at}: refused pi.exec(\"git\") is not allowed by the host (the adapter's `exec` / `execFor` setting)"
             ))),
-            Some("pi extension lens ran pi.exec(\"git\"): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)".into())
+            Some((Some("lens".into()), "pi extension lens ran pi.exec(\"git\"): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)".into()))
         );
         assert_eq!(said.note(&pi("[pi] something else")), None);
     }
@@ -298,7 +381,11 @@ mod tests {
                 "pi extension g's wake did not reach the agent: no answer within 30 s (it may still be delivered; later wakes go on)",
             ),
         ] {
-            assert_eq!(said.note(&pi(line)).as_deref(), Some(note), "{line}");
+            assert_eq!(
+                said.note(&pi(line)),
+                Some((Some("g".into()), note.into())),
+                "{line}"
+            );
         }
         for line in [
             "[pi] /x/g.ts: refused pi.exec(\"rm\") was not approved by the host (block)",
@@ -306,6 +393,131 @@ mod tests {
             "[pi] /x/g.ts: wake refused: invalid binding value: host_session.wake(text, file): …",
         ] {
             assert_eq!(said.note(&pi(line)), None, "{line}");
+        }
+    }
+
+    /// As `check` reads lines: the probe alone's answers for want of a
+    /// grant the plugin has dropped, the gate's other refusals and wakes
+    /// left out; a file no plugin loads names none.
+    #[test]
+    fn check_reads_lines_with_each_plugins_grants() {
+        let files = [
+            ("open".to_owned(), vec![PathBuf::from("/x/open.ts")]),
+            ("granted".to_owned(), vec![PathBuf::from("/x/granted.ts")]),
+        ];
+        let grants = vec![
+            PiGrants {
+                plugin: "open".into(),
+                trust: false,
+                exec: false,
+            },
+            PiGrants {
+                plugin: "granted".into(),
+                trust: true,
+                exec: true,
+            },
+        ];
+        let said = Said::checking(&files, false, grants);
+        let trusted =
+            |file: &str| format!("[pi] fixed answer ({file}): ctx.isProjectTrusted() → false");
+        let exec = |file: &str| {
+            format!("[pi] {file}: refused pi.exec(\"git\") is not allowed by the host (the adapter's `exec` / `execFor` setting)")
+        };
+        assert_eq!(said.note(&pi(&trusted("/x/granted.ts"))), None);
+        assert_eq!(said.note(&pi(&exec("/x/granted.ts"))), None);
+        assert_eq!(
+            said.note(&pi(&trusted("/x/open.ts"))).unwrap().0.as_deref(),
+            Some("open")
+        );
+        assert_eq!(
+            said.note(&pi(&exec("/x/open.ts"))).unwrap().0.as_deref(),
+            Some("open")
+        );
+        // A file no plugin loads: no plugin, said as the file.
+        assert_eq!(
+            said.note(&pi(&trusted("/y/other.ts"))),
+            Some((None, "pi extension /y/other.ts asked ctx.isProjectTrusted(): answered false (grant `trust = true` to change it)".into()))
+        );
+        for line in [
+            "[pi] /x/granted.ts: refused pi.exec(\"rm\") was not approved by the host (unanswered)",
+            "[pi] /x/open.ts: refused pi.exec(\"rm\") was not approved by the host (unanswered)",
+            "[pi] /x/granted.ts: refused pi.exec(\"rm\"): the host could not judge it: host_approval.judge took longer than 30000 ms",
+            "[pi] /x/granted.ts: refused pi.exec(\"rm\"): the host's approval failed: closed",
+            "[pi] /x/open.ts: wake refused: no answer within 30 s (it may still be delivered; later wakes go on)",
+        ] {
+            assert_eq!(said.note(&pi(line)), None, "{line}");
+        }
+        // The extension's own mistake, or a service missing: said.
+        for (line, why) in [
+            (
+                "[pi] /x/granted.ts: refused pi.exec(\"git\"): options.cwd must be a path string to be judged, not number",
+                "options.cwd must be a path string to be judged, not number",
+            ),
+            (
+                "[pi] /x/granted.ts: refused pi.exec(\"git\") needs the host's approval (`exec` \"gate\"): host_approval",
+                "needs the host's approval (`exec` \"gate\"): host_approval",
+            ),
+        ] {
+            assert_eq!(
+                said.note(&pi(line)),
+                Some((
+                    Some("granted".into()),
+                    format!("pi extension granted ran pi.exec(\"git\"): refused, {why}")
+                )),
+                "{line}"
+            );
+        }
+        // The model: told with `model`, as `run` reads it.
+        let told = Said::checking(&files, true, Vec::new());
+        assert_eq!(
+            told.note(&pi("[pi] fixed answer (/x/open.ts): ctx.model → yoagent/x")),
+            None
+        );
+        assert_eq!(
+            said.note(&pi("[pi] fixed answer (/x/open.ts): ctx.model → yoagent/x"))
+                .unwrap()
+                .0
+                .as_deref(),
+            Some("open")
+        );
+    }
+
+    /// A line names the file as the adapter has it, planned or canonical:
+    /// either is the plugin's.
+    #[test]
+    fn a_file_is_its_plugins_planned_or_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("lens.ts"), "").unwrap();
+        let link = dir.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(not(unix))]
+        return;
+        let planned = link.join("lens.ts");
+        let canonical = std::fs::canonicalize(&planned).unwrap();
+        assert_ne!(planned, canonical);
+        let line = |file: &Path| {
+            format!(
+                "[pi] fixed answer ({}): ctx.isProjectTrusted() → false",
+                file.display()
+            )
+        };
+        // Planned as spelled, the line canonical; and the other way.
+        for (files, named) in [(&planned, &canonical), (&canonical, &planned)] {
+            let said = Said::checking(
+                &[("lens".to_owned(), vec![files.clone()])],
+                false,
+                Vec::new(),
+            );
+            assert_eq!(
+                said.note(&pi(&line(named))).unwrap().0.as_deref(),
+                Some("lens"),
+                "{} as {}",
+                files.display(),
+                named.display()
+            );
         }
     }
 
@@ -332,7 +544,10 @@ mod tests {
                 Level::WARN,
                 "[dsh-host] writing the DSH session log failed: EACCES"
             )),
-            Some("The DSH host: writing the DSH session log failed: EACCES".into())
+            Some((
+                None,
+                "The DSH host: writing the DSH session log failed: EACCES".into()
+            ))
         );
         assert_eq!(
             said.note(&dsh(Level::INFO, "[dsh-host] turn 1 opened")),

@@ -2105,10 +2105,10 @@ extension and, where one would change it, the grant: "pi extension lens
 asked ctx.isProjectTrusted(): answered false (grant `trust = true` to
 change it)"; a `pi.exec` refused for want of `exec`, or by the gate's other
 refusals (not the owner's Block); a pi wake the host never got; the DSH
-host's warnings. Not yet: `check` (no session watches there; proposed:
-"Fixed answers in `check`", below).
+host's warnings. `check`: "Fixed answers in `check`", below (built
+2026-10-23).
 
-#### Fixed answers in `check` (proposed 2026-10-23)
+#### Fixed answers in `check` (built 2026-10-23)
 
 **Why.** `check` names every grant an entry has, but not what a plugin
 was answered for want of one. pi-lens without `trust` loads, lists its
@@ -2166,9 +2166,10 @@ prompt.
   - a line with no file, a file no pi plugin loads, or the DSH host's
     warnings gives none, and the note goes on the agent. The DSH host
     starts only together and serves every DSH plugin.
-- **Read with the grants.** `Said` learns each pi file's grants
-  (`Said::with_grants`, from the pi plugins' `grants`, matched by file as
-  `who` matches; `run` keeps `Said::new`, whose session runs granted). In
+- **Read with the grants.** `Said` learns each pi plugin's grants
+  (`Said::checking`, from the pi plugins' `grants`, matched by the plugin
+  `who` finds for the line's file; `run` keeps `Said::new`, whose session
+  runs granted). In
   `check` it drops what the probe alone said for want of a grant the
   plugin has:
   - the `isProjectTrusted() → false` note when its plugin has `trust`;
@@ -2242,6 +2243,20 @@ it.
     and none for no file or an unknown file;
   - the grant filters;
   - `check`'s leaving out of the gate's refusals and wakes.
+
+**Built** (2026-10-23) as proposed, decisions 1–3 as recommended:
+`plugin_log::Said::checking(pi_files, model, grants)` (`PiGrants {
+plugin, trust, exec }`), `Said::note` → `(Option<plugin>, text)`
+(`plugin_log::Note`); `check` holds the watch from before the probes to
+after `together`, collecting into a list it attaches at the end. `Said`
+keeps each file as given and canonical. After review: in `check` only the
+gate's refusals its setting makes (unanswered, the judge or the ask
+failing) are left out; a bad `cwd` and a missing approval service are said
+as in `run`. Tests: `plugin_log`'s `check_reads_lines_with_each_plugins_grants`
+and `a_file_is_its_plugins_planned_or_canonical`, `cli_test`
+`check_says_what_a_pi_extension_was_answered_for_want_of_a_grant` (no note
+on the agent; `ctx.model` and `session_shutdown`; granted; a gated `rm`;
+an entry with a problem, together skipped).
 
 **Decisions for review.**
 1. *A note, not a problem* (recommended: the plugin loads and works,
