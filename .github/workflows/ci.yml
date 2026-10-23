@@ -58,6 +58,13 @@ jobs:
         run: |
           rm -rf target/tmp/yobuild-home target/tmp/pi-lens-home
           YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked
+      - name: pi-lens's logs (diagnosis, on failure)
+        if: failure()
+        run: |
+          d=target/tmp/pi-lens-home/.pi-lens
+          ls -la $d $d/tools $d/bin 2>&1 | head -40
+          for f in $d/*.log; do echo "== $f"; tail -60 "$f"; done
+          find $d/projects -name '*.json' -newer $d/instances.json 2>/dev/null | head -5 | while read f; do echo "== $f"; head -c 3000 "$f"; echo; done
       - name: Page logic and the approval gate (node --test)
         run: node --test frontend/web/lib.test.js frontend/plugins/pi-extensions/confirm-dangerous.test.mjs
       - name: Example (scripted, headless; a pi dialog reaches the terminal UI)
