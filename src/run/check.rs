@@ -423,6 +423,10 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         locked,
         home,
     } = options;
+    // Node and npm, before anything uses them (design §13).
+    if super::needs_node(&manifest, false) {
+        crate::runtime::node_and_npm()?;
+    }
     // yobuild's own plugins (`yobuild:<name>`), given their files first.
     let manifest = manifest.with_builtins(&layout.frontend)?;
     // What `run` reads before anything starts, the key and budgets aside.

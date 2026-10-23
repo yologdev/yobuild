@@ -20,6 +20,10 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// folder), at the version yobuild's own runtimes use.
 const RUTIS_RUNTIME: &str = "@arcships/rutis-runtime";
 
+/// The version yobuild's own runtimes run (`frontend/plugins/package.json`'s
+/// pin, unit-tested equal), which a rutis plugin's package must install.
+const RUTIS_RUNTIME_VERSION: &str = "0.12.0";
+
 /// The rows re-providing `host_approval` and `host_session` to the pi
 /// adapter (`pi-host-approval`, `pi-host-session`).
 pub(crate) const PI_HOST_APPROVAL: &str = "pi-host-approval";
@@ -448,7 +452,7 @@ pub(crate) fn plan(
                 let at = match plan.rutis.iter().position(|p| *p == package) {
                     Some(at) => at,
                     None => {
-                        rutis_runtime(&package, layout).map_err(failed)?;
+                        rutis_runtime(&package).map_err(failed)?;
                         plan.rutis.push(package);
                         plan.rutis.len() - 1
                     }
@@ -858,15 +862,8 @@ fn package_of(path: &Path) -> Result<PathBuf, BoxError> {
 
 /// A rutis plugin's Node runtime: `@arcships/rutis-runtime` installed in its
 /// package (`dir`), at the version yobuild's own runtimes use.
-fn rutis_runtime(dir: &Path, layout: &Layout) -> Result<(), BoxError> {
-    let pins = layout.frontend.join("plugins/package.json");
-    let text = std::fs::read_to_string(&pins).map_err(|e| format!("{}: {e}", pins.display()))?;
-    let version = serde_json::from_str::<Json>(&text)
-        .map_err(|e| format!("{}: {e}", pins.display()))?["dependencies"][RUTIS_RUNTIME]
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| format!("{}: no {RUTIS_RUNTIME}", pins.display()))?;
-    let package = Package::new(RUTIS_RUNTIME, &version)?;
+fn rutis_runtime(dir: &Path) -> Result<(), BoxError> {
+    let package = Package::new(RUTIS_RUNTIME, RUTIS_RUNTIME_VERSION)?;
     let install = format!(
         "a rutis plugin runs in a Node runtime in its package: npm install {} in {}",
         package.spec(),
@@ -1264,6 +1261,8 @@ mod tests {
         let pins = Layout::default().frontend.join("plugins/package.json");
         let pins: Json = serde_json::from_str(&std::fs::read_to_string(pins).unwrap()).unwrap();
         let version = pins["dependencies"][RUTIS_RUNTIME].as_str().unwrap();
+        // The constant is the frontend's own pin.
+        assert_eq!(version, RUTIS_RUNTIME_VERSION);
         let runtime = dir.path().join("node_modules").join(RUTIS_RUNTIME);
         std::fs::create_dir_all(&runtime).unwrap();
         std::fs::write(

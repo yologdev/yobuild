@@ -53,26 +53,96 @@ use crate::manifest::{
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Where yobuild's own plugin files are: the frontend's (`frontend/plugins`)
-/// and the adapters copied from yoagent-rutis (`adapters/`,
-/// `scripts/copy-adapters.sh`).
+/// Where yobuild's own runtime files are: `frontend` holds `plugins/` (the
+/// terminal UI and yobuild's own plugins) beside `web/lib.js`; `adapters`
+/// holds yoagent-rutis's `pi/` and `dsh/`.
 #[derive(Debug, Clone)]
 pub struct Layout {
     pub frontend: PathBuf,
     pub adapters: PathBuf,
 }
 
-impl Default for Layout {
-    /// The checkout this crate was built from: `yobuild run` needs its
-    /// `frontend/plugins` and `adapters/` (set up by
-    /// `scripts/try-coding-agent.sh --setup-only`).
-    fn default() -> Self {
+impl Layout {
+    /// The checkout this crate was built from (`frontend/`, and `adapters/`
+    /// set up by `scripts/try-coding-agent.sh --setup-only`): for the
+    /// tests and `examples/coding_agent.rs`.
+    pub fn checkout() -> Self {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
         Self {
             frontend: repo.join("frontend"),
             adapters: repo.join("adapters"),
         }
     }
+
+    /// The runtime sets `manifest` needs, installed in the cache (`home`,
+    /// else `YOBUILD_HOME` or `~/.yobuild`; design §13): `adapters` for a pi
+    /// or DSH plugin, `ui` for the terminal UI (`terminal`) or one of
+    /// yobuild's own plugins. What it does not need is named by a path
+    /// that says so, never installed. `say` hears an install begin.
+    pub fn installed(
+        manifest: &Manifest,
+        home: Option<&Path>,
+        terminal: bool,
+        say: &dyn Fn(&str),
+    ) -> Result<Self, BoxError> {
+        use crate::runtime::{installed, RuntimeSet};
+        let adapters = manifest
+            .plugins
+            .iter()
+            .any(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_)));
+        let ui = terminal || manifest.plugins.iter().any(|p| p.builtin.is_some());
+        if !adapters && !ui {
+            return Ok(Self::unneeded());
+        }
+        let home = match home {
+            Some(home) => home.to_path_buf(),
+            None => crate::install::home()?,
+        };
+        let unneeded = Self::unneeded();
+        Ok(Self {
+            frontend: match ui {
+                true => installed(&home, RuntimeSet::Ui, say)?,
+                false => unneeded.frontend,
+            },
+            adapters: match adapters {
+                true => installed(&home, RuntimeSet::Adapters, say)?,
+                false => unneeded.adapters,
+            },
+        })
+    }
+
+    /// Paths no file is at, for a manifest that needs neither set.
+    fn unneeded() -> Self {
+        Self {
+            frontend: PathBuf::from("(yobuild's ui runtime: not needed by this manifest)"),
+            adapters: PathBuf::from("(yobuild's adapters runtime: not needed by this manifest)"),
+        }
+    }
+}
+
+impl Default for Layout {
+    /// The checkout ([`Layout::checkout`]): the library's tests run from it;
+    /// the `yobuild` binary uses [`Layout::installed`].
+    fn default() -> Self {
+        Self::checkout()
+    }
+}
+
+/// Whether running `manifest` needs Node and npm: a plugin (each runs in a
+/// Node runtime, or has its package installed), a pinned MCP server (npm
+/// installs it), or the terminal UI (`terminal`).
+pub(crate) fn needs_node(manifest: &Manifest, terminal: bool) -> bool {
+    terminal
+        || !manifest.plugins.is_empty()
+        || manifest.mcp.iter().any(|s| {
+            matches!(
+                &s.transport,
+                Transport::Stdio {
+                    source: Source::Package(_),
+                    ..
+                }
+            )
+        })
 }
 
 /// How to run an agent.
@@ -160,6 +230,11 @@ pub struct Ended {
 pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     let started = Instant::now();
     let cwd = std::env::current_dir()?;
+    // Node and npm, before anything uses them (design §13).
+    let terminal = options.manifest.frontend.terminal && !options.once;
+    if needs_node(&options.manifest, terminal) {
+        crate::runtime::node_and_npm()?;
+    }
     // yobuild's own plugins (`yobuild:<name>`), given their files first.
     let options = Options {
         manifest: options.manifest.with_builtins(&options.layout.frontend)?,
@@ -3072,6 +3147,82 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("has a name that is not UTF-8"), "{error}");
+    }
+
+    /// Which of yobuild's runtime sets a manifest needs (design §13): none
+    /// for no plugin (and no home looked up), `adapters` for pi or DSH, `ui`
+    /// for a built-in or the terminal UI, neither for a rutis plugin of
+    /// one's own; and when Node and npm are needed.
+    #[test]
+    fn a_manifest_gets_the_runtime_sets_it_needs() {
+        use crate::runtime::{seed, RuntimeSet};
+        let dir = tempfile::tempdir().unwrap();
+        let m = |entries: &str| {
+            Manifest::parse(
+                &format!("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n{entries}"),
+                &dir.path().join("a.toml"),
+                dir.path(),
+            )
+            .unwrap()
+        };
+        let home = tempfile::tempdir().unwrap();
+        let adapters = seed(home.path(), RuntimeSet::Adapters);
+        let ui = seed(home.path(), RuntimeSet::Ui);
+        let never = |text: &str| panic!("nothing is installed here: {text}");
+        let layout = |manifest: &Manifest, terminal: bool, home: Option<&Path>| {
+            Layout::installed(manifest, home, terminal, &never).unwrap()
+        };
+        let installed = |l: &Layout| (l.adapters == adapters, l.frontend == ui);
+        // No plugin: nothing, not even a home.
+        let none = layout(&m(""), false, Some(Path::new("/no/home/at/all")));
+        assert_eq!(installed(&none), (false, false));
+        assert!(!none.adapters.exists() && !none.frontend.exists());
+        let at = Some(home.path());
+        for (entries, terminal, want) in [
+            ("[[plugin]]\npi = \"./p.ts\"\n", false, (true, false)),
+            ("[[plugin]]\ndsh = \"./d.ts\"\n", false, (true, false)),
+            (
+                "[[plugin]]\nrutis = \"yobuild:todo-plan\"\n",
+                false,
+                (false, true),
+            ),
+            (
+                "[[plugin]]\npi = \"yobuild:confirm-dangerous\"\n",
+                false,
+                (true, true),
+            ),
+            (
+                "[[plugin]]\nrutis = \"./r.ts\"\nruntime = \"node\"\n",
+                false,
+                (false, false),
+            ),
+            ("", true, (false, true)),
+        ] {
+            assert_eq!(
+                installed(&layout(&m(entries), terminal, at)),
+                want,
+                "{entries} {terminal}"
+            );
+        }
+        // Node: a plugin, a pinned server, the terminal UI.
+        assert!(!needs_node(&m(""), false));
+        assert!(needs_node(&m(""), true));
+        assert!(needs_node(
+            &m("[[plugin]]\nrutis = \"./r.ts\"\nruntime = \"node\"\n"),
+            false
+        ));
+        assert!(needs_node(
+            &m("[[mcp]]\nname = \"s\"\nnpm = \"srv@1.0.0\"\n"),
+            false
+        ));
+        assert!(!needs_node(
+            &m("[[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n"),
+            false
+        ));
+        assert!(!needs_node(
+            &m("[[mcp]]\nname = \"h\"\nurl = \"https://mcp.example/\"\n"),
+            false
+        ));
     }
 
     /// The one environment note: on unix the count of what one or more

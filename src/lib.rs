@@ -12,6 +12,7 @@
 //! - [`manifest`]: an agent in one TOML file, read strictly.
 //! - [`install`]: a manifest's pinned packages, locked and installed.
 //! - [`run`]: an agent from its manifest (the `yobuild run` command).
+//! - [`runtime`]: yobuild's own runtime files, installed into the cache.
 //!
 //! Not published yet and without an API promise.
 
@@ -22,3 +23,4 @@ pub(crate) mod hints;
 pub mod install;
 pub mod manifest;
 pub mod run;
+pub mod runtime;

@@ -43,7 +43,30 @@ use rutis::Ctx;
 use yoagent::{AgentMessage, Content, Message};
 use yobuild::frontend::RunOutcome;
 use yobuild::manifest::Manifest;
-use yobuild::run::{run, Options};
+use yobuild::run::{run, Layout, Options};
+
+/// What yobuild says on stderr while it gets ready (an install of its own
+/// runtime files).
+fn say(text: &str) {
+    eprintln!("yobuild: {text}");
+}
+
+/// yobuild's own runtime files: the cache's (design §13), or — with
+/// `YOBUILD_RUNTIMES=checkout`, for developing yobuild — the checkout it was
+/// built from, whose `adapters/` holds the fixtures a test loads beside the
+/// runtime that must resolve their imports.
+fn layout(manifest: &Manifest, terminal: bool) -> Result<Layout, BoxError> {
+    // Unset or empty: the cache (as `YOBUILD_HOME` reads an empty one).
+    match std::env::var_os("YOBUILD_RUNTIMES").filter(|v| !v.is_empty()) {
+        None => Layout::installed(manifest, None, terminal, &say),
+        Some(v) if v == "checkout" => Ok(Layout::checkout()),
+        Some(other) => Err(format!(
+            "YOBUILD_RUNTIMES={:?}: only \"checkout\" is known (or leave it unset)",
+            other.to_string_lossy()
+        )
+        .into()),
+    }
+}
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -55,6 +78,9 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(e) => {
             eprintln!("yobuild: {e}");
+            if let Some(fix) = yobuild::run::what_to_do_at_start(&e.to_string()) {
+                eprintln!("  what to do: {fix}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -111,6 +137,9 @@ fn start() -> Result<ExitCode, BoxError> {
         return Err("--web: this run has no web frontend (--once, or a terminal manifest)".into());
     }
     let log = logging(terminal.then_some(options.manifest.agent.name.as_str()))?;
+    // yobuild's own runtime files, from the cache (design §13), once the
+    // log is there for what installing them warns of.
+    options.layout = layout(&options.manifest, terminal)?;
     let once = options.once;
 
     let runtime = tokio::runtime::Runtime::new()?;
@@ -192,6 +221,8 @@ fn check(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
         }
     }
     logging(None)?;
+    // As `run`'s: after the options are read and the log is there.
+    options.layout = layout(&options.manifest, false)?;
     let runtime = tokio::runtime::Runtime::new()?;
     let report = match runtime.block_on(check(options)) {
         Ok(report) => report,
