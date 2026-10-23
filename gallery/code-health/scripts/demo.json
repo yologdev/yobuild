@@ -1,0 +1,128 @@
+[
+  {
+    "tools": [
+      {
+        "name": "list_files",
+        "arguments": {
+          "path": "."
+        }
+      },
+      {
+        "name": "read_file",
+        "arguments": {
+          "path": "tsconfig.json"
+        },
+        "expect": "strict"
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "project_report",
+        "arguments": {
+          "view": "compact"
+        }
+      },
+      {
+        "name": "symbol_search",
+        "arguments": {
+          "query": "sum"
+        }
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "list_files",
+        "arguments": {
+          "path": "src"
+        },
+        "expect": "sum.ts"
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "lens_diagnostics",
+        "arguments": {
+          "source": "lsp",
+          "scope": "paths",
+          "paths": [
+            "src/sum.ts"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "lens_diagnostics",
+        "arguments": {
+          "source": "lsp",
+          "scope": "paths",
+          "paths": [
+            "src/sum.ts"
+          ]
+        },
+        "expect": "2345"
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "read_file",
+        "arguments": {
+          "path": "src/sum.ts",
+          "offset": 4,
+          "limit": 1
+        },
+        "expect": "sum(1, \"2\")"
+      },
+      {
+        "name": "module_report",
+        "arguments": {
+          "path": "src/sum.ts",
+          "view": "summary"
+        },
+        "expect": "\"name\":\"sum\""
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "read_symbol",
+        "arguments": {
+          "path": "src/sum.ts",
+          "symbol": "sum"
+        },
+        "expect": "a + b"
+      },
+      {
+        "name": "search",
+        "arguments": {
+          "pattern": "export"
+        }
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "project_report",
+        "arguments": {
+          "view": "compact"
+        },
+        "expect": "sum.ts"
+      }
+    ]
+  },
+  {
+    "text": "## Type errors\n- `src/sum.ts:4` — Argument of type 'string' is not assignable to parameter of type 'number' (`typescript:2345`). `sum(1, \"2\")` passes the text \"2\"; pass the number `2`.\n\n## Project outline\n- `tsconfig.json` — strict, no emit, includes `src`.\n- `src/sum.ts` — `sum(a, b)`: adds two numbers; `total`: `sum(1, \"2\")`.\n\n## Not checked\n- The project's own build and tests, and `npx tsc --noEmit` (not run: this agent runs nothing that could write).\n- Lint (no linter in this agent).\n- No open questions."
+  }
+]

@@ -1,0 +1,2 @@
+[Owner's answer to #1] There is no `api` package in this folder: should I check `src/` (the only TypeScript here) instead?
+Check src/

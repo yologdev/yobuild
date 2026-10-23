@@ -108,6 +108,12 @@ found. Nobody is there to answer:
 
 ## The traps
 
+- **A tool that warms up.** Each run of a reply file starts in a folder
+  the plugin may never have seen: a call that builds an index or starts a
+  language server can answer "retry shortly", or nothing, the first time.
+  Do in every reply file what `parts.md` says for that part (pi-lens:
+  `lens_diagnostics` twice, the `expect` on the second) — one reply file
+  passing does not mean the others will.
 - **With `[builtins] report`**, the last `text` reply must name every
   section (anywhere, any case: `## Done` …; `report = "handoff"` needs
   Done, Waiting on you, Decisions, Next). Else yobuild sends the model

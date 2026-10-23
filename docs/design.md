@@ -1775,6 +1775,24 @@ with a unit test.
    run. That second option would not meet "results checked" for the tool
    that matters.
 
+**Built** (2026-10-23): `expect` and the dedup (#63); the agent, built
+through the skill twice. The first build's `unclear` reply file probed
+`lens_diagnostics` once and, in a folder new to pi-lens, found nothing
+(its `demo`, probing twice, passed): `parts.md` now says to probe twice
+everywhere, the `expect` on the second, and `scripted.md` has a trap for
+tools that warm up. Its other stumbles, now in the skill:
+- `project_report`'s cold "retry shortly";
+- `read_enclosing` finding nothing for a top-level line;
+- `module_report` leaving out exported constants;
+- pi-lens's `git status` in the project;
+- where an agent that reads the whole project lives (beside it, in
+  `SKILL.md`).
+
+The second build ran each reply file twice on fresh copies, each passing.
+`holds` builds the asking tools' arguments from their schemas
+(`accepted`): pi-lens validates before the gate, and `{}` was refused as
+invalid rather than asked.
+
 **Order of PRs:**
 1. this design;
 2. `expect`, the `Said` dedup, `scripted.md` and `parts.md`'s notes,

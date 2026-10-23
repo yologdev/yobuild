@@ -1,0 +1,13 @@
+[
+  { "tools": [
+    { "name": "list_files", "arguments": { "path": "." }, "expect": "tsconfig.json" },
+    { "name": "project_report", "arguments": { "view": "compact" } }
+  ] },
+  { "tools": [
+    { "name": "ask_owner", "arguments": {
+      "question": "There is no `api` package in this folder: should I check `src/` (the only TypeScript here) instead?",
+      "why": "The task names a package this project does not have.",
+      "options": ["Check src/", "I'll point you at the api package"] } }
+  ] },
+  { "text": "## Type errors\nNone checked yet: waiting on question #1 (which code to check).\n\n## Project outline\n- `tsconfig.json` — strict, no emit, includes `src`.\n- `src/` — the only TypeScript folder; there is no `api` package here.\n\n## Not checked\n- Everything: question #1 — no `api` package here; check `src/` instead?" }
+]

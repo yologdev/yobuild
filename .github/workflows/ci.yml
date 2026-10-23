@@ -52,10 +52,11 @@ jobs:
       - name: Docs
         run: RUSTDOCFLAGS="-Dwarnings" cargo doc --locked --no-deps
       - name: Test (pi's and DSH's dialogs through the session need the runtimes)
-        # The tests' package cache starts empty, so every install really runs
-        # (the build cache may bring target/tmp back).
+        # The tests' package cache starts empty, so every install really runs,
+        # and pi-lens's servers are fetched (the build cache may bring
+        # target/tmp back).
         run: |
-          rm -rf target/tmp/yobuild-home
+          rm -rf target/tmp/yobuild-home target/tmp/pi-lens-home
           YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked
       - name: Page logic and the approval gate (node --test)
         run: node --test frontend/web/lib.test.js frontend/plugins/pi-extensions/confirm-dangerous.test.mjs

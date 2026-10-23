@@ -1,0 +1,13 @@
+[
+  { "tools": [
+    { "name": "lens_diagnostics", "arguments": { "source": "lsp", "scope": "paths", "paths": ["src"] } }
+  ] },
+  { "tools": [
+    { "name": "lens_diagnostics", "arguments": { "source": "lsp", "scope": "paths", "paths": ["src"] }, "expect": "2345" }
+  ] },
+  { "tools": [
+    { "name": "read_file", "arguments": { "path": "src/sum.ts" }, "expect": "export const total" },
+    { "name": "module_report", "arguments": { "path": "src/sum.ts", "view": "summary" }, "expect": "\"name\":\"sum\"" }
+  ] },
+  { "text": "## Type errors\n- `src/sum.ts:4` — Argument of type 'string' is not assignable to parameter of type 'number' (`typescript:2345`): pass the number `2`, not the text \"2\".\n\n## Project outline\n- `tsconfig.json` — strict, no emit, includes `src`.\n- `src/sum.ts` — `sum(a, b)` and `total`.\n\n## Not checked\n- The project's build and tests, `npx tsc --noEmit`, lint. No open questions." }
+]

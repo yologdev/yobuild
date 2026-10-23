@@ -31,7 +31,9 @@ from the agent's folder: `path/to/yobuild/target/debug/yobuild …` — below,
 
 One folder per agent, anywhere (not inside the yobuild checkout); the
 agent works in the folder `yobuild run` is started in (usually this one,
-or the project it works on):
+or the project it works on). An agent that reads or outlines the whole
+project should live beside it, not inside: in the project, its own
+manifest, prompt and reply files are among what it reads.
 
 ```text
 my-agent/
