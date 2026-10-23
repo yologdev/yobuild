@@ -2104,6 +2104,84 @@ change it)"; a `pi.exec` refused for want of `exec`, or by the gate's other
 refusals (not the owner's Block); a pi wake the host never got; the DSH
 host's warnings. Not yet: `check` (no session watches there).
 
+#### Fixed answers in `check` (proposed 2026-10-23)
+
+**Why.** `check` names every grant an entry has, but not what a plugin
+was answered for want of one. pi-lens without `trust` loads, lists its
+tools and passes `check`, then every diagnostic says "unavailable": the
+owner learns why only from `run`'s Warning, after spending a run. The
+roadmap's M3b asks that `check` name every fixed answer.
+
+**What is there to see.** `check` already starts the pi adapter twice,
+and `run`'s watcher would read both (verified against yoagent-rutis
+0.8.1):
+- alone, `probe::pi_with` loads the plugin's extension files (as
+  planned: `Plan::pi_files`) in a row whose id is `pi`, as `run`'s is.
+  The adapter fires `session_start` as it starts;
+- together, `run::start` loads the `pi` row, and `offered` calls one
+  run's hooks: `start_run`, `tools`, one `before_model`, `finish`. pi's
+  `before_agent_start` handlers run in that `before_model`.
+
+So a fixed answer given in `session_start`, in `before_agent_start` or as
+an extension loads reaches `check`'s process as a `tracing` event on the
+same target, from the same row, naming the same file. A question asked
+only in a tool call, or in a later hook (`tool_call`, `tool_result`,
+`input`), is not asked, since `check` calls no tool and sends no prompt.
+
+**How.** `check` watches plugin lines for its whole span, as `run` does
+(`plugin_log::watch` with a `Said` built from `Plan::pi_names()` and
+`Manifest::pi_model()`). This covers the probes alone and the agent
+together.
+- **Where it goes.** Each line `Said` knows becomes a note. A pi line
+  goes on the entry of the plugin whose file it names (`Said` returns
+  that plugin's name beside the text). A line with no file, or naming a
+  file no pi plugin loads, goes on the agent, as do the DSH host's
+  warnings (the host starts only together).
+- **How it is said.** Each is said once: alone and together give the
+  same line, and `Said` drops a repeat. The wording is `run`'s, for
+  example "pi extension lens asked ctx.isProjectTrusted(): answered
+  false (grant `trust = true` to change it)", and the same goes for a
+  `pi.exec` refused for want of `exec` and a pi wake the host never got.
+- **A note, not a problem:** the plugin works as answered, and `ok` is
+  unchanged.
+- **What stays the same:** the report's shape (version 3: notes are
+  text), the probes, and yoagent-rutis.
+
+**Limits, said.** The layer that sees these lines (`plugin_log::layer`)
+is the binary's: `check()` called as a library says them only if its
+caller installs the layer, so the tests use `cli_test`. A question asked
+only in a tool call goes unsaid by `check`, as before, and `run` says it.
+The skill's `failures.md` says so beside the note. This drops the earlier
+plan's "not exercised by the probe" per entry ("Fixed answers, said",
+above). The adapter cannot tell which questions a tool would ask, so the
+note would land on every pi plugin and say nothing.
+
+**Said where.**
+- `check`'s entry notes (text `  note: …`, JSON `notes`).
+- `failures.md`: the note, what to do (ask the person, then grant), and
+  the limit.
+- `CLAUDE.md`.
+
+**Tests.** `cli_test`:
+- an extension asking `ctx.isProjectTrusted()` in `session_start` and
+  calling `pi.exec` there gets both notes on its entry, each once,
+  `ok` still true;
+- one asking only in a tool gets neither;
+- with `trust = true` and `exec = "gate"`, the trust note goes.
+
+Unit tests: `Said` naming the plugin, for a file and for none.
+
+**Decisions for review.**
+1. *A note, not a problem* (recommended: the plugin loads and works,
+   answered as without a host), or a problem (`ok` false until granted
+   or the plugin is removed). A problem would refuse every honest manifest
+   that leaves `trust` off on purpose.
+2. *Tool-only questions unsaid by `check`* (recommended: `run` says them,
+   and the adapter cannot predict them), or one generic note on every pi
+   plugin without `trust`/`model`.
+3. *The DSH host's warnings as agent notes* (recommended: one host serves
+   every DSH plugin), or on each DSH plugin.
+
 ### Step 4: plugins without the provider keys (built 2026-10-21)
 
 **Why.** Every process yobuild starts inherits its environment, and with it

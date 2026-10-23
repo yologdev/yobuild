@@ -189,7 +189,9 @@ plugin of it or none) and named by `check`.
   judged by the gate and asked, `"free"`), and `model = "info"` on every pi
   plugin or none; `observe` dropped (every extension sees the conversation
   already, design §6); fixed answers and refused `pi.exec` said by `run`.
-- Left: `check` saying fixed answers (no session watches there), and noting
+- Left: `check` saying fixed answers (proposed 2026-10-23, design §12 "Fixed
+  answers in `check`": watched as `run` does, in its probes and the agent
+  together; a tool's own questions stay `run`'s), and noting
   a pi extension's observer events (the adapter would have to report its
   handlers).
 - **Built (step 4, 2026-10-21; design §12 "Step 4"):** every credential
