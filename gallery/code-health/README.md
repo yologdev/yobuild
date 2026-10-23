@@ -27,7 +27,7 @@ what is where. Read-only — it must never change my files."*
   project (a package that is not there, say).
 - **The report:** Type errors, Project outline, Not checked.
 - **Limits:**
-  - per run: $0.50, 30 model turns and 15 minutes;
+  - per run: $0.50 and 40 model turns;
   - in all: $2.00 until yobuild stops.
 
 ## What `trust` lets pi-lens do
@@ -52,8 +52,12 @@ You agree to this by running it:
   The report lists those under Not checked. Type errors come from the
   language server, file by file, for the files it probes.
 - **Not every probe finds something.** In a project new to pi-lens, the
-  first `lens_diagnostics` may find nothing. The prompt has it probe twice
-  and never report "clean" from one call.
+  first `lens_diagnostics` may find nothing, and a server still starting
+  (its first download, a slow machine) answers "inconclusive". The prompt
+  handles this:
+  - it probes twice, giving each probe a minute (`waitMs: 60000`);
+  - it reads pi-lens's `Outcomes:` line;
+  - it never reports "clean" from an unconfirmed check.
 
 ## What it needs
 
@@ -96,14 +100,16 @@ yobuild run path/to/gallery/code-health/agent.toml \
   --once "$(cat path/to/gallery/code-health/scripts/demo.task)"
 ```
 
-`scripts/question.json` names a package that is not there, so the agent
-asks. `scripts/answer.json` is the run your answer starts.
+`scripts/question.json` names a module that is not there, so the agent
+asks which one is meant and checks `src/` meanwhile.
 
 ## A live run
 
-2026-10-23, `deepseek/deepseek-flash`, `--once`, in the sample (a fresh
-folder; pi-lens's servers already fetched), with the task "Check this
-TypeScript project: type errors and an outline of what is where."
+2026-10-23, the second build's agent (the third, here, adds `waitMs` and
+the `Outcomes:` rule to its probes), `deepseek/deepseek-flash`, `--once`,
+in the sample (a fresh folder; pi-lens's servers already fetched), with
+the task "Check this TypeScript project: type errors and an outline of
+what is where."
 - **Calls:** 12 — `list_files`, `read_file`, `search`, `lens_diagnostics`
   twice, `project_report` twice, `symbol_search` and `module_report`.
   - The first `project_report` and the `symbol_search` came back

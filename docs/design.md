@@ -1788,7 +1788,15 @@ tools that warm up. Its other stumbles, now in the skill:
 - where an agent that reads the whole project lives (beside it, in
   `SKILL.md`).
 
-The second build ran each reply file twice on fresh copies, each passing.
+The second build ran each reply file twice on fresh copies, each passing
+locally, but on CI's Linux runner, with pi-lens's servers fetched cold,
+both probes of one reply file came back with no finding: each waits 15 s a
+file for the server by default (`waitMs`), and a server still starting
+outlasts that, answering `inconclusive` on its `Outcomes:` line. The skill
+now says `waitMs: 60000` on every probe and to read that line (never
+"clean" from `inconclusive`), and step 5 of `SKILL.md` names warm-up `✗`s.
+The third build passed each reply file three times, once with an empty
+`HOME`.
 `holds` builds the asking tools' arguments from their schemas
 (`accepted`): pi-lens validates before the gate, and `{}` was refused as
 invalid rather than asked.
