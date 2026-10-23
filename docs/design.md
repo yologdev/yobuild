@@ -3340,3 +3340,166 @@ above); (4) removing provider keys from plugin
 runtimes. Each a PR pair (yoagent-rutis,
 then yobuild), each design-checked; step 2's yoagent-rutis half shipped in
 0.7.1.
+
+## 13. Share: yobuild without its repository (M4; proposed 2026-10-23)
+
+**Why.** Today yobuild runs only from a set-up checkout. `Layout::default()`
+names the checkout's `frontend/` and `adapters/` by the path the binary was
+compiled at (`CARGO_MANIFEST_DIR`). `adapters/` is a gitignored copy of the
+yoagent-rutis crate's files (`scripts/copy-adapters.sh`), and the runtimes
+need `npm ci` in three folders. The skill says "until yobuild is installable
+on its own, it runs from a checkout". M4's "Done when": someone who has not
+seen the repository installs yobuild, runs `yobuild new`, and has a gallery
+agent running from the docs alone; 0.1 tagged.
+
+### What the binary needs at run time, and where it comes from
+
+| What | Today | Proposed |
+|---|---|---|
+| The web page (`frontend/web/`) | built into the binary (`include_str!`) | unchanged |
+| The terminal UI and UI plugins (`frontend/plugins/`: `terminal-ui.ts`, `search-links.ts`, `todo-plan.ts`, `pi-extensions/`, `package.json`, its lock) | the checkout, `npm ci` by hand | built into the binary; written to the cache and installed there on first need |
+| The pi adapter (`pi-extensions-adapter.ts`, `host-*.ts`, `resolve-package.mjs`, `package.json`, its lock) | copied from yoagent-rutis's crate into `adapters/pi`, `npm ci` by hand | the same files, built in; installed in the cache |
+| The DSH adapter (`dsh-tools-adapter.ts`, `dsh-host.ts`, `host-dialogs.ts`, `probe-services.ts`, `inspect-package.mjs`, the row lists, `package.json`, its lock: also the `dsh` set's base) | `adapters/dsh` | the same, built in; installed in the cache |
+| Node 22.19+ and npm | the person's | still the person's: said at once if missing or too old |
+
+The adapters' `fixture-*.ts` are test files and are not shipped.
+
+**The runtime sets.** The cache gets three sets of its own, `ui`, `pi` and
+`dsh`, installed the way `install.rs` installs a manifest's pins
+(design §4):
+- **Where:** `<home>/runtime/<set>/<hash>/` (`home`: `YOBUILD_HOME`, else
+  `~/.yobuild`).
+- **The hash:** over the set's files and lock, so a new yobuild with
+  changed adapters gets a new folder and an old one stays usable by the
+  old binary.
+- **The install:** the files are written, then `npm ci --ignore-scripts`
+  with the same flags (`npm_flags`), the stamp written last, made in a
+  `.partial-` folder and renamed into place. A folder without its stamp is
+  installed again.
+- **When:** only the sets a run needs (`ui` for the terminal UI or a
+  rutis plugin's runtime from yobuild's own package, `pi` for a pi plugin,
+  `dsh` for a DSH plugin), on first need. That is said like the manifest's
+  sets ("runtime `pi` installed: …") and refused under `--locked` only if
+  npm is missing.
+
+`Layout` becomes these folders. The checkout layout stays for development
+(`Layout::checkout()`: `examples/coding_agent.rs`, `run_test`). The
+`yobuild` binary always uses the cache, so CI exercises the installed path:
+- `cli_test` and `gallery_test` share the tests' `YOBUILD_HOME`, so each
+  set is installed once per job;
+- `scripts/copy-adapters.sh` stays for the example and `run_test`.
+
+**Where the adapters' files come from at build time.** They are
+yoagent-rutis's. Either:
+- **(a)** yoagent-rutis exposes them as data, e.g.
+  `adapters::files() -> &[(&str, &str)]` (`include_str!` in that crate), and
+  yobuild embeds that list. One source of truth, checked by the crate that
+  owns them. This needs a yoagent-rutis release, which is the yoagent
+  session's to make. Or:
+- **(b)** yobuild vendors a copy under `assets/adapters/`, refreshed by
+  `scripts/copy-adapters.sh` and checked in CI against the crate's files.
+
+Recommended: (a). (b) is the fallback if yoagent-rutis's owner declines.
+
+**Node, said at once.** Before any runtime starts, `node --version` and
+`npm --version` are checked: missing or older than 22.19 is an error
+naming what was found, with the hint `no-node`. Today that is reached
+only through rutis's own message.
+
+### New commands
+
+- **`yobuild new <name> [--from <gallery-agent>]`.** It makes the folder
+  `<name>/`, refused if it exists:
+  - **Alone**, it writes a starting manifest and prompt: `deepseek/deepseek-flash`,
+    `tools = "read-only"`, `ask_owner`, a `report`, a budget, the web
+    page. Every other key is shown commented, with a line on what it does
+    and a pointer to the skill's `manifest.md`.
+  - **With `--from`**, it copies a gallery agent built into the binary (its
+    `agent.toml`, `agent.lock`, `prompts/`, `scripts/`, `README.md`):
+    `web-research`, `notes-keeper`, `code-reviewer`, `spreadsheet-clerk`,
+    `code-health`. `yobuild new --list` names them, one line each.
+  - It ends by printing the next commands (`check`, a scripted run, a live
+    one).
+- **`yobuild skill install [--project] [--force]`.** It writes the
+  skill, built into the binary, to `~/.claude/skills/yobuild/` (or
+  `./.claude/skills/yobuild/` with `--project`).
+  - A folder there that differs from what this yobuild ships is refused
+    without `--force`, naming the files that differ. One that is the same
+    is "already installed".
+  - The skill's references to `examples/` become `yobuild new --from …`,
+    and `SKILL.md`'s "runs from a checkout" becomes "installed: `cargo
+    install yobuild` or a release binary", so the installed skill needs
+    no repository. `skill_test` checks that the skill names no repository
+    path.
+- **`yobuild --version`.**
+
+### Distribution
+
+- **crates.io (open question 2).** Recommended: publish `yobuild` 0.1 as
+  a binary crate (`cargo install yobuild`).
+  - Its library target stays: the tests use it. It is documented as having
+    no API promise before 1.0, and the crate's README says so.
+  - Everything it depends on is already on crates.io, provided (a) above
+    is released.
+- **Prebuilt binaries.** A release workflow on a `v*` tag builds for macOS
+  (arm64, x86_64) and Linux (x86_64, aarch64; glibc). It attaches tarballs
+  and checksums to the GitHub release, plus `cargo binstall` metadata. No
+  install script piped to a shell.
+- **Windows (open question 7).** Recommended: not in 0.1.
+  - It compiles, and `run` sets the credentials empty there.
+  - But nothing there is tested: the terminal UI reads `/dev/tty`, the
+    kept environment needs `/usr/bin/env`, and the pty checks are unix-only.
+  - So no Windows binary is built, the README says unsupported, and
+    `yobuild` on Windows prints one line saying so before running.
+- **The version.** `0.1.0`, with a `CHANGELOG.md` from the milestones.
+
+### Docs
+
+- **The repository's `README.md`, as the quickstart.** It covers, in
+  order:
+  - install (cargo or a release binary; Node 22.19+);
+  - `yobuild skill install`;
+  - `yobuild new my-agent --from web-research`;
+  - `yobuild check`;
+  - a scripted run, then a live run with a key;
+  - where the skill takes over.
+- **`docs/guide.md`.** The person's manual: the manifest (pointing at the
+  skill's `manifest.md`), grants, the kept environment, the gallery, what
+  to do when a run fails.
+- **A rendered docs site, and the video and posts.** Later, outside this
+  design.
+
+**Done-when check, in CI.** A `fresh-machine` job:
+1. builds the release binary;
+2. copies it to an empty folder outside the checkout;
+3. deletes the checkout's `adapters/` and `frontend/plugins/node_modules`;
+4. runs with an empty `HOME` and `YOBUILD_HOME`: `yobuild skill install`,
+   `yobuild new a --from notes-keeper`, `yobuild check a/agent.toml`, and
+   its `demo` scripted under `--once`, `Completed`.
+
+No key is needed, and nothing from the repository is read.
+
+### Decisions for review
+
+1. *crates.io* (open question 2). Recommended: publish the binary crate,
+   the library unpromised.
+2. *Windows* (open question 7). Recommended: not in 0.1, said.
+3. *The adapters' files.* Recommended: (a), yoagent-rutis exposing them,
+   with (b) vendoring as the fallback.
+4. *The gallery built into the binary* (`new --from`). Recommended:
+   built in, a few dozen KB of text. The alternative, fetched from the
+   repository, needs the network and a URL to trust.
+5. *Docs.* Recommended: README and `docs/guide.md` for 0.1; a rendered
+   site later.
+
+### Order of PRs
+
+1. this design;
+2. yoagent-rutis's `adapters::files()` (the yoagent session);
+3. the runtime sets in the cache, `Layout`, and the Node check;
+4. `yobuild new` (with the built-in gallery) and `yobuild skill install`,
+   with the skill made repository-free;
+5. the release workflow, the crate's metadata, `CHANGELOG.md` and the
+   `fresh-machine` job;
+6. README and `docs/guide.md`;
+7. tag 0.1 (and publish, per decision 1).
