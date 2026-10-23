@@ -63,7 +63,12 @@ fn lock_path(manifest: &Manifest) -> PathBuf {
 /// The cache's home: `YOBUILD_HOME`, else `~/.yobuild`.
 pub(crate) fn home() -> Result<PathBuf, BoxError> {
     match std::env::var_os("YOBUILD_HOME").filter(|v| !v.is_empty()) {
-        Some(home) => Ok(PathBuf::from(home)),
+        // Absolute: the runtimes' rows name files under it, and a relative
+        // name would be read from each runtime's own folder.
+        Some(home) => {
+            Ok(std::path::absolute(PathBuf::from(home))
+                .map_err(|e| format!("YOBUILD_HOME: {e}"))?)
+        }
         None => match std::env::var_os("HOME").filter(|v| !v.is_empty()) {
             Some(home) => Ok(Path::new(&home).join(".yobuild")),
             None => Err("neither YOBUILD_HOME nor HOME is set: where would packages go?".into()),

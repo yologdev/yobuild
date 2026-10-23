@@ -106,20 +106,26 @@ fn yobuild(args: &[&str], cwd: &Path, home: &Path) -> Ran {
     ran
 }
 
-/// The agent's gallery folder, when the adapters are installed (required
-/// in CI).
+/// The agent's gallery folder, when Node and npm are there (required in
+/// CI): the binary installs its own runtime files (design §13), so the
+/// checkout's `adapters/` is not needed.
 fn agent(name: &str) -> Option<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    if ["adapters/pi/node_modules", "adapters/dsh/node_modules"]
-        .iter()
-        .all(|d| root.join(d).is_dir())
-    {
+    let runs = |program: &str| {
+        Command::new(program)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    if runs("node") && runs("npm") {
         return Some(root.join("gallery").join(name));
     }
     if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
-        panic!("the gallery needs the adapters: scripts/copy-adapters.sh, then npm ci in adapters/pi and adapters/dsh");
+        panic!("the gallery needs Node 22.19+ and npm 11.19+");
     }
-    eprintln!("SKIPPED: scripts/copy-adapters.sh, then npm ci in adapters/pi and adapters/dsh");
+    eprintln!("SKIPPED: the gallery needs Node 22.19+ and npm 11.19+");
     None
 }
 

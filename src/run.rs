@@ -3149,6 +3149,82 @@ mod tests {
         assert!(error.contains("has a name that is not UTF-8"), "{error}");
     }
 
+    /// Which of yobuild's runtime sets a manifest needs (design §13): none
+    /// for no plugin (and no home looked up), `adapters` for pi or DSH, `ui`
+    /// for a built-in or the terminal UI, neither for a rutis plugin of
+    /// one's own; and when Node and npm are needed.
+    #[test]
+    fn a_manifest_gets_the_runtime_sets_it_needs() {
+        use crate::runtime::{seed, RuntimeSet};
+        let dir = tempfile::tempdir().unwrap();
+        let m = |entries: &str| {
+            Manifest::parse(
+                &format!("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n{entries}"),
+                &dir.path().join("a.toml"),
+                dir.path(),
+            )
+            .unwrap()
+        };
+        let home = tempfile::tempdir().unwrap();
+        let adapters = seed(home.path(), RuntimeSet::Adapters);
+        let ui = seed(home.path(), RuntimeSet::Ui);
+        let never = |text: &str| panic!("nothing is installed here: {text}");
+        let layout = |manifest: &Manifest, terminal: bool, home: Option<&Path>| {
+            Layout::installed(manifest, home, terminal, &never).unwrap()
+        };
+        let installed = |l: &Layout| (l.adapters == adapters, l.frontend == ui);
+        // No plugin: nothing, not even a home.
+        let none = layout(&m(""), false, Some(Path::new("/no/home/at/all")));
+        assert_eq!(installed(&none), (false, false));
+        assert!(!none.adapters.exists() && !none.frontend.exists());
+        let at = Some(home.path());
+        for (entries, terminal, want) in [
+            ("[[plugin]]\npi = \"./p.ts\"\n", false, (true, false)),
+            ("[[plugin]]\ndsh = \"./d.ts\"\n", false, (true, false)),
+            (
+                "[[plugin]]\nrutis = \"yobuild:todo-plan\"\n",
+                false,
+                (false, true),
+            ),
+            (
+                "[[plugin]]\npi = \"yobuild:confirm-dangerous\"\n",
+                false,
+                (true, true),
+            ),
+            (
+                "[[plugin]]\nrutis = \"./r.ts\"\nruntime = \"node\"\n",
+                false,
+                (false, false),
+            ),
+            ("", true, (false, true)),
+        ] {
+            assert_eq!(
+                installed(&layout(&m(entries), terminal, at)),
+                want,
+                "{entries} {terminal}"
+            );
+        }
+        // Node: a plugin, a pinned server, the terminal UI.
+        assert!(!needs_node(&m(""), false));
+        assert!(needs_node(&m(""), true));
+        assert!(needs_node(
+            &m("[[plugin]]\nrutis = \"./r.ts\"\nruntime = \"node\"\n"),
+            false
+        ));
+        assert!(needs_node(
+            &m("[[mcp]]\nname = \"s\"\nnpm = \"srv@1.0.0\"\n"),
+            false
+        ));
+        assert!(!needs_node(
+            &m("[[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n"),
+            false
+        ));
+        assert!(!needs_node(
+            &m("[[mcp]]\nname = \"h\"\nurl = \"https://mcp.example/\"\n"),
+            false
+        ));
+    }
+
     /// The one environment note: on unix the count of what one or more
     /// entries do not get, the credentials named; off unix the credentials
     /// only; nothing when nothing starts or nothing is left out.

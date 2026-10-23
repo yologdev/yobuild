@@ -1016,6 +1016,37 @@ fn check_says_what_run_would_refuse() {
     );
 }
 
+/// `YOBUILD_RUNTIMES`: unset or empty is the cache; `checkout` the
+/// repository's; anything else refused before anything runs.
+#[test]
+fn yobuild_runtimes_takes_checkout_or_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n",
+    )
+    .unwrap();
+    let with = |value: &str| {
+        bin()
+            .args(["check", "agent.toml"])
+            .current_dir(dir.path())
+            .env_remove("RUST_LOG")
+            .env("YOBUILD_RUNTIMES", value)
+            .output()
+            .unwrap()
+    };
+    let out = with("x");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "yobuild: YOBUILD_RUNTIMES=\"x\": only \"checkout\" is known (or leave it unset)\n"
+    );
+    for value in ["", "checkout"] {
+        let out = with(value);
+        assert!(out.status.success(), "{value:?}: {}", text(&out.stderr));
+    }
+}
+
 #[test]
 fn check_refuses_what_run_refuses_before_anything_starts() {
     let dir = tempfile::tempdir().unwrap();
