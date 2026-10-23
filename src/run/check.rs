@@ -423,6 +423,8 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         locked,
         home,
     } = options;
+    // yobuild's own plugins (`yobuild:<name>`), given their files first.
+    let manifest = manifest.with_builtins(&layout.frontend)?;
     // What `run` reads before anything starts, the key and budgets aside.
     Prompt::read(&manifest)?;
     let Prepared {
@@ -952,6 +954,7 @@ fn entry_code(entry: super::Starts<'_>, installed: &install::Installed) -> Resul
     let package = |set: Set, source: &Source| match source {
         Source::Package(p) => plugins::in_set(installed, set, p).map_err(|e| e.to_string()),
         Source::Path(path) => Ok(path.clone()),
+        Source::Builtin(name) => Err(format!("`yobuild:{name}` was not resolved to its file")),
     };
     match entry {
         super::Starts::Plugin(plugin, _) => match &plugin.kind {
@@ -970,6 +973,7 @@ fn source_text(source: &Source) -> String {
     match source {
         Source::Package(p) => p.spec(),
         Source::Path(path) => path.display().to_string(),
+        Source::Builtin(name) => format!("yobuild:{name}"),
     }
 }
 

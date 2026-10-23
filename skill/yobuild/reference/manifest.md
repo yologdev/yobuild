@@ -108,7 +108,8 @@ price`").
 
 **`[[plugin]]`** names exactly one of:
 - `pi = "<package>@<version>"` or a path (`./ext.ts`, a folder): a pi
-  extension or package. No `config`. Its skills are not loaded.
+  extension or package. No `config`. Its skills are not loaded. Or
+  `pi = "yobuild:confirm-dangerous"`, yobuild's own (`parts.md`).
 - `dsh = "<package>@<version>"` or a path: a DeepSeek Harness plugin.
   `config` is the plugin's own. Its skills are not loaded either (`check
   --json`'s `guidanceChars` is the prompt guidance it does add): put the
@@ -122,6 +123,8 @@ price`").
   it with a `package.json`, which must be `"type": "module"` for a `.ts`
   file and have `@arcships/rutis-runtime` installed at the version
   yobuild's runtimes use (0.12.0; `check` names it when it is missing).
+  Or one of yobuild's own, `rutis = "yobuild:todo-plan"` or
+  `"yobuild:search-links"` (`parts.md`): no `runtime` needed (Node).
 
 And optionally:
 - `name`: unique among plugins and servers. The default: a package's

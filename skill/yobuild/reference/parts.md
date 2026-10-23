@@ -94,8 +94,17 @@ export default definePlugin({
 })
 ```
 
-`[[plugin]] rutis = "plugins/shout.ts"`, `runtime = "node"`. (yobuild's
-`frontend/plugins/` are UI plugins, which offer no tools.)
+`[[plugin]] rutis = "plugins/shout.ts"`, `runtime = "node"`.
+
+yobuild's own plugins are named, not given a path:
+- `rutis = "yobuild:todo-plan"` draws a pi to-do plan (`rpiv-todo`'s
+  `todo`) on the web page;
+- `rutis = "yobuild:search-links"` turns search results into links on the
+  page;
+- `pi = "yobuild:confirm-dangerous"` (with `policy = true`) is a deny-list
+  that asks before `rm -rf` and the like.
+
+The first two are UI plugins: they offer no tools.
 
 ## MCP servers (`[[mcp]]`)
 

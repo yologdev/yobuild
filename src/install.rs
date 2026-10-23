@@ -219,6 +219,8 @@ fn pins(
                 }
                 continue;
             }
+            // yobuild's own: nothing to install.
+            Source::Builtin(_) => continue,
         };
         if set == Set::Dsh {
             dsh_package.get_or_insert(&plugin.name);
