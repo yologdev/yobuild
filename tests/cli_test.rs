@@ -1360,10 +1360,11 @@ fn what_a_pi_extension_was_answered_for_want_of_a_grant_is_said() {
 
 #[test]
 fn check_says_what_a_pi_extension_was_answered_for_want_of_a_grant() {
-    // Design §12 "Fixed answers in `check`": asked as it starts, seen in
-    // the probe alone and together, said once on its entry; read with its
-    // grants (the probe alone runs with none); a tool's own questions and
-    // what nobody answers in `check` unsaid.
+    // Design §12 "Fixed answers in `check`": asked as it starts or stops,
+    // seen in the probe alone and together, said once on its entry (never
+    // on the agent); read with its grants (the probe alone runs with
+    // none); a tool's own questions and what nobody answers in `check`
+    // unsaid.
     if !pi_installed() {
         return;
     }
@@ -1373,6 +1374,7 @@ fn check_says_what_a_pi_extension_was_answered_for_want_of_a_grant() {
             "export default function (pi: any) {{\n\
                pi.on('session_start', async (_e: unknown, ctx: any) => {{\n\
                  ctx.isProjectTrusted()\n\
+                 void ctx.model\n\
                  await pi.exec({command})\n\
                }})\n\
              }}\n"
@@ -1391,63 +1393,118 @@ fn check_says_what_a_pi_extension_was_answered_for_want_of_a_grant() {
          }\n",
     )
     .unwrap();
-    let check = |command: &str, grants: &str| {
+    std::fs::write(
+        dir.path().join("late.ts"),
+        "export default function (pi: any) {\n\
+           pi.on('session_shutdown', (_e: unknown, ctx: any) => { ctx.isProjectTrusted() })\n\
+         }\n",
+    )
+    .unwrap();
+    // `grants` on lens; `model` on every pi plugin or none; `extra` more
+    // entries.
+    let check = |command: &str, grants: &str, model: bool, extra: &str| {
         std::fs::write(dir.path().join("lens.ts"), lens(command)).unwrap();
+        let model = match model {
+            true => "grants = { model = \"info\" }\n",
+            false => "",
+        };
         std::fs::write(
             dir.path().join("agent.toml"),
             format!(
                 "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
                  [[plugin]]\npi = \"./lens.ts\"\n{grants}\
-                 [[plugin]]\npi = \"./quiet.ts\"\n"
+                 [[plugin]]\npi = \"./quiet.ts\"\n{model}\
+                 [[plugin]]\npi = \"./late.ts\"\n{model}{extra}"
             ),
         )
         .unwrap();
         let out = yobuild(&["check", "agent.toml", "--json"], dir.path());
         let report: serde_json::Value = serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|e| panic!("{e}: {}", text(&out.stderr)));
-        assert_eq!(report["ok"], true, "{report:#}");
-        let notes = |i: usize| -> Vec<String> {
-            report["entries"][i]["notes"]
+        let notes = |notes: &serde_json::Value| -> Vec<String> {
+            notes
                 .as_array()
                 .map(|n| n.iter().map(|n| n.as_str().unwrap().to_owned()).collect())
                 .unwrap_or_default()
         };
-        (notes(0), notes(1), report)
+        let entry = |name: &str| {
+            notes(
+                &report["entries"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|e| e["name"] == name)
+                    .unwrap_or_else(|| panic!("{name}: {report:#}"))["notes"],
+            )
+        };
+        let (lens, quiet, late) = (entry("lens"), entry("quiet"), entry("late"));
+        // Never on the agent: each file is its plugin's.
+        let agent = notes(&report["agent"]["notes"]);
+        assert!(
+            !agent
+                .iter()
+                .any(|n| n.contains("asked ctx.") || n.contains("pi.exec")),
+            "{report:#}"
+        );
+        (lens, quiet, late, report)
     };
-    let trust = "pi extension lens asked ctx.isProjectTrusted(): answered false (grant `trust = true` to change it)";
+    let trust = |who: &str| {
+        format!("pi extension {who} asked ctx.isProjectTrusted(): answered false (grant `trust = true` to change it)")
+    };
     let exec = "pi extension lens ran pi.exec(\"git\"): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)";
-    // Not granted: both, each once, though the probe and together both
-    // saw them; the tool that asks only when called, nothing.
-    let (lens_notes, quiet, report) = check("'git', ['status']", "");
-    for note in [trust, exec] {
+    let once = |notes: &[String], note: &str, report: &serde_json::Value| {
         assert_eq!(
-            lens_notes.iter().filter(|n| *n == note).count(),
+            notes.iter().filter(|n| *n == note).count(),
             1,
             "{note}\n{report:#}"
         );
-    }
-    assert!(
-        !quiet
+    };
+    let asked = |notes: &[String]| {
+        notes
             .iter()
-            .any(|n| n.contains("asked") || n.contains("pi.exec")),
+            .any(|n| n.contains("asked ctx.") || n.contains("pi.exec"))
+    };
+    // Not granted: each once, though the probe and together both saw
+    // them, `ctx.model` too; asked as it stops, said; the tool that asks
+    // only when called, nothing.
+    let (lens_notes, quiet, late, report) = check("'git', ['status']", "", false, "");
+    assert_eq!(report["ok"], true, "{report:#}");
+    once(&lens_notes, &trust("lens"), &report);
+    once(&lens_notes, exec, &report);
+    assert_eq!(
+        lens_notes
+            .iter()
+            .filter(
+                |n| n.starts_with("pi extension lens asked ctx.model: answered ")
+                    && n.ends_with(" (grant `model = \"info\"` to change it)")
+            )
+            .count(),
+        1,
         "{report:#}"
     );
+    once(&late, &trust("late"), &report);
+    assert!(!asked(&quiet), "{report:#}");
     // Granted: the probe alone's answers dropped; together `git status`
-    // is freed by the gate and trust is answered true.
-    let granted = "grants = { trust = true, exec = \"gate\" }\n";
-    let (lens_notes, _, report) = check("'git', ['status']", granted);
-    assert!(
-        !lens_notes
-            .iter()
-            .any(|n| n.contains("asked ctx.") || n.contains("pi.exec")),
-        "{report:#}"
-    );
+    // is freed by the gate and trust is answered true; told the model.
+    let granted = "grants = { trust = true, exec = \"gate\", model = \"info\" }\n";
+    let (lens_notes, _, _, report) = check("'git', ['status']", granted, true, "");
+    assert_eq!(report["ok"], true, "{report:#}");
+    assert!(!asked(&lens_notes), "{report:#}");
     // A command the gate asks about, with nobody there in `check`: unsaid.
-    let (lens_notes, _, report) = check("'rm', ['-rf', 'x']", granted);
-    assert!(
-        !lens_notes.iter().any(|n| n.contains("pi.exec")),
-        "{report:#}"
+    let (lens_notes, _, _, report) = check("'rm', ['-rf', 'x']", granted, true, "");
+    assert!(!asked(&lens_notes), "{report:#}");
+    // An entry with a problem: nothing together, the probe alone's lines
+    // still read with the grants.
+    let shadow = format!(
+        "[[plugin]]\npi = \"{}\"\ngrants = {{ model = \"info\" }}\n",
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("adapters/pi/fixture-shadow.ts")
+            .display()
     );
+    let (lens_notes, _, _, report) = check("'git', ['status']", granted, true, &shadow);
+    assert_eq!(report["ok"], false, "{report:#}");
+    assert_eq!(report["agent"]["together"], "skipped", "{report:#}");
+    assert!(!asked(&lens_notes), "{report:#}");
 }
 
 #[test]

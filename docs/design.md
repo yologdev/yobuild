@@ -2166,9 +2166,10 @@ prompt.
   - a line with no file, a file no pi plugin loads, or the DSH host's
     warnings gives none, and the note goes on the agent. The DSH host
     starts only together and serves every DSH plugin.
-- **Read with the grants.** `Said` learns each pi file's grants
-  (`Said::with_grants`, from the pi plugins' `grants`, matched by file as
-  `who` matches; `run` keeps `Said::new`, whose session runs granted). In
+- **Read with the grants.** `Said` learns each pi plugin's grants
+  (`Said::checking`, from the pi plugins' `grants`, matched by the plugin
+  `who` finds for the line's file; `run` keeps `Said::new`, whose session
+  runs granted). In
   `check` it drops what the probe alone said for want of a grant the
   plugin has:
   - the `isProjectTrusted() → false` note when its plugin has `trust`;
@@ -2247,9 +2248,15 @@ it.
 `plugin_log::Said::checking(pi_files, model, grants)` (`PiGrants {
 plugin, trust, exec }`), `Said::note` → `(Option<plugin>, text)`
 (`plugin_log::Note`); `check` holds the watch from before the probes to
-after `together`, collecting into a list it attaches at the end. Tests:
-`plugin_log`'s `check_reads_lines_with_each_plugins_grants`, `cli_test`
-`check_says_what_a_pi_extension_was_answered_for_want_of_a_grant`.
+after `together`, collecting into a list it attaches at the end. `Said`
+keeps each file as given and canonical. After review: in `check` only the
+gate's refusals its setting makes (unanswered, the judge or the ask
+failing) are left out; a bad `cwd` and a missing approval service are said
+as in `run`. Tests: `plugin_log`'s `check_reads_lines_with_each_plugins_grants`
+and `a_file_is_its_plugins_planned_or_canonical`, `cli_test`
+`check_says_what_a_pi_extension_was_answered_for_want_of_a_grant` (no note
+on the agent; `ctx.model` and `session_shutdown`; granted; a gated `rm`;
+an entry with a problem, together skipped).
 
 **Decisions for review.**
 1. *A note, not a problem* (recommended: the plugin loads and works,

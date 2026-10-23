@@ -140,9 +140,17 @@ pub(crate) type Note = (Option<String>, String);
 
 impl Said {
     pub(crate) fn new(pi_files: &[(String, Vec<PathBuf>)], model: bool) -> Self {
+        // Each file as given and canonical: a line names it either way.
         let files = pi_files
             .iter()
-            .flat_map(|(name, files)| files.iter().map(|f| (f.clone(), name.clone())))
+            .flat_map(|(name, files)| {
+                files.iter().flat_map(|f| {
+                    let canonical = std::fs::canonicalize(f).ok().filter(|c| c != f);
+                    std::iter::once(f.clone())
+                        .chain(canonical)
+                        .map(|f| (f, name.clone()))
+                })
+            })
             .collect();
         Said {
             files,
@@ -237,8 +245,16 @@ impl Said {
                 ));
             }
             // The owner's own "Block", or a cancel: nothing to tell. In
-            // `check`, nobody is there to answer.
-            if why.contains("(block)") || why.contains(" was cancelled") || granted.is_some() {
+            // `check`, what only its setting makes — nobody there to answer,
+            // the judge or the ask failing — is left out; a bad `cwd` or a
+            // missing approval service is said as in `run`.
+            let checks_own = why.contains(" was not approved by the host (")
+                || why.starts_with(": the host could not judge it: ")
+                || why.starts_with(": the host's approval failed: ");
+            if why.contains("(block)")
+                || why.contains(" was cancelled")
+                || (granted.is_some() && checks_own)
+            {
                 return None;
             }
             let why = why.trim_start_matches(':').trim();
@@ -424,9 +440,84 @@ mod tests {
         );
         for line in [
             "[pi] /x/granted.ts: refused pi.exec(\"rm\") was not approved by the host (unanswered)",
+            "[pi] /x/open.ts: refused pi.exec(\"rm\") was not approved by the host (unanswered)",
+            "[pi] /x/granted.ts: refused pi.exec(\"rm\"): the host could not judge it: host_approval.judge took longer than 30000 ms",
+            "[pi] /x/granted.ts: refused pi.exec(\"rm\"): the host's approval failed: closed",
             "[pi] /x/open.ts: wake refused: no answer within 30 s (it may still be delivered; later wakes go on)",
         ] {
             assert_eq!(said.note(&pi(line)), None, "{line}");
+        }
+        // The extension's own mistake, or a service missing: said.
+        for (line, why) in [
+            (
+                "[pi] /x/granted.ts: refused pi.exec(\"git\"): options.cwd must be a path string to be judged, not number",
+                "options.cwd must be a path string to be judged, not number",
+            ),
+            (
+                "[pi] /x/granted.ts: refused pi.exec(\"git\") needs the host's approval (`exec` \"gate\"): host_approval",
+                "needs the host's approval (`exec` \"gate\"): host_approval",
+            ),
+        ] {
+            assert_eq!(
+                said.note(&pi(line)),
+                Some((
+                    Some("granted".into()),
+                    format!("pi extension granted ran pi.exec(\"git\"): refused, {why}")
+                )),
+                "{line}"
+            );
+        }
+        // The model: told with `model`, as `run` reads it.
+        let told = Said::checking(&files, true, Vec::new());
+        assert_eq!(
+            told.note(&pi("[pi] fixed answer (/x/open.ts): ctx.model → yoagent/x")),
+            None
+        );
+        assert_eq!(
+            said.note(&pi("[pi] fixed answer (/x/open.ts): ctx.model → yoagent/x"))
+                .unwrap()
+                .0
+                .as_deref(),
+            Some("open")
+        );
+    }
+
+    /// A line names the file as the adapter has it, planned or canonical:
+    /// either is the plugin's.
+    #[test]
+    fn a_file_is_its_plugins_planned_or_canonical() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("lens.ts"), "").unwrap();
+        let link = dir.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(not(unix))]
+        return;
+        let planned = link.join("lens.ts");
+        let canonical = std::fs::canonicalize(&planned).unwrap();
+        assert_ne!(planned, canonical);
+        let line = |file: &Path| {
+            format!(
+                "[pi] fixed answer ({}): ctx.isProjectTrusted() → false",
+                file.display()
+            )
+        };
+        // Planned as spelled, the line canonical; and the other way.
+        for (files, named) in [(&planned, &canonical), (&canonical, &planned)] {
+            let said = Said::checking(
+                &[("lens".to_owned(), vec![files.clone()])],
+                false,
+                Vec::new(),
+            );
+            assert_eq!(
+                said.note(&pi(&line(named))).unwrap().0.as_deref(),
+                Some("lens"),
+                "{} as {}",
+                files.display(),
+                named.display()
+            );
         }
     }
 
