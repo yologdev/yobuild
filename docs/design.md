@@ -1403,7 +1403,7 @@ too:
 ### The gallery
 
 Agents built through the skill by a coding agent (M3's "done when": three
-of them), each in `gallery/<name>/`: the manifest, its prompt, its lock,
+of them; a fourth, code-health, for M3b: "pi-lens in the gallery", below), each in `gallery/<name>/`: the manifest, its prompt, its lock,
 a scripted reply file, and a README (what it does, how to run it). Each
 is `yobuild check --locked` and run scripted in CI, as the examples are
 (§8). Agents yobuild's own repository holds; others' agents, shared, are
@@ -1531,7 +1531,8 @@ examples are.
   reviewer** (`gallery/code-reviewer/`). The coding agent picked
   `pi-lens@4.4.3` from the skill and found it unusable too: it treats
   the project as untrusted under yobuild, starts no language server, and
-  reports every file clean (its own log said so). It took ESLint's MCP
+  reports every file clean (its own log said so). That was before the
+  `trust` grant (step 3): see "pi-lens in the gallery", below. It took ESLint's MCP
   server instead, `@eslint/mcp@0.3.15` (`lint-files`, absolute paths, the
   project's config), with `tools = "read-only"`, `ask_owner`, `report =
   ["Fix first", "Fix soon", "Worth a look", "Not checked", "Waiting on
@@ -1556,14 +1557,19 @@ MCP server, the third), each with the skill fixes its build found.
 
 #### pi-lens in the gallery (proposed 2026-10-23)
 
+A fourth gallery agent, for M3b rather than M3.
+
 **Why.** M3b's "Done when" asks that `pi-lens` work in a gallery agent,
 with its tools' results checked, not only `✓`. The code reviewer above
-left pi-lens because, under yobuild then, it was told the project is
-untrusted and so started no language server and reported every file
-clean. `grants = { trust = true }` (step 3, #46) changes that answer.
-pi-lens reads it at every `session_start`, and `check` now says when it
-is missing (#61). It was checked by hand on 2026-10-21, but no gallery
-agent uses it, and no test reads what a tool answered.
+left pi-lens because yobuild then told every pi extension the project was
+untrusted. In that state pi-lens starts no language server, and its
+diagnostics come back empty: the coding agent read that as "every file
+clean", and pi-lens today says "unavailable". `grants = { trust = true }`
+(step 3, #46) changes that answer. pi-lens reads it at every
+`session_start`, and since #61 `check` names the fixed answer
+`ctx.isProjectTrusted() → false` when `trust` is missing. pi-lens was
+checked by hand on 2026-10-21, but no gallery agent uses it, and no test
+reads what a tool answered.
 
 **Measured on 2026-10-23** (macOS). The setup:
 - `pi-lens@4.4.3`, `trust = true`, read-only;
@@ -1580,13 +1586,17 @@ What happened:
 | `lens_diagnostics` `{source: "lsp", scope: "paths"}` | 23 s; `~/.pi-lens` grows to 87 MB | 17 s (the server starting) |
 | its finding | `typescript:2345` "Argument of type 'string' is not assignable to parameter of type 'number'", line 4 | the same |
 
-- **What the first LSP probe downloads.** Into `~/.pi-lens/tools` it puts
+- **What the first LSP probe downloads.** Into `~/.pi-lens/tools`:
   `typescript` and `typescript-language-server`, from npm, at `^` ranges
-  (not pinned). Into `~/.pi-lens/bin` it puts `opengrep` and `typos-lsp`,
-  from GitHub.
+  (not pinned). Into `~/.pi-lens/bin`: `opengrep` and `typos-lsp`, from
+  GitHub.
+- **The first probe found the error in each cold run tried (two).**
+  `parts.md` says a first call "may come back 'inconclusive' while those
+  install". That was not reproduced, so the plan below does not rely on
+  it either way.
 - **`symbol_search` is not ready at first.** On a cold project its first
   call may answer "Word index is building in the background for this
-  workspace — retry this query shortly" (✗). In another cold run it
+  workspace — retry this query shortly" (`✗`). In another cold run it
   answered at once.
 - **The kept environment held.** `PI_LENS_DISABLE_LSP_INSTALL=1`, set in
   the parent but not granted, did not reach pi-lens, as step 5 means: it
@@ -1595,22 +1605,35 @@ What happened:
   twice, because the answer differs: `undefined` at `session_start`, the
   model's id in a run. `Said` dedups on the whole note.
 
-**The agent: `gallery/code-health/`, new.** The code reviewer stays, as
-the pattern for a linter's MCP server. code-health is made through the
-skill by a coding agent, as the others are. The request: "a code-health
-checker for a TypeScript project: type errors and an outline of what is
-where, read-only". Expected parts, which the skill's `parts.md` leads to:
-- `pi-lens@4.4.3`, `grants = { trust = true }`;
-- its reading tools allowed: `lens_diagnostics`, `project_report`,
-  `module_report`, `read_symbol`, `read_enclosing`, `symbol_search`,
-  `effective_config`;
-- `pi_lens_activate_tools` left asking;
-- `tools = "read-only"`, `ask_owner`, a `report`, and a budget.
+**The agent: `gallery/code-health/`, new.**
+- **Why new.** The code reviewer stays, as the pattern for a linter's
+  MCP server.
+- **How it is made.** Through the skill by a coding agent, as the
+  others are. The request: "a code-health checker for a TypeScript
+  project: type errors and an outline of what is where, read-only". The
+  coding agent works in a folder holding exactly the two TypeScript files
+  the test puts in the run's folder (below), told they are the sample
+  project.
+- **Expected parts,** which the skill's `parts.md` leads to:
+  - `pi-lens@4.4.3`, `grants = { trust = true, model = "info" }`. pi-lens
+    reads `ctx.model`, and `parts.md` will say to grant `model` so it
+    gets an answer rather than a fixed one (and so `check` has no
+    fixed-answer note);
+  - its reading tools allowed: `lens_diagnostics`, `project_report`,
+    `module_report`, `read_symbol`, `read_enclosing`, `symbol_search`,
+    `effective_config`;
+  - `pi_lens_activate_tools` left asking: it changes which tools the run
+    is offered, and `parts.md` will say so. Whatever the coding agent
+    decides for it is kept, as for any part;
+  - `tools = "read-only"`, `ask_owner`, a `report`, and a budget.
+- **Its README** (by hand) says what `trust` lets pi-lens do: download
+  and run language servers and scanners, from npm at unpinned ranges and
+  from GitHub, and run the project's own code among what they load. It
+  also says the first diagnostic is slow, about 25 s cold.
 
-Its README says what `trust` lets pi-lens do: download and run language
-servers and scanners, from npm at unpinned ranges and from GitHub, and
-run the project's own code among what they load. It also says the first
-diagnostic is slow.
+The earlier text above ("found it unusable too") and the code reviewer's
+README (hand-written) gain a line: that was before `trust`; see this
+section.
 
 **Results checked: `expect` on a scripted call.** A reply file's call may
 say what its result must contain:
@@ -1621,79 +1644,141 @@ say what its result must contain:
               "expect": "typescript:2345" }] }
 ```
 
-- **Shape.** `expect` is a string or a list of strings, matched
-  case-sensitively against the result's text blocks joined.
-- **Who checks it.** In a scripted run only, an extension (`after_tool`)
-  holds each call's expectations by its id. A call whose result lacks one
-  becomes an error whose first line is "the reply file expected `X` in
-  the result: <its first line>". `--once` shows it as `✗`, and the run
-  goes on, as any refused call's does.
-- **Where it is documented.** `scripted.md` describes it.
-- **In the gallery.** `gallery_test` never tolerates this wording, which
-  is not a plugin's own `✗`.
+- **The value.** `expect` is a string or a list of strings. It is
+  matched case-sensitively against the result's text blocks joined with
+  `\n`. Each string must appear.
+- **How a call finds its expectation.** `run/script.rs` puts it in the
+  mock call's `provider_metadata` (`{"yobuild_expect": [...]}`). The mock
+  gives every call an id `mock-tool-<index>` that repeats on every turn,
+  so the id cannot carry it. The metadata travels with the call into the
+  assistant message (`Content::ToolCall`).
+- **Who checks it.** A scripted run adds the extension `expect`. Its
+  `after_tool` finds its call in the last assistant message, by the
+  call's id within that turn (unique there, parallel calls included), and
+  reads the expectation. It checks error results too.
+- **A miss.** The result becomes an error whose first line is "the reply
+  file expected `X` in the result: <the result's first line>". The
+  original text follows, and `is_error` is set. `--once` shows it as `✗`,
+  and the run goes on, as any refused call's does.
+- **A call that never runs.** No `after_tool` is called for one denied
+  in `before_tool` (the gate, a policy, nobody there) or for an unknown
+  tool. Its expectation is said at the run's `finish`, as a Warning: "the
+  reply file's expectation for `x` was not checked: the call did not
+  run". The extension learns which calls ran from `on_event`'s
+  `ToolExecutionEnd`.
+- **Its place.** Last among the extensions, so it sees the text the
+  model sees. The gate's `after_tool` comes before it, so a file a call
+  made is recorded as the agent's even if `expect` then fails the call.
+  That is harmless: the call ran.
+- **The run's outcome.** A miss does not change it: the run can still
+  end `Completed` and exit 0. A person's own scripted check reads the
+  `✗` lines. `scripted.md` says so.
 
-A scripted model cannot see results, and `run()` as a library works in
-the process's folder (no `cwd`), so a test cannot read them from outside.
-Checking the result as it comes back works for any reply file: the
-gallery's, the examples', and a person's own.
+Why in yobuild, not only in a test: `gallery_test` must run the binary,
+because each run needs a folder of its own and parallel tests cannot
+change the process's folder (`run()` works in the process's folder:
+`Options` has no `cwd`). `--once` prints only each call's `✓` or `✗`
+first line, so no test can read a result from outside. Checking it as it
+comes back also works for any reply file: the gallery's, the examples',
+and a person's own.
 
 **In CI, with the network.**
-- **The plan.** code-health's reply files run in CI like the others:
-  - `demo` calls `project_report`, `module_report`, `read_symbol` and
-    `read_enclosing` (each with an `expect` naming what it must find),
-    then `lens_diagnostics` with `source: "lsp"`, expecting
-    `typescript:2345`;
-  - `symbol_search` comes after the others, or not at all (its index may
-    still be building).
-- **A `HOME` shared across the agent's runs.** Its `yobuild` runs use one
-  `HOME` (`CARGO_TARGET_TMPDIR/pi-lens-home`, kept like the tests'
-  `YOBUILD_HOME`). So a CI job downloads pi-lens's tools once, about
-  25 s, and later local runs are warm (about 17 s for the LSP probe). The
-  other agents keep a temporary `HOME` each.
+- **`demo`.** It calls `project_report`, `module_report`, `read_symbol`
+  and `read_enclosing` (each with an `expect` naming what the two files
+  hold), then `lens_diagnostics` with `source: "lsp"` twice, the
+  `expect: "typescript:2345"` on the second only (in case a first call
+  ever comes back "inconclusive"; yoagent steps in only after three
+  identical calls in a row). `symbol_search` stays allowed but uncalled.
+  If a reply file ever calls it and gets "retry shortly", that `✗` is the
+  plugin's own, tolerated as such.
+- **A `HOME` shared across the agent's runs.** This is an exception to
+  "Kept by CI"'s temporary `HOME` per `yobuild`. All of code-health's
+  `yobuild` runs (`check`, each reply file, the asking tools) use
+  `CARGO_TARGET_TMPDIR/pi-lens-home`.
+  - **Speed.** A CI job downloads pi-lens's tools once (about 23 s),
+    and later local runs are warm (about 17 s per LSP probe; the agent's
+    test takes about a minute and a half warm).
+  - **Not cached by CI.** The workflow removes `target/tmp/pi-lens-home`
+    before testing, as it removes `target/tmp/yobuild-home`: the build
+    cache may bring `target/tmp` back.
+  - **Kept locally, with what that means.** A warm local `HOME` keeps
+    the `^`-range versions it first downloaded, and whatever pi and
+    pi-lens keep there (pi-lens's per-project index) carries over
+    between runs. Two `cargo test` runs at once would share it. Deleting
+    the folder resets it.
+  - **The other agents** keep a temporary `HOME` each.
 - **The cost.** The network is already a CI dependency (npm, the web
-  researcher's Bing). Unlike a search, though, a failed download here
-  fails the test: pi-lens then says "unavailable" and the `expect`
-  misses. That is the point: the agent's whole value is that probe.
-- **The test's project.** The test puts the two-file TypeScript project
-  in the run's folder.
+  researcher's Bing). Unlike a search, a failed download here fails the
+  test: pi-lens then says "unavailable" and the `expect` misses. That is
+  the point: the agent's whole value is that probe.
+- **The test's project.** Two files, inline in the test (as
+  `notes_keeper`'s notes are): `tsconfig.json` and `src/sum.ts`, the
+  measurement's. The coding agent works against the same two. Changing
+  them means building the agent again, as for any change to what its
+  reply files were written against.
+
+**`gallery_test` changes:**
+- `holds` takes an optional shared `HOME`.
+- It refuses the miss wording ("the reply file expected `") wherever it
+  would tolerate a plugin's own `✗`, and the "was not checked" Warning
+  like an `Error:` notice.
+- Among `check`'s notes it accepts "its N skills are not loaded"
+  (pi-lens ships 4).
+- `code_health` requires that `demo`'s last `lens_diagnostics` call
+  carries an `expect` holding `typescript:2345`, so a reply file without
+  one cannot pass by checking nothing.
 
 **`Said` dedups fixed answers per question.** One note per extension and
-question, the first answer said. This applies in `run` and in `check`,
+question (`who` and the question, as `Said::pi` reads them), whatever
+the answer, the first answer said. It applies in `run` and in `check`,
 with a unit test.
 
 **Said where.**
-- `parts.md`: pi-lens's row gets **CI**, plus:
+- `scripted.md` (PR 2):
+  - `expect`, with an example `skill_test` parses;
+  - "an unknown key is an error" naming it;
+  - "a `✓` says the tool ran" pointing at `expect`.
+- `parts.md` (PR 2):
   - the first LSP probe's downloads and time;
   - `symbol_search` warming up;
-  - `PI_LENS_DISABLE_*` passing only when granted.
-- `scripted.md`: `expect`.
-- CLAUDE.md, and the roadmap's M3b.
+  - `PI_LENS_DISABLE_*` passing only when granted;
+  - `model = "info"`;
+  - why `pi_lens_activate_tools` asks;
+  - and its "inconclusive" sentence made "may".
+- `parts.md` (PR 3): pi-lens's **CI** mark. `skill_test` fails a **CI**
+  row no agent pins, so it comes with the agent.
+- CLAUDE.md: the gallery's fourth agent, `holds`' notes and shared
+  `HOME`, `expect`. The roadmap's M3b too.
 
 **Tests.**
-- `run/script.rs`: `expect` read (a string, a list) and refused in any
-  other shape.
-- `run_test`: a scripted call through a real MCP server, with its
-  `expect` met and missed, the miss being a `✗` with the wording above.
+- `run/script.rs`: `expect` read (a string, a list) into the call's
+  metadata, and refused in any other shape.
+- `run_test`, a scripted call through a real MCP server:
+  - its `expect` met (`✓`);
+  - its `expect` missed: a `✗` with the wording above;
+  - missed on an error result;
+  - a denied call's expectation said "not checked".
 - `plugin_log`: one note per question.
-- `gallery_test` `code_health`: `holds` with the shared `HOME`, the
-  project's files, and the `expect` lines.
+- `gallery_test` `code_health`: as above.
 
 **Decisions for review.**
 1. *A new agent, `code-health`* (recommended: the code reviewer stays the
    linter-MCP pattern), or the code reviewer rebuilt on pi-lens.
 2. *`expect` in reply files, checked as results come back* (recommended:
    works for every scripted run, written by the coding agent through the
-   skill), or a test-only reading of results (needs a way out of the
-   binary that `--once` lacks).
+   skill), or a test-only reading of results (the binary would need a way
+   to print them).
 3. *The LSP probe in CI, with a shared `HOME`* (recommended), or only
    pi-lens's tree-sitter tools in CI and the LSP probe checked by a live
-   run. That second option would not meet "results checked" for the
-   tool that matters.
+   run. That second option would not meet "results checked" for the tool
+   that matters.
 
 **Order of PRs:**
 1. this design;
-2. `expect`, the `Said` dedup, and `scripted.md` / `parts.md`;
-3. the agent, built through the skill, with the skill fixes its build
+2. `expect`, the `Said` dedup, `scripted.md` and `parts.md`'s notes,
+   and the forward line in the code reviewer's README;
+3. the agent, built through the skill, with its test, `parts.md`'s
+   **CI** mark, the CI workflow's `rm`, and the skill fixes its build
    finds.
 
 ## 12. The host layer: what a plugin's own app gives it (proposed 2026-10-19)
