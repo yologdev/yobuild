@@ -63,7 +63,8 @@ jobs:
         run: |
           d=target/tmp/pi-lens-home/.pi-lens
           ls -la $d $d/tools $d/bin 2>&1 | head -40
-          for f in $d/*.log; do echo "== $f"; tail -60 "$f"; done
+          for f in $d/*.log; do echo "== $f"; grep -iE 'typescript|tsserver|broken|spawn failure|install' "$f" | head -80; done
+          ls $d/tools/node_modules/.bin 2>&1 | head; node --version; which node
           find $d/projects -name '*.json' -newer $d/instances.json 2>/dev/null | head -5 | while read f; do echo "== $f"; head -c 3000 "$f"; echo; done
       - name: Page logic and the approval gate (node --test)
         run: node --test frontend/web/lib.test.js frontend/plugins/pi-extensions/confirm-dangerous.test.mjs
