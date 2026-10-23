@@ -38,7 +38,7 @@ change my code."*
   as untrusted, starts no language server, and reports every file clean.
   The coding agent found this out and switched to ESLint's server. That
   was before yobuild could grant `trust` (design §12, step 3): with
-  `grants = { trust = true }` pi-lens finds type errors (design §11,
+  `grants = { trust = true }` (and `model = "info"`) pi-lens finds type errors (design §11,
   "pi-lens in the gallery").
 
 ## What it needs

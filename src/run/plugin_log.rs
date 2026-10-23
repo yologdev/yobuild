@@ -359,6 +359,21 @@ mod tests {
             said.note(&pi("[pi] fixed answer: ctx.modelRegistry → a read-only list of 0 model(s)")),
             Some((None, "a pi extension asked ctx.modelRegistry: answered a read-only list of 0 model(s) (grant `model = \"info\"` to change it)".into()))
         );
+        // Another extension asking the same: its own note.
+        let two = Said::new(
+            &[
+                ("lens".to_owned(), vec![PathBuf::from("/x/lens.ts")]),
+                ("other".to_owned(), vec![PathBuf::from("/x/other.ts")]),
+            ],
+            false,
+        );
+        for file in ["/x/lens.ts", "/x/other.ts"] {
+            assert!(two
+                .note(&pi(&format!(
+                    "[pi] fixed answer ({file}): ctx.isProjectTrusted() → false"
+                )))
+                .is_some());
+        }
         // Once per question, whatever the answer: the first said.
         assert_eq!(
             said.note(&pi(&format!(
@@ -376,6 +391,13 @@ mod tests {
                 "[pi] {at}: refused pi.exec(\"git\") is not allowed by the host (the adapter's `exec` / `execFor` setting)"
             ))),
             Some((Some("lens".into()), "pi extension lens ran pi.exec(\"git\"): refused (grant `exec = \"gate\"` or `\"free\"` to allow it)".into()))
+        );
+        // A refused `pi.exec` repeated: once.
+        assert_eq!(
+            said.note(&pi(&format!(
+                "[pi] {at}: refused pi.exec(\"git\") is not allowed by the host (the adapter's `exec` / `execFor` setting)"
+            ))),
+            None
         );
         assert_eq!(said.note(&pi("[pi] something else")), None);
     }
@@ -564,6 +586,14 @@ mod tests {
                 None,
                 "The DSH host: writing the DSH session log failed: EACCES".into()
             ))
+        );
+        // Repeated: once.
+        assert_eq!(
+            said.note(&dsh(
+                Level::WARN,
+                "[dsh-host] writing the DSH session log failed: EACCES"
+            )),
+            None
         );
         assert_eq!(
             said.note(&dsh(Level::INFO, "[dsh-host] turn 1 opened")),

@@ -150,7 +150,10 @@ impl RunHooks for ExpectRun {
             .retain(|(id, _)| id != call.tool_call_id);
         let text = text_of(output);
         if let Some(missing) = texts.iter().find(|t| !text.contains(t.as_str())) {
-            let first = text.lines().next().unwrap_or("(no text)");
+            let first = text
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("(no text)");
             output.result.content.insert(
                 0,
                 Content::Text {

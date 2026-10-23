@@ -26,8 +26,14 @@ struct Call {
     name: String,
     #[serde(default)]
     arguments: serde_json::Value,
-    #[serde(default)]
+    /// Absent, or given: `null` is refused, as `""` and `[]` are.
+    #[serde(default, deserialize_with = "given")]
     expect: Option<Expect>,
+}
+
+/// An `expect` given: a text or a list, not `null`.
+fn given<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Expect>, D::Error> {
+    Expect::deserialize(d).map(Some)
 }
 
 /// What a call's result must contain: one text, or several.
@@ -193,6 +199,14 @@ mod tests {
             (
                 r#"[{ "tools": [{ "name": "a", "expect": [] }] }]"#,
                 "`a`'s `expect` is empty",
+            ),
+            (
+                r#"[{ "tools": [{ "name": "a", "expect": ["x", ""] }] }]"#,
+                "`a`'s `expect` is empty",
+            ),
+            (
+                r#"[{ "tools": [{ "name": "a", "expect": null }] }]"#,
+                "a list of",
             ),
             (
                 r#"[{ "tools": [{ "name": "a", "expects": "x" }] }]"#,

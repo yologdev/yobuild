@@ -64,12 +64,13 @@ plugins, an Info `Plugin time this run: …`; when the run
 ends, `  Cost: not priced (0 tokens in, 0 out; N turns)` (a reply file
 reports no usage; a live run says its dollars and tokens there); then the last answer and how the run ended on
 stdout (`Completed`, `Stopped: …`, `Error: …`). A `✓` says the tool ran,
-not what it found: give the calls that matter an `expect`. A result
-without it becomes an error the model sees, printed `✗ the reply file
-expected \`X\` in the result: <its first line>` — the run goes on and can
-still end `Completed`, so read the `✗` lines. A call that never ran
-(denied, or no such tool) has its `expect` said as a Warning: `the reply
-file's expectation for \`x\` was not checked: the call did not run`. To see
+not what it found: give the calls that matter an `expect`. A result that
+does not contain an expected text becomes an error the model sees,
+printed ``  <tool> ✗ the reply file expected `X` in the result: <its first
+line>`` — the run goes on and can still end `Completed`, so read the `✗`
+lines. A call that never ran (denied, or no such tool) has its `expect`
+said as a Warning: ``the reply file's expectation for `x` was not
+checked: the call did not run``. To see
 whole results, run the reply file without `--once` and open the page — or
 make the files a run reads such that only the right one can succeed (a file only in the folder the run starts in shows
 that a server's `"."` is that folder). A denied call also writes a log
