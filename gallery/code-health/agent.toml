@@ -1,0 +1,30 @@
+# A code-health checker for a TypeScript project: type errors and an
+# outline of what is where. Read-only: it changes none of the project's
+# files. Run it from the project's folder:
+#
+#   cd path/to/project
+#   DEEPSEEK_API_KEY=… yobuild run path/to/code-health/agent.toml
+
+[agent]
+name   = "code-health"
+model  = "deepseek/deepseek-flash"
+prompt = "prompts/agent.md"
+
+[limits]
+max_turns          = 40
+budget_usd         = 0.5       # dollars per run
+session_budget_usd = 2.0       # dollars across the session's runs
+
+[[plugin]]                     # type errors and the project's outline
+pi     = "pi-lens@4.4.3"
+grants = { trust = true, model = "info" }   # trust: it starts language servers on the project (downloads into ~/.pi-lens)
+allow  = ["lens_diagnostics", "project_report", "symbol_search", "module_report",
+          "read_symbol", "read_enclosing", "effective_config"]
+
+[builtins]
+ask_owner = true
+report    = ["Type errors", "Project outline", "Not checked"]
+tools     = "read-only"
+
+[frontend]
+web = true

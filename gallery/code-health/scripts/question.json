@@ -1,0 +1,23 @@
+[
+  { "tools": [
+    { "name": "list_files", "arguments": { "path": "." }, "expect": "sum.ts" },
+    { "name": "search", "arguments": { "pattern": "payment" } },
+    { "name": "project_report", "arguments": { "view": "compact" } },
+    { "name": "symbol_search", "arguments": { "query": "payment" } }
+  ] },
+  { "tools": [
+    { "name": "ask_owner", "arguments": { "question": "There is no payments module here: which folder did you mean?", "why": "The project holds only src/sum.ts; I am checking that meanwhile.", "options": ["src (all of it)", "another project folder"] } }
+  ] },
+  { "tools": [
+    { "name": "lens_diagnostics", "arguments": { "source": "lsp", "scope": "paths", "paths": ["src/sum.ts"], "waitMs": 60000 } }
+  ] },
+  { "tools": [
+    { "name": "lens_diagnostics", "arguments": { "source": "lsp", "scope": "paths", "paths": ["src/sum.ts"], "waitMs": 60000 }, "expect": "2345" },
+    { "name": "module_report", "arguments": { "path": "src/sum.ts", "view": "summary" }, "expect": "sum" }
+  ] },
+  { "tools": [
+    { "name": "search", "arguments": { "pattern": "export", "path": "src" }, "expect": "total" },
+    { "name": "project_report", "arguments": { "view": "compact" }, "expect": "sum.ts" }
+  ] },
+  { "text": "## Type errors\n- src/sum.ts:4 — typescript:2345: `sum(1, \"2\")` passes the text \"2\" where `sum` takes a number.\n\n## Project outline\n- src/sum.ts — `sum(a, b)` (function, exported); `total` (constant, exported).\n- No payments module was found.\n\n## Not checked\n- The payments module you named: none here. Question #1 (which folder you meant) is waiting on you." }
+]

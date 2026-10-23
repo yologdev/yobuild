@@ -1775,6 +1775,46 @@ with a unit test.
    run. That second option would not meet "results checked" for the tool
    that matters.
 
+**Built** (2026-10-23): `expect` and the dedup (#63); the agent, built
+through the skill twice. The first build's `unclear` reply file probed
+`lens_diagnostics` once and, in a folder new to pi-lens, found nothing
+(its `demo`, probing twice, passed): `parts.md` now says to probe twice
+everywhere, the `expect` on the second, and `scripted.md` has a trap for
+tools that warm up. Its other stumbles, now in the skill:
+- `project_report`'s cold "retry shortly";
+- `read_enclosing` finding nothing for a top-level line;
+- `module_report` leaving out exported constants;
+- pi-lens's `git status` in the project;
+- where an agent that reads the whole project lives (beside it, in
+  `SKILL.md`).
+
+The second build ran each reply file twice on fresh copies, each passing
+locally, but on CI's Linux runner, with pi-lens's servers fetched cold,
+both probes of one reply file came back with no finding: each waits 15 s a
+file for the server by default (`waitMs`), and a server still starting
+outlasts that, answering `inconclusive` on its `Outcomes:` line. The skill
+now says `waitMs: 60000` on every probe and to read that line (never
+"clean" from `inconclusive`), and step 5 of `SKILL.md` names warm-up `✗`s.
+The third build passed each reply file three times, once with an empty
+`HOME`.
+
+CI still failed with the third build. The cause was not the wait.
+- **What CI showed.** Its logs, printed on failure, showed pi-lens taking
+  the runner's global `tsc` ("ensure typescript: already available at
+  tsc") instead of installing its own.
+- **Why that fails.** It then admits no absolute tsserver ("no admitted
+  absolute TypeScript compiler"), so its TypeScript server is unavailable
+  whatever the trust.
+- **Reproduced locally** with a `tsc` on `PATH`. pi-lens 4.4.3 has no
+  setting for it.
+- **The fix.** CI removes the runner's global `tsc`/`tsserver` before
+  testing. `parts.md` and the agent's README say it: run it where no
+  global `tsc` is on `PATH`. The agent's prompt already reports an
+  unconfirmed probe as not checked.
+`holds` builds the asking tools' arguments from their schemas
+(`accepted`): pi-lens validates before the gate, and `{}` was refused as
+invalid rather than asked.
+
 **Order of PRs:**
 1. this design;
 2. `expect`, the `Said` dedup, `scripted.md` and `parts.md`'s notes,

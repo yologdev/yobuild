@@ -51,12 +51,30 @@ jobs:
         run: cargo clippy --locked --all-targets
       - name: Docs
         run: RUSTDOCFLAGS="-Dwarnings" cargo doc --locked --no-deps
-      - name: Test (pi's and DSH's dialogs through the session need the runtimes)
-        # The tests' package cache starts empty, so every install really runs
-        # (the build cache may bring target/tmp back).
+      - name: No global TypeScript (pi-lens 4.4.3's server is unavailable beside one)
+        # The runner has `tsc` on PATH; pi-lens then takes it rather than
+        # installing its own, finds no tsserver it admits, and its probe
+        # comes back unconfirmed (the code-health gallery agent).
         run: |
-          rm -rf target/tmp/yobuild-home
+          for b in $(which -a tsc tsserver 2>/dev/null); do
+            echo "removing $b"; rm -f "$b" 2>/dev/null || sudo rm -f "$b"
+          done
+          ! command -v tsc
+      - name: Test (pi's and DSH's dialogs through the session need the runtimes)
+        # The tests' package cache starts empty, so every install really runs,
+        # and pi-lens's servers are fetched (the build cache may bring
+        # target/tmp back).
+        run: |
+          rm -rf target/tmp/yobuild-home target/tmp/pi-lens-home
           YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked
+      - name: pi-lens's logs, on failure
+        if: failure()
+        run: |
+          d=target/tmp/pi-lens-home/.pi-lens
+          ls -la $d $d/tools $d/bin 2>&1 | head -40
+          for f in $d/*.log; do echo "== $f"; grep -iE 'typescript|tsserver|broken|spawn failure|install' "$f" | head -80; done
+          ls $d/tools/node_modules/.bin 2>&1 | head; node --version; which node
+          find $d/projects -name '*.json' -newer $d/instances.json 2>/dev/null | head -5 | while read f; do echo "== $f"; head -c 3000 "$f"; echo; done
       - name: Page logic and the approval gate (node --test)
         run: node --test frontend/web/lib.test.js frontend/plugins/pi-extensions/confirm-dangerous.test.mjs
       - name: Example (scripted, headless; a pi dialog reaches the terminal UI)

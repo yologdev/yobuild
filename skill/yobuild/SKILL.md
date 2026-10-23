@@ -31,7 +31,9 @@ from the agent's folder: `path/to/yobuild/target/debug/yobuild …` — below,
 
 One folder per agent, anywhere (not inside the yobuild checkout); the
 agent works in the folder `yobuild run` is started in (usually this one,
-or the project it works on):
+or the project it works on). An agent that reads or outlines the whole
+project should live beside it, not inside: in the project, its own
+manifest, prompt and reply files are among what it reads.
 
 ```text
 my-agent/
@@ -95,11 +97,13 @@ my-agent/
    Only the model is scripted: plugins and servers run for real (a search
    really searches). Expect each call `✓`; `✗ Tool call denied: …` where
    the gate would ask (under `--once` nobody answers); a `✗` with the
-   tool's own error only for a third party's day (scripted.md); and a last
-   line `Completed`.
-   `--once` shows that a tool ran, not what it returned: to see the
-   results, run the same reply file without `--once` and open the page
-   (each call is a card there). A tool whose arguments are ids from an
+   tool's own error only for a third party's day (scripted.md), or where
+   `parts.md` says a part warms up (pi-lens's first `project_report`,
+   say); and a last line `Completed`.
+   `--once` shows that a tool ran, not what it returned: give the calls
+   that matter an `expect` (scripted.md); to see whole results, run the
+   same reply file without `--once` and open the page (each call is a card
+   there). A tool whose arguments are ids from an
    earlier result cannot be scripted past that point (scripted.md): stop
    the reply file there.
    - A DSH plugin with `grants` gets the note "probed without the DSH

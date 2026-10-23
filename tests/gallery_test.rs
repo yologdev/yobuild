@@ -138,6 +138,31 @@ fn calls(stderr: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// A value `schema` (JSON Schema, as `check --json` gives a tool's
+/// `parameters`) accepts: its required properties, each the first of its
+/// `enum`, else a plain value of its type; a list holds one item. An
+/// object with nothing required is `{}`.
+fn accepted(schema: &Json) -> Json {
+    if let Some(first) = schema["enum"].as_array().and_then(|e| e.first()) {
+        return first.clone();
+    }
+    match schema["type"].as_str() {
+        Some("string") => Json::from("x"),
+        Some("number") | Some("integer") => Json::from(1),
+        Some("boolean") => Json::from(false),
+        Some("array") => Json::Array(vec![accepted(&schema["items"])]),
+        _ => {
+            let required = schema["required"].as_array().cloned().unwrap_or_default();
+            let object = required
+                .iter()
+                .filter_map(|name| name.as_str())
+                .map(|name| (name.to_owned(), accepted(&schema["properties"][name])))
+                .collect();
+            Json::Object(object)
+        }
+    }
+}
+
 /// The `tools` replies' calls of a reply file, in order, and its last `text`.
 fn script(replies: &Json) -> (Vec<String>, String) {
     let replies = replies.as_array().expect("a reply file is a list");
@@ -158,9 +183,11 @@ fn script(replies: &Json) -> (Vec<String>, String) {
 /// first (path, contents), each the same afterwards; the reply files meant
 /// to show refusals (every call `✗`, whatever the reason); the tools that
 /// ask (each call denied: nobody answers); the plugins' and servers' tools,
-/// whose own `✗` is tolerated.
+/// whose own `✗` is tolerated; a `HOME` shared by every run, when the
+/// agent's plugin keeps a large cache there (else a temporary one each).
 struct Rules<'a> {
     files: &'a [(&'a str, &'a str)],
+    home: Option<&'a Path>,
     refusing: &'a [&'a str],
     asks: HashSet<String>,
     theirs: HashSet<String>,
@@ -171,7 +198,8 @@ fn scripted(manifest: &str, file: &Path, task: &str, rules: &Rules) {
     let name = file.file_name().unwrap().to_string_lossy();
     let replies: Json = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
     let (called, last) = script(&replies);
-    let (work, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (work, own) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let home = rules.home.unwrap_or(own.path());
     for (path, contents) in rules.files {
         let path = work.path().join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -188,7 +216,7 @@ fn scripted(manifest: &str, file: &Path, task: &str, rules: &Rules) {
             task,
         ],
         work.path(),
-        home.path(),
+        home,
     );
     let all = format!("{name}:\n{}{}", ran.stdout, ran.stderr);
     assert!(ran.ok, "{all}");
@@ -229,15 +257,15 @@ fn scripted(manifest: &str, file: &Path, task: &str, rules: &Rules) {
 /// `check` and every reply file of a gallery agent, each run starting with
 /// `files` in its folder; in the reply files `refusing` names, every call
 /// refused.
-fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str]) {
+fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str], home: Option<&Path>) {
     let path = dir.join("agent.toml");
     let manifest = path.display().to_string();
     let parsed = Manifest::load(&path).unwrap();
-    let (work, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (work, own) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let ran = yobuild(
         &["check", &manifest, "--locked", "--json"],
         work.path(),
-        home.path(),
+        home.unwrap_or(own.path()),
     );
     let report: Json = serde_json::from_str(&ran.stdout)
         .unwrap_or_else(|e| panic!("check's JSON ({e}): {}", ran.stderr));
@@ -269,8 +297,11 @@ fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str]) {
         let notes = notes.as_array().map(Vec::as_slice).unwrap_or_default();
         for note in notes {
             let n = note.as_str().unwrap();
+            // A pi package's skills, which yobuild does not load (pi-lens
+            // ships four).
+            let skills = n.starts_with("plugin ") && n.contains(" skills are not loaded (");
             assert!(
-                n == GRANTED_DSH || n.starts_with(KEPT) || here(n),
+                n == GRANTED_DSH || n.starts_with(KEPT) || here(n) || skills,
                 "{report:#}"
             );
             if n.starts_with(KEPT) {
@@ -318,6 +349,7 @@ fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str]) {
 
     let rules = Rules {
         files,
+        home,
         refusing,
         asks,
         theirs,
@@ -354,7 +386,18 @@ fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str]) {
         let calls: Vec<Json> = rules
             .asks
             .iter()
-            .map(|t| serde_json::json!({ "name": t, "arguments": {} }))
+            .map(|t| {
+                // Arguments its schema accepts, so the gate is what stops
+                // it (a plugin may check them first: pi-lens does).
+                let schema = report["agent"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|tool| tool["name"] == t.as_str())
+                    .map(|tool| tool["parameters"].clone())
+                    .unwrap_or(Json::Null);
+                serde_json::json!({ "name": t, "arguments": accepted(&schema) })
+            })
             .collect();
         let replies = serde_json::json!([{ "tools": calls }, { "text": last }]);
         let dir = tempfile::tempdir().unwrap();
@@ -369,7 +412,7 @@ fn web_research() {
     let Some(dir) = agent("web-research") else {
         return;
     };
-    holds(&dir, &[], &[]);
+    holds(&dir, &[], &[], None);
 }
 
 #[test]
@@ -392,6 +435,7 @@ fn notes_keeper() {
             ),
         ],
         &[],
+        None,
     );
 }
 
@@ -413,6 +457,7 @@ fn code_reviewer() {
             ("tsconfig.json", "{\n  \"compilerOptions\": {\n    \"target\": \"ES2022\",\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"Bundler\",\n    \"strict\": true,\n    \"noEmit\": true\n  },\n  \"include\": [\"src\"]\n}\n"),
         ],
         &["no-writes.json"],
+        None,
     );
 }
 
@@ -431,5 +476,51 @@ fn spreadsheet_clerk() {
             ("expenses-2026-09.csv", "date,description,category,amount\n2026-09-01,Rent September,Housing,1200.00\n2026-09-02,FreshMart,Groceries,64.20\n2026-09-05,City Transit pass,Transport,45.00\n2026-09-09,FreshMart,Groceries,38.75\n2026-09-12,Power & Light,Utilities,72.40\n2026-09-15,Cinema,Entertainment,24.00\n2026-09-20,Corner Bakery,Groceries,9.80\n2026-09-27,Fuel stop,Transport,51.30\n"),
         ],
         &[],
+        None,
+    );
+}
+
+#[test]
+fn code_health() {
+    let Some(dir) = agent("code-health") else {
+        return;
+    };
+    // Its results are checked, not only its `✓` (design §11 "pi-lens in
+    // the gallery"): the demo's last `lens_diagnostics` must expect the
+    // type error, so a reply file without one cannot pass by checking
+    // nothing.
+    let demo: Json =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("scripts/demo.json")).unwrap())
+            .unwrap();
+    let last = demo
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["tools"].as_array())
+        .flatten()
+        .rfind(|c| c["name"] == "lens_diagnostics")
+        .expect("the demo runs lens_diagnostics");
+    let expects = |e: &Json| match e {
+        Json::String(t) => t.contains("2345"),
+        Json::Array(ts) => ts
+            .iter()
+            .any(|t| t.as_str().is_some_and(|t| t.contains("2345"))),
+        _ => false,
+    };
+    assert!(expects(&last["expect"]), "{last}");
+    // pi-lens's language servers (about 87 MB) are fetched once into a
+    // `HOME` every run shares (kept between local runs; CI removes it).
+    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("pi-lens-home");
+    std::fs::create_dir_all(&home).unwrap();
+    // The sample project the agent was built against: `"2"` where a
+    // `number` goes.
+    holds(
+        &dir,
+        &[
+            ("tsconfig.json", "{ \"compilerOptions\": { \"strict\": true, \"noEmit\": true }, \"include\": [\"src\"] }\n"),
+            ("src/sum.ts", "export function sum(a: number, b: number): number {\n  return a + b\n}\nexport const total: number = sum(1, \"2\")\n"),
+        ],
+        &[],
+        Some(&home),
     );
 }
