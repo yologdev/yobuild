@@ -51,6 +51,15 @@ jobs:
         run: cargo clippy --locked --all-targets
       - name: Docs
         run: RUSTDOCFLAGS="-Dwarnings" cargo doc --locked --no-deps
+      - name: No global TypeScript (pi-lens 4.4.3's server is unavailable beside one)
+        # The runner has `tsc` on PATH; pi-lens then takes it rather than
+        # installing its own, finds no tsserver it admits, and its probe
+        # comes back unconfirmed (the code-health gallery agent).
+        run: |
+          for b in $(which -a tsc tsserver 2>/dev/null); do
+            echo "removing $b"; rm -f "$b" 2>/dev/null || sudo rm -f "$b"
+          done
+          ! command -v tsc
       - name: Test (pi's and DSH's dialogs through the session need the runtimes)
         # The tests' package cache starts empty, so every install really runs,
         # and pi-lens's servers are fetched (the build cache may bring
@@ -58,7 +67,7 @@ jobs:
         run: |
           rm -rf target/tmp/yobuild-home target/tmp/pi-lens-home
           YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked
-      - name: pi-lens's logs (diagnosis, on failure)
+      - name: pi-lens's logs, on failure
         if: failure()
         run: |
           d=target/tmp/pi-lens-home/.pi-lens

@@ -61,6 +61,11 @@ You agree to this by running it:
 
 ## What it needs
 
+- No TypeScript installed globally (`npm i -g typescript`): pi-lens 4.4.3
+  takes a `tsc` it finds on `PATH` instead of its own, and its TypeScript
+  server is then unavailable. The agent then says the checks were not
+  confirmed, never "clean".
+
 - `DEEPSEEK_API_KEY` in the environment (the model is
   `deepseek/deepseek-flash`).
 - A working `yobuild`, from a set-up checkout (Node 22.19+ and npm; see

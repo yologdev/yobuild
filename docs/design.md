@@ -1797,6 +1797,20 @@ now says `waitMs: 60000` on every probe and to read that line (never
 "clean" from `inconclusive`), and step 5 of `SKILL.md` names warm-up `✗`s.
 The third build passed each reply file three times, once with an empty
 `HOME`.
+
+CI still failed with the third build. The cause was not the wait.
+- **What CI showed.** Its logs, printed on failure, showed pi-lens taking
+  the runner's global `tsc` ("ensure typescript: already available at
+  tsc") instead of installing its own.
+- **Why that fails.** It then admits no absolute tsserver ("no admitted
+  absolute TypeScript compiler"), so its TypeScript server is unavailable
+  whatever the trust.
+- **Reproduced locally** with a `tsc` on `PATH`. pi-lens 4.4.3 has no
+  setting for it.
+- **The fix.** CI removes the runner's global `tsc`/`tsserver` before
+  testing. `parts.md` and the agent's README say it: run it where no
+  global `tsc` is on `PATH`. The agent's prompt already reports an
+  unconfirmed probe as not checked.
 `holds` builds the asking tools' arguments from their schemas
 (`accepted`): pi-lens validates before the gate, and `{}` was refused as
 invalid rather than asked.
