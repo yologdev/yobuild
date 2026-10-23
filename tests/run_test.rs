@@ -1435,6 +1435,91 @@ async fn check_says_a_rutis_plugin_that_stops_or_waits() {
     );
 }
 
+/// `check` scans each entry's own code for the variables it reads (design
+/// §12 "Step 5"): a pinned server's package, a rutis plugin's file; a
+/// server that is a shell script has none, which is said. `CARGO_PKG_NAME`
+/// is set for the tests by cargo, and left out of their environment.
+#[tokio::test(flavor = "multi_thread")]
+async fn check_scans_each_entrys_own_code() {
+    let dir = project_with("", &SCRIPT.replace("server__echo", "srvenv__echo"));
+    let package = dir.path().join("srvenv");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::copy(dir.path().join("server.sh"), package.join("server.sh")).unwrap();
+    std::fs::write(
+        package.join("package.json"),
+        r#"{ "name": "srvenv", "version": "1.0.0", "bin": "./server.sh" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("lib.js"),
+        "module.exports = process.env.CARGO_PKG_NAME\n",
+    )
+    .unwrap();
+    let rutis = rutis_package();
+    let plugin = match &rutis {
+        Some(r) => {
+            let file = r.path().join("reads.ts");
+            std::fs::write(
+                &file,
+                format!(
+                    "{}const seen = process.env['CARGO_PKG_NAME']\n",
+                    rutis_tools("reads-tools", &["look"])
+                ),
+            )
+            .unwrap();
+            format!(
+                "[[plugin]]\nrutis = \"{}\"\nruntime = \"node\"\n",
+                file.display()
+            )
+        }
+        None => String::new(),
+    };
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        format!(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
+             [[mcp]]\nnpm = \"srvenv@1.0.0\"\n\
+             [[mcp]]\nname = \"shell\"\nnpm = \"./server.sh\"\n{plugin}"
+        ),
+    )
+    .unwrap();
+    yobuild::install::seed(
+        Path::new(CACHE),
+        &dir.path().join("agent.toml"),
+        yobuild::install::Set::Mcp,
+        &[("srvenv", "1.0.0", &package)],
+    )
+    .unwrap();
+    let report = check_dir(dir.path()).await;
+    assert!(report.ok, "{}", report.text());
+    let notes = |name: &str| {
+        report
+            .entries
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("{name}: {}", report.text()))
+            .notes
+            .clone()
+    };
+    assert!(
+        notes("srvenv").contains(&"its code reads `CARGO_PKG_NAME`, which is set here but left out of its environment: hand it over in its `env` table (`CARGO_PKG_NAME = \"${CARGO_PKG_NAME}\"`) if it should have it".to_owned()),
+        "{}",
+        report.text()
+    );
+    assert!(
+        notes("shell").contains(&"no JavaScript or TypeScript code of its own was found to scan: what it reads from the environment is not known".to_owned()),
+        "{}",
+        report.text()
+    );
+    if rutis.is_some() {
+        assert!(
+            notes("reads").contains(&"its code reads `CARGO_PKG_NAME`, which is set here but left out of its environment: grant it (`grants = { env = [\"CARGO_PKG_NAME\"] }`) if it should have it".to_owned()),
+            "{}",
+            report.text()
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn check_allows_a_servers_tool_its_entry_allows() {
     let dir = project("[[mcp]]\nname = \"other\"\nnpm = \"./server.sh\"\n");

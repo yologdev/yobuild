@@ -146,7 +146,7 @@ the compatibility matrix for the plugins it uses.
   the session's — what it means and the fix, in `failures.md` and in
   yobuild itself (`run/hints.rs`: `run` says `what to do: …` after a run
   that did not complete, and in a Notice; `check` gives each problem its
-  `fix`, its JSON at version 2).
+  `fix`, its JSON at version 2 then; 3 since step 5).
 - The gallery (`gallery/<name>/`, each checked and run scripted in CI),
   first web research (`pi-web-access`), your MCP server, and the
   spreadsheet clerk (`dsh-univer-office`, if `check` passes it); then

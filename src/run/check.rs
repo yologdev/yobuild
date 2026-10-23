@@ -269,7 +269,10 @@ pub struct Agent {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub install_scripts: Vec<String>,
     /// The variables set here that one or more of the plugins and stdio
-    /// servers do not get (`run::left_out`; design §12 "Step 5"), sorted.
+    /// servers do not get (`run::left_out`; design §12 "Step 5"; off unix
+    /// the credentials yoagent reads, set empty), sorted. Always in the
+    /// JSON, empty too, as the environment note points to it; the text
+    /// report says only the note's count.
     pub left_out: Vec<String>,
 }
 
@@ -465,6 +468,22 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             ),
         ));
     }
+    // What each plugin's and stdio server's own code reads (design §12
+    // "Step 5"), by its name: the scan, or why there is none.
+    let scans: Vec<(super::Starts<'_>, Result<crate::environment::Scan, String>)> =
+        super::starts(&manifest)
+            .into_iter()
+            .map(|entry| {
+                let scan =
+                    entry_code(entry, &installed).map(|p| crate::environment::names_read(&p));
+                (entry, scan)
+            })
+            .collect();
+    let reads = |name: &str, key: &str| {
+        scans.iter().any(|(entry, scan)| {
+            entry.name() == name && scan.as_ref().is_ok_and(|s| s.names.contains(key))
+        })
+    };
     // Plugins and stdio servers have the credentials set here taken out
     // (design §12, "Step 4"): one that needs a key fails at its first call,
     // which this says before then.
@@ -476,7 +495,8 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     // Each entry's, when they differ: a plugin whose `config` refers to one
     // still gets it there (beside "it is given"), and a pi or DSH plugin's
     // probe alone gets them empty.
-    for (name, lost) in super::withheld_from(&manifest, &withheld) {
+    let withheld_notes = super::withheld_from(&manifest, &withheld);
+    for (name, lost) in withheld_notes.clone() {
         let plugin = manifest.plugins.iter().find(|p| p.name == name);
         let filled: Vec<String> = lost
             .iter()
@@ -493,6 +513,15 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         }
         if plugin.is_some_and(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_))) {
             note.push_str("; its probe alone gets them empty");
+        }
+        // Its code reading one is said here, not in a note of its own.
+        let read: Vec<String> = lost
+            .iter()
+            .filter(|k| reads(&name, k.trim_matches('`')))
+            .cloned()
+            .collect();
+        if !read.is_empty() {
+            note.push_str(&format!("; its code reads {}", read.join(", ")));
         }
         entry_notes.push((name, note));
     }
@@ -516,15 +545,42 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     agent_notes.extend(super::proxy_note(&manifest, std::env::vars_os()));
     // An entry's own code reads a variable it does not get, or its grant
     // hands over one that looks like a secret or loads code: on the entry.
+    // A scan that missed some, or found nothing to read, is said: no note
+    // then is not "it reads nothing".
     let credentials = manifest.key_variables();
-    for entry in super::starts(&manifest) {
-        if let Some(path) = entry_code(entry, &installed) {
-            let read = crate::environment::names_read(&path);
-            for note in super::reads_notes(entry, &read, set, &credentials, cfg!(unix)) {
-                entry_notes.push((entry.name().to_owned(), note));
+    for (entry, scan) in &scans {
+        let entry = *entry;
+        let name = entry.name().to_owned();
+        match scan {
+            Ok(scan) => {
+                // A credential its note above names already.
+                let said: &[String] = withheld_notes
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(&[], |(_, lost)| lost.as_slice());
+                let mut read = scan.names.clone();
+                read.retain(|n| !said.contains(n));
+                for note in super::reads_notes(entry, &read, set, &credentials, cfg!(unix)) {
+                    entry_notes.push((name.clone(), note));
+                }
+                if let Some(missed) = scan.missed() {
+                    entry_notes.push((
+                        name.clone(),
+                        format!("its code was scanned in part ({missed}): what it reads from the environment may be more than is said"),
+                    ));
+                } else if scan.files == 0 {
+                    entry_notes.push((
+                        name.clone(),
+                        "no JavaScript or TypeScript code of its own was found to scan: what it reads from the environment is not known".to_owned(),
+                    ));
+                }
             }
+            Err(why) => entry_notes.push((
+                name.clone(),
+                format!("its code could not be scanned ({why}): what it reads from the environment is not known"),
+            )),
         }
-        if let super::Starts::Plugin(plugin) = entry {
+        if let super::Starts::Plugin(plugin, _) = entry {
             for note in super::given_notes(
                 plugin,
                 std::env::vars_os().map(|(k, _)| k),
@@ -616,7 +672,11 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             guidance_chars: None,
             install_scripts: Vec::new(),
             grants: plugin.grants.said(),
-            environment: plugin.grants.env.clone(),
+            environment: super::starts(&manifest)
+                .into_iter()
+                .find(|e| e.name() == plugin.name)
+                .map(|e| e.environment())
+                .unwrap_or_default(),
         };
         let names = match &plugin.kind {
             PluginKind::Pi(source) => {
@@ -847,22 +907,22 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
 
 /// The code `entry` runs, for the scan of what it reads
 /// (`environment::names_read`): a pi or DSH package's folder in its set (not
-/// its dependencies), a local file or folder, a stdio server's package or
-/// program. None when it cannot be found (`run` says why elsewhere).
-fn entry_code(entry: super::Starts<'_>, installed: &install::Installed) -> Option<PathBuf> {
+/// its dependencies), a local file or folder (a rutis plugin's own file),
+/// a stdio server's package or program; why not, when it cannot be found.
+fn entry_code(entry: super::Starts<'_>, installed: &install::Installed) -> Result<PathBuf, String> {
     let package = |set: Set, source: &Source| match source {
-        Source::Package(p) => plugins::in_set(installed, set, p).ok(),
-        Source::Path(path) => Some(path.clone()),
+        Source::Package(p) => plugins::in_set(installed, set, p).map_err(|e| e.to_string()),
+        Source::Path(path) => Ok(path.clone()),
     };
     match entry {
-        super::Starts::Plugin(plugin) => match &plugin.kind {
+        super::Starts::Plugin(plugin, _) => match &plugin.kind {
             PluginKind::Pi(source) => package(Set::Pi, source),
             PluginKind::Dsh(source) => package(Set::Dsh, source),
-            PluginKind::Rutis { path, .. } => Some(path.clone()),
+            PluginKind::Rutis { path, .. } => Ok(path.clone()),
         },
         super::Starts::Server(server) => match &server.transport {
             Transport::Stdio { source, .. } => package(Set::Mcp, source),
-            Transport::Http { .. } => None,
+            Transport::Http { .. } => Err("an HTTP server starts nothing here".into()),
         },
     }
 }

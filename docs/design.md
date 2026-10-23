@@ -2691,8 +2691,12 @@ its `env` table already hands over a value (`env = { TAVILY_API_KEY =
   }`) if it should have it"; for a stdio server: "…: hand it over in its
   `env` table (`TAVILY_API_KEY = \"${TAVILY_API_KEY}\"`) if it should have
   it"; for a credential yoagent reads, never a suggestion to grant: "its
-  code reads `OPENAI_API_KEY`, a credential yoagent reads, taken out:
-  granted, what it spends with it is not metered". The names come from
+  code reads `OPENAI_API_KEY`, a credential yoagent reads, taken out of
+  its environment: one handed over is spent unmetered" (as built, after
+  #59's review; "set empty in its environment" off unix); for a name that
+  loads code, left out on purpose, none either (as built: "…, which is set
+  here but left out of its environment on purpose: it can load code into
+  its runtime"). The names come from
   the scan above, run on the entry's own files: a pi or DSH package's
   folder in its set (not its dependencies), a local file, a stdio
   server's package. Only names set here, and not kept or granted, are
@@ -2700,16 +2704,20 @@ its `env` table already hands over a value (`env = { TAVILY_API_KEY =
   one. It is a hint, not a proof, with the scan's limits above.
 - `check`, for the agent, when a kept proxy variable holds a password
   (`written_password`, made crate-visible and taught a proxy written
-  without a scheme, `user:pw@proxy:3128`): "`HTTPS_PROXY` holds a
-  password, and every plugin and stdio server gets it as the owner's
-  network setting".
+  without a scheme, `user:pw@proxy:3128`): "`HTTPS_PROXY` hold(s) a
+  password, and every plugin and stdio MCP server gets it as the owner's
+  network setting" (as built).
 - `run` and `check` replace step 4's combined note with one that names the
   rule and counts: "plugins and stdio MCP servers start with the kept
   environment (the path, home, locale, terminal, session, proxies,
-  standard folders, toolchains) and what their entries grant: N variables
-  set here are left out, among them the credentials yoagent reads (`X`,
-  …)" — the credentials named as now, the rest counted (their names are in
-  `check --json`'s agent `leftOut`).
+  standard folders, toolchains) and what their entries grant: N
+  variable(s) set here are left out of one or more of them (`check
+  --json` lists them: the agent's `leftOut`), among them the credentials
+  yoagent reads (`X`, …); an entry that needs one gets it only from its
+  entry (…), and what it spends with it is not metered" — the credentials
+  named as now, the rest counted; with no credential among them, "…; an
+  `env` grant on a plugin, or a stdio server's `env` table, passes one it
+  needs" (as built).
 - §6 ("Not covered") and the honour-system bullet: plugins start with the
   kept environment and what is granted, not the owner's whole
   environment; still not a sandbox (files, dotfiles, `.env`s).
@@ -2725,11 +2733,12 @@ its `env` table already hands over a value (`env = { TAVILY_API_KEY =
 **Where it applies.** As step 4: the plugin runtimes (`ui`, `pi`, `dsh`,
 `rutis-<n>`) in `run` and in `check` (alone and together), the stdio MCP
 servers, the helper scripts (`node_json`: the kept set, no grants; they
-import a package's code). `check`'s pi and DSH probes alone keep step 4's
-behaviour — yoagent-rutis builds their launch and can only add or set
-empty, and yoagent's owner chose not to add removal (2026-10-21, step 4's
-History) — so alone they get the full environment less the credentials,
-said as now. Not npm (its own `npm_config_*` filtering, step M2b), not the
+import a package's code). `check`'s pi and DSH probes alone:
+yoagent-rutis builds their launch and can only add or set empty, and
+yoagent's owner chose not to add removal (2026-10-21, step 4's History) —
+proposed here as keeping step 4's behaviour; as built (5a's review), they
+get every name `run` leaves out set empty instead, said by the note's
+suffix. Not npm (its own `npm_config_*` filtering, step M2b), not the
 agent's `bash`, not `examples/coding_agent.rs` (above). Off unix: no `env`
 to start through, and the helpers keep step 4's removal — step 4's
 credentials set empty or removed, nothing else; said.
@@ -2831,8 +2840,12 @@ is not quite unset for a few programs (`UV_THREADPOOL_SIZE` empty is 0
 threads, then 1; `NODE_DISABLE_COLORS` and `OPENSSL_CONF` are read when
 present): nothing that changes what loads. `withheld_note`, `TAKEN` and
 `withheld_from` stay as step 4 made them until 5b. *5b* (2026-10-23):
-`environment::names_read` (the scan, capped at 5000 files and 4 MiB a
-file), `environment::proxy_password` (a proxy written without a scheme
+`environment::names_read` (the scan, capped at 5000 code files and
+4 MiB a file; after #59's review a `Scan`: 64 MiB a file (`dsh-univer-office`'s
+gateway bundle is 58 MiB), 512 MiB in all, 50 000 files and folders, no link below its start followed (a loop, or a monorepo's
+link out, walked nothing), files read as lossy UTF-8, and what it missed
+— a limit, a file too big, links, what could not be read — or no code
+found said as a note on the entry, so no note never means "not looked"), `environment::proxy_password` (a proxy written without a scheme
 too) and `PROXIES`; `run::Starts` (a plugin or stdio server: `gets`,
 `environment`), `run::left_out`, `run::environment_note` (the one note,
 replacing `withheld_note` and 5a's `kept_note`: a count of what one or
@@ -2847,7 +2860,16 @@ server's package or program); the skill's `manifest.md`, `parts.md`
 tests for each, `cli_test`
 `check_says_what_a_plugins_code_reads_and_what_it_is_given`, and the
 gallery and examples accepting the environment note. `withheld_from`
-stays (each entry's lost credentials when they differ).
+stays (each entry's lost credentials when they differ; after the review
+it says "; its code reads `X`" for one the code reads, in place of a
+second note). Also after #59's review: the DSH runtime's own home
+(`DSH_HOME`, and `DSH_AGENTS_HOME` for a private one), set by its launch
+when it has host services or the DSH host, is not left out of a DSH
+plugin (`run::dsh_launch`); a code-loading name its code reads is said
+without "grant it"; `run_test` `check_scans_each_entrys_own_code` (a
+pinned server's package, a rutis plugin's file, a shell server with no
+code); the gallery and `cli_test` accept the notes that depend on the
+variables set where they run.
 
 ### What it unlocks, and the migration
 

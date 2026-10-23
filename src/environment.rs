@@ -91,10 +91,68 @@ pub(crate) fn proxy_password(value: &str) -> bool {
     }
 }
 
-/// The most files and bytes [`names_read`] reads of one entry: a package
-/// is its own files, not its dependencies, but some ship a lot.
+/// The limits of [`names_read`] on one entry: a package is its own files,
+/// not its dependencies, but some ship a lot. At most `SCAN_FILES` code
+/// files are read, each only when at most `SCAN_BYTES` (a bundle is one big
+/// file, often: `dsh-univer-office`'s gateway is 58 MiB), at most
+/// `SCAN_TOTAL` bytes in all, and at most `SCAN_ENTRIES` files and folders
+/// looked at.
 const SCAN_FILES: usize = 5000;
-const SCAN_BYTES: u64 = 4 << 20;
+const SCAN_BYTES: u64 = 64 << 20;
+const SCAN_TOTAL: u64 = 512 << 20;
+const SCAN_ENTRIES: usize = 50_000;
+
+/// What [`names_read`] found: the names, and what it could not look at.
+#[derive(Debug, Default)]
+pub(crate) struct Scan {
+    pub names: std::collections::BTreeSet<String>,
+    /// Code files read, and their bytes.
+    pub files: usize,
+    pub bytes: u64,
+    /// Code files over `SCAN_BYTES`, not read.
+    pub too_big: Vec<std::path::PathBuf>,
+    /// Links below the start, not followed (they may lead out of the
+    /// entry's code, or back into it).
+    pub links: usize,
+    /// Files and folders that could not be read.
+    pub unreadable: usize,
+    /// A limit stopped the walk.
+    pub stopped: bool,
+}
+
+impl Scan {
+    /// What the scan missed, said for `check`'s note on the entry; None
+    /// when it read everything it found.
+    pub fn missed(&self) -> Option<String> {
+        let mut missed = Vec::new();
+        if self.stopped {
+            missed.push(format!(
+                "it stopped at a limit: {SCAN_FILES} code files, {} MiB of code or {SCAN_ENTRIES} files and folders",
+                SCAN_TOTAL >> 20
+            ));
+        }
+        if let Some(first) = self.too_big.first() {
+            missed.push(match self.too_big.len() {
+                1 => format!("`{}` is over {} MiB", first.display(), SCAN_BYTES >> 20),
+                n => format!(
+                    "{n} files over {} MiB, `{}` among them",
+                    SCAN_BYTES >> 20,
+                    first.display()
+                ),
+            });
+        }
+        if self.links > 0 {
+            missed.push(format!("{} link(s) not followed", self.links));
+        }
+        if self.unreadable > 0 {
+            missed.push(format!(
+                "{} file(s) or folder(s) could not be read",
+                self.unreadable
+            ));
+        }
+        (!missed.is_empty()).then(|| missed.join(", "))
+    }
+}
 
 /// The environment variables the code at `path` (a file, or a package's
 /// folder without its `node_modules`) names: `process.env.X` and
@@ -102,21 +160,45 @@ const SCAN_BYTES: u64 = 4 << 20;
 /// `.ts`, `.mts` and `.cts` files (design §12 "Step 5", the measurement's
 /// scan). A hint, not a proof: a name a dependency reads, one destructured
 /// (`const { X } = process.env`), computed, or looked up through another
-/// object is not seen; one in dead code is. What cannot be read is skipped.
-pub(crate) fn names_read(path: &std::path::Path) -> std::collections::BTreeSet<String> {
-    let mut names = std::collections::BTreeSet::new();
-    let mut files = 0;
+/// object is not seen; one in dead code is. `path` itself may be a link;
+/// links below it are not followed. What it could not read is in the
+/// [`Scan`], for `check` to say.
+pub(crate) fn names_read(path: &std::path::Path) -> Scan {
+    let mut scan = Scan::default();
+    let mut entries = 0;
     let mut stack = vec![path.to_path_buf()];
     while let Some(at) = stack.pop() {
-        let Ok(meta) = std::fs::metadata(&at) else {
+        entries += 1;
+        if entries > SCAN_ENTRIES {
+            scan.stopped = true;
+            break;
+        }
+        let meta = match at == path {
+            true => std::fs::metadata(&at),
+            false => std::fs::symlink_metadata(&at),
+        };
+        let Ok(meta) = meta else {
+            scan.unreadable += 1;
             continue;
         };
+        if meta.file_type().is_symlink() {
+            scan.links += 1;
+            continue;
+        }
         if meta.is_dir() {
             if at.file_name().is_some_and(|n| n == "node_modules") && at != path {
                 continue;
             }
-            if let Ok(read) = std::fs::read_dir(&at) {
-                stack.extend(read.flatten().map(|e| e.path()));
+            match std::fs::read_dir(&at) {
+                Ok(read) => {
+                    for entry in read {
+                        match entry {
+                            Ok(entry) => stack.push(entry.path()),
+                            Err(_) => scan.unreadable += 1,
+                        }
+                    }
+                }
+                Err(_) => scan.unreadable += 1,
             }
             continue;
         }
@@ -124,18 +206,36 @@ pub(crate) fn names_read(path: &std::path::Path) -> std::collections::BTreeSet<S
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| ["js", "mjs", "cjs", "ts", "mts", "cts"].contains(&e));
-        if !code || meta.len() > SCAN_BYTES {
+        if !code {
             continue;
         }
-        files += 1;
-        if files > SCAN_FILES {
+        if meta.len() > SCAN_BYTES {
+            scan.too_big
+                .push(at.strip_prefix(path).unwrap_or(&at).to_path_buf());
+            continue;
+        }
+        if scan.files == SCAN_FILES || scan.bytes + meta.len() > SCAN_TOTAL {
+            scan.stopped = true;
             break;
         }
-        if let Ok(text) = std::fs::read_to_string(&at) {
-            names.extend(env_names(&text));
+        scan.files += 1;
+        scan.bytes += meta.len();
+        // The names are ASCII: a file with other bytes (Latin-1 in a
+        // vendored file) is read all the same.
+        match std::fs::read(&at) {
+            Ok(bytes) => scan
+                .names
+                .extend(env_names(&String::from_utf8_lossy(&bytes))),
+            Err(_) => scan.unreadable += 1,
         }
     }
-    names
+    scan.too_big.sort();
+    scan
+}
+
+/// Whether `name` loads code into a process ([`CODE_LOADING`], `DYLD_*`).
+pub(crate) fn loads_code(name: &str) -> bool {
+    CODE_LOADING.contains(&name) || name.starts_with(CODE_LOADING_PREFIX)
 }
 
 /// The names `text` reads as `process.env.X` or `process.env["X"]`.
@@ -190,10 +290,7 @@ mod tests {
                 *name == "PWD" || !crate::manifest::secret(name),
                 "{name} looks like a secret"
             );
-            assert!(
-                !CODE_LOADING.contains(name) && !name.starts_with(CODE_LOADING_PREFIX),
-                "{name} loads code"
-            );
+            assert!(!loads_code(name), "{name} loads code");
         }
         for prefix in KEPT_PREFIXES {
             assert!(
@@ -223,14 +320,67 @@ mod tests {
         std::fs::write(dir.path().join("lib/c.mjs"), "process.env['NESTED']").unwrap();
         std::fs::create_dir_all(dir.path().join("node_modules/dep")).unwrap();
         std::fs::write(dir.path().join("node_modules/dep/d.js"), "process.env.DEP").unwrap();
-        let names: Vec<String> = names_read(dir.path()).into_iter().collect();
-        assert_eq!(names, ["NESTED", "OWN"]);
+        // Not UTF-8 (Latin-1), read all the same.
+        std::fs::write(
+            dir.path().join("lib/latin.cjs"),
+            b"// caf\xe9\nprocess.env.LATIN",
+        )
+        .unwrap();
+        let scan = names_read(dir.path());
+        let names: Vec<&String> = scan.names.iter().collect();
+        assert_eq!(names, ["LATIN", "NESTED", "OWN"]);
+        assert_eq!((scan.files, scan.missed()), (3, None));
+        let file = names_read(&dir.path().join("a.ts"));
+        assert_eq!(file.names.into_iter().collect::<Vec<_>>(), ["OWN"]);
+    }
+
+    #[test]
+    fn the_scan_says_what_it_missed_and_follows_no_link_below_its_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("pkg");
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::fs::write(root.join("a.js"), "process.env.OWN").unwrap();
+        // A bundle over the limit: not read, said.
+        let big = std::fs::File::create(root.join("dist/bundle.js")).unwrap();
+        big.set_len(SCAN_BYTES + 1).unwrap();
+        std::fs::write(dir.path().join("outside.js"), "process.env.OUTSIDE").unwrap();
+        #[cfg(unix)]
+        {
+            // A loop back to its start, and a link out of it.
+            std::os::unix::fs::symlink(&root, root.join("again")).unwrap();
+            std::os::unix::fs::symlink("..", root.join("up")).unwrap();
+            std::os::unix::fs::symlink(dir.path().join("outside.js"), root.join("b.js")).unwrap();
+        }
+        let scan = names_read(&root);
+        assert_eq!(scan.names.iter().collect::<Vec<_>>(), ["OWN"]);
+        assert_eq!(scan.too_big, [std::path::PathBuf::from("dist/bundle.js")]);
+        #[cfg(unix)]
         assert_eq!(
-            names_read(&dir.path().join("a.ts"))
-                .into_iter()
-                .collect::<Vec<_>>(),
-            ["OWN"]
+            scan.missed().unwrap(),
+            "`dist/bundle.js` is over 64 MiB, 3 link(s) not followed"
         );
+        // The start itself may be a link.
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+            assert_eq!(names_read(&link).names.iter().collect::<Vec<_>>(), ["OWN"]);
+        }
+        // The file limit stops the walk, said.
+        let many = dir.path().join("many");
+        std::fs::create_dir_all(&many).unwrap();
+        for i in 0..=SCAN_FILES {
+            std::fs::write(many.join(format!("{i}.js")), "").unwrap();
+        }
+        let scan = names_read(&many);
+        assert!(scan.stopped && scan.files == SCAN_FILES);
+        assert!(scan
+            .missed()
+            .unwrap()
+            .starts_with("it stopped at a limit: 5000 code files"));
+        // Nothing there: nothing read, one thing unreadable.
+        let gone = names_read(&dir.path().join("gone"));
+        assert_eq!((gone.files, gone.unreadable), (0, 1));
     }
 
     #[test]

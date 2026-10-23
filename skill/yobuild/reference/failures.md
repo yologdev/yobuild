@@ -106,14 +106,20 @@ off or a key is missing, may want a variable the kept environment left out
 ``its code reads `X`, which is set here but left out of its environment:
 grant it …`` — grant it (`grants = { env = ["X"] }`) if it should have it,
 after telling the person. For a credential yoagent reads the note says
-``… a credential yoagent reads, taken out: granted, what it spends with it
-is not metered``: ask first.
+``… a credential yoagent reads, taken out of its environment: one handed
+over is spent unmetered``: ask first. A name that loads code
+(`NODE_OPTIONS`, `NODE_PATH`, `LD_PRELOAD`, `DYLD_*`) is ``left out of its
+environment on purpose``: grant it only when the person asks. No such note
+is not proof: ``its code was scanned in part (…)`` and ``no JavaScript or
+TypeScript code of its own was found to scan`` say the scan saw little.
 
 Not failures, though they read like one: `check`'s note `probed without
 the DSH host: its grants are not exercised alone` on a DSH plugin with
 `grants` (alone it is probed without them; the scripted run exercises
 them); its agent note `plugins and stdio MCP servers start with the kept
-environment (…)`, said whenever a variable set here is left out; facts'
+environment (…)` (off unix `plugins and stdio MCP servers inherit the
+whole environment here but the credentials …`), said whenever a plugin or
+stdio server starts and a variable set here is left out; facts'
 `not a git repository`, `changes unknown: no snapshot at the start (git: …)` and `changes since
 the start unknown (git: …)` (Info: `git init` the folder for facts to tell
 what changed); `[builtins] ask_owner is off` (the error a plugin's own

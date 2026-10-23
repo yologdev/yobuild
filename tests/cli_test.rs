@@ -837,11 +837,12 @@ fn check_passes_the_example_agents_and_gives_the_matrixs_verdict() {
         assert!(out.contains(line), "{line:?} in\n{out}");
     }
     // Every name it allows is offered by it: no note but the kept
-    // environment's (this process's own variables are left out).
+    // environment's (this process's own variables are left out), and what
+    // depends on the variables set where the tests run.
     assert!(
         out.lines()
-            .filter(|l| l.trim_start().starts_with("note:"))
-            .all(|l| l.contains(ENVIRONMENT_NOTE)),
+            .filter_map(|l| l.trim_start().strip_prefix("note: "))
+            .all(|l| l.starts_with(ENVIRONMENT_NOTE) || set_here(l)),
         "{out}"
     );
     let (code, out, err) = check(&[&path("coding.toml"), "--locked"], dir.path());
@@ -1560,11 +1561,13 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     // adds.
     let probed = |note: String| format!("{note}; its probe alone gets them empty");
     let all = taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY"]);
+    // A shell script: no code of its own to scan, said.
     assert_eq!(
         notes(&report, "server"),
         [
             given("OPENAI_API_KEY"),
-            taken(&["DEEPSEEK_API_KEY", "ACME_KEY"])
+            taken(&["DEEPSEEK_API_KEY", "ACME_KEY"]),
+            "no JavaScript or TypeScript code of its own was found to scan: what it reads from the environment is not known".to_owned()
         ]
     );
     // Its config refers to the key: handed over in its config, not left in
@@ -1809,6 +1812,14 @@ fn a_server_that_cannot_start_is_said_with_what_to_do() {
 /// plugin or stdio server gets it.
 const ENVIRONMENT_NOTE: &str = "plugins and stdio MCP servers start with the kept environment (";
 
+/// A note that depends on the variables set where the tests run: one a
+/// plugin's code reads (`dsh-free-search` reads `DSH_HOME`), a proxy
+/// holding a password.
+fn set_here(note: &str) -> bool {
+    (note.starts_with("its code reads `") && note.contains("`, which is set here"))
+        || note.contains(" hold(s) a password, ")
+}
+
 /// `notes` (a report's) but the kept environment's.
 fn but_environment(notes: &serde_json::Value) -> Vec<String> {
     notes
@@ -1836,7 +1847,7 @@ fn check_says_what_a_plugins_code_reads_and_what_it_is_given() {
     std::fs::write(
         dir.path().join("reads.ts"),
         "export default function () {\n\
-           const seen = [process.env.YOBUILD_TEST_TOKEN, process.env['OPENAI_API_KEY'], process.env.YOBUILD_UNSET_HERE]\n\
+           const seen = [process.env.YOBUILD_TEST_TOKEN, process.env['OPENAI_API_KEY'], process.env.YOBUILD_UNSET_HERE, process.env.YOBUILD_EMPTY_HERE]\n\
            return seen.length\n\
          }\n",
     )
@@ -1861,6 +1872,7 @@ fn check_says_what_a_plugins_code_reads_and_what_it_is_given() {
             .env("DEEPSEEK_API_KEY", "sk-d")
             .env("OPENAI_API_KEY", "sk-o")
             .env("YOBUILD_TEST_TOKEN", "t")
+            .env("YOBUILD_EMPTY_HERE", "")
             .env("YOBUILD_SECRET_KEY", "s")
             .env("NODE_OPTIONS", "--no-deprecation")
             .env("HTTPS_PROXY", "me:pw@127.0.0.1:9")
@@ -1880,15 +1892,18 @@ fn check_says_what_a_plugins_code_reads_and_what_it_is_given() {
         .map(|n| n.as_str().unwrap())
         .collect();
     for note in [
-        "its code reads `OPENAI_API_KEY`, a credential yoagent reads, taken out: granted, what it spends with it is not metered",
+        "its code reads `OPENAI_API_KEY`, a credential yoagent reads, taken out of its environment: one handed over is spent unmetered",
         "its code reads `YOBUILD_TEST_TOKEN`, which is set here but left out of its environment: grant it (`grants = { env = [\"YOBUILD_TEST_TOKEN\"] }`) if it should have it",
         "it is given `NODE_OPTIONS`, which can load code into its runtime",
         "it is given `YOBUILD_SECRET_KEY`, set here: the owner's own, used as the plugin sees fit",
     ] {
         assert!(notes.contains(&note), "{note}\n{report:#}");
     }
+    // Unset or empty here: nothing to hand over, unsaid.
     assert!(
-        !notes.iter().any(|n| n.contains("YOBUILD_UNSET_HERE")),
+        !notes
+            .iter()
+            .any(|n| n.contains("YOBUILD_UNSET_HERE") || n.contains("YOBUILD_EMPTY_HERE")),
         "{report:#}"
     );
     assert_eq!(
