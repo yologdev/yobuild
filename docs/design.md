@@ -3340,3 +3340,306 @@ above); (4) removing provider keys from plugin
 runtimes. Each a PR pair (yoagent-rutis,
 then yobuild), each design-checked; step 2's yoagent-rutis half shipped in
 0.7.1.
+
+## 13. Share: yobuild without its repository (M4; proposed 2026-10-23)
+
+**Why.** Today yobuild runs only from a set-up checkout.
+- `Layout::default()` names the checkout's `frontend/` and `adapters/` by
+  the path the binary was compiled at (`CARGO_MANIFEST_DIR`).
+- `adapters/` is a gitignored copy of the yoagent-rutis crate's `plugins/`
+  folder (`scripts/copy-adapters.sh`).
+- The runtimes need `npm ci` in three folders.
+- `run/plugins.rs::rutis_runtime` reads the rutis runtime's version pin
+  from `frontend/plugins/package.json` for every rutis plugin.
+- The examples name the frontend's plugins by path
+  (`rutis = "../frontend/plugins/todo-plan.ts"`).
+- The skill says "until yobuild is installable on its own, it runs from a
+  checkout".
+
+M4's "Done when": someone who has not seen the repository installs yobuild,
+runs `yobuild new`, and has a gallery agent running from the docs alone; 0.1
+tagged.
+
+### What the binary needs at run time, and where it comes from
+
+| What | Today | Proposed |
+|---|---|---|
+| The web page (`frontend/web/index.html`, `app.js`, `lib.js`) | built in (`include_str!`) | unchanged |
+| The terminal UI (`frontend/plugins/terminal-ui.ts`, which imports `../web/lib.js`, ESM through `frontend/web/package.json`) and the UI plugins `search-links.ts` and `todo-plan.ts`, with `frontend/plugins/package.json` and its lock | the checkout, `npm ci` by hand | built in; the runtime set `ui` (below), as `plugins/` beside `web/lib.js` and `web/package.json` |
+| The pi example policy `frontend/plugins/pi-extensions/confirm-dangerous.ts` (not its `.test.mjs`) | the checkout | built in, in the `ui` set, nameable (below) |
+| The adapters (yoagent-rutis's `plugins/`: `pi/`, `dsh/`, `yoagent.d.ts`, which the adapters import as `../yoagent.d.ts`, each folder's `package.json` and lock; not the `fixture-*.ts`) | copied to `adapters/`, `npm ci` by hand | built in; the runtime set `adapters` (below) |
+| The rutis runtime's version (`@arcships/rutis-runtime`) | read from `frontend/plugins/package.json` | a constant, checked in a unit test against that file |
+| Node 22.19+ and npm 11.19+ | the person's | still the person's, checked first (below) |
+
+### The runtime sets
+
+The cache gets two sets of yobuild's own, installed the way `install.rs`
+installs a manifest's pins (design §4: written in a `.partial-` folder,
+`npm ci` with `npm_flags`, the stamp last, renamed into place; a folder
+without its stamp installed again).
+
+- **`adapters`.** `<home>/runtime/adapters/<hash>/` holds `pi/`, `dsh/`
+  and `yoagent.d.ts`, one root with both, as yoagent-rutis's probes need:
+  `probe::pi_with(root)` and `dsh_with(root)` use `root/pi` and `root/dsh`.
+  It is `Layout::adapters`.
+- **`ui`.** `<home>/runtime/ui/<hash>/` holds `plugins/` and `web/` (the
+  two files above). It is `Layout::frontend`.
+- **The hash.** The first 16 hex of a sha256 over the set's name and,
+  sorted by path, each file's path and bytes, as `install.rs`'s `hash`
+  does over its own inputs. A changed file gives a new folder; an old
+  folder stays usable by the old binary. Old folders are not removed; the
+  manifest sets' are not either (§4). Cleaning the cache stays the
+  person's, said in the guide.
+- **Installed in each folder.** `adapters/pi` and `adapters/dsh` are each
+  `npm ci`ed, and so is `ui/plugins`. Their install scripts run, as
+  `scripts/try-coding-agent.sh` runs them today: these are yobuild's own
+  packages, pinned by locks it ships, unlike a manifest's pins, which get
+  `--ignore-scripts`. Among them, `esbuild` and `fsevents` place
+  platform binaries. Running them is what has been tested so far.
+- **When.** On first need:
+  - `adapters` whenever a pi or DSH plugin loads, or `check` probes one;
+  - `ui` for the terminal UI or a built-in plugin.
+
+  The manifest's `dsh` set keeps holding its own copy of the DSH files and
+  base (§4). With DSH packages pinned, the DSH runtime runs from that set,
+  as today, and only the `adapters` set's `pi` side is used. The helper
+  scripts (`resolve-package.mjs`, `inspect-package.mjs`; Node built-ins
+  only) run from the `adapters` set either way.
+- **Said.** Like a manifest's sets: "runtime `adapters` installed (pi, dsh)".
+  `--locked` does not apply: these sets carry their own locks, are never
+  stale and never in `agent.lock`. npm is needed with or without it.
+
+**`Layout`.**
+- **`Layout::installed(home)`** (the binary; and `Layout::default()` for
+  library callers, which so far are the tests).
+- **`Layout::checkout()`** (the repository's folders): for
+  `examples/coding_agent.rs` and the tests that load the adapters'
+  fixtures, which stay on `scripts/copy-adapters.sh`. The dialog tests
+  name their own paths and are unchanged.
+- **The tests.** `cli_test` and `gallery_test` run the binary, so they
+  use the installed sets, from the tests' shared `YOBUILD_HOME`: each set
+  installed once a job. Their skips on `adapters/*/node_modules` change to
+  the Node check's.
+
+**Where the adapters' files come from at build time.** They are
+yoagent-rutis's `plugins/` folder, which its `adapters()` names by path
+(`CARGO_MANIFEST_DIR`). Its doc says a binary on another machine must ship
+a copy. Three ways:
+- **(a)** yoagent-rutis exposes them as data,
+  `adapters::files() -> &'static [(&'static str, &'static [u8])]`: paths
+  relative to `plugins/` (`pi/pi-extensions-adapter.ts`, …,
+  `yoagent.d.ts`), the fixtures left out by the crate. One source of
+  truth, checked by the crate that owns it. It needs a yoagent-rutis
+  release, the yoagent session's.
+- **(b)** yoagent-rutis declares `links = "yoagent-rutis"` and exports its
+  folder from a build script (`DEP_YOAGENT_RUTIS_PLUGINS`). yobuild's
+  build script then embeds what it lists. No API, but also a release.
+- **(c)** yobuild vendors a copy under `assets/adapters/`, refreshed by
+  `scripts/copy-adapters.sh` and checked in CI against the crate's files.
+  No release needed; a second copy to keep in step.
+
+Recommended: (a).
+
+### Node and npm, checked first
+
+Before `prepare` (whose install runs npm) and before any runtime, whenever
+the manifest needs Node, `node --version` and `npm --version` are read. The
+manifest needs Node when it has:
+- any plugin;
+- a pinned server (installed with npm);
+- the terminal UI.
+
+A missing one, or one older than Node 22.19 or npm 11.19 (the skill's
+floor for pinned DSH plugins), is an error naming what was found:
+
+> yobuild needs Node 22.19+ and npm 11.19+: found node 20.11.0
+
+It gets a new hint, `no-node-version`, with `failures.md`'s row. The `no-node`
+hint stays for rutis's own message. A run that needs no Node, an HTTP-only
+MCP agent say, checks nothing.
+
+### Built-in plugins, by name
+
+A manifest names a file by path, so nothing in the cache could be named.
+A plugin's source may instead be `yobuild:<name>`:
+- **The rutis plugins:** `rutis = "yobuild:todo-plan"` and
+  `rutis = "yobuild:search-links"`.
+- **The pi policy:** `pi = "yobuild:confirm-dangerous"`.
+
+Each resolves to its file in the `ui` set (installed on first need). An
+unknown name is refused, listing the known ones. `Source::Builtin(name)`
+joins `Package` and `Path` (`#[non_exhaustive]` already). The examples
+switch to these names, so they run from any folder.
+
+### New commands
+
+- **`yobuild new <name> [--from <agent>]`.** It makes the folder `<name>/`,
+  refused if it exists.
+  - **Alone**, it writes:
+    - `agent.toml`:
+      - `deepseek/deepseek-flash`;
+      - `tools = "read-only"`;
+      - `ask_owner = true`;
+      - `report = "handoff"`;
+      - `budget_usd = 0.25`, `session_budget_usd = 1.0`;
+      - the web page;
+      - every other top-level key shown commented, one line on what it
+        does, pointing at the skill's `manifest.md`.
+    - `prompts/agent.md`: a role to fill in.
+    - `scripts/demo.json`: one `list_files` call, then a reply naming the
+      report's sections.
+    - `scripts/demo.task`.
+
+    A unit test parses the template as written (the commented keys too,
+    uncommented one by one) and a `cli_test` runs `check` and the demo on
+    it.
+  - **With `--from`**, it copies an agent built into the binary:
+    - the gallery's five (`web-research`, `notes-keeper`, `code-reviewer`,
+      `spreadsheet-clerk`, `code-health`);
+    - the examples (`handoff`, `coding`, `minimal`), as `agent.toml` with
+      its prompt, lock and reply files.
+
+    It copies them unchanged but for two things, said when it ends:
+    - `[agent] name` becomes `<name>`, so its scratch and log are its own;
+    - the README's `path/to/gallery/<x>/` becomes the new folder's path.
+
+    The agent is the coding agent's work; `new` hand-edits nothing else.
+    `yobuild new --list` names them, one line each.
+  - It ends by printing the next commands: `check`, the demo scripted,
+    a live run.
+- **`yobuild skill install [--project] [--force]`.** It writes the skill,
+  built into the binary, to `~/.claude/skills/yobuild/` (or
+  `./.claude/skills/yobuild/` with `--project`), with a stamp
+  (`.yobuild-skill`: the yobuild version and a hash of the files written).
+  - **When the folder is there:**
+    - stamped, and its files still as written: replaced (an upgrade), and
+      said;
+    - files changed since (edited by hand), or no stamp: refused without
+      `--force`, naming the changed files.
+  - **With `--force`** the folder is written fresh: files the skill no
+    longer ships are removed.
+  - **The skill names no repository path.**
+    - `SKILL.md`'s "runs from a checkout" becomes "installed: `cargo
+      install yobuild` or a release binary".
+    - `scripts/try-coding-agent.sh` and "never add … to yobuild's
+      `adapters/`" go.
+    - `manifest.md`'s `examples/…` become `yobuild new --from handoff`
+      (and so on).
+    - `parts.md`'s `frontend/plugins/` become `yobuild:` names.
+    - Messages the skill quotes change with it: the `dsh-host` hint's
+      "adapters/dsh: `npm ci` there" and `install.rs`'s "the files in
+      adapters/dsh" name the runtime set instead.
+    - `skill_test` checks there is no repository path.
+- **`yobuild --version`.**
+
+### Upgrades and locks
+
+A manifest's `dsh` set records `base`, a hash of the DSH adapter's
+`package.json` and lock (§4). A yobuild whose DSH adapter changed finds
+every lock with DSH pins stale. Without `--locked` that set is resolved
+again and said; with it, refused. That includes agents copied by
+`new --from` and run by a newer binary.
+
+The refusal is kept, since the base is part of what was locked, and is
+made plain:
+
+> agent.lock: its `dsh` set was locked with another yobuild's DSH base
+> (this one's changed): run once without `--locked` to lock it again
+
+`CHANGELOG.md` says, for each release, whether the DSH base changed.
+
+### Distribution
+
+- **crates.io (open question 2).** Recommended: publish `yobuild` 0.1 as
+  a binary crate (`cargo install yobuild`).
+  - Its library (`yobuild::builtins`, `frontend`, `install`, `manifest`,
+    `run`) stays, since the tests use it, documented as having no API
+    promise before 1.0.
+  - Cargo.toml changes:
+    - `publish = false` goes;
+    - `version` becomes 0.1.0;
+    - an `include` list: `src/`, `frontend/web/` and the `frontend/plugins/`
+      sources and lock (no `node_modules`), `gallery/`, `examples/`,
+      `skill/`, plus `assets/adapters/` under (c).
+
+    The package stays well under crates.io's 10 MB. Everything it depends
+    on is on crates.io, given (a) or (b) released.
+- **Prebuilt binaries.** A release workflow on a `v*` tag builds for macOS
+  (arm64, x86_64) and Linux (x86_64, aarch64; glibc). It attaches tarballs
+  and checksums to the GitHub release, plus `cargo binstall` metadata. No
+  install script piped to a shell.
+- **Windows (open question 7).** Recommended: not in 0.1.
+  - Off unix there is no kept environment (only the credentials, set
+    empty), the terminal UI reads `/dev/tty`, and nothing is tested there.
+    Nothing is known to compile there either: no CI job builds it.
+  - So no Windows binary, and the README says unsupported.
+  - On Windows `yobuild run` and `check` refuse with one line, "Windows is
+    not supported yet (yobuild 0.1: macOS and Linux)". A
+    `cargo check --target x86_64-pc-windows-msvc` CI job keeps it
+    compiling for later.
+- **The version.** 0.1.0, with a `CHANGELOG.md` from the milestones.
+
+### Docs
+
+- **`README.md`, as the quickstart:**
+  - install (cargo or a release binary; Node 22.19+, npm 11.19+);
+  - `yobuild skill install`;
+  - `yobuild new my-agent --from web-research`;
+  - `check`;
+  - a scripted run, then a live run with a key;
+  - where the skill takes over.
+- **`docs/guide.md`**, the person's manual:
+  - the manifest (pointing at the skill's `manifest.md`), grants, the
+    kept environment, the gallery, what to do when a run fails;
+  - a rutis plugin of one's own (its package and `npm install`, the
+    runtime version yobuild names);
+  - the cache and how to clean it.
+- **The roadmap's "docs site, the video re-cut, posts"** move out of M4's
+  "Done when", to a later item.
+
+**Done-when check, in CI.** A `fresh-machine` job builds the release
+binary, then moves the whole checkout out of reach (renamed) before
+running anything. So no file read through a compiled-in path can pass,
+and any leftover `CARGO_MANIFEST_DIR` read fails. Then, with an empty
+`HOME` and `YOBUILD_HOME`:
+1. `yobuild skill install`;
+2. `yobuild new a --from web-research`, which installs the DSH `adapters`
+   set and the manifest's `dsh` set: `check`, then `demo` under `--once`,
+   `Completed`;
+3. `yobuild new b --from coding`, which installs the pi side and the `ui`
+   set for its `yobuild:` plugins: `check`, then its demo;
+4. the terminal UI on a pty with `yobuild new c` (`tests/run_terminal_pty.py`).
+
+No key is needed.
+
+### Decisions for review
+
+1. *crates.io* (open question 2). Recommended: publish the binary crate,
+   the library unpromised.
+2. *Windows* (open question 7). Recommended: not in 0.1, refused with a
+   line, kept compiling in CI.
+3. *The adapters' files.* Recommended: (a) yoagent-rutis exposing them;
+   (b) a build-script link; (c) vendoring.
+4. *Built-in plugins by `yobuild:` name* (recommended: the examples run
+   anywhere), or the examples kept repository-only and the UI plugins not
+   shipped.
+5. *The gallery and examples built into the binary* (recommended: about
+   450 KB of text, mostly locks), or fetched from the repository. Fetching
+   needs the network and a URL to trust.
+6. *Docs.* Recommended: README and `docs/guide.md` for 0.1; a rendered
+   site, the video and posts later.
+
+### Order of PRs
+
+1. this design;
+2. yoagent-rutis's `adapters::files()` (the yoagent session);
+3. the runtime sets, `Layout`, the rutis runtime's version constant, the
+   Node check, the messages that named the checkout;
+4. `yobuild:` built-in plugins and the examples moved to them;
+5. `yobuild new` (with the built-in gallery and examples) and `yobuild
+   skill install`, the skill made repository-free;
+6. the release workflow, Cargo.toml's `include` and `publish`,
+   `CHANGELOG.md`, the Windows refusal and `cargo check` job, and the
+   `fresh-machine` job;
+7. README and `docs/guide.md`;
+8. tag 0.1 (and publish, per decision 1).

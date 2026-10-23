@@ -243,21 +243,24 @@ starts (2026-10-23; a tool's own, `run`).
 **Done when** visualize's chart shows on the page from a sandboxed origin,
 and a plugin's model call is charged to the run's budget.
 
-## M4 — Share
+## M4 — Share (proposed 2026-10-23: design §13)
 
-- `yobuild new <name>` (a manifest and a prompt to edit), `cargo install
-  yobuild` (and a prebuilt binary), `yobuild skill install` (the skill
-  into `~/.claude/skills/`).
-- Running without the repository: the adapters (today `adapters/`,
-  copied by `scripts/copy-adapters.sh`) and the terminal UI installed
-  into the cache too (design §4).
-- Docs site, the video re-cut for yobuild, posts.
+- `yobuild new <name> [--from <agent>]` (a manifest, prompt and demo to
+  edit, or a gallery agent or example), `cargo install yobuild` (and a
+  prebuilt binary), `yobuild skill install` (the skill into
+  `~/.claude/skills/`, free of repository paths).
+- Running without the repository (design §13): the adapters and the
+  terminal UI as runtime sets in the cache, built into the binary;
+  built-in plugins named `yobuild:<name>`; Node and npm checked first.
+- README and `docs/guide.md`.
 - Release 0.1 (no git dependencies in a release: yoagent-rutis and its
   `probe` come from crates.io already).
 
 **Done when** someone who has not seen the repository installs yobuild,
 runs `yobuild new`, and has a gallery agent running from the docs alone;
-0.1 is tagged (and published, if open question 2 says so).
+0.1 is tagged (and published, if open question 2 says so) — checked in
+CI by a `fresh-machine` job with the checkout moved out of reach.
+Later: a docs site, the video re-cut for yobuild, posts.
 
 ## M5 — Agents that extend themselves
 
@@ -273,7 +276,7 @@ never loading, and a denied approval leaves the agent without the plugin.
 
 1. **Name and home.** Decided: `yologdev/yobuild`, public.
 2. **Publish to crates.io?** As a binary crate (`cargo install yobuild`),
-   and the library (`yobuild::parts`, `yobuild::frontend`) for people who
+   and the library (`yobuild::builtins`, `frontend`, `install`, `manifest`, `run`) for people who
    would rather write Rust than a manifest?
 3. **The probe as a library.** Decided: exposed from yoagent-rutis as a
    public module (so `check` and the compatibility matrix cannot drift
