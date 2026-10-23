@@ -686,6 +686,11 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             PluginKind::Dsh(source) => (Ecosystem::Dsh, source_text(source)),
             PluginKind::Rutis { path, .. } => (Ecosystem::Rutis, path.display().to_string()),
         };
+        // A built-in by its name, not where its file is.
+        let source = match &plugin.builtin {
+            Some(name) => format!("yobuild:{name}"),
+            None => source,
+        };
         let mut entry = Entry {
             kind: EntryKind::Plugin,
             name: plugin.name.clone(),

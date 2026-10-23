@@ -128,7 +128,8 @@ price`").
 
 And optionally:
 - `name`: unique among plugins and servers. The default: a package's
-  name without its scope, or a file's stem.
+  name without its scope, a file's stem, or a built-in's own name
+  (`todo-plan` for `yobuild:todo-plan`).
 - `allow = [...]`: the plugin's tools (as it names them) the gate lets run
   without asking. Not `bash`, `write_file`, `write`, `edit_file`, `edit`
   (judged call by call), not `ask_owner`, not a name with `__`. Freed only

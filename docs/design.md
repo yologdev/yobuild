@@ -3466,8 +3466,10 @@ A plugin's source may instead be `yobuild:<name>`:
   `rutis = "yobuild:search-links"`.
 - **The pi policy:** `pi = "yobuild:confirm-dangerous"`.
 
-Each resolves to its file in the `ui` set (installed on first need). An
-unknown name is refused, listing the known ones. `Source::Builtin(name)`
+Each resolves to its file under `Layout::frontend`. That is the checkout's
+`frontend/` until the `ui` set exists (PR 3), and the `ui` set after. An
+unknown name is refused, listing the known ones of its kind; on DSH
+(which has none) and on an MCP server the refusal says so. `Source::Builtin(name)`
 joins `Package` and `Path` (`#[non_exhaustive]` already). The examples
 switch to these names, so they run from any folder.
 
