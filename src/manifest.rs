@@ -1659,7 +1659,7 @@ fn guard(name: &str, value: &Value) -> Result<(), String> {
 
 /// Whether `text` holds a URL whose password (`://user:password@`) is
 /// written, not a `${NAME}` reference.
-fn written_password(text: &str) -> bool {
+pub(crate) fn written_password(text: &str) -> bool {
     text.match_indices("://").any(|(at, _)| {
         let rest = &text[at + 3..];
         let authority = rest

@@ -836,8 +836,15 @@ fn check_passes_the_example_agents_and_gives_the_matrixs_verdict() {
     ] {
         assert!(out.contains(line), "{line:?} in\n{out}");
     }
-    // Every name it allows is offered by it: no note.
-    assert!(!out.contains("note:"), "{out}");
+    // Every name it allows is offered by it: no note but the kept
+    // environment's (this process's own variables are left out), and what
+    // depends on the variables set where the tests run.
+    assert!(
+        out.lines()
+            .filter_map(|l| l.trim_start().strip_prefix("note: "))
+            .all(|l| l.starts_with(ENVIRONMENT_NOTE) || set_here(l)),
+        "{out}"
+    );
     let (code, out, err) = check(&[&path("coding.toml"), "--locked"], dir.path());
     assert_eq!(code, Some(0), "{out}{err}");
     assert!(
@@ -897,7 +904,7 @@ fn check_says_what_run_would_refuse() {
     assert_eq!(code, Some(1), "{out}");
     // As JSON: the problem and its fix.
     let report: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(report["version"], 2);
+    assert_eq!(report["version"], 3);
     assert_eq!(report["agent"]["together"], "refused");
     let problem = &report["agent"]["problems"][0];
     assert!(
@@ -929,8 +936,8 @@ fn check_says_what_run_would_refuse() {
     assert_eq!(report["ok"], true);
     assert_eq!(report["agent"]["together"], "started");
     assert_eq!(
-        report["agent"]["notes"],
-        serde_json::json!(["plugin fixture-needs-services allows `fixture_typo`, which no plugin offered (a typo, or offered only in some runs)"])
+        but_environment(&report["agent"]["notes"]),
+        ["plugin fixture-needs-services allows `fixture_typo`, which no plugin offered (a typo, or offered only in some runs)"]
     );
     // Each tool with its kind, description and arguments' schema.
     let tool = report["agent"]["tools"]
@@ -1230,9 +1237,8 @@ async fn the_handoff_example_asks_without_waiting_and_the_answer_starts_the_next
         "{facts:?}"
     );
     assert!(
-        facts
-            .iter()
-            .any(|f| f.contains("taken out of their environment (`OPENAI_API_KEY`)")),
+        facts.iter().any(|f| f.starts_with(ENVIRONMENT_NOTE)
+            && f.contains("among them the credentials yoagent reads (`OPENAI_API_KEY`)")),
         "{facts:?}"
     );
     let facts: Vec<&String> = facts.iter().filter(|f| f.starts_with("Facts:")).collect();
@@ -1494,18 +1500,17 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
         assert_eq!(lines(name, &stderr), [gone], "{name}");
     }
     assert_eq!(lines("mcp", &stderr), [handed]);
-    // Said as the session starts: the kept environment (how many is the
-    // developer's environment's affair; `YOBUILD_OTHER` makes at least one),
-    // and what fails for want of a key says why.
-    assert!(
-        stderr.contains("  Info: plugins and stdio MCP servers start with the kept environment ("),
-        "{stderr}"
-    );
-    let withheld = "plugins and stdio MCP servers have the credentials yoagent reads set here taken out of their environment (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ACME_KEY`): one that needs one gets it only from its entry (an `env` grant, or a `\"${NAME}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered";
-    assert!(
-        stderr.contains(&format!("  Info: {withheld}\n")),
-        "{stderr}"
-    );
+    // Said as the session starts, one note: the kept environment, a count
+    // (the developer's environment's affair; `YOBUILD_OTHER` makes at least
+    // one) and the credentials, since what fails for want of a key says
+    // why only in its own words.
+    let withheld = "among them the credentials yoagent reads (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ACME_KEY`); an entry that needs one gets it only from its entry (an `env` grant, or a `\"${NAME}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered";
+    let said: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with(&format!("  Info: {ENVIRONMENT_NOTE}")))
+        .collect();
+    assert_eq!(said.len(), 1, "{stderr}");
+    assert!(said[0].ends_with(withheld), "{stderr}");
     let dyld_note = "`DYLD_YOBUILD_TEST`, handed to a plugin or stdio MCP server, does not reach it while System Integrity Protection is on (macOS's default): every plugin runtime and stdio server starts through the protected /usr/bin/env, which drops `DYLD_*` variables";
     assert_eq!(
         stderr.contains(&format!("  Info: {dyld_note}\n")),
@@ -1556,11 +1561,13 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     // adds.
     let probed = |note: String| format!("{note}; its probe alone gets them empty");
     let all = taken(&["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY"]);
+    // A shell script: no code of its own to scan, said.
     assert_eq!(
         notes(&report, "server"),
         [
             given("OPENAI_API_KEY"),
-            taken(&["DEEPSEEK_API_KEY", "ACME_KEY"])
+            taken(&["DEEPSEEK_API_KEY", "ACME_KEY"]),
+            "no JavaScript or TypeScript code of its own was found to scan: what it reads from the environment is not known".to_owned()
         ]
     );
     // Its config refers to the key: handed over in its config, not left in
@@ -1578,22 +1585,40 @@ fn plugins_and_servers_have_the_credentials_taken_out_unless_handed_one() {
     let agent_notes = report["agent"]["notes"].as_array().unwrap();
     let said: Vec<_> = agent_notes
         .iter()
-        .filter(|n| {
-            n.as_str()
-                .unwrap()
-                .starts_with("plugins and stdio MCP servers have")
-        })
+        .filter(|n| n.as_str().unwrap().starts_with(ENVIRONMENT_NOTE))
         .collect();
     assert_eq!(
         agent_notes.iter().any(|n| n == dyld_note),
         cfg!(target_os = "macos"),
         "{report}"
     );
+    assert_eq!(said.len(), 1, "{report}");
+    assert!(
+        said[0].as_str().unwrap().ends_with(&format!(
+            "{withheld} (`check`'s pi and DSH plugins probed alone get what is left out set empty instead)"
+        )),
+        "{report}"
+    );
+    // Its names: the credentials and the unrelated one, not the kept set.
+    let left_out = report["agent"]["leftOut"].as_array().unwrap();
+    for name in [
+        "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ACME_KEY", "YOBUILD_OTHER",
+    ] {
+        assert!(left_out.iter().any(|n| n == name), "{name}: {report}");
+    }
+    assert!(
+        !left_out.iter().any(|n| n == "LANG" || n == "PATH"),
+        "{report}"
+    );
+    // What a server's `env` hands over is its `environment`.
     assert_eq!(
-        said,
-        [&serde_json::json!(format!(
-            "{withheld} (`check`'s pi and DSH plugins probed alone get them, and every other variable the kept environment leaves out, empty instead)"
-        ))],
+        report["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "server")
+            .unwrap()["environment"],
+        serde_json::json!(["DYLD_YOBUILD_TEST", "OPENAI_API_KEY"]),
         "{report}"
     );
 
@@ -1780,4 +1805,129 @@ fn a_server_that_cannot_start_is_said_with_what_to_do() {
     assert!(!out.status.success(), "{stderr}");
     assert!(stderr.contains(said), "{stderr}");
     assert!(stderr.contains(&format!("  what to do: {fix}")), "{stderr}");
+}
+
+/// How the kept environment's agent note begins (design §12 "Step 5"):
+/// with this process's own variables left out, every manifest with a
+/// plugin or stdio server gets it.
+const ENVIRONMENT_NOTE: &str = "plugins and stdio MCP servers start with the kept environment (";
+
+/// A note that depends on the variables set where the tests run: one a
+/// plugin's code reads (`dsh-free-search` reads `DSH_HOME`), a proxy
+/// holding a password.
+fn set_here(note: &str) -> bool {
+    (note.starts_with("its code reads `") && note.contains("`, which is set here"))
+        || note.contains(" hold(s) a password, ")
+}
+
+/// `notes` (a report's) but the kept environment's.
+fn but_environment(notes: &serde_json::Value) -> Vec<String> {
+    notes
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap().to_owned())
+        .filter(|n| !n.starts_with(ENVIRONMENT_NOTE))
+        .collect()
+}
+
+/// What `check` says of an entry's environment (design §12 "Step 5",
+/// "Said"): what its own code reads but does not get — a credential
+/// yoagent reads without "grant it", any other name set here with how to
+/// grant it, an unset one not at all; what its grant hands over that loads
+/// code or looks like a secret; its `environment`; the agent's `leftOut`;
+/// and a kept proxy holding a password.
+#[cfg(unix)]
+#[test]
+fn check_says_what_a_plugins_code_reads_and_what_it_is_given() {
+    if !pi_installed() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("reads.ts"),
+        "export default function () {\n\
+           const seen = [process.env.YOBUILD_TEST_TOKEN, process.env['OPENAI_API_KEY'], process.env.YOBUILD_UNSET_HERE, process.env.YOBUILD_EMPTY_HERE]\n\
+           return seen.length\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
+         [[plugin]]\npi = \"./reads.ts\"\n\
+         grants = { env = [\"NODE_OPTIONS\", \"YOBUILD_SECRET_KEY\"] }\n",
+    )
+    .unwrap();
+    let check = |json: bool| {
+        let mut args = vec!["check", "agent.toml"];
+        if json {
+            args.push("--json");
+        }
+        bin()
+            .args(&args)
+            .current_dir(dir.path())
+            .env_remove("RUST_LOG")
+            .env_remove("YOBUILD_UNSET_HERE")
+            .env("DEEPSEEK_API_KEY", "sk-d")
+            .env("OPENAI_API_KEY", "sk-o")
+            .env("YOBUILD_TEST_TOKEN", "t")
+            .env("YOBUILD_EMPTY_HERE", "")
+            .env("YOBUILD_SECRET_KEY", "s")
+            .env("NODE_OPTIONS", "--no-deprecation")
+            .env("HTTPS_PROXY", "me:pw@127.0.0.1:9")
+            .output()
+            .unwrap()
+    };
+    let out = check(true);
+    let stderr = text(&out.stderr);
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {stderr}"));
+    assert_eq!(report["ok"], true, "{report}");
+    let entry = &report["entries"][0];
+    let notes: Vec<&str> = entry["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    for note in [
+        "its code reads `OPENAI_API_KEY`, a credential yoagent reads, taken out of its environment: one handed over is spent unmetered",
+        "its code reads `YOBUILD_TEST_TOKEN`, which is set here but left out of its environment: grant it (`grants = { env = [\"YOBUILD_TEST_TOKEN\"] }`) if it should have it",
+        "it is given `NODE_OPTIONS`, which can load code into its runtime",
+        "it is given `YOBUILD_SECRET_KEY`, set here: the owner's own, used as the plugin sees fit",
+    ] {
+        assert!(notes.contains(&note), "{note}\n{report:#}");
+    }
+    // Unset or empty here: nothing to hand over, unsaid.
+    assert!(
+        !notes
+            .iter()
+            .any(|n| n.contains("YOBUILD_UNSET_HERE") || n.contains("YOBUILD_EMPTY_HERE")),
+        "{report:#}"
+    );
+    assert_eq!(
+        entry["environment"],
+        serde_json::json!(["NODE_OPTIONS", "YOBUILD_SECRET_KEY"])
+    );
+    let left_out = report["agent"]["leftOut"].as_array().unwrap();
+    for name in ["OPENAI_API_KEY", "DEEPSEEK_API_KEY", "YOBUILD_TEST_TOKEN"] {
+        assert!(left_out.iter().any(|n| n == name), "{name}: {report}");
+    }
+    for name in ["PATH", "HTTPS_PROXY", "NODE_OPTIONS", "YOBUILD_SECRET_KEY"] {
+        assert!(!left_out.iter().any(|n| n == name), "{name}: {report}");
+    }
+    let agent_notes = but_environment(&report["agent"]["notes"]);
+    assert!(
+        agent_notes.contains(&"`HTTPS_PROXY` hold(s) a password, and every plugin and stdio MCP server gets it as the owner's network setting".to_owned()),
+        "{report:#}"
+    );
+    // As text: the entry's environment beyond the kept set.
+    let out = check(false);
+    assert!(
+        text(&out.stdout)
+            .contains("  environment beyond the kept set: NODE_OPTIONS, YOBUILD_SECRET_KEY\n"),
+        "{}",
+        text(&out.stdout)
+    );
 }

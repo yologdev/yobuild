@@ -27,7 +27,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value as Json;
-use yobuild::manifest::{Manifest, Tools};
+use yobuild::manifest::{Manifest, PluginKind, Tools};
 
 /// The tests' cache of installed packages, shared with `cli_test`.
 const CACHE: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/yobuild-home");
@@ -239,13 +239,37 @@ fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str]) {
     // No note, but the one a DSH plugin with grants always gets (alone it
     // is probed without the DSH host; the scripted runs exercise it).
     const GRANTED_DSH: &str = "probed without the DSH host: its grants are not exercised alone";
+    // And the kept environment's: this process's own variables are left
+    // out of the plugins and servers (design §12 "Step 5").
+    const KEPT: &str = "plugins and stdio MCP servers start with the kept environment (";
+    // What depends on the environment the tests run in: a variable a
+    // plugin's code reads set here (`DSH_HOME`, `NODE_PATH`), a proxy
+    // holding a password.
+    let here = |n: &str| {
+        (n.starts_with("its code reads `") && n.contains("`, which is set here"))
+            || n.contains(" hold(s) a password, ")
+    };
+    // `check`'s probe alone is said only with a pi or DSH plugin.
+    let probed = parsed
+        .plugins
+        .iter()
+        .any(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_)));
     for notes in entries
         .iter()
         .chain([&report["agent"]])
         .map(|e| &e["notes"])
     {
         let notes = notes.as_array().map(Vec::as_slice).unwrap_or_default();
-        assert!(notes.iter().all(|n| n == GRANTED_DSH), "{report:#}");
+        for note in notes {
+            let n = note.as_str().unwrap();
+            assert!(
+                n == GRANTED_DSH || n.starts_with(KEPT) || here(n),
+                "{report:#}"
+            );
+            if n.starts_with(KEPT) {
+                assert_eq!(n.contains("probed alone"), probed, "{n}");
+            }
+        }
     }
     let kinds: HashMap<&str, &str> = report["agent"]["tools"]
         .as_array()

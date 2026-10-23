@@ -195,16 +195,13 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         };
         session.notice(level, note);
     }
-    let withheld = withheld(&manifest);
     let dyld = dyld_note(
         &manifest,
         std::env::vars_os().map(|(k, _)| k),
         cfg!(target_os = "macos"),
     );
-    let kept = kept_note(&manifest, std::env::vars_os().map(|(k, _)| k), cfg!(unix));
-    let notes = withheld_note(&manifest, &withheld)
+    let notes = environment_note(&manifest, std::env::vars_os().map(|(k, _)| k), cfg!(unix))
         .into_iter()
-        .chain(kept)
         .chain(dyld)
         .chain(dsh_home_note(
             &checked.plan,
@@ -1385,34 +1382,275 @@ async fn dsh_services(
     Err(dsh_missing(&missing, plan, host_services))
 }
 
-/// What plugins and stdio MCP servers have taken out of their environment:
-/// those of `withheld` some plugin's runtime or stdio server does not keep
-/// (an `env` grant, a server's `env`), when there are any. Said by `run`
-/// (an Info notice) and by `check` (an agent note), since one that needs a
-/// key fails at its first call, and nothing else says why.
-pub(crate) fn withheld_note(manifest: &Manifest, withheld: &[String]) -> Option<String> {
-    let taken: Vec<String> = withheld
+/// A plugin or stdio MCP server: what starts a process of its own (a
+/// plugin's runtime, a server), and so gets the kept environment and what
+/// its entry passes (design §12 "Step 5"). Made by [`starts`]: a `Server`
+/// is a stdio one (an HTTP server starts nothing, and gets nothing). A
+/// plugin carries what its runtime's launch sets besides (the DSH runtime's
+/// home, [`dsh_launch`]), which it gets whatever its grant says.
+#[derive(Clone, Copy)]
+pub(crate) enum Starts<'a> {
+    Plugin(&'a crate::manifest::Plugin, &'static [&'static str]),
+    Server(&'a Mcp),
+}
+
+impl Starts<'_> {
+    pub fn name(&self) -> &str {
+        match self {
+            Starts::Plugin(p, _) => &p.name,
+            Starts::Server(s) => &s.name,
+        }
+    }
+
+    /// It gets `name` beyond the kept set: its `env` grant passes it, its
+    /// runtime's launch sets it, or its server's `env` sets it.
+    pub fn gets(&self, name: &str) -> bool {
+        match self {
+            Starts::Plugin(p, launch) => p.grants.passes(name) || launch.contains(&name),
+            Starts::Server(s) => match &s.transport {
+                Transport::Stdio { env, .. } => env.contains_key(name),
+                Transport::Http { .. } => false,
+            },
+        }
+    }
+
+    /// What it gets beyond the kept set, as its entry names it: its `env`
+    /// grant's names and prefixes, or its server's `env` names (`check
+    /// --json`'s `environment`).
+    pub fn environment(&self) -> Vec<String> {
+        match self {
+            Starts::Plugin(p, _) => p.grants.env.clone(),
+            Starts::Server(s) => match &s.transport {
+                Transport::Stdio { env, .. } => env.keys().cloned().collect(),
+                Transport::Http { .. } => Vec::new(),
+            },
+        }
+    }
+}
+
+/// The manifest's plugins, then its stdio servers (an HTTP server starts
+/// nothing).
+pub(crate) fn starts(manifest: &Manifest) -> Vec<Starts<'_>> {
+    let servers = manifest
+        .mcp
         .iter()
-        .filter(|name| {
-            let plugins = manifest.plugins.iter().any(|p| !p.grants.passes(name));
-            let servers = manifest.mcp.iter().any(|s| match &s.transport {
-                Transport::Stdio { env, .. } => !env.contains_key(*name),
-                _ => false,
-            });
-            plugins || servers
+        .filter(|s| matches!(s.transport, Transport::Stdio { .. }));
+    let dsh = dsh_launch(manifest, DshHome::chosen().is_some());
+    manifest
+        .plugins
+        .iter()
+        .map(|p| match p.kind {
+            PluginKind::Dsh(_) => Starts::Plugin(p, dsh),
+            _ => Starts::Plugin(p, &[]),
         })
+        .chain(servers.map(Starts::Server))
+        .collect()
+}
+
+/// What the DSH runtime's launch sets (`DshHome::env`): a home, given when
+/// it has host services or the DSH host (as `start` decides, from the
+/// plan's `dsh_services` and `dsh_host`) — `chosen` when the user's own
+/// (`YOAGENT_DSH_HOME`).
+pub(crate) fn dsh_launch(manifest: &Manifest, chosen: bool) -> &'static [&'static str] {
+    let dsh = manifest
+        .plugins
+        .iter()
+        .any(|p| matches!(p.kind, PluginKind::Dsh(_)));
+    match dsh && (manifest.dsh.host_services || manifest.dsh_grants().is_some()) {
+        true => DshHome::names(chosen),
+        false => &[],
+    }
+}
+
+/// The names of `vars` (this process's environment) that one or more of
+/// the plugins and stdio servers do not get (design §12 "Step 5"; `check
+/// --json`'s agent `leftOut`), sorted: on unix every name the kept set
+/// leaves out and its entry does not get (a name `env -u` cannot take —
+/// empty, holding `=`, not UTF-8 — aside: it passes, or refuses a server);
+/// off unix (`unix` false) only the credentials yoagent reads, set empty.
+/// A variable set empty counts: it is left out all the same (the notes on
+/// one entry, by `key_is_set`, say only what holds a value).
+pub(crate) fn left_out(
+    manifest: &Manifest,
+    vars: impl IntoIterator<Item = std::ffi::OsString>,
+    unix: bool,
+) -> Vec<String> {
+    let starting = starts(manifest);
+    let credentials = manifest.key_variables();
+    let mut out: Vec<String> = vars
+        .into_iter()
+        .filter_map(|name| name.into_string().ok())
+        .filter(|name| !name.is_empty() && !name.contains('='))
+        .filter(|name| match unix {
+            true => !crate::environment::kept(name.as_ref()),
+            false => credentials.contains(name),
+        })
+        .filter(|name| starting.iter().any(|entry| !entry.gets(name)))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The one note on what plugins and stdio servers do not get (design §12
+/// "Step 5", "Said"), when something starts and something is left out:
+/// the rule and a count ([`left_out`]; their names are `check --json`'s
+/// `leftOut`), the credentials yoagent reads among them named — since one
+/// that needs a key fails at its first call, in its own words. `run` says
+/// it as an Info notice as the session starts, `check` as an agent note.
+pub(crate) fn environment_note(
+    manifest: &Manifest,
+    vars: impl IntoIterator<Item = std::ffi::OsString>,
+    unix: bool,
+) -> Option<String> {
+    let left = left_out(manifest, vars, unix);
+    if left.is_empty() {
+        return None;
+    }
+    let credentials: Vec<String> = manifest
+        .key_variables()
+        .into_iter()
+        .filter(|k| left.contains(k))
         .map(|k| format!("`{k}`"))
         .collect();
-    (!taken.is_empty()).then(|| format!(
-        "plugins and stdio MCP servers have the credentials yoagent reads set here {TAKEN} ({}): one that needs one gets it only from its entry (an `env` grant, or a `\"${{NAME}}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered",
-        taken.join(", ")
+    const HANDED: &str = "an entry that needs one gets it only from its entry (an `env` grant, or a `\"${NAME}\"` reference in its `config` or in a server's `env`, arguments, URL or headers), and what it spends with it is not metered";
+    if !unix {
+        return Some(format!(
+            "plugins and stdio MCP servers inherit the whole environment here but the credentials yoagent reads, set empty in their environment (there is no /usr/bin/env here to start them through): {}; {HANDED}",
+            credentials.join(", ")
+        ));
+    }
+    let n = left.len();
+    let head = format!(
+        "plugins and stdio MCP servers start with the kept environment (the path, home, locale, terminal, session, proxies, standard folders, toolchains) and what their entries grant: {n} variable(s) set here are left out of one or more of them (`check --json` lists them: the agent's `leftOut`)"
+    );
+    Some(match credentials.is_empty() {
+        true => format!(
+            "{head}; an `env` grant on a plugin, or a stdio server's `env` table, passes one it needs"
+        ),
+        false => format!(
+            "{head}, among them the credentials yoagent reads ({}); {HANDED}",
+            credentials.join(", ")
+        ),
+    })
+}
+
+/// `check`'s notes on what `entry`'s own code reads (`read`: the scan,
+/// `environment::names_read` — a rutis plugin's own file, not what it
+/// imports) but does not get, of the names `set` here (design §12 "Step
+/// 5", "Said"): a credential yoagent reads, never with a suggestion to
+/// grant it (taken out on unix, set empty elsewhere); on unix (`unix`) a
+/// name that loads code, left out on purpose, without one either; any other
+/// name the kept set leaves out, with how to hand it over — an `env` grant
+/// for a plugin, its `env` table for a server. A hint, not a proof (the
+/// scan's limits).
+pub(crate) fn reads_notes(
+    entry: Starts<'_>,
+    read: &std::collections::BTreeSet<String>,
+    set: impl Fn(&str) -> bool,
+    credentials: &[String],
+    unix: bool,
+) -> Vec<String> {
+    read.iter()
+        .filter(|name| set(name) && !entry.gets(name))
+        .filter_map(|name| {
+            if credentials.contains(name) {
+                let lost = match unix {
+                    true => "taken out of its environment",
+                    false => "set empty in its environment",
+                };
+                return Some(format!(
+                    "its code reads `{name}`, a credential yoagent reads, {lost}: one handed over is spent unmetered"
+                ));
+            }
+            if !unix || crate::environment::kept(name.as_ref()) {
+                return None;
+            }
+            if crate::environment::loads_code(name) {
+                return Some(format!(
+                    "its code reads `{name}`, which is set here but left out of its environment on purpose: it can load code into its runtime"
+                ));
+            }
+            Some(match entry {
+                Starts::Plugin(..) => format!(
+                    "its code reads `{name}`, which is set here but left out of its environment: grant it (`grants = {{ env = [\"{name}\"] }}`) if it should have it"
+                ),
+                Starts::Server(_) => format!(
+                    "its code reads `{name}`, which is set here but left out of its environment: hand it over in its `env` table (`{name} = \"${{{name}}}\"`) if it should have it"
+                ),
+            })
+        })
+        .collect()
+}
+
+/// `check`'s notes on what `plugin`'s `env` grant hands over of the names
+/// `set` here (`vars`), beside the credentials yoagent reads (`keys_given`
+/// says those): a name that loads code into its runtime, and one that looks
+/// like a secret (`manifest::secret`) — the owner's account, used as the
+/// plugin sees fit.
+pub(crate) fn given_notes(
+    plugin: &crate::manifest::Plugin,
+    vars: impl IntoIterator<Item = std::ffi::OsString>,
+    set: impl Fn(&str) -> bool,
+    credentials: &[String],
+) -> Vec<String> {
+    // A grant names letters, digits and `_`: a name not UTF-8 is none of it.
+    let mut names: Vec<String> = vars
+        .into_iter()
+        .filter_map(|name| name.into_string().ok())
+        .filter(|name| plugin.grants.passes(name) && set(name) && !credentials.contains(name))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .filter_map(|name| {
+            match (
+                crate::environment::loads_code(&name),
+                crate::manifest::secret(&name),
+            ) {
+                (true, _) => Some(format!(
+                    "it is given `{name}`, which can load code into its runtime"
+                )),
+                (false, true) => Some(format!(
+                    "it is given `{name}`, set here: the owner's own, used as the plugin sees fit"
+                )),
+                (false, false) => None,
+            }
+        })
+        .collect()
+}
+
+/// `check`'s agent note when a kept proxy variable set here (`vars`, with
+/// values) holds a password (`environment::proxy_password`) and something
+/// starts: every plugin and stdio server gets it.
+pub(crate) fn proxy_note(
+    manifest: &Manifest,
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Option<String> {
+    if starts(manifest).is_empty() {
+        return None;
+    }
+    let mut names: Vec<String> = vars
+        .into_iter()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value)))
+        .filter(|(name, value)| {
+            crate::environment::PROXIES.contains(&name.as_str())
+                && crate::environment::proxy_password(&value.to_string_lossy())
+        })
+        .map(|(name, _)| format!("`{name}`"))
+        .collect();
+    names.sort();
+    (!names.is_empty()).then(|| format!(
+        "{} hold(s) a password, and every plugin and stdio MCP server gets it as the owner's network setting",
+        names.join(", ")
     ))
 }
 
 /// What each plugin and stdio MCP server loses of `withheld`, by its name,
 /// when they do not all lose the same (an `env` grant or a server's `env`
 /// keeps some for one): `check` notes each entry's then, since the one
-/// combined note ([`withheld_note`]) cannot say who lost what. Alike (or
+/// combined note ([`environment_note`]) cannot say who lost what. Alike (or
 /// none started): nothing.
 pub(crate) fn withheld_from(
     manifest: &Manifest,
@@ -1449,13 +1687,7 @@ pub(crate) fn withheld_from(
 /// What happens to a withheld credential: on unix it is taken out
 /// (`/usr/bin/env -u`); elsewhere, with no `env` to exec through, it is set
 /// empty — which a plugin may read differently from unset (an SDK sends the
-/// empty key), so the notes say which: [`TAKEN`] for all of them (the
-/// combined note), [`TAKEN_ONE`] for one entry (`check`'s).
-#[cfg(unix)]
-const TAKEN: &str = "taken out of their environment";
-#[cfg(not(unix))]
-const TAKEN: &str =
-    "set empty in their environment (not taken out: there is no `env` here to start them through)";
+/// empty key), so `check`'s note on one entry says which.
 #[cfg(unix)]
 pub(crate) const TAKEN_ONE: &str = "taken out of its environment";
 #[cfg(not(unix))]
@@ -1497,49 +1729,6 @@ pub(crate) struct UnsetGrant {
     /// None of the grant's names is set, and it holds no prefix: it hands
     /// nothing over.
     pub all: bool,
-}
-
-/// What `run` says of the kept environment as the session starts, when a
-/// plugin or stdio MCP server starts (design §12 "Step 5"): on unix how
-/// many of `vars` (this process's names) the kept set leaves out (none:
-/// nothing said), since a plugin that needs one fails in its own words;
-/// off unix (`unix` false) that only the credentials yoagent reads are.
-/// Which ones, and which plugin's code reads them, is `check`'s (step 5b).
-pub(crate) fn kept_note(
-    manifest: &Manifest,
-    vars: impl IntoIterator<Item = std::ffi::OsString>,
-    unix: bool,
-) -> Option<String> {
-    let starts = !manifest.plugins.is_empty()
-        || manifest
-            .mcp
-            .iter()
-            .any(|s| matches!(s.transport, Transport::Stdio { .. }));
-    if !starts {
-        return None;
-    }
-    if !unix {
-        return Some("plugins and stdio MCP servers inherit the whole environment here but the credentials yoagent reads (there is no /usr/bin/env to start them through): an `env` grant changes nothing else".to_owned());
-    }
-    // What reaches none of them: not kept, not passed by a plugin's `env`
-    // grant nor set by a stdio server's `env`, and a name `env -u` can take
-    // (one holding `=` passes as it is).
-    let passed = |name: &str| {
-        manifest.plugins.iter().any(|p| p.grants.passes(name))
-            || manifest.mcp.iter().any(|s| match &s.transport {
-                Transport::Stdio { env, .. } => env.contains_key(name),
-                _ => false,
-            })
-    };
-    let left_out = vars
-        .into_iter()
-        .filter(|name| !crate::environment::kept(name))
-        .filter(|name| !name.is_empty() && !name.as_encoded_bytes().contains(&b'='))
-        .filter(|name| !passed(&name.to_string_lossy()))
-        .count();
-    (left_out > 0).then(|| format!(
-        "plugins and stdio MCP servers start with the kept environment (the path, home, locale, terminal, session, proxies, standard folders, toolchains) and what their entries pass: {left_out} variable(s) set here reach none of them — an `env` grant on a plugin, or a stdio server's `env` table, passes one it needs"
-    ))
 }
 
 /// The `DYLD_*` variables handed to an entry on purpose — an `env`
@@ -2868,10 +3057,11 @@ mod tests {
         assert!(error.contains("has a name that is not UTF-8"), "{error}");
     }
 
-    /// `run`'s note of the kept environment: a count on unix, the
-    /// credentials only off unix, nothing when nothing starts.
+    /// The one environment note: on unix the count of what one or more
+    /// entries do not get, the credentials named; off unix the credentials
+    /// only; nothing when nothing starts or nothing is left out.
     #[test]
-    fn the_kept_note_counts_what_is_left_out_when_something_starts() {
+    fn the_environment_note_counts_what_is_left_out_and_names_the_credentials() {
         let dir = tempfile::tempdir().unwrap();
         let m = |entries: &str| {
             Manifest::parse(
@@ -2881,31 +3071,175 @@ mod tests {
             )
             .unwrap()
         };
-        let vars = || ["PATH", "LC_ALL", "GITHUB_TOKEN", "UNRELATED"].map(Into::into);
+        let vars = || {
+            [
+                "PATH", "LC_ALL", "GITHUB_TOKEN", "UNRELATED", "OPENAI_API_KEY", "=x",
+            ]
+            .map(std::ffi::OsString::from)
+        };
         let plugin = m("[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\n");
-        let said = super::kept_note(&plugin, vars(), true).unwrap();
+        assert_eq!(
+            super::left_out(&plugin, vars(), true),
+            ["GITHUB_TOKEN", "OPENAI_API_KEY", "UNRELATED"]
+        );
+        let said = super::environment_note(&plugin, vars(), true).unwrap();
         assert!(
-            said.contains(": 2 variable(s) set here reach none of them"),
+            said.contains(": 3 variable(s) set here are left out of one or more of them (`check --json` lists them: the agent's `leftOut`), among them the credentials yoagent reads (`OPENAI_API_KEY`); an entry that needs one gets it only from its entry"),
             "{said}"
         );
-        // What a grant passes, and a name `env -u` cannot take, are not
-        // counted.
-        let granted = m(
-            "[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\ngrants = { env = [\"GITHUB_TOKEN\"] }\n",
-        );
-        let odd = || ["GITHUB_TOKEN", "UNRELATED", "=x"].map(Into::into);
-        let said = super::kept_note(&granted, odd(), true).unwrap();
-        assert!(
-            said.contains(": 1 variable(s) set here reach none of them"),
-            "{said}"
-        );
-        assert!(super::kept_note(&plugin, ["PATH".into()], true).is_none());
-        assert!(super::kept_note(&plugin, vars(), false)
+        // Off unix: the credentials only.
+        assert_eq!(super::left_out(&plugin, vars(), false), ["OPENAI_API_KEY"]);
+        assert!(super::environment_note(&plugin, vars(), false)
             .unwrap()
-            .contains("inherit the whole environment here but the credentials"));
-        assert!(super::kept_note(&m(""), vars(), true).is_none());
+            .contains("inherit the whole environment here but the credentials yoagent reads, set empty in their environment (there is no /usr/bin/env here to start them through): `OPENAI_API_KEY`;"));
+        // What every entry gets is not left out; with no credential, how
+        // to pass one is said instead.
+        let granted = m("[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\ngrants = { env = [\"GITHUB_TOKEN\", \"OPENAI_API_KEY\"] }\n");
+        assert_eq!(super::left_out(&granted, vars(), true), ["UNRELATED"]);
+        assert!(super::environment_note(&granted, vars(), true)
+            .unwrap()
+            .ends_with(": 1 variable(s) set here are left out of one or more of them (`check --json` lists them: the agent's `leftOut`); an `env` grant on a plugin, or a stdio server's `env` table, passes one it needs"));
+        // A server that does not set it loses it all the same; one whose
+        // `env` sets it, beside a plugin's prefix, does not.
+        let both = m("[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\ngrants = { env = [\"UNRELATED\"] }\n[[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n");
+        assert!(super::left_out(&both, vars(), true).contains(&"UNRELATED".to_owned()));
+        let all = m("[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\ngrants = { env = [\"UNRELATED\", \"GITHUB_*\"] }\n[[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\nenv = { UNRELATED = \"x\", GITHUB_TOKEN = \"${GITHUB_TOKEN}\" }\n");
+        assert_eq!(super::left_out(&all, vars(), true), ["OPENAI_API_KEY"]);
+        // The DSH runtime's own home, set by its launch, is not left out
+        // of a DSH plugin given one (host services, the DSH host).
+        let home = ["DSH_HOME", "DSH_AGENTS_HOME"].map(std::ffi::OsString::from);
+        assert_eq!(
+            super::left_out(&plugin, home.clone(), true),
+            ["DSH_AGENTS_HOME", "DSH_HOME"]
+        );
+        let hosted = m("[dsh]\nhost_services = true\n[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\n");
+        assert_eq!(
+            super::dsh_launch(&hosted, false),
+            ["DSH_HOME", "DSH_AGENTS_HOME"]
+        );
+        assert_eq!(super::dsh_launch(&hosted, true), ["DSH_HOME"]);
+        assert!(super::dsh_launch(&plugin, false).is_empty());
+        let granted_dsh =
+            m("[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\ngrants = { workspace = true }\n");
+        assert_eq!(super::dsh_launch(&granted_dsh, true), ["DSH_HOME"]);
+        if crate::frontend::host::DshHome::chosen().is_none() {
+            assert!(super::left_out(&hosted, home, true).is_empty());
+        }
+        // Nothing starts, or nothing is left out.
+        assert!(super::environment_note(&m(""), vars(), true).is_none());
         let http = m("[[mcp]]\nname = \"h\"\nurl = \"https://mcp.example/\"\n");
-        assert!(super::kept_note(&http, vars(), true).is_none());
+        assert!(super::environment_note(&http, vars(), true).is_none());
+        assert!(super::environment_note(&plugin, ["PATH".into()], true).is_none());
+    }
+
+    /// What an entry's code reads but does not get: a credential never
+    /// with "grant it"; a plugin pointed at its grant, a server at its
+    /// `env` table; what it gets, what is kept or unset, and (off unix)
+    /// anything but a credential, unsaid.
+    #[test]
+    fn what_an_entrys_code_reads_but_does_not_get_is_said_by_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = Manifest::parse(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
+             [[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\ngrants = { env = [\"GIVEN\"] }\n\
+             [[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\nenv = { OWN = \"x\" }\n",
+            &dir.path().join("a.toml"),
+            dir.path(),
+        )
+        .unwrap();
+        let read: std::collections::BTreeSet<String> = [
+            "TAVILY_API_KEY", "OPENAI_API_KEY", "GIVEN", "OWN", "LANG", "UNSET", "NODE_PATH",
+        ]
+        .map(String::from)
+        .into();
+        let set = |n: &str| n != "UNSET";
+        let credentials = m.key_variables();
+        let all = super::starts(&m);
+        let plugin = super::reads_notes(all[0], &read, set, &credentials, true);
+        assert_eq!(
+            plugin,
+            [
+                "its code reads `NODE_PATH`, which is set here but left out of its environment on purpose: it can load code into its runtime",
+                "its code reads `OPENAI_API_KEY`, a credential yoagent reads, taken out of its environment: one handed over is spent unmetered",
+                "its code reads `OWN`, which is set here but left out of its environment: grant it (`grants = { env = [\"OWN\"] }`) if it should have it",
+                "its code reads `TAVILY_API_KEY`, which is set here but left out of its environment: grant it (`grants = { env = [\"TAVILY_API_KEY\"] }`) if it should have it",
+            ]
+        );
+        let server = super::reads_notes(all[1], &read, set, &credentials, true);
+        assert_eq!(server.len(), 4, "{server:?}");
+        assert!(server.contains(&"its code reads `GIVEN`, which is set here but left out of its environment: hand it over in its `env` table (`GIVEN = \"${GIVEN}\"`) if it should have it".to_owned()));
+        // Off unix only the credential is left out: set empty.
+        assert_eq!(
+            super::reads_notes(all[0], &read, set, &credentials, false),
+            ["its code reads `OPENAI_API_KEY`, a credential yoagent reads, set empty in its environment: one handed over is spent unmetered"]
+        );
+        assert_eq!(all[0].environment(), ["GIVEN"]);
+        assert_eq!(all[1].environment(), ["OWN"]);
+    }
+
+    /// A granted name that loads code, or looks like a secret, is said when
+    /// set here; a credential is `keys_given`'s, a plain one unsaid.
+    #[test]
+    fn a_granted_secret_or_code_loader_set_here_is_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = Manifest::parse(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
+             [[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\n\
+             grants = { env = [\"NODE_OPTIONS\", \"TAVILY_*\", \"OPENAI_API_KEY\", \"PLAIN\"] }\n",
+            &dir.path().join("a.toml"),
+            dir.path(),
+        )
+        .unwrap();
+        let vars = [
+            "NODE_OPTIONS", "TAVILY_API_KEY", "TAVILY_REGION", "OPENAI_API_KEY", "PLAIN",
+        ]
+        .map(std::ffi::OsString::from);
+        let notes = super::given_notes(&m.plugins[0], vars, |_| true, &m.key_variables());
+        assert_eq!(
+            notes,
+            [
+                "it is given `NODE_OPTIONS`, which can load code into its runtime",
+                "it is given `TAVILY_API_KEY`, set here: the owner's own, used as the plugin sees fit",
+            ]
+        );
+    }
+
+    /// A kept proxy holding a password is said, when something starts.
+    #[test]
+    fn a_proxy_with_a_password_is_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = |entries: &str| {
+            Manifest::parse(
+                &format!("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n{entries}"),
+                &dir.path().join("a.toml"),
+                dir.path(),
+            )
+            .unwrap()
+        };
+        let vars = || {
+            [
+                ("https_proxy", "me:pw@proxy:3128"),
+                ("HTTP_PROXY", "http://proxy:3128"),
+                ("ALL_PROXY", "socks5://me:pw@proxy:1080"),
+                ("OTHER", "http://me:pw@x"),
+            ]
+            .map(|(k, v)| (k.into(), v.into()))
+        };
+        let plugin = m("[[plugin]]\nname = \"p\"\ndsh = \"./p.ts\"\n");
+        assert_eq!(
+            super::proxy_note(&plugin, vars()).unwrap(),
+            "`ALL_PROXY`, `https_proxy` hold(s) a password, and every plugin and stdio MCP server gets it as the owner's network setting"
+        );
+        assert!(super::proxy_note(&m(""), vars()).is_none());
+        let http = m("[[mcp]]\nname = \"h\"\nurl = \"https://mcp.example/\"\n");
+        assert!(super::proxy_note(&http, vars()).is_none());
+        // A value not UTF-8 is read all the same.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let odd = std::ffi::OsString::from_vec(b"http://me:p\xffw@proxy".to_vec());
+            assert!(super::proxy_note(&plugin, [("HTTP_PROXY".into(), odd)]).is_some());
+        }
     }
 
     /// An `env` grant's prefix is never said unset, and a grant holding one
@@ -3017,51 +3351,6 @@ mod tests {
             ),
             [("s".to_owned(), names(&["OPENAI_API_KEY"]))]
         );
-    }
-
-    #[test]
-    fn the_withheld_note_names_only_what_some_plugin_or_stdio_server_loses() {
-        let dir = tempfile::tempdir().unwrap();
-        let note = |entries: &str, withheld: &[&str]| {
-            let m = Manifest::parse(
-                &format!("[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n{entries}"),
-                &dir.path().join("a.toml"),
-                dir.path(),
-            )
-            .unwrap();
-            let withheld: Vec<String> = withheld.iter().map(|k| k.to_string()).collect();
-            super::withheld_note(&m, &withheld)
-        };
-        let keys = ["OPENAI_API_KEY", "GROQ_API_KEY"];
-        let stdio = "[[mcp]]\nname = \"s\"\nnpm = \"./s.sh\"\n";
-        // Nothing runs that could lose one, or nothing is set.
-        assert_eq!(note("", &keys), None);
-        assert_eq!(
-            note(
-                "[[mcp]]\nname = \"h\"\nurl = \"https://h.example/mcp\"\n",
-                &keys
-            ),
-            None
-        );
-        assert_eq!(note(stdio, &[]), None);
-        // A stdio server loses both; one whose `env` sets one loses the other.
-        let said = note(stdio, &keys).unwrap();
-        assert!(
-            said.contains("(`OPENAI_API_KEY`, `GROQ_API_KEY`)"),
-            "{said}"
-        );
-        let said = note(
-            &format!("{stdio}env = {{ OPENAI_API_KEY = \"${{MINE}}\" }}\n"),
-            &keys,
-        )
-        .unwrap();
-        assert!(said.contains("environment (`GROQ_API_KEY`)"), "{said}");
-        // Every plugin granted all of them: nothing lost, nothing said.
-        let granted = "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\n\
-                       grants = { env = [\"GROQ_API_KEY\", \"OPENAI_API_KEY\"] }\n";
-        assert_eq!(note(granted, &keys), None);
-        let other = "[[plugin]]\nrutis = \"./q.ts\"\nruntime = \"node\"\n";
-        assert!(note(&format!("{granted}{other}"), &keys).is_some());
     }
 
     /// A command whose path holds `=` (which `env` would read as an

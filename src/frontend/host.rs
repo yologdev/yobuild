@@ -140,9 +140,7 @@ impl DshHome {
     /// An empty `YOAGENT_DSH_HOME` counts as unset: DSH reads an empty
     /// `DSH_HOME` as `~/.dsh`.
     pub fn new() -> std::io::Result<Self> {
-        match std::env::var_os("YOAGENT_DSH_HOME")
-            .filter(|v| !v.to_string_lossy().trim().is_empty())
-        {
+        match Self::chosen() {
             Some(path) => {
                 let path = PathBuf::from(path);
                 std::fs::create_dir_all(&path)?;
@@ -166,6 +164,20 @@ impl DshHome {
         }
     }
 
+    /// The home the user chose: `YOAGENT_DSH_HOME`, when not empty.
+    pub fn chosen() -> Option<std::ffi::OsString> {
+        std::env::var_os("YOAGENT_DSH_HOME").filter(|v| !v.to_string_lossy().trim().is_empty())
+    }
+
+    /// The names [`DshHome::env`] sets, for a home the user chose (`chosen`)
+    /// or a private one.
+    pub fn names(chosen: bool) -> &'static [&'static str] {
+        match chosen {
+            true => &["DSH_HOME"],
+            false => &["DSH_HOME", "DSH_AGENTS_HOME"],
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -174,11 +186,13 @@ impl DshHome {
     /// `~/.agents` skills are not read either. A `YOAGENT_DSH_HOME` the user
     /// chose (`~/.dsh`, to share their keys on purpose) leaves skills alone.
     pub fn env(&self) -> Vec<(&'static str, PathBuf)> {
-        let mut env = vec![("DSH_HOME", self.path.clone())];
-        if self._private.is_some() {
-            env.push(("DSH_AGENTS_HOME", self.path.join("agents")));
-        }
-        env
+        Self::names(self._private.is_none())
+            .iter()
+            .map(|&name| match name {
+                "DSH_HOME" => (name, self.path.clone()),
+                _ => (name, self.path.join("agents")),
+            })
+            .collect()
     }
 }
 

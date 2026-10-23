@@ -100,11 +100,27 @@ and show as `name ✗` under `--once`. The run goes on.
 | Warning `The DSH host: …` | the stand-in DSH agent's own trouble (its session log, a turn) | the message says which; the log has more |
 | an open question (with `facts`: `; 1 question(s) waiting on you`) | the owner has not answered | answer in the page or the terminal: during a run it steers that run; when idle it starts the next |
 
+A plugin that fails with an authentication error, or says a feature is
+off or a key is missing, may want a variable the kept environment left out
+(plugins start without the person's variables): `yobuild check` notes
+``its code reads `X`, which is set here but left out of its environment:
+grant it …`` — grant it (`grants = { env = ["X"] }`) if it should have it,
+after telling the person. For a credential yoagent reads the note says
+``… a credential yoagent reads, taken out of its environment: one handed
+over is spent unmetered``: ask first. A name that loads code
+(`NODE_OPTIONS`, `NODE_PATH`, `LD_PRELOAD`, `DYLD_*`) is ``left out of its
+environment on purpose``: grant it only when the person asks. No such note
+is not proof: ``its code was scanned in part (…)`` and ``no JavaScript or
+TypeScript code of its own was found to scan`` say the scan saw little.
+
 Not failures, though they read like one: `check`'s note `probed without
 the DSH host: its grants are not exercised alone` on a DSH plugin with
 `grants` (alone it is probed without them; the scripted run exercises
-them); facts' `not a git repository`,
-`changes unknown: no snapshot at the start (git: …)` and `changes since
+them); its agent note `plugins and stdio MCP servers start with the kept
+environment (…)` (off unix `plugins and stdio MCP servers inherit the
+whole environment here but the credentials …`), said whenever a plugin or
+stdio server starts and a variable set here is left out; facts'
+`not a git repository`, `changes unknown: no snapshot at the start (git: …)` and `changes since
 the start unknown (git: …)` (Info: `git init` the folder for facts to tell
 what changed); `[builtins] ask_owner is off` (the error a plugin's own
 `ask_owner` call gets: the person sees it only if the plugin shows it;
