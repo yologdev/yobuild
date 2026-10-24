@@ -1,8 +1,10 @@
 name: Publish to crates.io
 
-# When a release is published (yoagent's own workflow, the same way): the
-# crate at the release's tag, which must be Cargo.toml's version, goes to
-# crates.io with the repository's `CARGO_REGISTRY_TOKEN`. Run by hand with
+# When a release is published: the crate at the release's tag, which must
+# be Cargo.toml's version, goes to crates.io by trusted publishing — the
+# crate's settings on crates.io name this repository and this workflow,
+# and crates-io-auth-action trades the job's GitHub identity for a token
+# that lasts 30 minutes, so no token is stored. Run by hand with
 # a tag, it publishes that tag: for one made before this workflow existed
 # (v0.1.0), since a release runs the workflow of its tag's commit.
 on:
@@ -16,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write # trusted publishing
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,7 +37,7 @@ jobs:
             v[0-9]*.[0-9]*.[0-9]*) ;;
             *) echo "::error::not a version tag: $TAG"; exit 1 ;;
           esac
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +48,9 @@ jobs:
             echo "::error::the tag is $TAG, Cargo.toml says $version"
             exit 1
           fi
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
       - name: cargo publish
         run: cargo publish --locked
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
