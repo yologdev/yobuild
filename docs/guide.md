@@ -2,7 +2,9 @@
 
 How to make, run and trust an agent with yobuild. The README's
 [Start](../README.md#start) gets one running in a minute; this guide is
-the rest. Every manifest key, as yobuild reads it, is in the skill's
+the rest. What you can build with yobuild, and why, is in
+[What you can build](use-cases.md). Every manifest key, as yobuild
+reads it, is in the skill's
 [manifest reference](../skill/yobuild/reference/manifest.md): this guide
 links there rather than repeating it.
 
@@ -40,12 +42,16 @@ the folder `yobuild run` starts in.
 
 ## Installing
 
+Download yobuild for your machine from the
+[releases page](https://github.com/yologdev/yobuild/releases): unpack the
+`.tar.gz` and put `yobuild` on your PATH. Or build it:
+
 ```sh
 cargo install --git https://github.com/yologdev/yobuild   # until 0.1 is on crates.io
 yobuild --version
 ```
 
-- **Rust** (a recent stable toolchain, 1.88+) to build it.
+- **Rust** (a recent stable toolchain, 1.88+), only to build it.
 - **Platforms:** macOS and Linux. On Windows, `yobuild new` and
   `yobuild skill install` work, and `run` and `check` refuse.
 - **Node 22.19+ and npm 11.19+** for any agent with plugins (or a pinned

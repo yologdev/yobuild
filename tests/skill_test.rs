@@ -272,17 +272,30 @@ fn anchor(heading: &str) -> String {
         .collect()
 }
 
-/// `docs/guide.md`, the person's manual: every link leads to a file (and
-/// a heading there), its manifest is one yobuild reads, and the versions
-/// it names are the code's.
-#[test]
-fn the_guide_links_lead_somewhere_and_its_facts_are_the_codes() {
+/// `text` without its fenced code blocks: a `#` comment there is no
+/// heading, and a `](` there no link.
+fn prose(text: &str) -> String {
+    let mut fenced = false;
+    text.lines()
+        .filter(|l| {
+            if l.trim_start().starts_with("```") {
+                fenced = !fenced;
+                return false;
+            }
+            !fenced
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every relative link in `doc` (a path from the repository's root) leads
+/// to a file, and each `#fragment` to a heading there.
+fn links_lead_somewhere(doc: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let guide = root.join("docs/guide.md");
-    let text = std::fs::read_to_string(&guide).unwrap();
+    let doc = root.join(doc);
+    let text = prose(&std::fs::read_to_string(&doc).unwrap());
     let headings = |path: &Path| -> Vec<String> {
-        std::fs::read_to_string(path)
-            .unwrap()
+        prose(&std::fs::read_to_string(path).unwrap())
             .lines()
             .filter_map(|l| {
                 l.trim_start_matches('#')
@@ -292,6 +305,7 @@ fn the_guide_links_lead_somewhere_and_its_facts_are_the_codes() {
             .map(anchor)
             .collect()
     };
+    let name = doc.display();
     for (at, _) in text.match_indices("](") {
         let target = &text[at + 2..];
         let target = &target[..target.find(')').unwrap()];
@@ -300,21 +314,28 @@ fn the_guide_links_lead_somewhere_and_its_facts_are_the_codes() {
         }
         let (file, fragment) = target.split_once('#').unwrap_or((target, ""));
         let path = if file.is_empty() {
-            guide.clone()
+            doc.clone()
         } else {
-            root.join("docs").join(file)
+            doc.parent().unwrap().join(file)
         };
-        assert!(
-            path.exists(),
-            "the guide links {target}, which is not there"
-        );
+        assert!(path.exists(), "{name} links {target}, which is not there");
         if !fragment.is_empty() {
             assert!(
                 headings(&path).iter().any(|h| h == fragment),
-                "the guide links {target}: no such heading"
+                "{name} links {target}: no such heading"
             );
         }
     }
+}
+
+/// `docs/guide.md`, the person's manual: every link leads to a file (and
+/// a heading there), its manifest is one yobuild reads, and the versions
+/// it names are the code's.
+#[test]
+fn the_guide_links_lead_somewhere_and_its_facts_are_the_codes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    links_lead_somewhere("docs/guide.md");
+    let text = std::fs::read_to_string(root.join("docs/guide.md")).unwrap();
     let toml = &blocks(&text, "toml")[0];
     let dir = Path::new("/tmp/agent");
     yobuild::manifest::Manifest::parse(toml, &dir.join("agent.toml"), dir)
@@ -328,4 +349,121 @@ fn the_guide_links_lead_somewhere_and_its_facts_are_the_codes() {
     );
     let rust = read("Cargo.toml");
     assert!(rust.contains("rust-version = \"1.88\"") && text.contains("1.88+"));
+}
+
+/// The cost of a gallery agent's live run, as its README gives it: the
+/// first dollar amount under `## A live run`.
+fn live_cost(agent: &str) -> String {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme =
+        std::fs::read_to_string(root.join("gallery").join(agent).join("README.md")).unwrap();
+    let run = &readme[readme
+        .find("## A live run")
+        .unwrap_or_else(|| panic!("{agent}'s README has no live run"))..];
+    let at = run
+        .find('$')
+        .unwrap_or_else(|| panic!("{agent}'s live run has no cost"));
+    run[at..]
+        .chars()
+        .take_while(|c| *c == '$' || *c == '.' || c.is_ascii_digit())
+        .collect()
+}
+
+/// `docs/use-cases.md` and the README, the pitch: their links lead
+/// somewhere, every agent they list or copy `--from` is built in, and each
+/// gallery agent is listed at its live run's cost — `deepseek-flash`, under
+/// two cents, in an agent that caps dollars per run and per session, as
+/// the page says.
+#[test]
+fn the_pitch_names_agents_that_are_built_in_at_their_real_costs() {
+    use yobuild::manifest::Manifest;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let built_in: Vec<&str> = yobuild::agents::BUILTIN.iter().map(|a| a.name).collect();
+    let mut gallery: Vec<String> = std::fs::read_dir(root.join("gallery"))
+        .unwrap()
+        .map(|e| e.unwrap())
+        .filter(|e| e.path().join("agent.toml").exists())
+        .map(|e| e.file_name().into_string().unwrap())
+        .collect();
+    gallery.sort();
+    assert!(!gallery.is_empty());
+    for agent in &gallery {
+        let cost = live_cost(agent);
+        let dollars: f64 = cost[1..].parse().unwrap();
+        assert!(
+            dollars < 0.02,
+            "{agent}'s live run cost {cost}: not under two cents"
+        );
+        let manifest = Manifest::load(root.join("gallery").join(agent).join("agent.toml")).unwrap();
+        let model = &manifest.agent.model;
+        assert_eq!(
+            (model.provider(), model.id()),
+            ("deepseek", "deepseek-flash"),
+            "{agent}"
+        );
+        assert!(
+            manifest.limits.budget_usd.is_some() && manifest.limits.session_budget_usd.is_some(),
+            "{agent} does not cap dollars per run and per session"
+        );
+    }
+    for doc in ["docs/use-cases.md", "README.md"] {
+        links_lead_somewhere(doc);
+        let text = prose(&std::fs::read_to_string(root.join(doc)).unwrap());
+        let lines: Vec<&str> = text.lines().collect();
+        // An entry is a table row (`| `x` |`) or a bullet (`- **`x`**`).
+        let entry = |l: &str| -> Option<String> {
+            let rest = l.strip_prefix("| `").or_else(|| l.strip_prefix("- **`"))?;
+            Some(rest[..rest.find('`')?].to_owned())
+        };
+        let entries: Vec<(usize, String)> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| Some((i, entry(l)?)))
+            .collect();
+        for (_, name) in &entries {
+            assert!(
+                built_in.contains(&name.as_str()),
+                "{doc} lists `{name}`, which is not built in"
+            );
+        }
+        for agent in &gallery {
+            let cost = live_cost(agent);
+            let (i, _) = entries
+                .iter()
+                .find(|(_, name)| name == agent)
+                .unwrap_or_else(|| panic!("{doc} does not list {agent}"));
+            // On its line, or a bullet's next line (which is no entry).
+            let next = lines
+                .get(i + 1)
+                .filter(|l| entry(l).is_none() && lines[*i].starts_with("- "));
+            let quoted = |l: &str| {
+                l.match_indices(cost.as_str())
+                    .any(|(at, _)| !l[at + cost.len()..].starts_with(|c: char| c.is_ascii_digit()))
+            };
+            assert!(
+                quoted(lines[*i]) || next.is_some_and(|l| quoted(l)),
+                "{doc}: {agent} is not listed at its live run's {cost}"
+            );
+        }
+        let words: Vec<&str> = text.split_whitespace().collect();
+        for pair in words
+            .windows(2)
+            .filter(|w| w[0].trim_start_matches('`') == "--from")
+        {
+            let name: String = pair[1]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            assert!(
+                pair[1].starts_with('<') || built_in.contains(&name.as_str()),
+                "{doc}: `--from {}` is not built in",
+                pair[1]
+            );
+        }
+    }
+    let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+    let readme = readme.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(readme.contains("Node 22.19+ and npm 11.19+") && readme.contains("Rust 1.88+"));
+    let page = std::fs::read_to_string(root.join("docs/use-cases.md")).unwrap();
+    assert!(page.contains("under two cents"));
 }
