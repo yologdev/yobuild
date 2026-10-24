@@ -3643,7 +3643,14 @@ the Node and npm check); PR 5, `yobuild new` (`src/agents.rs`: the
 starter and the eight built-in agents, the examples gaining a `.task`
 each) and `yobuild skill install` (`src/skill.rs`, with `--dir` for a
 coding agent other than Claude Code, decided 2026-10-24), the skill free
-of repository paths (`skill_test`), the README's Start. PR 3's findings:
+of repository paths (`skill_test`), the README's Start. PR 6, the release
+groundwork: Cargo.toml 0.1.0 with its `include` list and `cargo binstall`
+metadata, `CHANGELOG.md`, `run`/`check` refused on Windows with a CI job
+keeping it compiling, the release workflow (tarballs and checksums for
+four targets, `cargo publish --dry-run`, a draft release; publishing by
+hand) and the `fresh-machine` CI job (`web-research` and `coding` copied,
+checked and run with the checkout moved away, and the terminal UI on a
+pty). PR 3's findings:
 - a DSH plugin file resolves its imports from where it is, so the tests'
   DSH fixture in the checkout's `adapters/dsh`, which imports Cordis,
   cannot run beside the cache's runtime; the binary takes

@@ -172,3 +172,68 @@ jobs:
         run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked --test kept_env_test
       - name: A server that cannot start, and the DYLD_* note, through the binary
         run: cargo test --locked --test cli_test a_server_that_cannot_start_is_said_with_what_to_do
+
+  # Not supported on Windows yet (design §13 "Distribution"): `run` and
+  # `check` refuse there. Kept compiling, for later.
+  windows:
+    name: Compiles on Windows
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --locked
+
+  # M4's "Done when" (design §13): yobuild runs without its repository. The
+  # release binary, copied out, with the whole checkout then moved out of
+  # reach (so no file read through a compiled-in path can pass), an empty
+  # HOME and YOBUILD_HOME: the skill installed; a gallery agent with a DSH
+  # plugin and an example with a pi policy and a built-in plugin, each
+  # copied, checked and run scripted; the terminal UI on a pty.
+  fresh-machine:
+    name: Without the repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Build the release binary
+        run: cargo build --release --locked
+      - name: Copy it, and the terminal check, out of the checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin" "$RUNNER_TEMP/check/tests/fixtures"
+          cp target/release/yobuild "$RUNNER_TEMP/bin/"
+          cp tests/run_terminal_pty.py "$RUNNER_TEMP/check/tests/"
+          cp -r tests/fixtures/echo "$RUNNER_TEMP/check/tests/fixtures/"
+      - name: Move the checkout out of reach
+        run: mv "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE.away" && mkdir "$GITHUB_WORKSPACE"
+      - name: No global TypeScript (as in the check job)
+        run: |
+          for b in $(which -a tsc tsserver 2>/dev/null); do rm -f "$b" 2>/dev/null || sudo rm -f "$b"; done
+      - name: The skill, two agents and the terminal UI, from the binary alone
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          export PATH="$RUNNER_TEMP/bin:$PATH" HOME="$RUNNER_TEMP/home" YOBUILD_HOME="$RUNNER_TEMP/yobuild-home"
+          mkdir -p "$HOME" work
+          yobuild --version
+          yobuild skill install
+          test -f "$HOME/.claude/skills/yobuild/SKILL.md"
+          for agent in web-research coding; do
+            yobuild new "agents/$agent" --from "$agent"
+            yobuild check "agents/$agent/agent.toml" --locked
+            (cd work && yobuild run "../agents/$agent/agent.toml" --scripted "../agents/$agent/scripts/demo.json" --locked --once "$(cat "../agents/$agent/scripts/demo.task")" | tee out.txt)
+            tail -1 work/out.txt | grep -qx Completed
+          done
+          ls "$YOBUILD_HOME/runtime/adapters" "$YOBUILD_HOME/runtime/ui"
+          python3 check/tests/run_terminal_pty.py "$RUNNER_TEMP/bin/yobuild"
+      - name: Put the checkout back (for the cache's post step)
+        if: always()
+        run: |
+          if [ -d "$GITHUB_WORKSPACE.away" ]; then rm -rf "$GITHUB_WORKSPACE" && mv "$GITHUB_WORKSPACE.away" "$GITHUB_WORKSPACE"; fi
