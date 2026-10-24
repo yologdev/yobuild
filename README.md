@@ -155,6 +155,9 @@ yobuild skill install                                             # the skill, u
 
 ## Documents
 
+- [Guide](docs/guide.md) — making, checking, running and trusting an agent:
+  the manual.
+- [Changelog](CHANGELOG.md) — what each release brings.
 - [Vision](docs/vision.md) — why, for whom, what it is not.
 - [Design](docs/design.md) — architecture, the manifest, the built-ins, what
   moves from yoagent, the safety model.
