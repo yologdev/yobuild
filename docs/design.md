@@ -3582,8 +3582,11 @@ made plain:
   before it existed (v0.1.0: a release runs the workflow of its tag's
   commit). 0.1.0 went with a token (`CARGO_REGISTRY_TOKEN`: a new crate's
   first version needs one); from 0.2 by crates.io's trusted publishing
-  (the crate's settings name this repository and `publish.yml`; a token
-  for 30 minutes from the job's GitHub identity, none stored).
+  (the crate's settings name this repository, `publish.yml` and the
+  `crates-io` environment; a token for 30 minutes from the job's GitHub
+  identity, none stored). A version already there is skipped; a failure
+  is said on the release ("Not on crates.io yet", with the run); a
+  pre-release (a tag with `-`) stays off crates.io.
 - **Windows (open question 7).** Recommended: not in 0.1.
   - Off unix there is no kept environment (only the credentials, set
     empty), the terminal UI reads `/dev/tty`, and nothing is tested there.
