@@ -13,9 +13,10 @@ installs the pinned plugins, vets them, and runs the agent.
 
 ## A working `yobuild`
 
-`yobuild` on PATH: until yobuild 0.1 is released, installed with
-`cargo install --git https://github.com/yologdev/yobuild` (`yobuild
---version` says it is there). It needs
+`yobuild` on PATH: downloaded from
+https://github.com/yologdev/yobuild/releases (macOS and Linux; unpack the
+`.tar.gz` and put `yobuild` on PATH), or built with `cargo install
+yobuild` (`yobuild --version` says it is there). It needs
 Node 22.19+ and npm 11.19+ for plugins (`yobuild` says so if they are
 missing or older), and installs its own runtime files into its cache
 (`~/.yobuild`) the first time a plugin needs them.
