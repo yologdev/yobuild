@@ -104,7 +104,14 @@ fn main() -> ExitCode {
 
 fn start() -> Result<ExitCode, BoxError> {
     let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
+    let command = args.next();
+    // Not tested on Windows yet: no kept environment there, a terminal UI
+    // that reads /dev/tty (design §13 "Distribution"). `new` and `skill`
+    // only write files, and run anywhere.
+    if cfg!(windows) && matches!(command.as_deref(), Some("run" | "check")) {
+        return Err("Windows is not supported yet (yobuild 0.1: macOS and Linux)".into());
+    }
+    match command.as_deref() {
         Some("run") => {}
         Some("check") => return check(args),
         Some("new") => return new(args),

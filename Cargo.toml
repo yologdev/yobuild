@@ -1,14 +1,51 @@
 [package]
 name = "yobuild"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 resolver = "3"
 description = "Build an agent by choosing its parts: plugins from other ecosystems on the yoagent loop, a few built-ins of its own, and a frontend"
 license = "MIT"
 repository = "https://github.com/yologdev/yobuild"
 rust-version = "1.88"
-# Not published yet (open question 2 in docs/roadmap.md); no API promise.
-publish = false
+readme = "README.md"
+homepage = "https://github.com/yologdev/yobuild"
+keywords = ["agent", "llm", "plugins", "mcp", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+# A binary first (`cargo install yobuild`); the library is what its tests
+# use, with no API promise before 1.0 (design §13 "Distribution").
+#
+# What the crate ships: the sources and what the binary builds in
+# (`include_bytes!`/`include_str!`: the web page, the frontend's plugins,
+# the gallery, the examples' manifests, the skill) — not the tests, the
+# docs, the scripts or any `node_modules`.
+include = [
+    "/src/**/*.rs",
+    "/frontend/web/index.html",
+    "/frontend/web/app.js",
+    "/frontend/web/lib.js",
+    "/frontend/web/package.json",
+    "/frontend/plugins/package.json",
+    "/frontend/plugins/package-lock.json",
+    "/frontend/plugins/*.ts",
+    "/frontend/plugins/pi-extensions/confirm-dangerous.ts",
+    "/gallery/**/*",
+    "/examples/*.toml",
+    "/examples/*.lock",
+    "/examples/prompts/*.md",
+    "/examples/scripts/*.json",
+    "/examples/scripts/*.task",
+    "/skill/yobuild/**/*.md",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+]
+
+# Prebuilt binaries for `cargo binstall yobuild`, as the release workflow
+# names them (`.github/workflows/release.yml`).
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/yobuild-v{ version }-{ target }.tar.gz"
+bin-dir = "yobuild-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
 
 
 [dependencies]

@@ -16,9 +16,10 @@ Go — plus a few small built-ins of its own, on top of the
 
 ## Start
 
-yobuild needs Rust to build, and Node 22.19+ with npm 11.19+ for plugins
-(it installs its own runtime files into `~/.yobuild` the first time a
-plugin needs them):
+yobuild runs on macOS and Linux (not Windows yet). It needs Rust to
+build, and Node 22.19+ with npm 11.19+ for plugins (it installs its own
+runtime files into `~/.yobuild` the first time a plugin needs them). What
+each release brings: [CHANGELOG.md](CHANGELOG.md).
 
 ```sh
 cargo install --git https://github.com/yologdev/yobuild   # until 0.1 is on crates.io

@@ -243,7 +243,7 @@ starts (2026-10-23; a tool's own, `run`).
 **Done when** visualize's chart shows on the page from a sandboxed origin,
 and a plugin's model call is charged to the run's budget.
 
-## M4 — Share (design §13; built 2026-10-24: `yobuild:` built-ins, the runtime sets, `yobuild new`, `yobuild skill install`)
+## M4 — Share (design §13; built 2026-10-24: `yobuild:` built-ins, the runtime sets, `yobuild new`, `yobuild skill install`, the release groundwork)
 
 - `yobuild new <folder> [--from <agent>]` (a manifest, prompt and demo to
   edit, or a gallery agent or example; built), `yobuild skill install
