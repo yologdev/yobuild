@@ -248,13 +248,13 @@ and a plugin's model call is charged to the run's budget.
 - `yobuild new <folder> [--from <agent>]` (a manifest, prompt and demo to
   edit, or a gallery agent or example; built), `yobuild skill install
   [--project | --dir]` (the skill, free of repository paths, where a
-  coding agent reads it; built), `cargo install yobuild` once 0.1 is on
-  crates.io (until then `cargo install --git`) and a prebuilt binary.
+  coding agent reads it; built), `cargo install yobuild` and a prebuilt
+  binary (0.1).
 - Running without the repository (design §13): the adapters and the
   terminal UI as runtime sets in the cache, built into the binary;
   built-in plugins named `yobuild:<name>`; Node and npm checked first.
 - README (its pitch), `docs/guide.md` and `docs/use-cases.md` (what you can build, why, compared with other ways).
-- Release 0.1 (no git dependencies in a release: yoagent-rutis and its
+- Release 0.1, 2026-10-25 (no git dependencies in a release: yoagent-rutis and its
   `probe` come from crates.io already).
 
 **Done when** someone who has not seen the repository installs yobuild,
@@ -276,7 +276,8 @@ never loading, and a denied approval leaves the agent without the plugin.
 ## Open questions (for review)
 
 1. **Name and home.** Decided: `yologdev/yobuild`, public.
-2. **Publish to crates.io?** As a binary crate (`cargo install yobuild`),
+2. **Publish to crates.io?** Decided: yes, from 0.1 (`cargo install
+   yobuild`). Asked: as a binary crate (`cargo install yobuild`),
    and the library (`yobuild::builtins`, `frontend`, `install`, `manifest`, `run`) for people who
    would rather write Rust than a manifest?
 3. **The probe as a library.** Decided: exposed from yoagent-rutis as a

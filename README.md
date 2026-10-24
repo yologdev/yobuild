@@ -9,8 +9,8 @@ small built-ins of its own, on top of the
 [yoagent](https://github.com/yologdev/yoagent) loop. No code to write:
 an agent is a short settings file and a prompt.
 
-> Status: **M4 (share) under way**: yobuild runs without its repository;
-> a release (0.1, crates.io and binaries) comes next. Built: the manifest,
+> Status: **0.1, the first release** (macOS and Linux; on crates.io, and
+> binaries on the releases page). Built: the manifest,
 > `yobuild run` and `yobuild check`, installing pinned plugins, the
 > built-ins, the frontends (web page, phone, terminal), the host layer
 > (grants, the kept environment), a gallery of agents built through the
@@ -77,7 +77,7 @@ plugin needs them. What each release brings:
 [CHANGELOG.md](CHANGELOG.md).
 
 ```sh
-cargo install --git https://github.com/yologdev/yobuild   # or build it (until 0.1 is on crates.io)
+cargo install yobuild                                     # or build it with Rust
 yobuild new --list                                        # the agents built in: the gallery and the examples
 yobuild new research --from web-research                  # a copy, ready to run
 cd research                                               # an agent works in the folder it starts in
@@ -195,7 +195,7 @@ so a mistyped `--dir` (a project, a home) is refused.
 ## Upgrading
 
 ```sh
-cargo install --git https://github.com/yologdev/yobuild --force   # the new yobuild (or download the new release)
+cargo install yobuild                                             # the new yobuild (or download the new release)
 yobuild skill install                                             # the skill, updated if nobody edited it
 ```
 

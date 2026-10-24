@@ -47,7 +47,7 @@ Download yobuild for your machine from the
 `.tar.gz` and put `yobuild` on your PATH. Or build it:
 
 ```sh
-cargo install --git https://github.com/yologdev/yobuild   # until 0.1 is on crates.io
+cargo install yobuild
 yobuild --version
 ```
 

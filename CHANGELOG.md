@@ -5,7 +5,7 @@ base changed**, because a lock with DSH plugins records it: when it
 changed, `--locked` refuses such a lock, and one run without `--locked`
 locks it again (commit the new lock).
 
-## 0.1.0 — unreleased
+## 0.1.0 — 2026-10-25
 
 The first release: build an agent from its parts and run it, without the
 repository.
