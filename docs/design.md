@@ -3575,6 +3575,14 @@ made plain:
   (arm64, x86_64) and Linux (x86_64, aarch64; glibc). It attaches tarballs
   and checksums to the GitHub release, plus `cargo binstall` metadata. No
   install script piped to a shell.
+- **Publishing the crate** (decided 2026-10-25, as yoagent does it): a
+  person publishes the draft release, and that publishes the crate —
+  `publish.yml`, on `release: published`, runs `cargo publish --locked`
+  at the release's tag with the repository's `CARGO_REGISTRY_TOKEN`
+  secret. Run by hand with a tag, it publishes a tag made before it
+  existed (v0.1.0: a release runs the workflow of its tag's commit).
+  crates.io's trusted publishing (no stored token) can take over once the
+  crate exists; a new crate's first version needs a token.
 - **Windows (open question 7).** Recommended: not in 0.1.
   - Off unix there is no kept environment (only the credentials, set
     empty), the terminal UI reads `/dev/tty`, and nothing is tested there.
