@@ -150,11 +150,14 @@ yobuild skill install                                             # the skill, u
 - A lock with DSH plugins was made against yobuild's DSH base: when a new
   yobuild's base changed, `--locked` refuses it, and a run without
   `--locked` locks it again (commit the new lock).
-- `~/.yobuild` can be deleted at any time: what it holds is installed
-  again when needed.
+- `~/.yobuild` can be deleted whenever no yobuild is running: what it
+  holds is installed again when needed.
 
 ## Documents
 
+- [Guide](docs/guide.md) — making, checking, running and trusting an agent:
+  the manual.
+- [Changelog](CHANGELOG.md) — what each release brings.
 - [Vision](docs/vision.md) — why, for whom, what it is not.
 - [Design](docs/design.md) — architecture, the manifest, the built-ins, what
   moves from yoagent, the safety model.

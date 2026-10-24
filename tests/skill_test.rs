@@ -256,3 +256,76 @@ fn the_skill_needs_no_repository() {
         }
     }
 }
+
+/// GitHub's anchor for a heading: lowercase, spaces made `-`, everything
+/// but letters, digits, `-` and `_` dropped.
+fn anchor(heading: &str) -> String {
+    heading
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter_map(|c| match c {
+            ' ' => Some('-'),
+            c if c.is_alphanumeric() || c == '-' || c == '_' => Some(c),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `docs/guide.md`, the person's manual: every link leads to a file (and
+/// a heading there), its manifest is one yobuild reads, and the versions
+/// it names are the code's.
+#[test]
+fn the_guide_links_lead_somewhere_and_its_facts_are_the_codes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let guide = root.join("docs/guide.md");
+    let text = std::fs::read_to_string(&guide).unwrap();
+    let headings = |path: &Path| -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter_map(|l| {
+                l.trim_start_matches('#')
+                    .strip_prefix(' ')
+                    .filter(|_| l.starts_with('#'))
+            })
+            .map(anchor)
+            .collect()
+    };
+    for (at, _) in text.match_indices("](") {
+        let target = &text[at + 2..];
+        let target = &target[..target.find(')').unwrap()];
+        if target.starts_with("http") {
+            continue;
+        }
+        let (file, fragment) = target.split_once('#').unwrap_or((target, ""));
+        let path = if file.is_empty() {
+            guide.clone()
+        } else {
+            root.join("docs").join(file)
+        };
+        assert!(
+            path.exists(),
+            "the guide links {target}, which is not there"
+        );
+        if !fragment.is_empty() {
+            assert!(
+                headings(&path).iter().any(|h| h == fragment),
+                "the guide links {target}: no such heading"
+            );
+        }
+    }
+    let toml = &blocks(&text, "toml")[0];
+    let dir = Path::new("/tmp/agent");
+    yobuild::manifest::Manifest::parse(toml, &dir.join("agent.toml"), dir)
+        .unwrap_or_else(|e| panic!("the guide's manifest: {e}"));
+    let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap();
+    assert!(text.contains("Node 22.19+ and npm 11.19+"));
+    assert!(read("src/runtime.rs").contains("Node 22.19+ and npm 11.19+"));
+    assert!(text.contains("@arcships/rutis-runtime@0.12.0"));
+    assert!(
+        read("frontend/plugins/package.json").contains("\"@arcships/rutis-runtime\": \"0.12.0\"")
+    );
+    let rust = read("Cargo.toml");
+    assert!(rust.contains("rust-version = \"1.88\"") && text.contains("1.88+"));
+}
