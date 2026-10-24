@@ -14,8 +14,7 @@ an agent is a short settings file and a prompt.
 > `yobuild run` and `yobuild check`, installing pinned plugins, the
 > built-ins, the frontends (web page, phone, terminal), the host layer
 > (grants, the kept environment), a gallery of agents built through the
-> skill, and `yobuild new` / `yobuild skill install`. Numbers quoted are
-> measured in the yoagent repository.
+> skill, and `yobuild new` / `yobuild skill install`.
 
 ## What you can build
 
@@ -40,34 +39,45 @@ of building an agent: [What you can build](docs/use-cases.md).
 
 ## Why yobuild
 
-- **Parts that exist, used as they are**: thousands of pi packages, DSH
-  plugins and MCP servers on npm, pinned in a lock.
-- **Checked before you trust it**: `yobuild check` loads every part
-  without a model, a key or any cost, and says what would fail and how
-  to fix it.
-- **It asks before it harms**: deleting or replacing your files, or
-  running anything not known to be harmless, asks you first. With nobody
-  there, it is refused.
-- **It doesn't wait on you**: its questions don't stop the work, and you
-  can answer later from your phone.
-- **What it says is checked**: a required report, plus facts the model
-  cannot make up (files changed, commits, tokens, tool calls, time).
-- **Capped and private**: spending limits per run and per session.
-  Plugins start without your keys unless you pass one on. It runs on your computer with the
-  model provider you choose, with no account and no hosted service.
+First, it is not a sandbox: plugins run with your rights (see
+[when yobuild is not the right tool](docs/use-cases.md#when-yobuild-is-not-the-right-tool)).
+Within that:
 
-Not a sandbox: plugins run with your rights. See
-[when yobuild is not the right tool](docs/use-cases.md#when-yobuild-is-not-the-right-tool).
+- **Parts that exist, used as they are**: pi packages, DSH plugins and
+  MCP servers from npm, pinned in a lock. Not every one loads, and
+  `check` says which.
+- **Checked before you trust it**: `yobuild check` loads every part
+  without a model, a key or any model cost, and says what would fail and
+  how to fix it.
+- **It asks before it harms**: with the default approval gate, deleting
+  or replacing your files, or running a command it doesn't know, asks you
+  first, and with nobody there it is refused. Reading, building, testing
+  and editing files in the project run freely.
+- **It doesn't wait on you**: with `ask_owner`, its questions don't stop
+  the work. Answer later in the page, or on your phone on the same
+  Wi-Fi.
+- **It reports, and yobuild adds the facts**: a report with the sections
+  you choose, and, with `facts`, numbers the model cannot make up (tokens,
+  tool calls, time; files changed and commits in a git repository).
+- **Capped and local**: spending limits you set, per run and per
+  session. Plugins start without your environment's keys unless you pass
+  one on. It runs on your computer with the model provider you choose,
+  with no account and no hosted service; your task and what the agent
+  reads go to that provider.
 
 ## Start
 
-yobuild runs on macOS and Linux (not Windows yet). It needs Rust to
-build, and Node 22.19+ with npm 11.19+ for plugins (it installs its own
-runtime files into `~/.yobuild` the first time a plugin needs them). What
-each release brings: [CHANGELOG.md](CHANGELOG.md).
+yobuild runs on macOS and Linux (not Windows yet). Download it for your
+machine from the
+[releases page](https://github.com/yologdev/yobuild/releases) (unpack
+the `.tar.gz` and put `yobuild` on your PATH), or build it with Rust
+1.88+ (below). Agents with plugins need Node 22.19+ and npm 11.19+:
+yobuild installs its own runtime files into `~/.yobuild` the first time a
+plugin needs them. What each release brings:
+[CHANGELOG.md](CHANGELOG.md).
 
 ```sh
-cargo install --git https://github.com/yologdev/yobuild   # until 0.1 is on crates.io
+cargo install --git https://github.com/yologdev/yobuild   # or build it (until 0.1 is on crates.io)
 yobuild new --list                                        # the agents built in: the gallery and the examples
 yobuild new research --from web-research                  # a copy, ready to run
 cd research                                               # an agent works in the folder it starts in
@@ -185,7 +195,7 @@ so a mistyped `--dir` (a project, a home) is refused.
 ## Upgrading
 
 ```sh
-cargo install --git https://github.com/yologdev/yobuild --force   # the new yobuild
+cargo install --git https://github.com/yologdev/yobuild --force   # the new yobuild (or download the new release)
 yobuild skill install                                             # the skill, updated if nobody edited it
 ```
 
