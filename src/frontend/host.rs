@@ -478,6 +478,9 @@ pub(crate) fn matches(entry: &std::ffi::OsStr, name: &std::ffi::OsStr) -> bool {
 /// for a path holding `=`) is not there: the `no-env` hint's words, which
 /// must not begin as `startable`'s ("yobuild cannot start …", the
 /// `cannot-start` hint's, earlier in the table).
+// Used on unix, where runtimes start through `env` (and by the hints'
+// tests).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn no_env(program: &Path, missing: &str) -> String {
     format!(
         "cannot start {} with the kept environment: {missing} is not there, and yobuild needs it to start a plugin runtime or stdio MCP server",

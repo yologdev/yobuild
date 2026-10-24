@@ -265,6 +265,8 @@ async fn memory(runtimes: &[(String, PathBuf)]) -> Vec<(String, u64)> {
 /// rutis-0`): runtimes started from one folder (the terminal UI's and a
 /// rutis package's, both `frontend/plugins`) cannot be told apart from
 /// outside, so they are said together rather than each given the other's.
+// Memory is read on unix only (`ps`).
+#[cfg_attr(not(unix), allow(dead_code))]
 fn by_folder(runtimes: &[(String, PathBuf)]) -> Vec<(&PathBuf, String)> {
     let mut folders: Vec<(&PathBuf, Vec<&str>)> = Vec::new();
     for (name, dir) in runtimes {
