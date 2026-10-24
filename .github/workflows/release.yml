@@ -2,9 +2,12 @@ name: Release
 
 # On a version tag (`v0.1.0`): the binaries for macOS and Linux, each a
 # tarball with its checksum, attached to a draft GitHub release named after
-# the tag. A person publishes the release; crates.io (`cargo publish`) is a
-# step of its own, by hand. Windows is not built (design §13). Run by hand
-# (workflow_dispatch) it builds and checks the crate, and drafts nothing.
+# the tag. Windows is not built (design §13). A person publishes the
+# release, and crates.io (`cargo publish`) is a step of its own, by hand —
+# done first: the notes give `cargo install yobuild` and `cargo binstall
+# yobuild`, which read crates.io (until then the notes' `--git --tag` form
+# is the one that works). Run by hand (workflow_dispatch) it builds and
+# checks the crate, and drafts nothing.
 on:
   push:
     tags: ["v*"]
@@ -26,7 +29,8 @@ jobs:
       matrix:
         include:
           - { target: aarch64-apple-darwin, os: macos-14 }
-          - { target: x86_64-apple-darwin, os: macos-13 }
+          # Intel macOS, cross-built on Apple silicon (the macOS 13 image is retired).
+          - { target: x86_64-apple-darwin, os: macos-14 }
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
     steps:
@@ -84,4 +88,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* --draft --title "yobuild $GITHUB_REF_NAME" \
-            --notes "See CHANGELOG.md. Install: download the tarball for your platform, or \`cargo binstall yobuild\` / \`cargo install yobuild\`. Needs Node 22.19+ and npm 11.19+ for plugins."
+            --notes "See CHANGELOG.md. Needs Node 22.19+ and npm 11.19+ for plugins. Install: download the tarball for your platform (macOS or Linux), or \`cargo install --git https://github.com/yologdev/yobuild --tag $GITHUB_REF_NAME\`; once the crate is on crates.io, \`cargo install yobuild\` or \`cargo binstall yobuild\`."
