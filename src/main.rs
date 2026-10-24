@@ -3,7 +3,19 @@
 //! ```text
 //! yobuild run <agent.toml> [--scripted FILE] [--once] [--measure] [--web ADDR] [--locked] [--] [TASK…]
 //! yobuild check <agent.toml> [--locked] [--json]
+//! yobuild new <folder> [--from <agent>]
+//! yobuild new --list
+//! yobuild skill install [--project | --dir <folder>] [--force]
+//! yobuild --version
 //! ```
+//!
+//! `new` makes an agent's folder (design §13): a starter whose every other
+//! key is shown commented, or (`--from`) a copy of an agent built into
+//! yobuild — its gallery's and its examples' (`--list`), named after the
+//! folder. `skill install` writes the yobuild skill where a coding agent
+//! reads it: `~/.claude/skills/yobuild/` (Claude Code), the project's
+//! `.claude/skills/yobuild/`, or `--dir`; it updates a copy nobody edited
+//! and refuses one someone changed (`--force`).
 //!
 //! `check` vets every plugin and MCP server without a model or a key (each
 //! alone, then the agent together; design §4): a report on stdout, as text
@@ -71,7 +83,11 @@ fn layout(manifest: &Manifest, terminal: bool) -> Result<Layout, BoxError> {
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const USAGE: &str = "usage: yobuild run <agent.toml> [--scripted FILE] [--once] [--measure] [--web ADDR] [--locked] [--] [TASK…]
-       yobuild check <agent.toml> [--locked] [--json]";
+       yobuild check <agent.toml> [--locked] [--json]
+       yobuild new <folder> [--from <agent>]
+       yobuild new --list
+       yobuild skill install [--project | --dir <folder>] [--force]
+       yobuild --version | -V";
 
 fn main() -> ExitCode {
     match start() {
@@ -91,6 +107,12 @@ fn start() -> Result<ExitCode, BoxError> {
     match args.next().as_deref() {
         Some("run") => {}
         Some("check") => return check(args),
+        Some("new") => return new(args),
+        Some("skill") => return skill(args),
+        Some("-V" | "--version") => {
+            println!("yobuild {}", env!("CARGO_PKG_VERSION"));
+            return Ok(ExitCode::SUCCESS);
+        }
         Some("-h" | "--help") | None => {
             println!("{USAGE}");
             return Ok(ExitCode::SUCCESS);
@@ -196,6 +218,114 @@ fn start() -> Result<ExitCode, BoxError> {
         }
         Ok(code)
     })
+}
+
+/// `yobuild new <folder> [--from <agent>]`: a new agent's folder, the
+/// starter or a built-in agent copied (`yobuild::agents`); `--list` names
+/// the built-in ones.
+fn new(args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
+    use yobuild::agents::{new_agent, BUILTIN};
+    let args: Vec<String> = args.collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{USAGE}");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args == ["--list"] {
+        for kind in ["gallery", "example"] {
+            println!("{kind}:");
+            for agent in BUILTIN.iter().filter(|a| a.kind == kind) {
+                println!("  {:<18} {}", agent.name, agent.summary);
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let (folder, from) = match args.as_slice() {
+        [folder] if !folder.starts_with('-') => (folder, None),
+        [folder, flag, from] if flag == "--from" && !folder.starts_with('-') => {
+            (folder, Some(from.as_str()))
+        }
+        _ => return Err(USAGE.into()),
+    };
+    let dir = PathBuf::from(folder);
+    let made = new_agent(&dir, from)?;
+    // Absolute: the commands below run from the folder the agent works in.
+    let dir = std::path::absolute(&dir)?;
+    match from {
+        Some(from) => println!("made {} from the built-in agent `{from}`:", dir.display()),
+        None => println!("made {}, a starter to fill in:", dir.display()),
+    }
+    for file in &made.files {
+        println!("  {file}");
+    }
+    for change in &made.changed {
+        println!("  changed: {change}");
+    }
+    let manifest = dir.join("agent.toml");
+    let demo = dir.join("scripts/demo.json");
+    let task = dir.join("scripts/demo.task");
+    println!(
+        "next, from the folder it should work in (its own, or a project's):\n  yobuild check {m}\n  yobuild run {m} --scripted {d} --once \"$(cat {t})\"   # no key needed\n  DEEPSEEK_API_KEY=… yobuild run {m}",
+        m = manifest.display(),
+        d = demo.display(),
+        t = task.display()
+    );
+    if from.is_some() && dir.join("README.md").is_file() {
+        println!(
+            "its README says what it needs and does: {}",
+            dir.join("README.md").display()
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `yobuild skill install [--project | --dir <folder>] [--force]`: the
+/// yobuild skill where a coding agent reads it (`yobuild::skill`).
+fn skill(args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
+    use yobuild::skill::{install, Done, Target};
+    let args: Vec<String> = args.collect();
+    let Some((command, rest)) = args.split_first() else {
+        return Err(USAGE.into());
+    };
+    if command == "-h" || command == "--help" {
+        println!("{USAGE}");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if command != "install" {
+        return Err(format!("unknown command skill {command:?}\n{USAGE}").into());
+    }
+    let mut target = Target::User;
+    let mut force = false;
+    let mut rest = rest.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--project" if target == Target::User => target = Target::Project,
+            "--dir" if target == Target::User => {
+                target = Target::Dir(rest.next().ok_or(USAGE)?.into())
+            }
+            "--force" => force = true,
+            "--project" | "--dir" => {
+                return Err(format!("one of --project and --dir\n{USAGE}").into())
+            }
+            other => return Err(format!("unknown option {other}\n{USAGE}").into()),
+        }
+    }
+    let dir = target.folder()?;
+    match install(&dir, force)? {
+        Done::Installed => println!("installed the yobuild skill in {}", dir.display()),
+        Done::Updated { from } => println!(
+            "updated the yobuild skill in {} (it was yobuild {from}'s)",
+            dir.display()
+        ),
+        Done::AlreadyThere => println!("the yobuild skill is in {} already", dir.display()),
+        Done::Replaced => println!("wrote the yobuild skill afresh in {}", dir.display()),
+        _ => println!("the yobuild skill is in {}", dir.display()),
+    }
+    if target == Target::User || target == Target::Project {
+        println!(
+            "Claude Code reads it there: ask it to build an agent (\"make me an agent that …\")."
+        );
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `yobuild check`: the report on stdout (text, or JSON with `--json`);

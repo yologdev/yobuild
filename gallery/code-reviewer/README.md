@@ -4,7 +4,7 @@ It reviews the code quality of a TypeScript project: lint problems, type
 errors and risky patterns. Then it reports what to fix, most important
 first. It never changes the project.
 
-Built with the [yobuild skill](../../skill/yobuild/SKILL.md) by a coding
+Built with the yobuild skill (`yobuild skill install`) by a coding
 agent, from this request: *"I want an agent that reviews the code quality
 of my TypeScript project — lint problems, type errors, risky patterns —
 and gives me a report of what to fix, most important first. It must not
@@ -45,8 +45,8 @@ change my code."*
 
 - `DEEPSEEK_API_KEY` in the environment (the model is
   `deepseek/deepseek-flash`).
-- A working `yobuild`, from a set-up checkout (Node 22.19+ and npm; see
-  the skill).
+- `yobuild` installed (see yobuild's README), with Node 22.19+ and npm
+  11.19+ on PATH.
 - Your project's ESLint config, and its dependencies installed
   (`npm install`). The server brings its own ESLint 10, but a config's
   plugins (typescript-eslint, for `.ts` files) come from your
@@ -58,9 +58,12 @@ change my code."*
 
 ## Run it
 
+Get a copy of its folder with `yobuild new my-code-reviewer --from code-reviewer` (the
+paths below then name that folder).
+
 ```sh
 cd path/to/your-project
-DEEPSEEK_API_KEY=… path/to/yobuild run path/to/gallery/code-reviewer/agent.toml
+DEEPSEEK_API_KEY=… yobuild run path/to/gallery/code-reviewer/agent.toml
 ```
 
 Open the URL it prints and ask for a review. Its questions appear above

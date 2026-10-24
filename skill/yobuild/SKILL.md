@@ -13,25 +13,25 @@ installs the pinned plugins, vets them, and runs the agent.
 
 ## A working `yobuild`
 
-Until yobuild is installable on its own, it runs from a checkout of
-<https://github.com/yologdev/yobuild>, set up once:
+`yobuild` on PATH: until yobuild 0.1 is released, installed with
+`cargo install --git https://github.com/yologdev/yobuild` (`yobuild
+--version` says it is there). It needs
+Node 22.19+ and npm 11.19+ for plugins (`yobuild` says so if they are
+missing or older), and installs its own runtime files into its cache
+(`~/.yobuild`) the first time a plugin needs them.
 
-```sh
-git clone https://github.com/yologdev/yobuild && cd yobuild
-scripts/try-coding-agent.sh --setup-only   # Node 22.19+ and npm: the adapters
-cargo build
-```
-
-Pinned DSH plugins need npm 11.19 or later to install (an older npm
-writes an incomplete lock, which yobuild refuses). Call yobuild by path
-from the agent's folder: `path/to/yobuild/target/debug/yobuild …` — below,
-`yobuild` means that path.
+Two commands help before writing anything:
+- `yobuild new --list` names the agents built into yobuild: its gallery
+  (each built this way, and checked) and its examples.
+- `yobuild new <folder> --from <agent>` copies one, ready to `check` and
+  run: start from the one nearest the request and change it.
+  `yobuild new <folder>` alone writes a starter whose every other key is
+  shown commented.
 
 ## Where things go
 
-One folder per agent, anywhere (not inside the yobuild checkout); the
-agent works in the folder `yobuild run` is started in (usually this one,
-or the project it works on). An agent that reads or outlines the whole
+One folder per agent, anywhere; the agent works in the folder `yobuild
+run` is started in (usually this one, or the project it works on). An agent that reads or outlines the whole
 project should live beside it, not inside: in the project, its own
 manifest, prompt and reply files are among what it reads.
 
@@ -41,6 +41,7 @@ my-agent/
   agent.lock          written by the first `yobuild check` or `run` (when it pins packages); commit it
   prompts/agent.md    the prompt
   scripts/demo.json   the scripted replies
+  scripts/demo.task   the task each reply file was written for
 ```
 
 ## The method
@@ -57,7 +58,9 @@ my-agent/
    then a plugin from [reference/parts.md](reference/parts.md) at the
    version it lists (**CI** rows first: yobuild's own CI runs them); then
    an MCP server. A part not listed: pin `npm view <package> version`.
-3. **Write** `agent.toml` and a first prompt (`check` reads it), then
+3. **Write** `agent.toml` and a first prompt — from `yobuild new <folder>
+   --from <agent>` when a built-in agent is near the request, else from
+   `yobuild new <folder>`'s starter (`check` reads it) — then
    revise the prompt once `check` has listed the tools: keys, patterns and
    how to write the prompt in [reference/manifest.md](reference/manifest.md). `allow`
    only tools that read or plan (never `bash` or the writers: the gate
@@ -146,9 +149,8 @@ my-agent/
   in a sandbox, or a plugin with `policy = true` is the approval policy.
   It lets every call run as the agent asks.
 - Never write a secret into a file: `${NAME}`, set in the environment.
-- Never add plugin packages to yobuild's `adapters/`, and never edit a
-  lock by hand: yobuild installs pinned plugins into its cache from the
-  lock it writes.
+- Never install plugin packages by hand, and never edit a lock: yobuild
+  installs pinned plugins into its cache from the lock it writes.
 - Never skip `check`, and never run live before a scripted run passed.
 - Ask the person before a live run.
 

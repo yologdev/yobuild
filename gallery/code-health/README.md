@@ -4,7 +4,7 @@ It checks a TypeScript project's health: the type errors a real
 TypeScript language server finds, and an outline of what is where. It
 never changes the project's files.
 
-Built with the [yobuild skill](../../skill/yobuild/SKILL.md) by a coding
+Built with the yobuild skill (`yobuild skill install`) by a coding
 agent, from this request: *"I'd like a code-health checker for a
 TypeScript project: it should find type errors and give me an outline of
 what is where. Read-only — it must never change my files."*
@@ -68,8 +68,8 @@ You agree to this by running it:
 
 - `DEEPSEEK_API_KEY` in the environment (the model is
   `deepseek/deepseek-flash`).
-- A working `yobuild`, from a set-up checkout (Node 22.19+ and npm; see
-  the skill).
+- `yobuild` installed (see yobuild's README), with Node 22.19+ and npm
+  11.19+ on PATH.
 - The network:
   - on the first run, yobuild installs pi-lens from npm into its cache
     (`~/.yobuild`);
@@ -79,12 +79,15 @@ You agree to this by running it:
 
 ## Run it
 
+Get a copy of its folder with `yobuild new my-code-health --from code-health` (the
+paths below then name that folder).
+
 From your project's folder (the agent reads the folder it is started
 in):
 
 ```sh
 cd path/to/your-project
-DEEPSEEK_API_KEY=… path/to/yobuild run path/to/gallery/code-health/agent.toml
+DEEPSEEK_API_KEY=… yobuild run path/to/gallery/code-health/agent.toml
 ```
 
 Open the URL it prints and ask for a health check. Its questions appear

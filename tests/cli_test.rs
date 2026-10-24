@@ -1016,6 +1016,136 @@ fn check_says_what_run_would_refuse() {
     );
 }
 
+/// `yobuild new` (design §13): the starter checks and runs its demo, a
+/// built-in agent copied does too, `--list` names them; `yobuild skill
+/// install --dir` writes the skill, then finds it there.
+#[test]
+fn new_makes_an_agent_that_runs_and_skill_install_writes_the_skill() {
+    let dir = tempfile::tempdir().unwrap();
+    let stdout = |out: &std::process::Output| text(&out.stdout);
+    let out = yobuild(&["new", "--list"], dir.path());
+    assert!(out.status.success());
+    for name in ["web-research", "code-health", "handoff", "minimal"] {
+        assert!(
+            stdout(&out).contains(&format!("  {name} ")),
+            "{}",
+            stdout(&out)
+        );
+    }
+    for (folder, from) in [("starter", None), ("reader", Some("minimal"))] {
+        let mut args = vec!["new", folder];
+        if let Some(from) = from {
+            args.extend(["--from", from]);
+        }
+        let out = yobuild(&args, dir.path());
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        assert!(stdout(&out).contains("yobuild check "), "{}", stdout(&out));
+        let manifest = format!("{folder}/agent.toml");
+        let (code, report, err) = check(&[&manifest], dir.path());
+        assert_eq!(code, Some(0), "{report}{err}");
+        assert!(report.contains(&format!("agent {folder}: ok")), "{report}");
+        let task =
+            std::fs::read_to_string(dir.path().join(folder).join("scripts/demo.task")).unwrap();
+        let out = yobuild(
+            &[
+                "run",
+                &manifest,
+                "--scripted",
+                &format!("{folder}/scripts/demo.json"),
+                "--once",
+                task.trim(),
+            ],
+            dir.path(),
+        );
+        assert!(
+            out.status.success() && stdout(&out).ends_with("Completed\n"),
+            "{folder}: {}{}",
+            stdout(&out),
+            text(&out.stderr)
+        );
+    }
+    // A folder there: refused.
+    let out = yobuild(&["new", "starter"], dir.path());
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "yobuild: starter exists: give a new folder\n"
+    );
+    // The skill, into a folder of one's own.
+    let skill = dir.path().join("skills/yobuild");
+    let skill = skill.display().to_string();
+    let out = yobuild(&["skill", "install", "--dir", &skill], dir.path());
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        stdout(&out),
+        format!("installed the yobuild skill in {skill}\n")
+    );
+    assert!(dir.path().join("skills/yobuild/SKILL.md").is_file());
+    let out = yobuild(&["skill", "install", "--dir", &skill], dir.path());
+    assert_eq!(
+        stdout(&out),
+        format!("the yobuild skill is in {skill} already\n")
+    );
+    // By default, Claude Code's folder under HOME; --project, the current
+    // folder's; not both.
+    let home = tempfile::tempdir().unwrap();
+    let out = bin()
+        .args(["skill", "install"])
+        .current_dir(dir.path())
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(home
+        .path()
+        .join(".claude/skills/yobuild/SKILL.md")
+        .is_file());
+    assert!(
+        stdout(&out).contains("Claude Code reads it there"),
+        "{}",
+        stdout(&out)
+    );
+    let out = yobuild(&["skill", "install", "--project"], dir.path());
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(dir.path().join(".claude/skills/yobuild/SKILL.md").is_file());
+    let out = yobuild(&["skill", "install", "--project", "--dir", "x"], dir.path());
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).starts_with("yobuild: one of --project and --dir"));
+    // A folder holding no skill: never written into.
+    let out = yobuild(&["skill", "install", "--dir", ".", "--force"], dir.path());
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("holds no yobuild skill"),
+        "{}",
+        text(&out.stderr)
+    );
+    // Argument errors and the version.
+    for args in [
+        &["new"][..],
+        &["new", "x", "--from"],
+        &["new", "--from", "minimal", "x"],
+        &["new", "--list", "x"],
+        &["skill"],
+        &["skill", "remove"],
+        &["skill", "install", "--dir"],
+    ] {
+        let out = yobuild(args, dir.path());
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert!(
+            text(&out.stderr).contains("usage: yobuild run"),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    let out = yobuild(&["new", "x", "--from", "nope"], dir.path());
+    assert!(text(&out.stderr).starts_with("yobuild: no built-in agent `nope`"));
+    let out = yobuild(&["--version"], dir.path());
+    assert_eq!(
+        stdout(&out),
+        format!("yobuild {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}
+
 /// `YOBUILD_RUNTIMES`: unset or empty is the cache; `checkout` the
 /// repository's; anything else refused before anything runs.
 #[test]

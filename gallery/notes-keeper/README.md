@@ -8,7 +8,7 @@ before it changes or creates any file.
 It is also the pattern for plugging in any MCP server: see
 [Your own server](#your-own-server).
 
-Built with the [yobuild skill](../../skill/yobuild/SKILL.md) by a coding
+Built with the yobuild skill (`yobuild skill install`) by a coding
 agent, from this request: *"I keep my notes as markdown files in a folder.
 I want an agent that answers questions about them and can tidy them up —
 but through an MCP server, the official filesystem one, since that's how
@@ -36,8 +36,8 @@ creates any file."*
 
 - `DEEPSEEK_API_KEY` in the environment (the model is
   `deepseek/deepseek-flash`).
-- A working `yobuild`, from a set-up checkout (Node 22.19+ and npm; see
-  the skill).
+- `yobuild` installed (see yobuild's README), with Node 22.19+ and npm
+  11.19+ on PATH.
 - The network on the first run only: yobuild installs the server from npm
   into its cache (`~/.yobuild`).
 
@@ -45,9 +45,12 @@ It keeps nothing outside your notes folder.
 
 ## Run it
 
+Get a copy of its folder with `yobuild new my-notes-keeper --from notes-keeper` (the
+paths below then name that folder).
+
 ```sh
 cd ~/notes
-DEEPSEEK_API_KEY=… path/to/yobuild run path/to/gallery/notes-keeper/agent.toml
+DEEPSEEK_API_KEY=… yobuild run path/to/gallery/notes-keeper/agent.toml
 ```
 
 Open the URL it prints and type a question or a tidy-up request. Each

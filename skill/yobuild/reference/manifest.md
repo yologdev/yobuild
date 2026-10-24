@@ -7,7 +7,8 @@ folder. The agent itself works in the folder `yobuild run` is started in.
 ## Every key, at once
 
 A reference, not a template: it shows every kind of entry; an agent uses
-a few. Start from the patterns below, or from yobuild's `examples/`.
+a few. Start from the patterns below, or from an agent built into
+yobuild (`yobuild new --list`; `yobuild new <folder> --from <agent>`).
 
 ```toml
 [agent]
@@ -286,11 +287,11 @@ listens.
   choose names that appear only as headings (`Sources cited`, not
   `Brief`).
 
-`examples/prompts/handoff.md` in yobuild is a whole one.
+`yobuild new x --from handoff` writes a whole one (`x/prompts/handoff.md`).
 
 ## Patterns
 
-- **An agent that reports back** (`examples/handoff.toml`): `ask_owner`,
+- **An agent that reports back** (`--from handoff`): `ask_owner`,
   `report = "handoff"`, `facts`, a scratch, a budget, the web page.
 - **Ask, and go on** (a question that must be answered): `ask_owner`; the
   prompt says to carry on with what does not depend on it, or end with
@@ -304,9 +305,9 @@ listens.
   the others "none yet". A `report` without such a section fails that run
   (sent back 3 times, then `[Extension failed: report]`). Asking and
   answering are two runs: script them as two reply files (scripted.md).
-- **A coding agent with a policy** (`examples/coding.toml`): a pi
+- **A coding agent with a policy** (`--from coding`): a pi
   extension with `policy = true`, `gate = "off"`, the terminal.
-- **A reader** (`examples/minimal.toml`): `tools = "read-only"`, no
+- **A reader** (`--from minimal`): `tools = "read-only"`, no
   plugins. It has no tool that writes: its work is its last answer.
   `scratch` adds nothing then (the read-only tools reach only the agent's
   folder).
