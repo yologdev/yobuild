@@ -394,8 +394,7 @@ fn the_pitch_names_agents_that_are_built_in_at_their_real_costs() {
             dollars < 0.02,
             "{agent}'s live run cost {cost}: not under two cents"
         );
-        let manifest =
-            Manifest::load(&root.join("gallery").join(agent).join("agent.toml")).unwrap();
+        let manifest = Manifest::load(root.join("gallery").join(agent).join("agent.toml")).unwrap();
         let model = &manifest.agent.model;
         assert_eq!(
             (model.provider(), model.id()),
