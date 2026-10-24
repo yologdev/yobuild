@@ -2,8 +2,9 @@
 
 How to make, run and trust an agent with yobuild. The README's
 [Start](../README.md#start) gets one running in a minute; this guide is
-the rest. Every manifest key, as yobuild reads it, is in the skill's
-[manifest reference](../skill/yobuild/reference/manifest.md): this guide
+the rest. What you can build with yobuild, and why, is in
+[What you can build](use-cases.md). Every manifest key, as yobuild
+reads it, is in the skill's [manifest reference](../skill/yobuild/reference/manifest.md): this guide
 links there rather than repeating it.
 
 - [What an agent is](#what-an-agent-is)

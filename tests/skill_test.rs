@@ -272,14 +272,12 @@ fn anchor(heading: &str) -> String {
         .collect()
 }
 
-/// `docs/guide.md`, the person's manual: every link leads to a file (and
-/// a heading there), its manifest is one yobuild reads, and the versions
-/// it names are the code's.
-#[test]
-fn the_guide_links_lead_somewhere_and_its_facts_are_the_codes() {
+/// Every relative link in `doc` (a path from the repository's root) leads
+/// to a file, and each `#fragment` to a heading there.
+fn links_lead_somewhere(doc: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let guide = root.join("docs/guide.md");
-    let text = std::fs::read_to_string(&guide).unwrap();
+    let doc = root.join(doc);
+    let text = std::fs::read_to_string(&doc).unwrap();
     let headings = |path: &Path| -> Vec<String> {
         std::fs::read_to_string(path)
             .unwrap()
@@ -292,6 +290,7 @@ fn the_guide_links_lead_somewhere_and_its_facts_are_the_codes() {
             .map(anchor)
             .collect()
     };
+    let name = doc.display();
     for (at, _) in text.match_indices("](") {
         let target = &text[at + 2..];
         let target = &target[..target.find(')').unwrap()];
@@ -300,21 +299,28 @@ fn the_guide_links_lead_somewhere_and_its_facts_are_the_codes() {
         }
         let (file, fragment) = target.split_once('#').unwrap_or((target, ""));
         let path = if file.is_empty() {
-            guide.clone()
+            doc.clone()
         } else {
-            root.join("docs").join(file)
+            doc.parent().unwrap().join(file)
         };
-        assert!(
-            path.exists(),
-            "the guide links {target}, which is not there"
-        );
+        assert!(path.exists(), "{name} links {target}, which is not there");
         if !fragment.is_empty() {
             assert!(
                 headings(&path).iter().any(|h| h == fragment),
-                "the guide links {target}: no such heading"
+                "{name} links {target}: no such heading"
             );
         }
     }
+}
+
+/// `docs/guide.md`, the person's manual: every link leads to a file (and
+/// a heading there), its manifest is one yobuild reads, and the versions
+/// it names are the code's.
+#[test]
+fn the_guide_links_lead_somewhere_and_its_facts_are_the_codes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    links_lead_somewhere("docs/guide.md");
+    let text = std::fs::read_to_string(root.join("docs/guide.md")).unwrap();
     let toml = &blocks(&text, "toml")[0];
     let dir = Path::new("/tmp/agent");
     yobuild::manifest::Manifest::parse(toml, &dir.join("agent.toml"), dir)
@@ -328,4 +334,51 @@ fn the_guide_links_lead_somewhere_and_its_facts_are_the_codes() {
     );
     let rust = read("Cargo.toml");
     assert!(rust.contains("rust-version = \"1.88\"") && text.contains("1.88+"));
+}
+
+/// `docs/use-cases.md` and the README, the pitch: their links lead
+/// somewhere, every agent they name is built in, and each cost they quote
+/// is that agent's live run, as its README gives it.
+#[test]
+fn the_pitch_names_agents_that_are_built_in_at_their_real_costs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    links_lead_somewhere("docs/use-cases.md");
+    links_lead_somewhere("README.md");
+    let built_in: Vec<&str> = yobuild::agents::BUILTIN.iter().map(|a| a.name).collect();
+    let costs = [
+        ("web-research", "$0.0027"),
+        ("notes-keeper", "$0.0016"),
+        ("code-reviewer", "$0.0049"),
+        ("spreadsheet-clerk", "$0.0109"),
+        ("code-health", "$0.0034"),
+    ];
+    for doc in ["docs/use-cases.md", "README.md"] {
+        let text = std::fs::read_to_string(root.join(doc)).unwrap();
+        for (agent, cost) in costs {
+            let readme =
+                std::fs::read_to_string(root.join("gallery").join(agent).join("README.md"))
+                    .unwrap();
+            assert!(readme.contains(cost), "{agent}'s README has no {cost}");
+            let line = text
+                .lines()
+                .find(|l| l.contains(&format!("`{agent}`")))
+                .unwrap_or_else(|| panic!("{doc} does not name {agent}"));
+            // The cost is on the agent's line, or the line after it.
+            let next = text.lines().skip_while(|l| *l != line).nth(1).unwrap_or("");
+            assert!(
+                line.contains(cost) || next.contains(cost),
+                "{doc}: {agent} is not quoted at {cost}"
+            );
+        }
+        for (at, _) in text.match_indices("--from ") {
+            let name: String = text[at + 7..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '-')
+                .collect();
+            assert!(
+                name.is_empty() || built_in.contains(&name.as_str()),
+                "{doc}: `--from {name}` is not built in"
+            );
+        }
+    }
 }

@@ -243,7 +243,7 @@ starts (2026-10-23; a tool's own, `run`).
 **Done when** visualize's chart shows on the page from a sandboxed origin,
 and a plugin's model call is charged to the run's budget.
 
-## M4 — Share (design §13; built 2026-10-24: `yobuild:` built-ins, the runtime sets, `yobuild new`, `yobuild skill install`, the release groundwork, `docs/guide.md`)
+## M4 — Share (design §13; built 2026-10-24: `yobuild:` built-ins, the runtime sets, `yobuild new`, `yobuild skill install`, the release groundwork, `docs/guide.md`, `docs/use-cases.md`)
 
 - `yobuild new <folder> [--from <agent>]` (a manifest, prompt and demo to
   edit, or a gallery agent or example; built), `yobuild skill install
@@ -253,7 +253,7 @@ and a plugin's model call is charged to the run's budget.
 - Running without the repository (design §13): the adapters and the
   terminal UI as runtime sets in the cache, built into the binary;
   built-in plugins named `yobuild:<name>`; Node and npm checked first.
-- README and `docs/guide.md`.
+- README (its pitch), `docs/guide.md` and `docs/use-cases.md` (what you can build, why, compared with other ways).
 - Release 0.1 (no git dependencies in a release: yoagent-rutis and its
   `probe` come from crates.io already).
 

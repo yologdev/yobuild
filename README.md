@@ -1,10 +1,13 @@
 # yobuild
 
-**Build an agent by choosing its parts.** yobuild assembles working agents
-from plugins other ecosystems already publish — pi extensions, DeepSeek
-Harness plugins, MCP servers, rutis plugins in Rust, TypeScript, Python or
-Go — plus a few small built-ins of its own, on top of the
-[yoagent](https://github.com/yologdev/yoagent) loop.
+**Build an AI agent of your own by choosing its parts, or have Claude Code
+build it for you.** An agent does a task for you with tools: it searches,
+reads, writes, and asks you what is yours to decide. yobuild makes one
+from parts other people already publish: pi packages, DeepSeek Harness
+(DSH) plugins, MCP servers and rutis plugins, unchanged. It adds a few
+small built-ins of its own, on top of the
+[yoagent](https://github.com/yologdev/yoagent) loop. No code to write:
+an agent is a short settings file and a prompt.
 
 > Status: **M4 (share) under way**: yobuild runs without its repository;
 > a release (0.1, crates.io and binaries) comes next. Built: the manifest,
@@ -13,6 +16,48 @@ Go — plus a few small built-ins of its own, on top of the
 > (grants, the kept environment), a gallery of agents built through the
 > skill, and `yobuild new` / `yobuild skill install`. Numbers quoted are
 > measured in the yoagent repository.
+
+## What you can build
+
+Each of these is built in (`yobuild new my-agent --from <name>`), and
+each was run live for a real task (costs with DeepSeek's `deepseek-flash`):
+
+- **`web-research`**: ask a question; it searches, reads the pages and
+  answers with its sources ($0.0027 a run).
+- **`notes-keeper`**: answers from your folder of notes, and asks before
+  it changes one ($0.0016).
+- **`code-reviewer`**: lints and reads a project and says what to fix
+  first, changing nothing ($0.0049).
+- **`spreadsheet-clerk`**: turns a month's CSV into an `.xlsx` with
+  totals ($0.0109).
+- **`code-health`**: the type errors a real TypeScript server finds, and
+  an outline of the project ($0.0034).
+- **`handoff`**: hand it any task and walk away; it asks only what is
+  yours to decide, without waiting, and ends with a report.
+
+More of them, how you get one, and how yobuild compares with other ways
+of building an agent: [What you can build](docs/use-cases.md).
+
+## Why yobuild
+
+- **Parts that exist, used as they are**: thousands of pi packages, DSH
+  plugins and MCP servers on npm, pinned in a lock.
+- **Checked before you trust it**: `yobuild check` loads every part
+  without a model, a key or any cost, and says what would fail and how
+  to fix it.
+- **It asks before it harms**: deleting or replacing your files, or
+  running anything not known to be harmless, asks you first. With nobody
+  there, it is refused.
+- **It doesn't wait on you**: its questions don't stop the work, and you
+  can answer later from your phone.
+- **What it says is checked**: a required report, plus facts the model
+  cannot make up (files changed, commits, tokens, tool calls, time).
+- **Capped and private**: spending limits per run and per session.
+  Plugins start without your keys unless you pass one on. It runs on your computer with the
+  model provider you choose, with no account and no hosted service.
+
+Not a sandbox: plugins run with your rights. See
+[when yobuild is not the right tool](docs/use-cases.md#when-yobuild-is-not-the-right-tool).
 
 ## Start
 
@@ -155,6 +200,8 @@ yobuild skill install                                             # the skill, u
 
 ## Documents
 
+- [What you can build](docs/use-cases.md) — the agents, why yobuild,
+  how it compares, and when it is not the right tool.
 - [Guide](docs/guide.md) — making, checking, running and trusting an agent:
   the manual.
 - [Changelog](CHANGELOG.md) — what each release brings.
