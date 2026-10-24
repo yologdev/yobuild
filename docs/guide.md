@@ -45,6 +45,7 @@ cargo install --git https://github.com/yologdev/yobuild   # until 0.1 is on crat
 yobuild --version
 ```
 
+- **Rust** (a recent stable toolchain, 1.88+) to build it.
 - **Platforms:** macOS and Linux. On Windows, `yobuild new` and
   `yobuild skill install` work, and `run` and `check` refuse.
 - **Node 22.19+ and npm 11.19+** for any agent with plugins (or a pinned
@@ -56,7 +57,7 @@ yobuild --version
   and scripted runs need none.
 
 yobuild installs its own runtime files (the pi and DSH adapters, the
-terminal UI) into `~/.yobuild/runtime/` the first time an agent needs them.
+terminal UI, its own plugins) into `~/.yobuild/runtime/` the first time an agent needs them.
 That takes a minute once, and it says so.
 
 ## Making an agent
@@ -99,7 +100,9 @@ yours, and an upgrade never touches it.
 
 **Have a coding agent build it.** `yobuild skill install` puts the yobuild
 skill where Claude Code reads it (`~/.claude/skills/yobuild/`; `--project`
-for one project, `--dir <folder>` for another coding agent). Then ask
+for one project; for another coding agent, `--dir` and the skill's own
+folder, such as `--dir ~/.codex/skills/yobuild`, not the skills folder
+holding it). Then ask
 Claude Code for an agent: "make me an agent that keeps my reading list".
 The skill teaches it to ask you what matters, pick parts, write the
 manifest, check it, run it scripted, and ask you before a live run.
@@ -134,10 +137,13 @@ web = true
   part, `[builtins]`, `[frontend]` (and `[dsh]`). Every key is in the
   [manifest reference](../skill/yobuild/reference/manifest.md), with
   patterns and how to write the prompt.
-- **Read strictly:** an unknown key, a range instead of a version, or a
-  secret written into the file is refused, with its line and column.
+- **Read strictly:** an unknown key or a range instead of a version is
+  refused, with its line and column.
 - **Secrets** are never written: `${NAME}` takes them from the
-  environment when the agent starts.
+  environment when the agent starts. A value whose name looks like a
+  secret (a key, token, password, auth, …) holding anything but `${NAME}`
+  references is refused, and so is a URL with its password written in. A
+  secret under another name is not caught: keep it in a variable.
 - **What the parts give:** [parts](../skill/yobuild/reference/parts.md)
   lists the built-ins, the pi and DSH plugins known to load, and MCP
   servers, with the versions to pin.
@@ -146,15 +152,16 @@ web = true
 
 - **pi extensions** (`pi = "pkg@1.2.3"`, or a path) and **DSH plugins**
   (`dsh = "pkg@1.2.3"`, or a path) run unchanged, in Node, through
-  yoagent-rutis's adapters. Their skills are not loaded: what they teach
-  goes into the prompt.
+  yoagent-rutis's adapters. Their skills are not loaded: put what they
+  teach into your prompt.
 - **rutis plugins** (`rutis = "./plugin.ts"`, `runtime = "node"`) are
   plugins of your own, in TypeScript. One lives in its own npm package:
   - the nearest folder above it with a `package.json`, which must be
-    `"type": "module"`;
+    `"type": "module"` for a `.ts` plugin;
   - with `@arcships/rutis-runtime` installed there at the version
-    yobuild's runtimes use, 0.12.0 (`npm install @arcships/rutis-runtime@0.12.0`;
-    `check` names it when it is missing).
+    yobuild's runtimes use, 0.12.0 (`npm install @arcships/rutis-runtime@0.12.0`).
+    Without it, `run` and `check` refuse before anything starts, naming
+    the command.
 - **yobuild's own plugins** are named, not given a path:
   - `rutis = "yobuild:todo-plan"` draws a plan on the page;
   - `rutis = "yobuild:search-links"` turns search results into links;
@@ -168,22 +175,25 @@ web = true
 - **The lock:** what it resolved is written beside the manifest
   (`agent.toml` → `agent.lock`). Commit it.
 - **`--locked`** (for CI, or an agent someone checked) refuses a lock that
-  is missing, stale or disagrees with itself, rather than resolving it
-  again.
+  is missing, stale, disagrees with itself or holds a set nothing pins any
+  more, rather than resolving it again.
 - **Without `--locked`**, a changed pin is resolved again, and yobuild
   says what changed.
 
 ## Checking an agent
 
 ```sh
-yobuild check agent.toml          # a report; exit 1 when anything has a problem
+yobuild check agent.toml          # a report; exit 1 on a problem, or when the agent did not start
 yobuild check agent.toml --json   # the same, for a program
 ```
 
 `check` needs no model and no key. It starts each plugin and server
-alone, then the agent together, and for each entry says:
+alone (a few DSH plugins that the DSH runtime loads anyway are checked
+only together), then, when no entry has a problem, the agent together.
+For each entry it says:
 - what it offers;
-- how the gate treats each of its tools (free, judged, allowed, asks);
+- how the gate treats each of its tools (free, judged, allowed, asks, or
+  runs, with `gate = "off"`);
 - what yobuild gives it, and what it does not get;
 - what `run` would refuse, with a fix for each problem.
 
@@ -201,14 +211,16 @@ From the folder the agent should work in:
 ```sh
 DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml           # the frontend the manifest names
 DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml "a task"  # start with a task
-yobuild run path/to/agent.toml --web 0.0.0.0:8787            # where the page listens
+DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml --web 0.0.0.0:8787   # where the page listens
 DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml --once "a task"   # one task, no frontend
 ```
 
 - **The web page** prints its URL. Open it to talk to the agent, answer
   its questions, and see each tool call. A task given on the command line
-  waits until the page is open. With `phone = true` it listens on every
-  interface and prints a link for a phone on the same Wi-Fi.
+  waits until the page is open. `--web` sets where it listens (not with
+  `--once`, nor for a terminal agent). With `phone = true` (beside
+  `web = true`) it listens on every interface and prints a link for a
+  phone on the same Wi-Fi, or says it found none.
 - **The terminal UI** (`terminal = true`) draws in the terminal. Ctrl+C
   quits.
 - **`--once`** runs one task with nobody there:
@@ -218,9 +230,11 @@ DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml --once "a task"   # one task
     refused;
   - the exit code is 0 only if the run completed.
 - **`--measure`** says each plugin's time and each runtime's memory after
-  each run.
-- **Each run ends with a cost line** (`Cost: $0.0034 (…)`) and, with
-  `facts`, what changed in the folder's git repository.
+  each run, when the agent has plugins.
+- **Each run's cost** is shown as it ends: on the page's last line for
+  the run (` · $0.0034`), and under `--once` as a line on stderr
+  (`Cost: $0.0034 (…)`). With `facts`, a notice says what changed in the
+  folder's git repository.
 
 ## Scripted runs
 
@@ -243,35 +257,45 @@ run checks what a tool found, not only that it ran. The format, what
 Not a sandbox: a plugin has Node's whole power, and the agent's tools
 reach your files. What yobuild does:
 
-- **The gate**, an allow-list. Reading is free, as are builds and tests
-  in the project and writing new files or the agent's own. Anything else
-  asks you, and is refused with nobody there. That covers deleting or
-  overwriting what you have, an unknown program or option, and a plugin's
-  tool not allowed by name. `allow = [...]` on an entry frees its
-  harmless tools.
+- **The gate**, an allow-list. Free:
+  - reading;
+  - builds and tests in the project;
+  - writing new files, or the agent's own;
+  - editing files in the project (it guards your files against being
+    deleted or replaced, not against edits; `.env*` and `.git` ask).
+
+  Anything else asks you, and is refused with nobody there. That covers
+  deleting or replacing what you have, files outside the project, an
+  unknown program or option, and a plugin's tool not allowed by name.
+  `allow = [...]` on an entry frees its harmless tools.
 - **Grants**, per plugin, off unless given:
   - `workspace`: the agent's folder;
   - `trust`: the project is trusted;
   - `model = "info"`: which model runs;
   - `wake`: it may message the agent;
-  - `exec`: a pi extension running commands, judged by the gate with
-    `"gate"`;
+  - `exec = "gate"` (each command judged by the gate) or `"free"`: a pi
+    extension running commands;
   - `env`: named variables.
 
-  What a plugin was answered for want of a grant is said, by `check` and
-  by `run`.
+  Each ecosystem takes some of them, and every DSH plugin must have the
+  same: the [manifest reference](../skill/yobuild/reference/manifest.md)
+  says which. What a plugin was answered for want of a grant is said, by
+  `check` and by `run`.
 - **The kept environment.** Plugins and servers start without your
   credentials and other exported variables: the model's key stays with
-  yobuild, so a plugin cannot spend outside the run's budget. What one
-  truly needs is handed over on purpose, and `check` notes it. Your files
-  (a `~/.aws/credentials`, a `.env`) are still readable.
+  yobuild, so a plugin cannot spend it outside the run's budget. What one
+  truly needs is handed over on purpose, and `check` notes it. The agent's
+  own `bash` (with `tools = "coding"`) keeps your whole environment, the
+  model's key included. Your files (a `~/.aws/credentials`, a `.env`) are
+  still readable.
 - **Budgets and limits**, per run and per session; a run that would spend
   more stops, and says which limit.
 - **Questions that do not block:** the agent asks with `ask_owner` and
   carries on. Your answer reaches it mid-run, or starts the next run.
 
-The design's [§9 and §12](design.md) explain each, and what each does not
-cover.
+The design's [§6](design.md#6-safety-model) and
+[§12](design.md#12-the-host-layer-what-a-plugins-own-app-gives-it-proposed-2026-10-19)
+explain each, and what each does not cover.
 
 ## When something fails
 
@@ -304,8 +328,8 @@ it):
 - `plugins/<set>/<hash>/`: agents' pinned packages, shared by agents whose
   pins resolve alike.
 
-Old folders are not removed. Delete `~/.yobuild`, or any folder in it, at
-any time: what is needed is installed again.
+Old folders are not removed. Delete `~/.yobuild`, or any folder in it,
+whenever no yobuild is running: what is needed is installed again.
 
 ## Upgrading
 
