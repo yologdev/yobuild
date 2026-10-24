@@ -13,9 +13,12 @@
 //! - [`install`]: a manifest's pinned packages, locked and installed.
 //! - [`run`]: an agent from its manifest (the `yobuild run` command).
 //! - [`runtime`]: yobuild's own runtime files, installed into the cache.
+//! - [`agents`]: `yobuild new` — a starter, or a built-in agent copied.
+//! - [`skill`]: `yobuild skill install` — the skill where a coding agent reads it.
 //!
 //! Not published yet and without an API promise.
 
+pub mod agents;
 pub mod builtins;
 pub(crate) mod environment;
 pub mod frontend;
@@ -24,3 +27,4 @@ pub mod install;
 pub mod manifest;
 pub mod run;
 pub mod runtime;
+pub mod skill;

@@ -243,12 +243,13 @@ starts (2026-10-23; a tool's own, `run`).
 **Done when** visualize's chart shows on the page from a sandboxed origin,
 and a plugin's model call is charged to the run's budget.
 
-## M4 — Share (design §13; yobuild: built-ins and the runtime sets built 2026-10-24)
+## M4 — Share (design §13; built 2026-10-24: `yobuild:` built-ins, the runtime sets, `yobuild new`, `yobuild skill install`)
 
-- `yobuild new <name> [--from <agent>]` (a manifest, prompt and demo to
-  edit, or a gallery agent or example), `cargo install yobuild` (and a
-  prebuilt binary), `yobuild skill install` (the skill into
-  `~/.claude/skills/`, free of repository paths).
+- `yobuild new <folder> [--from <agent>]` (a manifest, prompt and demo to
+  edit, or a gallery agent or example; built), `yobuild skill install
+  [--project | --dir]` (the skill, free of repository paths, where a
+  coding agent reads it; built), `cargo install yobuild` once 0.1 is on
+  crates.io (until then `cargo install --git`) and a prebuilt binary.
 - Running without the repository (design §13): the adapters and the
   terminal UI as runtime sets in the cache, built into the binary;
   built-in plugins named `yobuild:<name>`; Node and npm checked first.

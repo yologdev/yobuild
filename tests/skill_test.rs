@@ -224,3 +224,35 @@ fn parts_md_ci_pins_are_the_examples_and_gallerys_pins() {
         );
     }
 }
+
+/// The skill is installed without the repository (`yobuild skill
+/// install`, design §13): it names none of the repository's folders, and
+/// each agent it points `yobuild new --from` at is built into yobuild.
+#[test]
+fn the_skill_needs_no_repository() {
+    for file in [
+        "SKILL.md", "reference/manifest.md", "reference/parts.md", "reference/scripted.md",
+        "reference/failures.md",
+    ] {
+        let text = std::fs::read_to_string(Path::new(SKILL).join(file)).unwrap();
+        for path in [
+            "examples/", "adapters/", "frontend/", "gallery/", "scripts/try-", "target/debug",
+            "checkout", "path/to/yobuild",
+        ] {
+            assert!(!text.contains(path), "{file} names {path:?}");
+        }
+        for (at, _) in text.match_indices("--from ") {
+            let name: String = text[at + "--from ".len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if name.is_empty() || name == "agent" {
+                continue;
+            }
+            assert!(
+                yobuild::agents::BUILTIN.iter().any(|a| a.name == name),
+                "{file}: --from {name}"
+            );
+        }
+    }
+}

@@ -1242,16 +1242,13 @@ skill layout:
 
 `SKILL.md` links each reference by its path, relative and one level
 deep, so a coding agent reads one only when it needs it. It lives in this
-repository and is installed by copying the folder (decided 2026-10-19) into `~/.claude/skills/` or a project's
-`.claude/skills/` (the README says how); `yobuild skill install` comes
-with M4's install (roadmap M4).
+repository, built into the binary, and installed by `yobuild skill
+install` (§13; until then, by copying the folder, decided 2026-10-19).
 
-**A working `yobuild`.** Until M4, `yobuild` runs from a checkout of this
-repository, set up once (`scripts/try-coding-agent.sh --setup-only`: the
-adapters, the frontend's plugins), and is called by path
-(`path/to/yobuild/target/debug/yobuild`, or `cargo run --manifest-path
-path/to/yobuild/Cargo.toml -- …`) from the agent's own folder. `SKILL.md`
-says so first.
+**A working `yobuild`.** Installed, on PATH (§13: until 0.1, `cargo
+install --git`), with Node and npm for plugins; `SKILL.md` says so first,
+and points at `yobuild new --list` / `--from` to start from a built-in
+agent. (Until M4 it ran from a set-up checkout, called by path.)
 
 **The method `SKILL.md` teaches:**
 
@@ -3509,17 +3506,25 @@ switch to these names, so they run from any folder.
     `yobuild new --list` names them, one line each.
   - It ends by printing the next commands: `check`, the demo scripted,
     a live run.
-- **`yobuild skill install [--project] [--force]`.** It writes the skill,
-  built into the binary, to `~/.claude/skills/yobuild/` (or
-  `./.claude/skills/yobuild/` with `--project`), with a stamp
+- **`yobuild skill install [--project | --dir <folder>] [--force]`.** It
+  writes the skill, built into the binary, to `~/.claude/skills/yobuild/`
+  (Claude Code's, for every project), `./.claude/skills/yobuild/` with
+  `--project`, or any folder with `--dir` (the skill is plain Markdown:
+  another coding agent can be pointed at it; decided 2026-10-24), with a
+  stamp
   (`.yobuild-skill`: the yobuild version and a hash of the files written).
   - **When the folder is there:**
     - stamped, and its files still as written: replaced (an upgrade), and
       said;
-    - files changed since (edited by hand), or no stamp: refused without
-      `--force`, naming the changed files.
-  - **With `--force`** the folder is written fresh: files the skill no
-    longer ships are removed.
+    - files changed since (edited by hand): refused without `--force`,
+      naming them; no stamp but a `SKILL.md` (a copy made by hand):
+      refused without `--force`;
+    - a folder holding no skill (no stamp, no `SKILL.md`: a project, a
+      home, a mistyped `--dir`): refused, `--force` or not.
+  - **With `--force`** the skill's files are written over; files an
+    earlier yobuild wrote and this one does not ship are removed, and
+    nothing else (as built: never the whole folder, which `--dir` lets
+    name anything; files of one's own beside it stay).
   - **The skill names no repository path.**
     - `SKILL.md`'s "runs from a checkout" becomes "installed: `cargo
       install yobuild` or a release binary".
@@ -3633,8 +3638,12 @@ No key is needed.
 
 **Built so far:** PR 2 (yoagent-rutis 0.8.2, `embedded-adapters`, the
 yoagent session's); PR 4, `yobuild:` built-ins (#66); PR 3, the runtime
-sets (`src/runtime.rs`, `Layout::installed`, the version constant, the
-Node and npm check). PR 3's findings:
+sets (#67: `src/runtime.rs`, `Layout::installed`, the version constant,
+the Node and npm check); PR 5, `yobuild new` (`src/agents.rs`: the
+starter and the eight built-in agents, the examples gaining a `.task`
+each) and `yobuild skill install` (`src/skill.rs`, with `--dir` for a
+coding agent other than Claude Code, decided 2026-10-24), the skill free
+of repository paths (`skill_test`), the README's Start. PR 3's findings:
 - a DSH plugin file resolves its imports from where it is, so the tests'
   DSH fixture in the checkout's `adapters/dsh`, which imports Cordis,
   cannot run beside the cache's runtime; the binary takes

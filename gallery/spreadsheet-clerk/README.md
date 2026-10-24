@@ -5,7 +5,7 @@ category, amount) and it builds a spreadsheet with a total per category,
 saved as an `.xlsx` next to the CSV. It never overwrites or deletes your
 files without asking: if the `.xlsx` is already there, it asks you first.
 
-Built with the [yobuild skill](../../skill/yobuild/SKILL.md) by a coding
+Built with the yobuild skill (`yobuild skill install`) by a coding
 agent, from this request: *"I export my monthly expenses from my bank as a
 CSV (date, description, category, amount). I want an agent that takes such
 a CSV from my folder, builds a spreadsheet with a total per category, and
@@ -41,8 +41,8 @@ the spreadsheet work."*
 
 - `DEEPSEEK_API_KEY` in the environment (the model is
   `deepseek/deepseek-flash`).
-- A working `yobuild`, from a set-up checkout (Node 22.19+ and npm; see
-  the skill).
+- `yobuild` installed (see yobuild's README), with Node 22.19+ and npm
+  11.19+ on PATH.
 - The network once: the first run installs `dsh-univer-office` and its
   packages (230 in all) from npm into yobuild's cache (`~/.yobuild`).
 - About 1 GB of memory for the DSH runtime while it runs.
@@ -59,9 +59,12 @@ the spreadsheet work."*
 
 ## Run it
 
+Get a copy of its folder with `yobuild new my-spreadsheet-clerk --from spreadsheet-clerk` (the
+paths below then name that folder).
+
 ```sh
 cd ~/expenses          # the folder holding the CSV
-DEEPSEEK_API_KEY=… path/to/yobuild run path/to/gallery/spreadsheet-clerk/agent.toml \
+DEEPSEEK_API_KEY=… yobuild run path/to/gallery/spreadsheet-clerk/agent.toml \
   "Build the spreadsheet for expenses-2026-09.csv"
 ```
 

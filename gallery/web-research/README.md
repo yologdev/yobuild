@@ -4,7 +4,7 @@ Ask it a question and it researches it on the web, then gives you a short
 answer and the sources it used. If your question is too broad, it asks you
 to narrow it down instead of guessing.
 
-Built with the [yobuild skill](../../skill/yobuild/SKILL.md) by a coding
+Built with the yobuild skill (`yobuild skill install`) by a coding
 agent, from this request: *"I want an agent that researches a question on
 the web for me and gives me a short answer with the sources it used. If my
 question is too broad, it should ask me to narrow it down rather than
@@ -32,8 +32,8 @@ guess."*
 
 - `DEEPSEEK_API_KEY` in the environment (the model is
   `deepseek/deepseek-flash`).
-- A working `yobuild`, from a set-up checkout (Node 22.19+ and npm; see
-  the skill).
+- `yobuild` installed (see yobuild's README), with Node 22.19+ and npm
+  11.19+ on PATH.
 - The network: the searches go to Bing and the pages it finds. The first
   run also installs `dsh-free-search` from npm into yobuild's cache
   (`~/.yobuild`).
@@ -47,9 +47,12 @@ to clear it.
 
 ## Run it
 
+Get a copy of its folder with `yobuild new my-web-research --from web-research` (the
+paths below then name that folder).
+
 ```sh
 mkdir -p ~/research && cd ~/research
-DEEPSEEK_API_KEY=… path/to/yobuild run path/to/gallery/web-research/agent.toml "your question"
+DEEPSEEK_API_KEY=… yobuild run path/to/gallery/web-research/agent.toml "your question"
 ```
 
 Open the URL it prints; the run starts when the page is open. Its

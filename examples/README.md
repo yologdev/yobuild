@@ -1,12 +1,23 @@
 # The example agents
 
-Three agents, each a manifest (`yobuild run <manifest>`) and a prompt file (`prompts/`); `scripts/` holds the scripted model's replies for each (`--scripted`, no key):
+Three agents, each a manifest (`yobuild run <manifest>`) and a prompt file (`prompts/`); `scripts/` holds the scripted model's replies for each (`--scripted`, no key) and the task each demo runs (`.task`). They are built into `yobuild` too: `yobuild new my-handoff --from handoff` (or `coding`, `minimal`) copies one as `agent.toml`, its lock (`minimal` has none: it pins nothing), its prompt and `scripts/demo.json` with `demo.task`, with no repository needed:
 
 | Manifest | What it is |
 |---|---|
 | [`handoff.toml`](handoff.toml) | a personal handoff agent: hand it a task — research, writing, planning or code — and walk away (below) |
 | [`coding.toml`](coding.toml) | a coding agent in the terminal: a pi extension as the approval policy, DSH's web search and ask-user tool |
 | [`minimal.toml`](minimal.toml) | the smallest: reading tools only, confined to its folder, in the browser; no plugins, no Node |
+
+With yobuild installed (no repository):
+
+```bash
+yobuild new ~/agents/handoff --from handoff
+mkdir research && cd research && git init
+DEEPSEEK_API_KEY=… yobuild run ~/agents/handoff/agent.toml                  # then open the printed URL
+yobuild run ~/agents/handoff/agent.toml --scripted ~/agents/handoff/scripts/demo.json   # the scripted model; you answer its question in the page
+```
+
+From a checkout of yobuild (developing it):
 
 ```bash
 path/to/yobuild/scripts/try-coding-agent.sh --setup-only    # once: the adapters (yobuild run installs the pinned packages, from handoff.lock / coding.lock)
