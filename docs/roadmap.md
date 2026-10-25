@@ -293,9 +293,10 @@ Later: a docs site, the video re-cut for yobuild, posts.
 
 - `find_plugin` / `load_plugin` tools, behind the owner's approval and the
   fail-closed rules; refused plugins never load (design §14). Found by
-  searching the MCP registry and npm, with no catalogue built in; each
-  candidate checked alone before the owner is asked; loaded for the
-  session only. Step 1: MCP stdio servers.
+  searching the MCP registry and npm, with no catalogue built in; none of
+  a candidate's code runs before the owner allows it, and its tools are
+  checked and shown before the agent gets them; loaded for the session
+  only. Step 1: MCP stdio servers.
 - A demo: an agent missing a capability finds a plugin, asks, loads it, and
   finishes the task.
 
