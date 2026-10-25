@@ -194,6 +194,9 @@ phone = true
             terminal: false
         }
     );
+    // `[extend]` is refused with `gate = "off"`: its keys are read in
+    // `extend_is_off_unless_its_table_is_there_and_alone_takes_the_defaults`.
+    assert_eq!(m.extend, None);
 }
 
 #[test]

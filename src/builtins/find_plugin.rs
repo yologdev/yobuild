@@ -1,14 +1,17 @@
 //! `find_plugin` (`[extend]`, design §14): the agent searches for a plugin
-//! it lacks. Step 1: MCP stdio servers, from the MCP registry and npm's
-//! search. It starts, loads and installs nothing; what it returns is the
-//! packages' own words, cleaned and cut. The session keeps each candidate
-//! it returned: `load_plugin` takes only those.
+//! it lacks. Only the first kind so far, MCP stdio servers, from the MCP
+//! registry and npm's search. It starts, loads and installs nothing; what
+//! it returns is the packages' own words, each made one line and cut. The
+//! session keeps each candidate it returned, for `load_plugin` (design
+//! §14; not built yet) to take only those.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::env::VarError;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 use serde_json::{json, Value as Json};
 use yoagent::{AgentTool, Content, ToolContext, ToolError, ToolResult};
 
@@ -21,16 +24,22 @@ const SOURCE_TIME: Duration = Duration::from_secs(15);
 /// npm's downloads API, asked only for npmjs's own registry.
 const DOWNLOADS_TIME: Duration = Duration::from_secs(5);
 const MAX_CANDIDATES: usize = 10;
+/// Candidates npm is asked about at once (each up to two `npm view`s).
+const VIEWS_AT_ONCE: usize = 4;
+/// The servers one MCP registry search returns.
+const REGISTRY_PAGE: usize = 30;
 /// The MCP registry yobuild searches: its `v0` API.
 pub const MCP_REGISTRY: &str = "https://registry.modelcontextprotocol.io";
 /// Another MCP registry, for the tests: https, or http on this machine.
 pub const MCP_REGISTRY_ENV: &str = "YOBUILD_MCP_REGISTRY";
-const NPMJS: &str = "https://registry.npmjs.org/";
+const NPMJS: &str = "https://registry.npmjs.org";
 const DOWNLOADS: &str = "https://api.npmjs.org/downloads/point/last-week/";
 const DESCRIPTION_CHARS: usize = 200;
 const FIELD_CHARS: usize = 120;
 /// Words that find every server, left out of the MCP registry's search.
 const PLAIN_WORDS: [&str; 8] = ["mcp", "server", "the", "and", "for", "with", "from", "tool"];
+/// What may follow a word for a registry find to name it (`linting`).
+const ENDINGS: [&str; 6] = ["", "s", "er", "ers", "ing", "ed"];
 const DAY: i64 = 24 * 60 * 60;
 
 /// Where `find_plugin` searches: the MCP registry (its URL), and npm's
@@ -43,18 +52,24 @@ pub struct Sources {
 
 impl Sources {
     /// The MCP registry from [`MCP_REGISTRY_ENV`] when set and not empty,
-    /// else [`MCP_REGISTRY`].
+    /// else [`MCP_REGISTRY`]; one that is not UTF-8 refused.
     pub fn from_env() -> Result<Sources, String> {
         match std::env::var(MCP_REGISTRY_ENV) {
             Ok(url) if !url.is_empty() => Self::at(&url),
-            _ => Self::at(MCP_REGISTRY),
+            Ok(_) | Err(VarError::NotPresent) => Self::at(MCP_REGISTRY),
+            Err(VarError::NotUnicode(_)) => Err(format!("{MCP_REGISTRY_ENV} is not UTF-8")),
         }
     }
 
-    /// The MCP registry at `url`: https, or http on this machine.
+    /// The MCP registry at `url`: https, or http on this machine. Its path
+    /// is kept: `v0/servers` goes below it.
     pub fn at(url: &str) -> Result<Sources, String> {
-        let registry =
+        let mut registry =
             crate::manifest::endpoint(url).map_err(|m| format!("{MCP_REGISTRY_ENV} {m}"))?;
+        if !registry.path().ends_with('/') {
+            let path = format!("{}/", registry.path());
+            registry.set_path(&path);
+        }
         Ok(Sources { registry })
     }
 }
@@ -77,12 +92,14 @@ pub struct Candidate {
     pub repository: Option<String>,
     /// When `version` was published (`YYYY-MM-DD`).
     pub published: Option<String>,
-    /// Last week's, from npm's downloads API; `None` when not known (a
-    /// registry other than npmjs's, or the API failing).
-    pub downloads: Option<u64>,
-    /// `version` has a provenance attestation published with it (npm
-    /// checks it at install with `npm audit signatures`; yobuild does not).
-    pub provenance: bool,
+    /// Last week's, from npm's downloads API; or why not known (npm's
+    /// registry here is not npmjs's, or the API failed).
+    pub downloads: Result<u64, String>,
+    /// Whether `version` has a provenance attestation published with it
+    /// (`dist.attestations`); `None` when npm gave no `dist`. Published,
+    /// not verified: neither yobuild nor `npm install` checks it (`npm
+    /// audit signatures` does, when someone runs it).
+    pub provenance: Option<bool>,
     /// What the MCP registry lists as required; `None` when not in it.
     pub required_env: Option<Vec<String>>,
     pub required_args: Option<Vec<String>>,
@@ -109,7 +126,8 @@ impl FindPlugin {
         }
     }
 
-    /// Every candidate returned this session, the latest of each package.
+    /// Every candidate returned this session: of each package the latest
+    /// with a version to take, else its latest.
     pub fn candidates(&self) -> Vec<Candidate> {
         self.found.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -135,8 +153,8 @@ impl FindPlugin {
         };
         let npm = match npm {
             Ok(found) => {
-                lines.push(format!("npm: {} found", found.len()));
-                found
+                lines.push(found.line());
+                found.hits
             }
             Err(e) => {
                 lines.push(format!("npm: failed ({e})"));
@@ -144,26 +162,45 @@ impl FindPlugin {
                 Vec::new()
             }
         };
-        let hits = merged(registry, npm);
-        let npmjs = npm_registry.is_ok_and(|r| r.trim() == NPMJS);
+        let (hits, total) = merged(registry, npm);
+        let downloads = match npm_registry {
+            Ok(r) if is_npmjs(&r) => Ok(()),
+            Ok(r) => Err(format!(
+                "not asked: npm's registry here is {}, not npmjs's",
+                clip(&r, FIELD_CHARS)
+            )),
+            Err(e) => Err(format!("not asked: npm's registry could not be read ({e})")),
+        };
         let now = now();
-        let candidates = join_all(
-            hits.into_iter()
-                .map(|hit| candidate(hit, &self.extend, now, npmjs)),
-        )
-        .await;
+        let viewed: Vec<(Candidate, Option<String>)> = stream::iter(hits)
+            .map(|hit| candidate(hit, &self.extend, now, &downloads))
+            .buffered(VIEWS_AT_ONCE)
+            .collect()
+            .await;
+        let unviewed = match viewed.iter().all(|(_, e)| e.is_some()) {
+            true => viewed.first().and_then(|(_, e)| e.clone()),
+            false => None,
+        };
         Found {
             lines,
             failed,
-            candidates,
+            candidates: viewed.into_iter().map(|(c, _)| c).collect(),
+            total,
+            unviewed,
         }
     }
 
+    /// Keeps `candidates`, each in place of its package's, but for one
+    /// with a version to take, which only another such replaces (npm
+    /// failing once does not lose it).
     fn remember(&self, candidates: &[Candidate]) {
         let mut found = self.found.lock().unwrap_or_else(|e| e.into_inner());
         for candidate in candidates {
-            found.retain(|c| c.package != candidate.package);
-            found.push(candidate.clone());
+            match found.iter_mut().find(|c| c.package == candidate.package) {
+                Some(old) if old.version.is_ok() && candidate.version.is_err() => {}
+                Some(old) => *old = candidate.clone(),
+                None => found.push(candidate.clone()),
+            }
         }
     }
 }
@@ -172,8 +209,19 @@ impl FindPlugin {
 /// candidates.
 struct Found {
     lines: Vec<String>,
+    /// Each source that failed, with why.
     failed: Vec<String>,
     candidates: Vec<Candidate>,
+    /// The packages the sources found, before the cut to
+    /// [`MAX_CANDIDATES`].
+    total: usize,
+    /// npm could be asked about none of the candidates: why (the first's).
+    unviewed: Option<String>,
+}
+
+/// Whether `registry` (npm's setting) is npmjs's own.
+fn is_npmjs(registry: &str) -> bool {
+    registry.trim().trim_end_matches('/') == NPMJS
 }
 
 /// A package a source named, before npm is asked about it.
@@ -187,15 +235,22 @@ struct Hit {
     required_args: Option<Vec<String>>,
 }
 
-/// The MCP registry's servers for a search: those with an npm package over
-/// stdio, and how many were left out.
+/// What the MCP registry's searches for a need found, each server counted
+/// once however many of the searches returned it: those with an npm
+/// package over stdio, and those left out, by why.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct RegistryFound {
     hits: Vec<Hit>,
     remote: usize,
     other: usize,
-    /// A search of several that failed, with why.
-    partly: Option<String>,
+    /// Returned, but naming none of the need's words (the registry
+    /// matches any part of a name).
+    unrelated: usize,
+    /// A search had more servers than the page it returned.
+    more: bool,
+    searches: usize,
+    /// The searches that failed, with why (each reason once).
+    failed: Vec<String>,
 }
 
 impl RegistryFound {
@@ -208,24 +263,52 @@ impl RegistryFound {
         if self.other > 0 {
             out.push(format!("{} not an npm package over stdio", self.other));
         }
+        if self.unrelated > 0 {
+            out.push(format!(
+                "{} naming none of the need's words",
+                self.unrelated
+            ));
+        }
         if !out.is_empty() {
             line.push_str(&format!(
                 " ({} left out: {})",
-                self.remote + self.other,
+                self.remote + self.other + self.unrelated,
                 out.join(", ")
             ));
         }
-        if let Some(why) = &self.partly {
-            line.push_str(&format!("; one of its searches failed ({why})"));
+        if self.more {
+            line.push_str(&format!(
+                "; a search matched more than the {REGISTRY_PAGE} it returns"
+            ));
+        }
+        if !self.failed.is_empty() {
+            line.push_str(&format!(
+                "; {} of its {} searches failed ({})",
+                self.failed.len(),
+                self.searches,
+                distinct(&self.failed).join("; ")
+            ));
         }
         line
     }
 }
 
+/// Each of `texts` once, in order.
+fn distinct(texts: &[String]) -> Vec<&str> {
+    let mut seen: Vec<&str> = Vec::new();
+    for text in texts {
+        if !seen.contains(&text.as_str()) {
+            seen.push(text);
+        }
+    }
+    seen
+}
+
 /// The two sources' hits as one list of at most [`MAX_CANDIDATES`]: those
 /// both found first (the registry's, which lists what they need), then
-/// each source's own in turn, each in its own order.
-fn merged(registry: Vec<Hit>, npm: Vec<Hit>) -> Vec<Hit> {
+/// each source's own in turn, each in its own order; and how many there
+/// were before the cut.
+fn merged(registry: Vec<Hit>, npm: Vec<Hit>) -> (Vec<Hit>, usize) {
     let in_npm = |hit: &Hit| npm.iter().any(|n| n.package == hit.package);
     let (both, registry): (Vec<Hit>, Vec<Hit>) = registry.into_iter().partition(|h| in_npm(h));
     let mut hits: Vec<Hit> = both
@@ -255,49 +338,62 @@ fn merged(registry: Vec<Hit>, npm: Vec<Hit>) -> Vec<Hit> {
             true
         }
     });
+    let total = hits.len();
     hits.truncate(MAX_CANDIDATES);
-    hits
+    (hits, total)
 }
 
-/// Whether `hit` names `word` as a word (or with `s`, `er`, `ers`, `ing`,
-/// `ed` after it) in its registry name, package or description: the
-/// registry matches any part of a name, `lint` in `maxwellintl` too.
-fn mentions(hit: &Hit, word: &str) -> bool {
-    let text = format!(
-        "{} {} {}",
-        hit.registry_name.as_deref().unwrap_or_default(),
-        hit.package,
-        hit.description
-    )
-    .to_lowercase();
-    text.split(|c: char| !c.is_alphanumeric()).any(|token| {
-        token
-            .strip_prefix(word)
-            .is_some_and(|rest| ["", "s", "er", "ers", "ing", "ed"].contains(&rest))
+/// Whether `text` (a server's name, package and description) names `word`
+/// as a word, or with one of [`ENDINGS`] after it: the registry matches
+/// any part of a name, `lint` in `maxwellintl` too. A word of several
+/// parts (`lint-staged`) must be those parts in a row (`lint_staged`,
+/// `lint staged`), the ending on the last.
+fn mentions(text: &str, word: &str) -> bool {
+    let words = |text: &str| -> Vec<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect()
+    };
+    let (tokens, parts) = (words(text), words(word));
+    let Some((last, first)) = parts.split_last() else {
+        return false;
+    };
+    tokens.windows(parts.len()).any(|run| {
+        run[..first.len()] == *first
+            && run[first.len()]
+                .strip_prefix(last.as_str())
+                .is_some_and(|rest| ENDINGS.contains(&rest))
     })
 }
 
-/// The words of `need` the MCP registry is searched for, each on its own
-/// (it matches a server's name): up to four of three letters or more, not
-/// [`PLAIN_WORDS`]; else the whole of it.
+/// The words of `need` the MCP registry is searched for, a search each:
+/// it matches a search against any part of a server's name, so a need of
+/// several words, searched whole, would rarely match. Words are split at
+/// what is not a letter, digit or `-` (`lint-staged` is one); up to four
+/// of three letters or more that are not [`PLAIN_WORDS`], else (a need of
+/// only such words, `mcp server`) its first four as they are. Never empty
+/// for a need with a letter or digit.
 fn registry_words(need: &str) -> Vec<String> {
-    let mut words: Vec<String> = Vec::new();
+    let mut all: Vec<String> = Vec::new();
     for word in need
         .to_lowercase()
         .split(|c: char| !(c.is_alphanumeric() || c == '-'))
     {
         let word = word.trim_matches('-');
-        if word.chars().count() >= 3
-            && !PLAIN_WORDS.contains(&word)
-            && !words.iter().any(|w| w == word)
-        {
-            words.push(word.to_owned());
+        if word.chars().any(char::is_alphanumeric) && !all.iter().any(|w| w == word) {
+            all.push(word.to_owned());
         }
     }
-    words.truncate(4);
+    let mut words: Vec<String> = all
+        .iter()
+        .filter(|w| w.chars().count() >= 3 && !PLAIN_WORDS.contains(&w.as_str()))
+        .cloned()
+        .collect();
     if words.is_empty() {
-        words.push(need.to_owned());
+        words = all;
     }
+    words.truncate(4);
     words
 }
 
@@ -312,48 +408,62 @@ async fn registry(base: &url::Url, need: &str) -> Result<RegistryFound, String> 
         let client = client.clone();
         async move {
             let mut url = base.join("v0/servers").map_err(|e| e.to_string())?;
-            let word = word.as_str();
             url.query_pairs_mut()
                 .append_pair("search", word)
                 .append_pair("version", "latest")
-                .append_pair("limit", "30");
+                .append_pair("limit", &REGISTRY_PAGE.to_string());
             let response = client.get(url).send().await.map_err(|e| said(&e))?;
             let status = response.status();
             if !status.is_success() {
                 return Err(format!("HTTP {status}"));
             }
             let body: Json = response.json().await.map_err(|e| said(&e))?;
-            registry_found(&body)
+            registry_page(&body)
         }
     }))
     .await;
-    // Servers found by more of the words first, then in the order found.
+    ranked(&words, answers)
+}
+
+/// The searches' pages as one: servers found by more of the words first,
+/// then in the order found; each left-out server counted once. Every
+/// search failing is an error (each reason once).
+fn ranked(words: &[String], pages: Vec<Result<Page, String>>) -> Result<RegistryFound, String> {
     let mut ranked: Vec<(usize, Hit)> = Vec::new();
-    let mut found = RegistryFound::default();
-    let mut errors = Vec::new();
-    for answer in answers {
-        match answer {
-            Ok(one) => {
-                found.remote = found.remote.max(one.remote);
-                found.other = found.other.max(one.other);
-                for hit in one
-                    .hits
-                    .into_iter()
-                    .filter(|h| words.iter().any(|w| mentions(h, w)))
-                {
-                    match ranked.iter_mut().find(|(_, h)| h.package == hit.package) {
-                        Some((n, _)) => *n += 1,
-                        None => ranked.push((1, hit)),
-                    }
-                }
+    let mut found = RegistryFound {
+        searches: pages.len(),
+        ..RegistryFound::default()
+    };
+    let (mut remote, mut other, mut unrelated) =
+        (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    for page in pages {
+        let page = match page {
+            Ok(page) => page,
+            Err(e) => {
+                found.failed.push(e);
+                continue;
             }
-            Err(e) => errors.push(e),
+        };
+        found.more |= page.more;
+        for listed in page.servers {
+            if !words.iter().any(|w| mentions(&listed.text, w)) {
+                unrelated.insert(listed.key);
+                continue;
+            }
+            match listed.hit {
+                Some(hit) => match ranked.iter_mut().find(|(_, h)| h.package == hit.package) {
+                    Some((n, _)) => *n += 1,
+                    None => ranked.push((1, hit)),
+                },
+                None if listed.remote => _ = remote.insert(listed.key),
+                None => _ = other.insert(listed.key),
+            }
         }
     }
-    if errors.len() == words.len() {
-        return Err(errors.swap_remove(0));
+    if found.failed.len() == found.searches {
+        return Err(distinct(&found.failed).join("; "));
     }
-    found.partly = errors.into_iter().next();
+    (found.remote, found.other, found.unrelated) = (remote.len(), other.len(), unrelated.len());
     ranked.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
     found.hits = ranked.into_iter().map(|(_, h)| h).collect();
     Ok(found)
@@ -371,17 +481,54 @@ fn said(error: &dyn std::error::Error) -> String {
     text
 }
 
-/// The MCP registry's answer (`v0`: `{servers: [{server, _meta}]}`; an
-/// entry that is the server itself read too).
-fn registry_found(body: &Json) -> Result<RegistryFound, String> {
+/// One MCP registry search's answer.
+#[derive(Debug, PartialEq, Eq)]
+struct Page {
+    servers: Vec<Listed>,
+    /// More matched than it returned (a `nextCursor`, or a full page).
+    more: bool,
+}
+
+/// A server a search returned.
+#[derive(Debug, PartialEq, Eq)]
+struct Listed {
+    /// Its name (else its JSON), to count it once across searches.
+    key: String,
+    /// Its name, packages and description, for [`mentions`].
+    text: String,
+    /// When it has an npm package over stdio.
+    hit: Option<Hit>,
+    /// Else, whether it is remote only.
+    remote: bool,
+}
+
+/// The MCP registry's answer (`v0`: `{servers: [{server, _meta}],
+/// metadata: {nextCursor}}`; an entry that is the server itself read too).
+fn registry_page(body: &Json) -> Result<Page, String> {
     let servers = body["servers"]
         .as_array()
         .ok_or("it answered without a `servers` list")?;
-    let mut found = RegistryFound::default();
+    let more = servers.len() >= REGISTRY_PAGE
+        || body["metadata"]["nextCursor"]
+            .as_str()
+            .is_some_and(|c| !c.is_empty());
+    let mut page = Page {
+        servers: Vec::new(),
+        more,
+    };
     for entry in servers {
         let server = entry.get("server").unwrap_or(entry);
         let empty = Vec::new();
         let packages = server["packages"].as_array().unwrap_or(&empty);
+        let key = match server["name"].as_str() {
+            Some(name) => name.to_owned(),
+            None => server.to_string(),
+        };
+        let words = std::iter::once(text(&server["name"]))
+            .chain(packages.iter().map(|p| text(&p["identifier"])))
+            .chain([text(&server["description"])])
+            .collect::<Vec<_>>()
+            .join(" ");
         let stdio = packages.iter().find(|p| {
             p["registryType"] == "npm"
                 && p["transport"]["type"] == "stdio"
@@ -392,10 +539,12 @@ fn registry_found(body: &Json) -> Result<RegistryFound, String> {
         let Some(package) = stdio else {
             let remote =
                 packages.is_empty() && server["remotes"].as_array().is_some_and(|r| !r.is_empty());
-            match remote {
-                true => found.remote += 1,
-                false => found.other += 1,
-            }
+            page.servers.push(Listed {
+                key,
+                text: words,
+                hit: None,
+                remote,
+            });
             continue;
         };
         let required = |key: &str, name: &dyn Fn(&Json) -> String| -> Vec<String> {
@@ -407,7 +556,7 @@ fn registry_found(body: &Json) -> Result<RegistryFound, String> {
                 .map(|v| clip(&name(v), FIELD_CHARS))
                 .collect()
         };
-        found.hits.push(Hit {
+        let hit = Hit {
             package: package["identifier"]
                 .as_str()
                 .unwrap_or_default()
@@ -426,9 +575,15 @@ fn registry_found(body: &Json) -> Result<RegistryFound, String> {
                     false => name,
                 }
             })),
+        };
+        page.servers.push(Listed {
+            key,
+            text: words,
+            hit: Some(hit),
+            remote: false,
         });
     }
-    Ok(found)
+    Ok(page)
 }
 
 /// A JSON string as it is, anything else empty.
@@ -436,7 +591,28 @@ fn text(value: &Json) -> String {
     value.as_str().unwrap_or_default().to_owned()
 }
 
-async fn npm_search(need: &str) -> Result<Vec<Hit>, String> {
+/// What npm's search found.
+#[derive(Debug, PartialEq, Eq)]
+struct NpmFound {
+    hits: Vec<Hit>,
+    /// Packages under names yobuild does not take (npm's old forms).
+    unnamed: usize,
+}
+
+impl NpmFound {
+    fn line(&self) -> String {
+        let mut line = format!("npm: {} found", self.hits.len());
+        if self.unnamed > 0 {
+            line.push_str(&format!(
+                " ({} left out: a name yobuild does not take)",
+                self.unnamed
+            ));
+        }
+        line
+    }
+}
+
+async fn npm_search(need: &str) -> Result<NpmFound, String> {
     let mut args: Vec<String> = ["search", "--json", "--searchlimit=20", "--", "keywords:mcp"]
         .map(String::from)
         .into();
@@ -444,34 +620,52 @@ async fn npm_search(need: &str) -> Result<Vec<Hit>, String> {
     npm_hits(&blocking(args).await?)
 }
 
-/// `npm search --json`'s answer: a list of packages.
-fn npm_hits(stdout: &str) -> Result<Vec<Hit>, String> {
+/// `npm search --json`'s answer: a list of packages, each with its name.
+fn npm_hits(stdout: &str) -> Result<NpmFound, String> {
+    if stdout.trim().is_empty() {
+        return Err("npm search answered nothing".into());
+    }
     let list: Json = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("npm search answered what is not JSON ({e})"))?;
     let list = list
         .as_array()
         .ok_or("npm search answered without a list")?;
-    Ok(list
-        .iter()
-        .filter_map(|p| {
-            let name = p["name"].as_str()?;
-            Package::new(name, "1.0.0").ok()?;
-            Some(Hit {
-                package: name.to_owned(),
-                registry_name: None,
-                from_npm: true,
-                description: text(&p["description"]),
-                required_env: None,
-                required_args: None,
-            })
-        })
-        .collect())
+    let mut found = NpmFound {
+        hits: Vec::new(),
+        unnamed: 0,
+    };
+    for p in list {
+        let name = p["name"]
+            .as_str()
+            .ok_or("npm search answered a package without a `name` (has its output changed?)")?;
+        if Package::new(name, "1.0.0").is_err() {
+            found.unnamed += 1;
+            continue;
+        }
+        found.hits.push(Hit {
+            package: name.to_owned(),
+            registry_name: None,
+            from_npm: true,
+            description: text(&p["description"]),
+            required_env: None,
+            required_args: None,
+        });
+    }
+    Ok(found)
 }
 
-/// npm with `args`, in a folder of its own (no project's `.npmrc`), with
-/// [`SOURCE_TIME`], off the async threads.
-async fn blocking(mut args: Vec<String>) -> Result<String, String> {
-    args.push("--no-update-notifier".into());
+/// `args` with `--no-update-notifier`, before any `--` (after it, npm
+/// would take it for an argument: a search's words).
+fn quiet(mut args: Vec<String>) -> Vec<String> {
+    let at = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    args.insert(at, "--no-update-notifier".into());
+    args
+}
+
+/// npm with `args` [`quiet`], in a folder of its own (no project's
+/// `.npmrc`), with [`SOURCE_TIME`], off the async threads.
+async fn blocking(args: Vec<String>) -> Result<String, String> {
+    let args = quiet(args);
     tokio::task::spawn_blocking(move || {
         let dir = tempfile::tempdir().map_err(|e| format!("a folder for npm: {e}"))?;
         crate::install::npm_within(dir.path(), &args, SOURCE_TIME).map_err(|e| e.to_string())
@@ -486,12 +680,15 @@ async fn blocking(mut args: Vec<String>) -> Result<String, String> {
 struct Viewed {
     version: Option<String>,
     latest: Option<String>,
-    versions: Vec<String>,
+    /// `None` when npm gave no `versions`.
+    versions: Option<Vec<String>>,
+    /// Each version's publish time as npm gives it (not text: its JSON).
     time: BTreeMap<String, String>,
     description: String,
     licence: Option<String>,
     repository: Option<String>,
-    provenance: bool,
+    /// `None` when npm gave no `dist`.
+    provenance: Option<bool>,
 }
 
 fn viewed(stdout: &str) -> Result<Viewed, String> {
@@ -501,26 +698,28 @@ fn viewed(stdout: &str) -> Result<Viewed, String> {
         return Err("npm view answered what is not an object".into());
     }
     let versions = match &view["versions"] {
-        Json::Array(all) => all
+        Json::Array(all) => Some(
+            all.iter()
+                .map(|v| v.as_str().map(String::from))
+                .collect::<Option<Vec<_>>>()
+                .ok_or("npm view's `versions` holds what is not text")?,
+        ),
+        Json::String(one) => Some(vec![one.clone()]),
+        Json::Null => None,
+        _ => return Err("npm view's `versions` is neither a list nor a text".into()),
+    };
+    let time = match &view["time"] {
+        Json::Object(t) => t
             .iter()
-            .filter_map(|v| v.as_str().map(String::from))
+            .map(|(k, v)| {
+                let at = v.as_str().map_or_else(|| v.to_string(), String::from);
+                (k.clone(), at)
+            })
             .collect(),
-        Json::String(one) => vec![one.clone()],
-        _ => Vec::new(),
+        Json::Null => BTreeMap::new(),
+        _ => return Err("npm view's `time` is not an object".into()),
     };
-    let time = view["time"]
-        .as_object()
-        .map(|t| {
-            t.iter()
-                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
-                .collect()
-        })
-        .unwrap_or_default();
-    let licence = match &view["license"] {
-        Json::String(l) => Some(l.clone()),
-        Json::Object(l) => l.get("type").and_then(Json::as_str).map(String::from),
-        _ => None,
-    };
+    let licence = licence(&view["license"]).or_else(|| licence(&view["licenses"]));
     let repository = match &view["repository"] {
         Json::String(r) => Some(r.clone()),
         Json::Object(r) => r.get("url").and_then(Json::as_str).map(String::from),
@@ -538,8 +737,24 @@ fn viewed(stdout: &str) -> Result<Viewed, String> {
         description: text(&view["description"]),
         licence,
         repository,
-        provenance: view["dist"]["attestations"].is_object(),
+        provenance: view["dist"]
+            .as_object()
+            .map(|d| d.get("attestations").is_some_and(Json::is_object)),
     })
+}
+
+/// A licence as `license` gives it (`"MIT"`, `{type}`), or as a list of
+/// those (`licenses`, an older form), joined with `OR`.
+fn licence(value: &Json) -> Option<String> {
+    match value {
+        Json::String(l) => Some(l.clone()),
+        Json::Object(l) => l.get("type").and_then(Json::as_str).map(String::from),
+        Json::Array(all) => {
+            let all: Vec<String> = all.iter().filter_map(licence).collect();
+            (!all.is_empty()).then(|| all.join(" OR "))
+        }
+        _ => None,
+    }
 }
 
 /// A release version's numbers: `a.b.c` only (no pre-release or build).
@@ -556,16 +771,41 @@ fn release(version: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(numbers)
 }
 
+/// A `latest` tag's numbers, and whether a release of those numbers is
+/// within it: `1.2.3` and `1.2.3+build` are; before `1.2.3-rc.1` comes
+/// 1.2.2, not 1.2.3. `None` when it is not a version.
+fn latest_bound(latest: &str) -> Option<((u64, u64, u64), bool)> {
+    let core = latest.split_once('+').map_or(latest, |(core, _)| core);
+    let (numbers, pre) = match core.split_once('-') {
+        Some((numbers, pre)) => (numbers, Some(pre)),
+        None => (core, None),
+    };
+    if pre.is_some_and(str::is_empty) {
+        return None;
+    }
+    Some((release(numbers)?, pre.is_none()))
+}
+
 /// The version to take of a package: the newest release not past
 /// `latest`, published at least `min_age_days` before `now` (seconds); or
 /// why none. With 0 days a publish time is not needed.
 fn version_to_take(view: &Viewed, min_age_days: u32, now: i64) -> Result<String, String> {
-    let latest = view.latest.as_deref().and_then(release);
-    let mut releases: Vec<(&String, (u64, u64, u64))> = view
-        .versions
+    let Some(versions) = &view.versions else {
+        return Err("npm gives no list of its versions".into());
+    };
+    let Some(latest) = view.latest.as_deref() else {
+        return Err("it has no `latest` tag, so the version to take cannot be told".into());
+    };
+    let Some((bound, within)) = latest_bound(latest) else {
+        return Err(format!(
+            "its `latest` tag, {:?}, is not a version",
+            clip(latest, FIELD_CHARS)
+        ));
+    };
+    let mut releases: Vec<(&String, (u64, u64, u64))> = versions
         .iter()
         .filter_map(|v| Some((v, release(v)?)))
-        .filter(|(_, n)| latest.is_none_or(|l| *n <= l))
+        .filter(|(_, n)| *n < bound || (within && *n == bound))
         .collect();
     releases.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     let Some((newest, _)) = releases.first() else {
@@ -576,14 +816,18 @@ fn version_to_take(view: &Viewed, min_age_days: u32, now: i64) -> Result<String,
     }
     let enough = now - i64::from(min_age_days) * DAY;
     for (version, _) in &releases {
-        match view.time.get(*version).and_then(|t| seconds(t)) {
+        let Some(at) = view.time.get(*version) else {
+            return Err(format!(
+                "npm gives no publish time for {version}, so its age cannot be told"
+            ));
+        };
+        match seconds(at) {
             Some(at) if at <= enough => return Ok((*version).clone()),
             Some(_) => continue,
-            None => {
-                return Err(format!(
-                    "npm gives no publish time for {version}, so its age cannot be told"
-                ))
-            }
+            None => return Err(format!(
+                "npm's publish time for {version}, {:?}, cannot be read, so its age cannot be told",
+                clip(at, 40)
+            )),
         }
     }
     let when = view
@@ -633,15 +877,22 @@ fn day(seconds: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
+/// Seconds since 1970; `None` for a clock that reads before it.
+fn now() -> Option<i64> {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(since.as_secs()).ok()
 }
 
 /// A hit made a candidate: npm asked about its versions, and about the one
-/// it would take when that is not the latest; its downloads when `npmjs`.
-async fn candidate(hit: Hit, extend: &Extend, now: i64, npmjs: bool) -> Candidate {
+/// it would take when that is not the latest; its downloads unless
+/// `downloads` says why not. Beside it, why npm could not be asked about
+/// it at all.
+async fn candidate(
+    hit: Hit,
+    extend: &Extend,
+    now: Option<i64>,
+    downloads: &Result<(), String>,
+) -> (Candidate, Option<String>) {
     let mut candidate = Candidate {
         package: hit.package.clone(),
         version: Err(String::new()),
@@ -651,8 +902,8 @@ async fn candidate(hit: Hit, extend: &Extend, now: i64, npmjs: bool) -> Candidat
         licence: None,
         repository: None,
         published: None,
-        downloads: None,
-        provenance: false,
+        downloads: Err(String::new()),
+        provenance: None,
         required_env: hit.required_env,
         required_args: hit.required_args,
     };
@@ -660,26 +911,35 @@ async fn candidate(hit: Hit, extend: &Extend, now: i64, npmjs: bool) -> Candidat
         let args = vec!["view".into(), spec, "--json".into()];
         viewed(&blocking(args).await?)
     };
-    let (latest, downloads) = tokio::join!(view(hit.package.clone()), async {
-        match npmjs {
-            true => downloads(&hit.package).await,
-            false => None,
+    let (latest, counted) = tokio::join!(view(hit.package.clone()), async {
+        match downloads {
+            Ok(()) => weekly_downloads(&hit.package)
+                .await
+                .map_err(|e| format!("npm's downloads API failed ({e})")),
+            Err(why) => Err(why.clone()),
         }
     });
-    candidate.downloads = downloads;
+    candidate.downloads = counted;
     let latest = match latest {
         Ok(latest) => latest,
         Err(e) => {
             candidate.version = Err(format!("npm could not say what it is: {e}"));
-            return candidate;
+            return (candidate, Some(e));
         }
     };
     if candidate.description.is_empty() {
         candidate.description = clip(&latest.description, DESCRIPTION_CHARS);
     }
-    candidate.version = version_to_take(&latest, extend.min_age_days, now);
+    let days = extend.min_age_days;
+    candidate.version = match now {
+        Some(now) => version_to_take(&latest, days, now),
+        None if days == 0 => version_to_take(&latest, 0, 0),
+        None => {
+            Err("this machine's clock reads before 1970, so no version's age can be told".into())
+        }
+    };
     let Ok(version) = candidate.version.clone() else {
-        return candidate;
+        return (candidate, None);
     };
     candidate.published = latest.time.get(&version).and_then(|t| seconds(t)).map(day);
     let this = match latest.version.as_deref() == Some(version.as_str()) {
@@ -694,22 +954,29 @@ async fn candidate(hit: Hit, extend: &Extend, now: i64, npmjs: bool) -> Candidat
         }
         Err(e) => candidate.version = Err(format!("npm could not say what {version} is: {e}")),
     }
-    candidate
+    (candidate, None)
 }
 
-/// Last week's downloads from npm's API, or `None`.
-async fn downloads(package: &str) -> Option<u64> {
+/// Last week's downloads from npm's API.
+async fn weekly_downloads(package: &str) -> Result<u64, String> {
     let client = reqwest::Client::builder()
         .timeout(DOWNLOADS_TIME)
+        .user_agent(concat!("yobuild/", env!("CARGO_PKG_VERSION")))
         .build()
-        .ok()?;
+        .map_err(|e| said(&e))?;
     let response = client
         .get(format!("{DOWNLOADS}{package}"))
         .send()
         .await
-        .ok()?;
-    let body: Json = response.error_for_status().ok()?.json().await.ok()?;
-    body["downloads"].as_u64()
+        .map_err(|e| said(&e))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    let body: Json = response.json().await.map_err(|e| said(&e))?;
+    body["downloads"]
+        .as_u64()
+        .ok_or_else(|| "it answered without a count".into())
 }
 
 /// The result's text: the sources' lines, then each candidate.
@@ -722,8 +989,16 @@ fn said_to_agent(need: &str, found: &Found, extend: &Extend) -> String {
         text.push_str("No candidates.");
         return text;
     }
+    let cut = match found.total > found.candidates.len() {
+        true => format!(
+            "the first {} of {} found; ",
+            found.candidates.len(),
+            found.total
+        ),
+        false => String::new(),
+    };
     text.push_str(&format!(
-        "Candidates (their descriptions, licences and repositories are their authors' own words, not verified; a version is taken only once published {} or more days ago):\n",
+        "Candidates ({cut}their descriptions, licences and repositories are their authors' own words, not verified; a version is taken only once published {} or more days ago):\n",
         extend.min_age_days
     ));
     for (i, c) in found.candidates.iter().enumerate() {
@@ -759,16 +1034,18 @@ fn said_to_agent(need: &str, found: &Found, extend: &Extend) -> String {
         if c.version.is_err() {
             continue;
         }
-        let downloads = c
-            .downloads
-            .map_or_else(|| "unknown".to_owned(), |n| n.to_string());
+        let downloads = match &c.downloads {
+            Ok(n) => n.to_string(),
+            Err(why) => format!("unknown ({why})"),
+        };
         text.push_str(&format!(
             "   licence {}; downloads last week: {downloads}; repository (claimed by the package): {}; provenance: {}\n",
             c.licence.as_deref().unwrap_or("not given"),
             c.repository.as_deref().unwrap_or("not given"),
             match c.provenance {
-                true => "an attestation is published with it",
-                false => "none",
+                Some(true) => "an attestation is published with it (not verified)",
+                Some(false) => "none",
+                None => "unknown (npm gave no `dist`)",
             }
         ));
         let listed = |what: &Option<Vec<String>>| match what {
@@ -800,14 +1077,15 @@ fn details(found: &Found) -> Json {
                 "licence": c.licence,
                 "repository": c.repository,
                 "published": c.published,
-                "downloads": c.downloads,
+                "downloads": c.downloads.as_ref().ok(),
+                "downloadsUnknown": c.downloads.as_ref().err(),
                 "provenance": c.provenance,
                 "requiredEnv": c.required_env,
                 "requiredArgs": c.required_args,
             })
         })
         .collect();
-    json!({ "sources": found.lines, "candidates": candidates })
+    json!({ "sources": found.lines, "found": found.total, "candidates": candidates })
 }
 
 #[async_trait::async_trait]
@@ -849,11 +1127,22 @@ impl AgentTool for FindPlugin {
         }
         let need = match &params["need"] {
             Json::String(need) => clip(need, FIELD_CHARS),
-            _ => String::new(),
+            Json::Null => String::new(),
+            other => {
+                return Err(ToolError::InvalidArgs(format!(
+                    "`need` must be a string, not {}",
+                    clip(&other.to_string(), 40)
+                )))
+            }
         };
         if need.is_empty() {
             return Err(ToolError::InvalidArgs(
                 "`need` is required: the capability, in a few words".into(),
+            ));
+        }
+        if !need.chars().any(char::is_alphanumeric) {
+            return Err(ToolError::InvalidArgs(
+                "`need` holds no word to search for".into(),
             ));
         }
         match &params["kind"] {
@@ -881,6 +1170,21 @@ impl AgentTool for FindPlugin {
             return Err(ToolError::Failed(format!(
                 "{text}\nBoth sources failed: this is not \"nothing found\"."
             )));
+        }
+        if let Some(why) = &found.unviewed {
+            self.session.notice(
+                NoticeLevel::Warning,
+                format!("find_plugin could not ask npm about any candidate: {why}."),
+            );
+            return Err(ToolError::Failed(format!(
+                "{text}\nnpm could be asked about none of them: this is not \"none loadable\"."
+            )));
+        }
+        if let [failed] = found.failed.as_slice() {
+            self.session.notice(
+                NoticeLevel::Warning,
+                format!("find_plugin searched one source only: {failed}."),
+            );
         }
         self.remember(&found.candidates);
         Ok(ToolResult {

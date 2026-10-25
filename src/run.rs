@@ -347,8 +347,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     if let Some(ask) = &ask_owner {
         tools.add(AskOwner::TOOL, vec![Box::new(ask.clone())]);
     }
-    if let Some(extend) = &manifest.extend {
-        let find = FindPlugin::new(session.clone(), extend.clone(), Sources::from_env()?);
+    if let (Some(extend), Some(sources)) = (&manifest.extend, &checked.sources) {
+        let find = FindPlugin::new(session.clone(), extend.clone(), sources.clone());
         tools.add(FindPlugin::TOOL, vec![Box::new(find)]);
     }
     for server in &manifest.mcp {
@@ -766,6 +766,7 @@ struct Checked {
     prompt: Prompt,
     plan: plugins::Plan,
     servers: HashMap<String, Launch>,
+    sources: Option<Sources>,
     notes: Vec<String>,
     installed: install::Installed,
 }
@@ -838,6 +839,7 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
         installed,
         plan,
         servers,
+        sources,
         notes: more,
     } = prepare(
         manifest,
@@ -856,6 +858,7 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
         prompt,
         plan,
         servers,
+        sources,
         notes,
         installed,
     })
@@ -1039,6 +1042,9 @@ struct Prepared {
     installed: install::Installed,
     plan: plugins::Plan,
     servers: HashMap<String, Launch>,
+    /// `find_plugin`'s sources, with `[extend]` (a bad
+    /// `YOBUILD_MCP_REGISTRY` refused here, before anything starts).
+    sources: Option<Sources>,
     /// Said before the agent starts (a Warning notice each).
     notes: Vec<String>,
 }
@@ -1051,6 +1057,10 @@ fn prepare(
     cwd: &Path,
 ) -> Result<Prepared, BoxError> {
     let lookup = |name: &str| std::env::var(name).ok();
+    let sources = match manifest.extend {
+        Some(_) => Some(Sources::from_env()?),
+        None => None,
+    };
     let mut notes = Vec::new();
     // Nothing judging calls is allowed (an agent in a sandbox), but said.
     if manifest.builtins.gate == GateMode::Off && !manifest.plugins.iter().any(|p| p.policy) {
@@ -1090,6 +1100,7 @@ fn prepare(
         installed,
         plan,
         servers,
+        sources,
         notes,
     })
 }

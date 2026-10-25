@@ -4,7 +4,7 @@ fn view(versions: &[(&str, &str)], latest: &str) -> Viewed {
     Viewed {
         version: Some(latest.into()),
         latest: Some(latest.into()),
-        versions: versions.iter().map(|(v, _)| v.to_string()).collect(),
+        versions: Some(versions.iter().map(|(v, _)| v.to_string()).collect()),
         time: versions
             .iter()
             .map(|(v, t)| (v.to_string(), t.to_string()))
@@ -84,7 +84,54 @@ fn a_version_without_a_publish_time_or_only_pre_releases_is_not_taken() {
 }
 
 #[test]
-fn the_registry_gives_npm_servers_over_stdio_and_counts_the_rest() {
+fn latest_bounds_what_is_taken_and_without_it_nothing_is() {
+    let all = [
+        ("1.4.0", "2026-01-01T00:00:00.000Z"),
+        ("1.5.0", "2026-02-01T00:00:00.000Z"),
+        ("2.0.0", "2026-03-01T00:00:00.000Z"),
+    ];
+    // A pre-release `latest`: 2.0.0 comes after it.
+    assert_eq!(
+        version_to_take(&view(&all, "2.0.0-rc.1"), 7, now()),
+        Ok("1.5.0".into())
+    );
+    // Build metadata: within it.
+    assert_eq!(
+        version_to_take(&view(&all, "2.0.0+b-1"), 7, now()),
+        Ok("2.0.0".into())
+    );
+    assert_eq!(
+        version_to_take(&view(&all, "1.5.0"), 7, now()),
+        Ok("1.5.0".into())
+    );
+    let mut v = view(&all, "2.0.0");
+    v.latest = None;
+    assert_eq!(
+        version_to_take(&v, 7, now()),
+        Err("it has no `latest` tag, so the version to take cannot be told".into())
+    );
+    for bad in ["next", "2.0.0-", "2.0"] {
+        assert_eq!(
+            version_to_take(&view(&all, bad), 7, now()),
+            Err(format!("its `latest` tag, {bad:?}, is not a version"))
+        );
+    }
+    let mut v = view(&all, "2.0.0");
+    v.versions = None;
+    assert_eq!(
+        version_to_take(&v, 7, now()),
+        Err("npm gives no list of its versions".into())
+    );
+    let mut v = view(&all, "2.0.0");
+    v.time.insert("2.0.0".into(), "yesterday".into());
+    assert_eq!(
+        version_to_take(&v, 7, now()),
+        Err("npm's publish time for 2.0.0, \"yesterday\", cannot be read, so its age cannot be told".into())
+    );
+}
+
+#[test]
+fn the_registry_gives_npm_servers_over_stdio_and_lists_the_rest() {
     let body = serde_json::json!({
         "servers": [
             { "server": {
@@ -110,26 +157,112 @@ fn the_registry_gives_npm_servers_over_stdio_and_counts_the_rest() {
                 "transport": { "type": "stdio" } }] } },
             { "name": "old-shape", "packages": [{ "registryType": "npm", "identifier": "Bad Name",
                 "transport": { "type": "stdio" } }] }
-        ]
+        ],
+        "metadata": { "count": 4 }
     });
-    let found = registry_found(&body).unwrap();
-    assert_eq!((found.remote, found.other), (1, 2));
+    let page = registry_page(&body).unwrap();
+    assert!(!page.more);
+    let eslint = &page.servers[0];
+    assert_eq!(eslint.key, "io.github.eslint/mcp");
     assert_eq!(
-        found.hits,
-        vec![Hit {
+        eslint.text,
+        "io.github.eslint/mcp @eslint/mcp @eslint/mcp ESLint\nover MCP"
+    );
+    assert_eq!(
+        eslint.hit,
+        Some(Hit {
             package: "@eslint/mcp".into(),
             registry_name: Some("io.github.eslint/mcp".into()),
             from_npm: false,
             description: "ESLint\nover MCP".into(),
             required_env: Some(vec!["TOKEN".into()]),
             required_args: Some(vec!["--root".into(), "<dir>".into()]),
-        }]
+        })
     );
+    let rest: Vec<(&str, bool, bool)> = page.servers[1..]
+        .iter()
+        .map(|l| (l.key.as_str(), l.hit.is_some(), l.remote))
+        .collect();
+    assert_eq!(
+        rest,
+        [
+            ("remote", false, true),
+            ("py", false, false),
+            ("old-shape", false, false)
+        ]
+    );
+    assert!(registry_page(&serde_json::json!({ "items": [] })).is_err());
+    let more = serde_json::json!({ "servers": [], "metadata": { "nextCursor": "abc" } });
+    assert!(registry_page(&more).unwrap().more);
+}
+
+fn listed(key: &str, text: &str, hit: Option<Hit>, remote: bool) -> Listed {
+    Listed {
+        key: key.into(),
+        text: text.into(),
+        hit,
+        remote,
+    }
+}
+
+#[test]
+fn the_registrys_searches_are_ranked_and_each_server_counted_once() {
+    let words = ["lint".to_string(), "typescript".to_string()];
+    let ts = || {
+        listed(
+            "io.x/ts-lint",
+            "ts-lint TypeScript linting",
+            Some(hit("ts-lint", true, false)),
+            false,
+        )
+    };
+    let pages = vec![
+        Ok(Page {
+            servers: vec![
+                listed(
+                    "io.x/lint-mcp",
+                    "lint-mcp",
+                    Some(hit("lint-mcp", true, false)),
+                    false,
+                ),
+                ts(),
+                listed("io.x/remote", "remote lint", None, true),
+                listed(
+                    "io.x/maxwellintl",
+                    "maxwellintl",
+                    Some(hit("maxwellintl", true, false)),
+                    false,
+                ),
+            ],
+            more: false,
+        }),
+        Ok(Page {
+            servers: vec![
+                ts(),
+                listed("io.x/remote", "remote lint", None, true),
+                listed("io.x/py", "a python typescript checker", None, false),
+            ],
+            more: true,
+        }),
+        Err("HTTP 503 Service Unavailable".into()),
+    ];
+    let found = ranked(&words, pages).unwrap();
+    let names: Vec<&str> = found.hits.iter().map(|h| h.package.as_str()).collect();
+    assert_eq!(names, ["ts-lint", "lint-mcp"]);
+    assert_eq!((found.remote, found.other, found.unrelated), (1, 1, 1));
     assert_eq!(
         found.line(),
-        "MCP registry: 1 found (3 left out: 1 remote only, 2 not an npm package over stdio)"
+        "MCP registry: 2 found (3 left out: 1 remote only, 1 not an npm package over stdio, 1 naming none of the need's words); a search matched more than the 30 it returns; 1 of its 3 searches failed (HTTP 503 Service Unavailable)"
     );
-    assert!(registry_found(&serde_json::json!({ "items": [] })).is_err());
+    let failing = vec![
+        Err("HTTP 503 Service Unavailable".to_string()),
+        Err("HTTP 503 Service Unavailable".into()),
+        Err("timed out".into()),
+    ];
+    assert_eq!(
+        ranked(&words, failing),
+        Err("HTTP 503 Service Unavailable; timed out".into())
+    );
 }
 
 #[test]
@@ -143,18 +276,39 @@ fn the_registry_is_searched_by_the_needs_own_words() {
         vec!["reading", "xlsx", "files", "too"]
     );
     assert_eq!(registry_words("db"), vec!["db"]);
+    // Only plain or short words: those, as they are.
+    assert_eq!(registry_words("MCP server"), vec!["mcp", "server"]);
+    assert_eq!(
+        registry_words("lint-staged config"),
+        vec!["lint-staged", "config"]
+    );
+    assert_eq!(
+        registry_words("one two three four five"),
+        vec!["one", "two", "three", "four"]
+    );
 }
 
 #[test]
 fn npm_search_and_view_are_read_as_npm_writes_them() {
-    let hits = npm_hits(
+    let found = npm_hits(
         "[\n{\"name\":\"@eslint/mcp\",\"version\":\"0.3.15\",\"description\":\"MCP server for ESLint\"}\n,\n{\"name\":\"NOT VALID\"}\n]\n",
     )
     .unwrap();
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].package, "@eslint/mcp");
-    assert!(hits[0].from_npm && hits[0].required_env.is_none());
+    assert_eq!(found.hits.len(), 1);
+    assert_eq!(found.hits[0].package, "@eslint/mcp");
+    assert!(found.hits[0].from_npm && found.hits[0].required_env.is_none());
+    assert_eq!(
+        found.line(),
+        "npm: 1 found (1 left out: a name yobuild does not take)"
+    );
+    assert_eq!(npm_hits("[]").unwrap().line(), "npm: 0 found");
     assert!(npm_hits("npm error").is_err());
+    assert_eq!(npm_hits(" \n"), Err("npm search answered nothing".into()));
+    // Another shape is an error, never "0 found".
+    assert_eq!(
+        npm_hits(r#"[{"package":{"name":"x"}}]"#),
+        Err("npm search answered a package without a `name` (has its output changed?)".into())
+    );
 
     let v = viewed(
         r#"{"name":"@eslint/mcp","version":"0.3.15","dist-tags":{"latest":"0.3.15"},
@@ -163,20 +317,36 @@ fn npm_search_and_view_are_read_as_npm_writes_them() {
             "dist":{"attestations":{"url":"u"}}}"#,
     )
     .unwrap();
-    assert_eq!(v.versions, vec!["0.3.14", "0.3.15"]);
+    assert_eq!(v.versions, Some(vec!["0.3.14".into(), "0.3.15".into()]));
     assert_eq!(v.licence.as_deref(), Some("Apache-2.0"));
     assert_eq!(
         v.repository.as_deref(),
         Some("https://github.com/eslint/rewrite")
     );
-    assert!(v.provenance);
+    assert_eq!(v.provenance, Some(true));
     // One version: `versions` is a string.
-    let v = viewed(r#"{"version":"1.0.0","versions":"1.0.0","license":{"type":"MIT"}}"#).unwrap();
+    let v = viewed(r#"{"version":"1.0.0","versions":"1.0.0","license":{"type":"MIT"},"dist":{}}"#)
+        .unwrap();
     assert_eq!(
-        (v.versions, v.licence),
-        (vec!["1.0.0".to_string()], Some("MIT".to_string()))
+        (v.versions, v.licence, v.provenance),
+        (
+            Some(vec!["1.0.0".to_string()]),
+            Some("MIT".to_string()),
+            Some(false)
+        )
+    );
+    // The older `licenses` list; no `versions`, `dist` or `time`.
+    let v = viewed(r#"{"licenses":[{"type":"MIT"},"Apache-2.0"]}"#).unwrap();
+    assert_eq!(
+        (v.versions, v.licence, v.provenance, v.time.len()),
+        (None, Some("MIT OR Apache-2.0".to_string()), None, 0)
     );
     assert!(viewed("[]").is_err());
+    for bad in [
+        r#"{"versions":{}}"#, r#"{"versions":[1]}"#, r#"{"time":"x"}"#,
+    ] {
+        assert!(viewed(bad).is_err(), "{bad}");
+    }
 }
 
 #[test]
@@ -194,8 +364,8 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
                 licence: None,
                 repository: Some("https://example.com/r".into()),
                 published: Some("2026-09-01".into()),
-                downloads: None,
-                provenance: false,
+                downloads: Err("not asked: npm's registry here is http://x, not npmjs's".into()),
+                provenance: Some(false),
                 required_env: None,
                 required_args: None,
             },
@@ -208,12 +378,14 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
                 licence: None,
                 repository: None,
                 published: None,
-                downloads: None,
-                provenance: false,
+                downloads: Err(String::new()),
+                provenance: None,
                 required_env: None,
                 required_args: None,
             },
         ],
+        total: 2,
+        unviewed: None,
     };
     let text = said_to_agent("lint", &found, &Extend::default());
     assert_eq!(
@@ -222,11 +394,44 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
          Sources: MCP registry: failed (HTTP 503); npm: 2 found.\n\
          Candidates (their descriptions, licences and repositories are their authors' own words, not verified; a version is taken only once published 7 or more days ago):\n\
          1. lint-mcp 1.2.0 (published 2026-09-01; found in npm's search)\n   Lints\n   \
-         licence not given; downloads last week: unknown; repository (claimed by the package): https://example.com/r; provenance: none\n   \
+         licence not given; downloads last week: unknown (not asked: npm's registry here is http://x, not npmjs's); repository (claimed by the package): https://example.com/r; provenance: none\n   \
          required arguments: not listed; required environment variables: not listed\n\
          2. new-mcp (found in npm's search): not loadable: no version was published 7 or more days ago (the newest, 0.1.0, on 2026-10-24)"
     );
-    assert_eq!(details(&found)["candidates"][1]["version"], Json::Null);
+    let json = details(&found);
+    assert_eq!(json["found"], 2);
+    assert_eq!(
+        json["candidates"][0],
+        serde_json::json!({
+            "package": "lint-mcp", "version": "1.2.0", "notLoadable": null,
+            "registryName": null, "fromNpm": true, "description": "Lints",
+            "licence": null, "repository": "https://example.com/r",
+            "published": "2026-09-01", "downloads": null,
+            "downloadsUnknown": "not asked: npm's registry here is http://x, not npmjs's",
+            "provenance": false, "requiredEnv": null, "requiredArgs": null
+        })
+    );
+    assert_eq!(json["candidates"][1]["version"], Json::Null);
+    assert_eq!(json["candidates"][1]["provenance"], Json::Null);
+
+    // Cut to fewer than found: said.
+    let mut cut = found;
+    cut.total = 14;
+    cut.candidates.truncate(1);
+    cut.candidates[0].downloads = Ok(1200);
+    cut.candidates[0].provenance = Some(true);
+    let text = said_to_agent("lint", &cut, &Extend::default());
+    assert!(
+        text.contains("\nCandidates (the first 1 of 14 found; their"),
+        "{text}"
+    );
+    assert!(
+        text.contains("downloads last week: 1200; ")
+            && text.contains("provenance: an attestation is published with it (not verified)"),
+        "{text}"
+    );
+    cut.candidates.clear();
+    assert!(said_to_agent("lint", &cut, &Extend::default()).ends_with("\nNo candidates."));
 }
 
 #[test]
@@ -243,6 +448,31 @@ fn the_registry_may_be_another_only_over_https_or_on_this_machine() {
     assert!(Sources::at("http://127.0.0.1:9").is_ok());
     let e = Sources::at("http://registry.example.com").unwrap_err();
     assert!(e.starts_with("YOBUILD_MCP_REGISTRY "), "{e}");
+    // A path is kept, with or without its last slash.
+    for at in ["https://example.com/mcp", "https://example.com/mcp/"] {
+        let sources = Sources::at(at).unwrap();
+        assert_eq!(
+            sources.registry.join("v0/servers").unwrap().as_str(),
+            "https://example.com/mcp/v0/servers"
+        );
+    }
+}
+
+#[test]
+fn npm_is_quiet_before_its_arguments_and_npmjs_is_known_with_or_without_a_slash() {
+    let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        quiet(args(&["search", "--json", "--", "keywords:mcp", "lint"])),
+        args(&["search", "--json", "--no-update-notifier", "--", "keywords:mcp", "lint"])
+    );
+    assert_eq!(
+        quiet(args(&["view", "x", "--json"])),
+        args(&["view", "x", "--json", "--no-update-notifier"])
+    );
+    assert!(is_npmjs("https://registry.npmjs.org/\n"));
+    assert!(is_npmjs("https://registry.npmjs.org"));
+    assert!(!is_npmjs("https://registry.npmjs.org.example.com/"));
+    assert!(!is_npmjs("http://127.0.0.1:4873/"));
 }
 
 fn hit(package: &str, registry: bool, npm: bool) -> Hit {
@@ -268,22 +498,134 @@ fn both_sources_finds_come_first_then_each_sources_in_turn() {
         hit("both", false, true),
         hit("n2", false, true),
     ];
-    let first = merged(registry, npm);
+    let (first, total) = merged(registry, npm);
+    assert_eq!(total, 5);
     let names: Vec<&str> = first.iter().map(|h| h.package.as_str()).collect();
     assert_eq!(names, ["both", "r1", "n1", "r2", "n2"]);
     assert!(first[0].from_npm && first[0].registry_name.is_some());
     let many: Vec<Hit> = (0..8).map(|i| hit(&format!("r{i}"), true, false)).collect();
     let more: Vec<Hit> = (0..8).map(|i| hit(&format!("n{i}"), false, true)).collect();
-    assert_eq!(merged(many, more).len(), MAX_CANDIDATES);
+    let (cut, total) = merged(many, more);
+    assert_eq!((cut.len(), total), (MAX_CANDIDATES, 16));
 }
 
 #[test]
 fn a_registry_find_must_name_the_word_as_a_word() {
-    let mut h = hit("maxwellintl-mcp", true, false);
-    assert!(!mentions(&h, "lint"));
-    h.description = "Structured linting output for ESLint".into();
-    assert!(mentions(&h, "lint"), "linting");
-    assert!(mentions(&hit("lint-mcp", false, false), "lint"));
-    assert!(!mentions(&hit("lintelly", false, false), "lint"));
-    assert!(mentions(&hit("tools", false, false), "tool"));
+    assert!(!mentions("io.x/maxwellintl maxwellintl-mcp", "lint"));
+    assert!(mentions("Structured linting output for ESLint", "lint"));
+    assert!(mentions("lint-mcp", "lint"));
+    assert!(!mentions("lintelly", "lint"));
+    assert!(mentions("tools", "tool"));
+    // A word of parts: those parts in a row, the ending on the last.
+    assert!(mentions("io.x/lint-staged", "lint-staged"));
+    assert!(mentions("runs lint_stageds", "lint-staged"));
+    assert!(!mentions("staged lint", "lint-staged"));
+    assert!(!mentions("lint", "lint-staged"));
+    assert!(mentions("An MCP server", "mcp"));
+    assert!(!mentions("anything", "-"));
+}
+
+fn tool() -> (FindPlugin, crate::frontend::Driver) {
+    let (session, driver) = Session::new(false);
+    let sources = Sources::at("http://127.0.0.1:9").unwrap();
+    (FindPlugin::new(session, Extend::default(), sources), driver)
+}
+
+fn candidate_of(package: &str, version: Result<&str, &str>) -> Candidate {
+    Candidate {
+        package: package.into(),
+        version: version.map(String::from).map_err(String::from),
+        registry_name: None,
+        from_npm: true,
+        description: String::new(),
+        licence: None,
+        repository: None,
+        published: None,
+        downloads: Err(String::new()),
+        provenance: None,
+        required_env: None,
+        required_args: None,
+    }
+}
+
+#[test]
+fn the_session_keeps_each_packages_latest_but_a_failure_never_loses_a_version() {
+    let (find, _driver) = tool();
+    find.remember(&[
+        candidate_of("a", Ok("1.0.0")),
+        candidate_of("b", Err("too new")),
+    ]);
+    find.remember(&[candidate_of(
+        "a",
+        Err("npm could not say what it is: timed out"),
+    )]);
+    find.remember(&[candidate_of("b", Ok("0.2.0")), candidate_of("c", Err("x"))]);
+    find.remember(&[candidate_of("c", Err("y"))]);
+    let kept: Vec<(String, Result<String, String>)> = find
+        .candidates()
+        .into_iter()
+        .map(|c| (c.package, c.version))
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            ("a".to_string(), Ok("1.0.0".to_string())),
+            ("b".into(), Ok("0.2.0".into())),
+            ("c".into(), Err("y".into())),
+        ]
+    );
+    find.remember(&[candidate_of("a", Ok("1.1.0"))]);
+    assert_eq!(find.candidates()[0].version, Ok("1.1.0".into()));
+}
+
+#[tokio::test]
+async fn the_arguments_are_refused_before_anything_is_searched() {
+    let (find, _driver) = tool();
+    let call = |args: Json| {
+        let find = find.clone();
+        async move {
+            match find
+                .execute(args, ToolContext::new("1", FindPlugin::TOOL))
+                .await
+            {
+                Err(ToolError::InvalidArgs(why)) => why,
+                other => panic!("{other:?}"),
+            }
+        }
+    };
+    let cases = [
+        (serde_json::json!("lint"), "the arguments must be an object"),
+        (
+            serde_json::json!({ "need": "lint", "query": "x" }),
+            "unknown key `query` (use need, kind)",
+        ),
+        (
+            serde_json::json!({}),
+            "`need` is required: the capability, in a few words",
+        ),
+        (
+            serde_json::json!({ "need": " \n " }),
+            "`need` is required: the capability, in a few words",
+        ),
+        (
+            serde_json::json!({ "need": ["lint"] }),
+            "`need` must be a string, not [\"lint\"]",
+        ),
+        (
+            serde_json::json!({ "need": "--" }),
+            "`need` holds no word to search for",
+        ),
+        (
+            serde_json::json!({ "need": "lint", "kind": "pi" }),
+            "kind \"pi\": this agent may find \"mcp\"",
+        ),
+        (
+            serde_json::json!({ "need": "lint", "kind": 1 }),
+            "kind 1: this agent may find \"mcp\"",
+        ),
+    ];
+    for (args, why) in cases {
+        assert_eq!(call(args.clone()).await, why, "{args}");
+    }
+    assert!(find.candidates().is_empty());
 }

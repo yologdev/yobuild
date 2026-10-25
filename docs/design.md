@@ -3730,17 +3730,37 @@ is part of what `load_plugin` does, and `find_plugin` only reads.
 **`find_plugin(need, kind?)`** searches and returns candidates. It starts,
 loads and installs nothing.
 - `need`: a few words, such as "lint TypeScript" or "read xlsx files".
-- `kind`: `"mcp"` only in step 1; later `"pi"`, `"dsh"`, `"rutis"`.
+- `kind`: `"mcp"` only in stage 1; later `"pi"`, `"dsh"`, `"rutis"`
+  (stage 2, below). The stages are what is found and loaded; the PRs that
+  build stage 1 are numbered apart ("Order of PRs").
 - Sources, for MCP servers, each with a 15-second limit:
   - the MCP registry, its `v0` API (`/v0/servers?search=`; base
     `https://registry.modelcontextprotocol.io`, or `YOBUILD_MCP_REGISTRY`
-    for the tests: https, or http on a loopback address): only entries with
-    an `npm` package and a `stdio` transport. Remote servers and PyPI or
-    OCI packages are left out, and the result says how many were. Its
-    search matches any part of a server's name (`lint` finds
-    `maxwellintl`), so it is searched for each of the need's words (up to
-    four), and a server is kept only when its name, package or description
-    has one of them as a word;
+    for the tests: https, or http on a loopback address; its path kept;
+    checked before anything starts, in `run` and `check`): only entries
+    with an `npm` package and a `stdio` transport. Remote servers and PyPI
+    or OCI packages are left out, and the result says how many were.
+    - Its search matches the search text against any part of a server's
+      name, so a need searched whole ("lint TypeScript") would rarely
+      match a name, and one short word matches too much (`lint` finds
+      `maxwellintl`). So each of the need's words is a search of its own,
+      and a server is kept only when its name, package or description has
+      one of them as a word.
+    - The words: the need split at what is not a letter, digit or `-`
+      (`lint-staged` stays one); up to four of three letters or more that
+      are not plain (`mcp`, `server`, `tool`, `the`, `and`, `for`, `with`,
+      `from`); a need of only such words (`mcp server`) is searched for its
+      first four as they are. A need with no letter or digit is refused.
+    - A server names a word when the word, or the word with `s`, `er`,
+      `ers`, `ing` or `ed` after it, is one of its words (`linting` names
+      `lint`); a word of parts (`lint-staged`) must be those parts in a
+      row (`lint_staged` too).
+    - Servers found by more of the words come first. Each server is counted
+      once however many searches return it; those left out are counted by
+      why (remote only, not an npm package over stdio, naming none of the
+      words). A search that matched more than the page it returns (30) is
+      said. Searches that fail are said with their count and reasons; all
+      of them failing is the source failing;
   - npm's search, through the `npm` CLI (`npm search --json`, then
     `npm view <package> --json` for each candidate) with the npm settings
     `install` keeps (the registry and its login keys), so a mirror or a
@@ -3749,19 +3769,32 @@ loads and installs nothing.
   it failed and why (a time-out, an HTTP status, npm's message). One
   source failing is said there and the other's candidates are given; both
   failing makes the result an error (`is_error`) and a Warning notice to
-  the owner, never an empty list that reads as "nothing found".
+  the owner, never an empty list that reads as "nothing found". One
+  failing is a Warning notice too: the owner sees the search was half
+  done. npm's search answering in another shape (a package without a
+  `name`) is a failure, never "0 found"; packages under names yobuild does
+  not take (npm's old forms) are counted as left out.
 - Each candidate (those both sources found first, then each source's own
-  in turn; one per package; at most 10):
-  - the package and the version `load_plugin` would take: the newest one
+  in turn; one per package; at most 10, and "the first 10 of N" said when
+  cut), npm asked about at most four at once:
+  - the package and the version `load_plugin` would take: the newest
+    release (`a.b.c`) not past the `latest` tag (before a pre-release
+    `latest`, `2.0.0-rc.1`, only what comes before it: not `2.0.0`)
     published at least `min_age_days` ago (from `npm view`'s `time`).
-    With none old enough, or no publish time, the candidate is listed as
-    not loadable, saying why;
-  - its description, licence, and repository, marked "claimed by the
-    package" (nothing checks it); whether a provenance attestation is
-    published with the version (npm checks one at install with
-    `npm audit signatures`; yobuild does not);
-  - weekly downloads, from npm's downloads API only when the registry is
-    `registry.npmjs.org`, else "unknown";
+    With none old enough, no `latest` tag, no list of versions, or a
+    publish time missing or unreadable, the candidate is listed as not
+    loadable, saying which. npm answering a `versions` or `time` of
+    another shape is npm failing for that candidate, not "no version";
+  - its description, licence (`license`, or the older `licenses` list),
+    and repository, marked "claimed by the package" (nothing checks it);
+    whether a provenance attestation is published with the version
+    ("unknown" when npm gives no `dist`). Published is not verified:
+    neither yobuild nor `npm install` checks it (`npm audit signatures`
+    does, when someone runs it);
+  - weekly downloads, from npm's downloads API only when npm's registry
+    is `registry.npmjs.org` (with or without its last `/`), so a private
+    registry's package names never reach npmjs; else "unknown", with why
+    (another registry, or the API's error);
   - when it is in the MCP registry, the arguments and environment
     variables the entry lists as required; from npm only, "not listed".
 - All of it is text the packages' authors wrote. Each field has its line
@@ -3769,8 +3802,13 @@ loads and installs nothing.
   cut to a length with an ellipsis (`clip`, a new helper beside it:
   `one_line` refuses text, it does not cut it). The result says the text
   is unverified.
+- npm failing for every candidate (a registry down, every `npm view`
+  timing out) makes the result an error and a Warning notice, as both
+  sources failing does: not a list of candidates that read as "not
+  loadable".
 - The session remembers each candidate it returned (package, version, the
-  registry entry). `load_plugin` takes only those, so a name the agent
+  registry entry); a later search where npm failed for a package does not
+  replace one with a version to take. `load_plugin` takes only those, so a name the agent
   read on a page, or a look-alike of a real package, is refused unless a
   search found it.
 
@@ -3795,7 +3833,7 @@ order, stopping at the first refusal:
    `args` (`guard`), with no `${…}` at all: nothing fills one. They are the
    server's own and shown whole in the question, an argument naming a path
    outside the agent's folder marked so. A server whose MCP registry entry
-   lists a required environment variable is refused: in step 1 nothing
+   lists a required environment variable is refused: in stage 1 nothing
    hands a loaded server a credential, and it would only start broken. A
    candidate from npm alone lists none; the question says its needs are
    not listed.
@@ -3822,7 +3860,7 @@ order, stopping at the first refusal:
      starts: you will be asked again once they are." and "It runs with your
      rights: this is not a sandbox.";
    - three outcomes, as `host_approval`'s: **Allow** goes on; **Block**
-     refuses and remembers the package (step 1); **unanswered** (nobody
+     refuses and remembers the package (stage 1); **unanswered** (nobody
      there, timed out, dismissed) refuses without remembering it, with a
      Warning notice, and the result tells the agent nobody answered.
 6. **Start it and list its tools.** Started as a manifest's server is
@@ -3916,7 +3954,7 @@ Off unless the manifest says so:
 
 ```toml
 [extend]
-kinds        = ["mcp"]   # what may be found and loaded; step 1: "mcp" only
+kinds        = ["mcp"]   # what may be found and loaded; stage 1: "mcp" only
 max_loads    = 2         # servers kept per session: 1 to 5
 max_attempts = 4         # load_plugin calls per session: 1 to 10
 min_age_days = 7         # whole days, 0 to 365: newer versions are not taken
@@ -3939,6 +3977,8 @@ min_age_days = 7         # whole days, 0 to 365: newer versions are not taken
 - `--locked` is unaffected: nothing loaded goes into the lock.
 - `check` lists both tools as allowed and notes that the agent may load
   MCP servers, up to `max_loads`, with the owner's approval each time.
+  Until `load_plugin` is built (PR 4), it lists `find_plugin` alone and
+  its note says loading is not in this yobuild yet.
   `check --json` gains the agent's `extend` (`kinds`, `maxLoads`,
   `maxAttempts`, `minAgeDays`), and its report version becomes 4.
 
@@ -3976,7 +4016,7 @@ Nothing is written by yobuild.
 
 ### Later steps
 
-- **Step 2: rutis, pi and DSH plugins.** npm search finds them by their
+- **Stage 2: rutis, pi and DSH plugins.** npm search finds them by their
   keywords (`pi-package`, `dsh-plugin`). Loading them is harder:
   - a rutis plugin runs in a Node runtime of its own package, and
     `PluginHost`'s runtimes are fixed at `start`; it needs a host that adds

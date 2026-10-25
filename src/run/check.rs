@@ -459,6 +459,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         installed,
         plan,
         servers,
+        sources,
         notes,
     } = prepare(&manifest, &layout, home.as_deref(), locked, &cwd)?;
     let gate_off = manifest.builtins.gate == GateMode::Off;
@@ -956,6 +957,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             server_tools: &server_tools,
             expected: &expected,
             schemas: &std::sync::Mutex::new(Schemas::new()),
+            sources: sources.as_ref(),
         };
         together(&context, &mut agent).await;
         schemas.extend(context.schemas.lock().unwrap().drain());
@@ -1240,6 +1242,8 @@ struct Together_<'a> {
     expected: &'a [String],
     /// Where the tools' descriptions and schemas go.
     schemas: &'a std::sync::Mutex<Schemas>,
+    /// `find_plugin`'s, with `[extend]`.
+    sources: Option<&'a Sources>,
 }
 
 /// The agent together, through `run`'s own start: a refusal there is a
@@ -1255,6 +1259,7 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         server_tools,
         expected,
         schemas,
+        sources,
     } = *context;
     let root = match Ctx::root() {
         Ok(root) => root,
@@ -1313,8 +1318,8 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         if manifest.builtins.ask_owner {
             seen.extend([schema_of(&AskOwner::new(session.clone()))]);
         }
-        if let Some(extend) = &manifest.extend {
-            let find = FindPlugin::new(session.clone(), extend.clone(), Sources::from_env()?);
+        if let (Some(extend), Some(sources)) = (&manifest.extend, sources) {
+            let find = FindPlugin::new(session.clone(), extend.clone(), sources.clone());
             seen.extend([schema_of(&find)]);
         }
         seen.extend(offered.iter().map(|o| (o.name.clone(), (o.description.clone(), o.parameters.clone()))));
