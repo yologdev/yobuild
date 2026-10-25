@@ -134,6 +134,31 @@ pub(crate) const HINTS: &[Hint] = &[
         pattern: "the plugin host is not running",
         fix: "the plugin host shut down: restart",
     },
+    // `load_plugin`'s refusals the owner can lift (run/load.rs).
+    Hint {
+        id: "load-too-new",
+        scope: Scope::Call,
+        pattern: "is not loadable: no version was published",
+        fix: "every version is newer than [extend] min_age_days: wait, or lower min_age_days (0 turns the guard off)",
+    },
+    Hint {
+        id: "load-max-loads",
+        scope: Scope::Call,
+        pattern: "as many as it may ([extend] max_loads",
+        fix: "raise [extend] max_loads (up to 5) and restart, or add the server you need to agent.toml as an [[mcp]] entry",
+    },
+    Hint {
+        id: "load-max-attempts",
+        scope: Scope::Call,
+        pattern: "calls are spent ([extend] max_attempts",
+        fix: "raise [extend] max_attempts (up to 10) and restart",
+    },
+    Hint {
+        id: "load-name-in-use",
+        scope: Scope::Call,
+        pattern: "is in use by another plugin or server: pass another `name`",
+        fix: "the agent can pass another `name`; or rename the manifest's entry of that name",
+    },
     // Refused at start (check, run, and plugins stopping later).
     Hint {
         id: "shadowed-builtin",
@@ -355,6 +380,27 @@ mod tests {
                 Scope::Call,
                 "the plugin host is not running (shut down, disposed or restarted since the bridge was installed)".into(),
                 "host-down-call",
+            ),
+            // run/load.rs: `limits` and `name`, as `execute` returns them.
+            (
+                Scope::Call,
+                "load_plugin refused it: young is not loadable: no version was published 7 or more days ago (the newest, 1.0.0, on 2026-10-24) (min_age_days is 7)".into(),
+                "load-too-new",
+            ),
+            (
+                Scope::Call,
+                "load_plugin refused it: this session has loaded 2 servers, as many as it may ([extend] max_loads 2)".into(),
+                "load-max-loads",
+            ),
+            (
+                Scope::Call,
+                "load_plugin refused it: this session's load_plugin calls are spent ([extend] max_attempts 4)".into(),
+                "load-max-attempts",
+            ),
+            (
+                Scope::Call,
+                "load_plugin refused it: the name \"eslint\" is in use by another plugin or server: pass another `name` (letters, digits, `-`, `_`)".into(),
+                "load-name-in-use",
             ),
             // yobuild: run/check.rs, run.rs, frontend/host.rs.
             (

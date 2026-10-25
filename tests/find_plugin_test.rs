@@ -337,7 +337,7 @@ fn a_registry_that_is_not_https_is_refused_before_anything_starts() {
 }
 
 #[test]
-fn check_lists_find_plugin_as_allowed_and_says_what_extend_lets_the_agent_do() {
+fn check_lists_both_tools_as_allowed_and_says_what_extend_lets_the_agent_do() {
     let dir = project("[]");
     let out = Command::new(env!("CARGO_BIN_EXE_yobuild"))
         .args(["check", "agent.toml", "--json"])
@@ -361,6 +361,17 @@ fn check_lists_find_plugin_as_allowed_and_says_what_extend_lets_the_agent_do() {
         .find(|t| t["name"] == "find_plugin")
         .expect("find_plugin listed");
     assert_eq!(find["kind"], "allowed");
+    let load = agent["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "load_plugin")
+        .expect("load_plugin listed");
+    assert_eq!(load["kind"], "allowed");
+    assert!(
+        load["parameters"]["properties"]["package"].is_object(),
+        "{load:#}"
+    );
     assert!(
         find["parameters"]["properties"]["need"].is_object(),
         "{find:#}"

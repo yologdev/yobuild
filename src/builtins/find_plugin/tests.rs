@@ -32,6 +32,13 @@ fn times_read_as_npm_writes_them_and_days_said_back() {
         day(seconds("2024-02-29T23:59:59.999Z").unwrap()),
         "2024-02-29"
     );
+    // npm's `--before`, to the second, as `seconds` reads it back.
+    assert_eq!(
+        iso(seconds("2026-10-16T17:04:59.463Z").unwrap()),
+        "2026-10-16T17:04:59Z"
+    );
+    assert_eq!(iso(0), "1970-01-01T00:00:00Z");
+    assert_eq!(seconds(&iso(951_868_799)), Some(951_868_799));
     for bad in [
         "2026-10-16", "2026-13-01T00:00:00Z", "2026-10-16T17:04:59", "soon",
     ] {
@@ -356,6 +363,7 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
         failed: vec!["MCP registry: HTTP 503".into()],
         candidates: vec![
             Candidate {
+                need: "lint".into(),
                 package: "lint-mcp".into(),
                 version: Ok("1.2.0".into()),
                 registry_name: None,
@@ -370,6 +378,7 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
                 required_args: None,
             },
             Candidate {
+                need: "lint".into(),
                 package: "new-mcp".into(),
                 version: Err("no version was published 7 or more days ago (the newest, 0.1.0, on 2026-10-24)".into()),
                 registry_name: None,
@@ -533,6 +542,7 @@ fn tool() -> (FindPlugin, crate::frontend::Driver) {
 
 fn candidate_of(package: &str, version: Result<&str, &str>) -> Candidate {
     Candidate {
+        need: "lint".into(),
         package: package.into(),
         version: version.map(String::from).map_err(String::from),
         registry_name: None,

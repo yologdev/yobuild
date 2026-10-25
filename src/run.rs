@@ -17,6 +17,7 @@ pub(crate) mod allowed;
 pub mod check;
 pub(crate) mod expect;
 pub(crate) mod host;
+pub(crate) mod load;
 pub(crate) mod measure;
 pub mod plugin_log;
 pub(crate) mod plugins;
@@ -224,6 +225,9 @@ pub struct Ended {
     pub error: Option<String>,
     pub notices: Vec<(NoticeLevel, String)>,
     pub agent: Option<Agent>,
+    /// The servers the agent loaded this session and the `[[mcp]]` blocks
+    /// that would keep them (`[extend]`), to write once the session ends.
+    pub loaded: Option<String>,
 }
 
 /// Runs the agent: until the frontend ends the session (terminal; an error
@@ -251,6 +255,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         addr,
         layout,
         scripted,
+        home,
         ..
     } = options;
     let options_scripted = scripted.is_some();
@@ -347,9 +352,36 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     if let Some(ask) = &ask_owner {
         tools.add(AskOwner::TOOL, vec![Box::new(ask.clone())]);
     }
+    // What the agent loads this session (design §14): offered from the next
+    // turn, each tool asking.
+    let loaded = load::Loaded::default();
+    let files = load::Files {
+        manifest: crate::install::file_name(&manifest.path),
+        lock: crate::install::file_name(&crate::install::lock_path(&manifest)),
+    };
     if let (Some(extend), Some(sources)) = (&manifest.extend, &checked.sources) {
+        // Loaded tools ask only through the gate: the manifest refuses
+        // `[extend]` with `gate = "off"`, and this keeps that true here.
+        if judge.is_none() {
+            return Err(
+                "[extend] needs the gate (`gate = \"off\"` would let loaded tools run unasked)"
+                    .into(),
+            );
+        }
         let find = FindPlugin::new(session.clone(), extend.clone(), sources.clone());
+        let load = load::LoadPlugin::new(
+            session.clone(),
+            files.clone(),
+            &manifest,
+            extend.clone(),
+            find.clone(),
+            loaded.clone(),
+            once,
+            home.clone(),
+            &cwd,
+        );
         tools.add(FindPlugin::TOOL, vec![Box::new(find)]);
+        tools.add(load::LoadPlugin::TOOL, vec![Box::new(load)]);
     }
     for server in &manifest.mcp {
         let found = mcp(server, &checked.servers[&server.name]).await?;
@@ -370,6 +402,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // The session's id, for logs (a label is informational in yoagent).
     .with_run_label(session.id())
     .with_tools(tools.list)
+    .with_tool_source(loaded.clone())
     .with_execution_limits(limits(&manifest))
     .with_extension({
         // A plugin that is the approval policy: no run goes on unguarded —
@@ -393,7 +426,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         adapters,
         own,
     );
-    if let Some(gate) = judge.map(|g| agent_gate(g, &manifest, offered)) {
+    let asked = {
+        let loaded = loaded.clone();
+        Arc::new(move |tool: &str| loaded.asks(tool)) as crate::builtins::AskedCheck
+    };
+    if let Some(gate) = judge.map(|g| agent_gate(g, &manifest, offered).with_asked(asked)) {
         agent = agent.with_extension(gate);
         // A plugin's allowed tools, checked once its tools are offered.
         let names: Vec<(String, String)> = manifest
@@ -524,6 +561,14 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                         }
                     }
                 }
+                // A loaded server found gone: its tools leave at the next turn.
+                for (server, why) in loaded.stopped() {
+                    tracing::error!("the loaded MCP server {server} stopped: {why}");
+                    session.notice(
+                        NoticeLevel::Error,
+                        format!("The loaded MCP server `{server}` stopped: {why}"),
+                    );
+                }
                 if terminal && !host.is_running(ui) {
                     break End::UiGone;
                 }
@@ -558,7 +603,18 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         }
     };
     drop(served);
-    let ended = finish(seen, watching, agent, once, interrupted).await;
+    let mut ended = finish(seen, watching, agent, once, interrupted).await;
+    // However it ended: what was loaded, and how to keep it (nothing is
+    // written). Each was said as a notice when it was kept; the binary
+    // writes this once the runtimes have stopped (the terminal UI may hold
+    // the terminal until then), and on an error it is written here.
+    loaded.stopped();
+    let kept = loaded.kept();
+    loaded.close().await;
+    ended.loaded = (!kept.is_empty()).then(|| load::kept_text(&kept, &files));
+    if let (Some(_), Some(text)) = (&failure, &ended.loaded) {
+        eprintln!("{text}");
+    }
     match failure {
         Some(failure) => Err(match ended.outcome {
             Some(outcome) => format!(
@@ -606,7 +662,7 @@ fn gate(
         gate = gate.with_allowed_tools([AskOwner::TOOL]);
     }
     if manifest.extend.is_some() {
-        gate = gate.with_allowed_tools([FindPlugin::TOOL]);
+        gate = gate.with_allowed_tools([FindPlugin::TOOL, load::LoadPlugin::TOOL]);
     }
     Some(gate)
 }
@@ -1471,6 +1527,7 @@ async fn finish(
         error,
         notices: seen.notices,
         agent,
+        loaded: None,
     }
 }
 
@@ -2887,6 +2944,14 @@ mod tests {
         let extend = manifest(dir.path(), "[extend]\n");
         let judge = gate(&extend, &session, &project, None).unwrap();
         assert!(find(&judge), "find_plugin is allowed with [extend]");
+        let load = |gate: &Gate| {
+            gate.check(load::LoadPlugin::TOOL, &serde_json::json!({}))
+                .question()
+                .is_none()
+        };
+        assert!(load(&judge), "load_plugin is allowed with [extend]");
+        let neither = gate(&neither, &session, &project, None).unwrap();
+        assert!(!load(&neither), "and asks without it");
         let off = manifest(dir.path(), "[builtins]\ngate = \"off\"\n");
         assert!(gate(&off, &session, &project, None).is_none());
     }

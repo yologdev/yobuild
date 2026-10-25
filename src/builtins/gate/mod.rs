@@ -141,6 +141,10 @@ pub struct Gate {
 /// → whether the tool that would run is one the caller allows.
 pub type OfferedCheck = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
+/// Tools that always ask, by name, whatever else frees them: those of a
+/// server the agent loaded this session (design §14).
+pub type AskedCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 impl Gate {
     /// Asks through `session`; relative paths are against `cwd` (made
     /// absolute). [`READ_ONLY_TOOLS`] are free.
@@ -155,6 +159,7 @@ impl Gate {
                 scratch: None,
                 free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
                 allowed_if: None,
+                asked: None,
                 created: Arc::default(),
             }),
             pending: Arc::default(),
@@ -188,12 +193,21 @@ impl Gate {
         self.change(|rules| rules.allowed_if = Some((names, offered)))
     }
 
+    /// Makes every tool `asked` names ask, call by call, before any other
+    /// rule (a loaded server's tools: the owner's yes to the load is not
+    /// one to each call), its question saying so. Replaces an earlier
+    /// check rather than adding to it.
+    pub fn with_asked(self, asked: AskedCheck) -> Self {
+        self.change(|rules| rules.asked = Some(asked))
+    }
+
     fn change(self, edit: impl FnOnce(&mut Rules)) -> Self {
         let mut rules = Rules {
             start: self.rules.start.clone(),
             scratch: self.rules.scratch.clone(),
             free_tools: self.rules.free_tools.clone(),
             allowed_if: self.rules.allowed_if.clone(),
+            asked: self.rules.asked.clone(),
             created: self.rules.created.clone(),
         };
         edit(&mut rules);
@@ -360,6 +374,8 @@ struct Rules {
     /// Tools free only when the check says the one that would run is
     /// allowed (`with_tools_allowed_if`).
     allowed_if: Option<(HashSet<String>, OfferedCheck)>,
+    /// Tools that always ask ([`Gate::with_asked`]).
+    asked: Option<AskedCheck>,
     /// Files the agent made this session, as the files they were
     /// ([`Identity`]): it may overwrite or delete them while they still are.
     /// Shared by every clone of the gate.
@@ -380,6 +396,11 @@ impl Rules {
             details: pretty(args),
         };
         let free = |creates: Vec<PathBuf>| Check::Free { creates };
+        if self.asked.as_ref().is_some_and(|asked| asked(tool)) {
+            return ask(format!(
+                "Run `{tool}`, a tool of a server loaded this session?"
+            ));
+        }
         match tool {
             "bash" => {
                 let Some(command) = args["command"].as_str() else {

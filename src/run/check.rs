@@ -576,8 +576,8 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     agent_notes.extend(super::proxy_note(&manifest, std::env::vars_os()));
     if let Some(extend) = &manifest.extend {
         agent_notes.push(format!(
-            "[extend]: the agent may search the MCP registry and npm for MCP servers (`find_plugin`, versions published {} or more days ago); loading one (`load_plugin`, with the owner's approval each time) is not in this yobuild yet",
-            extend.min_age_days
+            "[extend]: the agent may search the MCP registry and npm for MCP servers (`find_plugin`, versions published {} or more days ago) and load up to {} a session (`load_plugin`, in {} calls): each with the owner's approval before it starts and again with its tools, which all ask, call by call; nothing is written to the manifest",
+            extend.min_age_days, extend.max_loads, extend.max_attempts
         ));
     }
     // An entry's own code reads a variable it does not get, or its grant
@@ -1320,7 +1320,22 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         }
         if let (Some(extend), Some(sources)) = (&manifest.extend, sources) {
             let find = FindPlugin::new(session.clone(), extend.clone(), sources.clone());
-            seen.extend([schema_of(&find)]);
+            let files = super::load::Files {
+                manifest: String::new(),
+                lock: String::new(),
+            };
+            let load = super::load::LoadPlugin::new(
+                session.clone(),
+                files,
+                manifest,
+                extend.clone(),
+                find.clone(),
+                super::load::Loaded::default(),
+                false,
+                None,
+                cwd,
+            );
+            seen.extend([schema_of(&find), schema_of(&load)]);
         }
         seen.extend(offered.iter().map(|o| (o.name.clone(), (o.description.clone(), o.parameters.clone()))));
         schemas.lock().unwrap().extend(seen);
@@ -1330,6 +1345,7 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         }
         if manifest.extend.is_some() {
             own.insert(FindPlugin::TOOL.to_owned());
+            own.insert(super::load::LoadPlugin::TOOL.to_owned());
         }
         own.extend(server_tools.iter().map(|t| t.name.clone()));
         let adapters = Adapters {
@@ -1364,6 +1380,7 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         }
         if manifest.extend.is_some() {
             tools.push(Tool::new(FindPlugin::TOOL, ToolKind::Allowed));
+            tools.push(Tool::new(super::load::LoadPlugin::TOOL, ToolKind::Allowed));
         }
         tools.extend(server_tools.iter().cloned());
         for Offer { name, owner, .. } in &offered {

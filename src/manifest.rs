@@ -1868,11 +1868,37 @@ fn values(raw: BTreeMap<String, Spanned<String>>) -> Result<BTreeMap<String, Val
 /// A stdio server's arguments: a value after a flag named like a secret
 /// (`--token X`, `--api-key=X`) is that secret.
 fn arguments(raw: Vec<Spanned<String>>) -> Result<Vec<Value>, Located> {
+    guarded_arguments(raw.into_iter().map(|arg| (arg.span(), arg.into_inner())))
+}
+
+/// The arguments the agent gives a server it loads (`load_plugin`, design
+/// §14): as a manifest's server's `args` are guarded, with no `${…}` at
+/// all, since nothing fills one in, and no control character (the block
+/// that keeps the server is TOML, whose strings take none unescaped, and
+/// the question shows each argument on one line).
+pub(crate) fn loaded_arguments(args: &[String]) -> Result<(), String> {
+    if let Some(arg) = args.iter().find(|a| a.chars().any(char::is_control)) {
+        return Err(format!(
+            "argument {arg:?} holds a control character: an argument is one line of text"
+        ));
+    }
+    let values = guarded_arguments(args.iter().map(|a| (0..0, a.clone()))).map_err(|(_, m)| m)?;
+    match values.iter().find(|v| !v.references().is_empty()) {
+        Some(v) => Err(format!(
+            "argument {:?} refers to a variable: nothing fills one in for a loaded server",
+            v.as_str()
+        )),
+        None => Ok(()),
+    }
+}
+
+/// [`arguments`] of `(place, text)` pairs.
+fn guarded_arguments(
+    raw: impl IntoIterator<Item = (std::ops::Range<usize>, String)>,
+) -> Result<Vec<Value>, Located> {
     let mut out = Vec::new();
     let mut flag: Option<String> = None;
-    for arg in raw {
-        let span = arg.span();
-        let text = arg.into_inner();
+    for (span, text) in raw {
         let value = Value::new(text.clone()).map_err(|m| (span.clone(), m))?;
         let name = match (text.strip_prefix('-'), flag.take()) {
             (Some(option), _) => {

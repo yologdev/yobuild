@@ -3818,19 +3818,28 @@ order, stopping at the first refusal:
    `--once` the result says so and nothing is counted). No other load in
    progress (two at once: the second is refused, "another load is in
    progress"). The package at that version among this session's
-   candidates, and loadable. Not loaded already, and not refused or
-   blocked this session (any version). `max_attempts` not reached; this
-   call then counts as one. `max_loads` not reached.
+   candidates, and loadable. Not loaded already (one that stopped is said
+   so: it is not loaded again this session), and not blocked by the owner
+   this session (any version; other refusals, nobody answering among
+   them, are not remembered). `max_attempts` not reached; this call then
+   counts as one, whatever refuses it after. `max_loads` not reached (a
+   server that stopped still counts). A call whose arguments are not of
+   these shapes is refused before any of this, and not counted.
 2. **The name.** `name` if given; else the package's name without its
-   scope, without a leading `server-` or `mcp-server-` or a trailing
-   `-mcp` or `-mcp-server`, and, when nothing is left (`@eslint/mcp`), the
-   scope without `@` (`eslint`). It must be a manifest name (letters,
-   digits, `-_.`; no `__`), short enough that `<name>__<tool>` can be a
-   tool's name, and not the name of any of the manifest's plugins or
-   servers or of a server already loaded: otherwise refused, asking the
-   agent to pass another `name`. Its tools are `<name>__<tool>`.
+   scope, without a leading `server-` or `mcp-server-` and a trailing
+   `-mcp` or `-mcp-server`; when nothing is left, or only `mcp`, `server`
+   or `mcp-server` (`@eslint/mcp`), the scope without `@` (`eslint`);
+   unscoped with nothing left, the package's name as it is. It takes
+   letters, digits, `-` and `_` (not the `.` a manifest's name may hold:
+   a tool's name takes none), no `__` and no `_` at its end (`a_` with a
+   tool `_x` would read as `a` with `__x`), short enough that
+   `<name>__<tool>` can be a tool's name, and not the name of any of the
+   manifest's plugins or servers or of a server already loaded: otherwise
+   refused, asking the agent to pass another `name`. Its tools are
+   `<name>__<tool>`.
 3. **What it is handed.** `args` pass the manifest's rule for a server's
-   `args` (`guard`), with no `${…}` at all: nothing fills one. They are the
+   `args` (`guard`), with no `${…}` at all (nothing fills one) and no
+   control character (the block that keeps it is TOML). They are the
    server's own and shown whole in the question, an argument naming a path
    outside the agent's folder marked so. A server whose MCP registry entry
    lists a required environment variable is refused: in stage 1 nothing
@@ -3842,14 +3851,17 @@ order, stopping at the first refusal:
    every package in its tree, not only the top one, was published that
    long ago (with `min_age_days = 0`, no `--before`); installed as
    `install` installs a set (`--ignore-scripts`, the kept npm settings),
-   in the same cache, with a 5-minute limit per npm call. Its lock is
-   kept with the session, not beside the manifest (`install` gains a set
-   that takes its lock's place as an argument, without `lock_beside`). The
-   program is found as `bin_of` finds a manifest server's: one `bin`, or
-   the one named like the package; several and none so named is refused,
-   naming them. Then what is read without running it: the install scripts
-   it would have run (`install_scripts`) and what its code reads that it
-   would not get (`reads_notes`).
+   in the same cache, with a 5-minute limit per npm call
+   (`install::install_one`). Its lock is resolved for this load only and
+   written nowhere (no `lock_beside`). The program is found as `bin_of`
+   finds a manifest server's: one `bin`, or the one named like the
+   package; several and none so named is refused (`load_plugin` takes no
+   `bin`). Then what is read without running it, off the async threads:
+   the install scripts it would have run (the packages it brings with
+   npm's `hasInstallScript`) and what its code reads, set here, that it
+   would not get (`environment::names_read`: outside the kept set, or a
+   credential), with what the scan missed (a limit, links, no code found)
+   said in the question, not taken for "reads nothing".
 5. **Ask the owner: start it?** An Allow/Block question through
    `Session::ask` with `UI_TIMEOUT` (300 s), as the gate asks:
    - title: `Start the MCP server <package>@<version> as <name>? (asked by
@@ -3864,25 +3876,31 @@ order, stopping at the first refusal:
      there, timed out, dismissed) refuses without remembering it, with a
      Warning notice, and the result tells the agent nobody answered.
 6. **Start it and list its tools.** Started as a manifest's server is
-   (`launch`: the kept environment, `env -u`), owned by `Loaded` (below);
-   `initialize` and `tools/list` within 30 seconds each. `check`'s MCP
-   step judges the list: no tools, or a prefixed name a model cannot take,
-   stops the process and refuses it. A start that fails is refused with
-   its error (the server's first stderr lines). The list is fixed from
-   here: a `list_changed` from the server is ignored.
+   (`run::without`: the kept environment, `env -u`), owned by `Loaded`
+   (below); `initialize` and `tools/list` within 30 seconds each. The list
+   is judged as `check`'s MCP step judges a manifest server's: no tools, a
+   prefixed name a model cannot take, or a tool listed twice stops the
+   process and refuses it. A start that fails is refused with yoagent's
+   words for it (its exit status and last stderr, the wrapper the kept
+   environment starts it through not named), an Error notice. The list is
+   fixed from here: a `list_changed` from the server is ignored.
 7. **Ask the owner: keep it?** A second Allow/Block question, `Keep the
    MCP server <name>? It offers: <tools>`, the details each tool's
    description (its own claim) and parameters. Allow adds the tools to
    `Loaded`, and the result names them. Block stops it and remembers the
-   package; unanswered stops it without remembering. The process the owner
-   allows is the one that runs: there is no second start.
+   package; unanswered stops it without remembering (both a Warning, as
+   at the first question). The process the owner allows is the one that
+   runs: there is no second start.
 
-Every refusal is the tool's result, marked `is_error`, and a Warning
-notice to the owner ("The agent's plugin `x` was refused: …"), so a
+Every refusal (a malformed call's too) is the tool's result, marked
+`is_error`, and a Warning notice to the owner ("The agent's plugin `x`
+was refused: …"), so a
 refused plugin is shown never loading. A refusal with a fix the owner can
 make (`min_age_days`, `max_loads`, `max_attempts`, a name in use) has a
-row in `hints.rs`, and so in `failures.md`. A failure after the first
-Allow (a start that fails, a bad tool list) is an Error notice.
+row in `hints.rs`, and so in `failures.md`. The server failing after the
+first Allow (a start that fails, a bad tool list) is an Error notice; the
+owner's Block or silence at the second question, or a run stopped
+meanwhile, a Warning.
 
 ### How the tools reach the agent
 
@@ -3919,9 +3937,11 @@ agent's own tools, then earlier sources, then extensions' tools, so a
 loaded tool loses to the built-ins and the manifest's servers and wins
 over a pi, DSH or rutis plugin's tool of the same name. Step 2's naming
 makes the first two impossible; the third is rare (a plugin's tool named
-`x__y`). yoagent only logs a collision, so `Loaded` checks, at the next
-`before_model`, that each of its tools was offered, and one that was not
-is a Warning notice naming it.
+`x__y`), and there the loaded tool is the one offered (yoagent logs the
+plugin's it dropped). So every tool `Loaded` holds is offered: there is
+nothing to check at `before_model`. (The first draft had `Loaded` check
+that its tools were offered; built, it was seen that no case leaves one
+out.)
 
 ### The gate and the loaded tools
 
@@ -3929,21 +3949,40 @@ A loaded server's tools all **ask**, call by call: the owner's Allow on
 the load is not an `allow` list, and the descriptions a server gives its
 tools are its own claims (MCP's `readOnlyHint` included). The gate asks
 every tool in `Loaded` by membership, whatever its name, not by a name it
-does not know.
+does not know, before any rule that could free it (`Gate::with_asked`),
+with a question of its own: "Run `x__y`, a tool of a server loaded this
+session?". A stopped server's tools stay asked: freed by name, a
+plugin's tool of that name could then run unasked. (A call to one after
+its server stopped is asked, then not found: the gate judges before
+yoagent looks the tool up.) The gate is what makes them ask, so `run`
+refuses `[extend]` without it, as the manifest does with `gate = "off"`.
 
 ### Lifetime
 
-- `Loaded` owns the processes and is kept in `Started`. Every way a
-  session ends stops them: the driver returning, Ctrl+C, a failed start,
-  the terminal UI stopping (each child `kill_on_drop`, its client closed).
+- `Loaded` owns the processes; `run` holds it for the session and stops
+  them at its end (`Loaded::close`), however it ended: the driver
+  returning, Ctrl+C, a failed start, the terminal UI stopping (each child
+  is also `kill_on_drop`). A server the owner does not keep, or that fails
+  to start, is stopped at once.
 - A reset keeps them: they are the session's, as its plugins are.
-- A server that stops mid-session: the watcher's tick sees its process
-  gone, an Error notice says so ("The loaded MCP server `x` stopped: …"),
-  and it leaves `Loaded` (its generation bumped). It still counts toward
-  `max_loads`.
-- A run aborted mid-load stops the load where it is: npm killed, the
-  set's `.partial-` folder removed as `install` removes one, an open
-  question withdrawn, a started process stopped. Nothing is remembered.
+- A server that stops mid-session: its tools leave `Loaded`'s list and
+  its generation moves the moment it is found gone, so they are gone from
+  the next turn; the watcher's tick then says so, an Error notice ("The
+  loaded MCP server `x` stopped: it exited with …; last stderr: …"), and
+  marks it stopped (the end of the session says so beside its block). It
+  still counts toward `max_loads`, and is not loaded again this session.
+  yoagent 0.25.14 keeps the server's process to itself, so yobuild sees a
+  death at the next call: a transport of its own around yoagent's stdio
+  one notes a call whose output closed (it died during the call) or whose
+  input would not take it (it had died while idle: "it no longer reads
+  its input"). yoagent has been asked for a check that does not wait for
+  a call (`McpClient::exited()`, an exit watch the transport hands the
+  client when it is built); the tick will use it once it ships.
+- A run aborted mid-load stops the load where it is: npm killed (and no
+  later npm call started), the set's `.partial-` folder removed as
+  `install` removes one, an open question withdrawn, a started process
+  stopped. Nothing is remembered, but the call counted toward
+  `max_attempts`; no load is left "in progress".
 - Each step has its own limit (15 s a source, 5 min an npm call, 30 s to
   start and list, `UI_TIMEOUT` a question), and all of them sit inside the
   run's `max_minutes`.
@@ -3977,8 +4016,7 @@ min_age_days = 7         # whole days, 0 to 365: newer versions are not taken
 - `--locked` is unaffected: nothing loaded goes into the lock.
 - `check` lists both tools as allowed and notes that the agent may load
   MCP servers, up to `max_loads`, with the owner's approval each time.
-  Until `load_plugin` is built (PR 4), it lists `find_plugin` alone and
-  its note says loading is not in this yobuild yet.
+  (Until `load_plugin` was built, in PR 4, it listed `find_plugin` alone.)
   `check --json` gains the agent's `extend` (`kinds`, `maxLoads`,
   `maxAttempts`, `minAgeDays`), and its report version becomes 4.
 
@@ -3997,22 +4035,27 @@ min_age_days = 7         # whole days, 0 to 365: newer versions are not taken
 ### When the session ends
 
 `main.rs` writes, to stderr, after the session ends however it ended
-(Ctrl+C too, when no notice could still reach a frontend):
+(Ctrl+C too, when no notice could still reach a frontend), once the
+plugin runtimes have stopped — the terminal UI may hold the terminal
+until then (`Ended::loaded`; when `run` itself fails, `run` writes it):
 
 ```text
-Loaded this session: @eslint/mcp@0.3.15 as eslint (tools: lint-files). To keep it, add:
+Loaded this session: @eslint/mcp@0.3.15 as eslint (tools: lint-files). To keep it, add to agent.toml:
 
 [[mcp]]
 name = "eslint"
 npm  = "@eslint/mcp@0.3.15"
 # allow = ["lint-files"]   # tools that would run without asking
+
+The next run resolves its dependencies again (the lock's `mcp` set, without the age limit) and writes agent.lock, which --locked needs.
 ```
 
-with its `args` when it had any. A session that ends normally also sends
-it as an Info notice. It adds that the next run resolves the server's
-dependencies again (the lock's `mcp` set, without `--before`), so the
-first run after adding it writes `agent.lock`, which `--locked` needs.
-Nothing is written by yobuild.
+with its `args` when it had any, the manifest's and its lock's own names
+(`handoff.toml`, `handoff.lock`), and a server that stopped marked so
+(`tools: lint-files, stopped this session: …`). The same text is an Info
+notice the moment the owner keeps the server ("The agent loaded … for
+this session."): once the session ends, no frontend is left to hear
+one. Nothing is written by yobuild.
 
 ### Later steps
 
@@ -4031,24 +4074,44 @@ Nothing is written by yobuild.
 
 ### Tests
 
+As built (PR 4), each named where it lives:
+
 - The sources are stubbed: an axum server in the tests answers the MCP
-  registry (`YOBUILD_MCP_REGISTRY`) and npm's registry (`npm_config_registry`,
-  a kept setting), so no test reaches the network. Packages come from a
-  seeded `mcp` set.
-- `run_test`, through the page: a candidate found, allowed twice, its
-  tool called (and asking); each question's Block (remembered) and
-  unanswered (not remembered, a Warning); a package no search returned
-  refused; `--once` refused; a name in use refused, and taken with
-  `name`; a server with no tools refused after the first Allow, never
-  offered; a required environment variable; `min_age_days`, and a publish
-  time that cannot be read; `max_loads` and `max_attempts`; two loads at
-  once; one source down (its line, the other's candidates) and both down
-  (an error); a loaded server that dies (an Error notice, its tools
-  gone at the next turn); a run aborted mid-load.
-- `cli_test`: Ctrl+C after a load prints the `[[mcp]]` block on stderr;
-  `[extend]`'s refusals as `line:col: message`.
-- A scripted demo in the gallery (below), run in CI with both questions
-  answered over the page's WebSocket, as `cli_test` does for questions.
+  registry (`YOBUILD_MCP_REGISTRY`) and npm's registry
+  (`npm_config_registry`, a kept setting), so no test reaches the
+  network. For `load_plugin` the stub also serves packages packed in the
+  test with `npm pack` (a small Node MCP server), so the install is the
+  real `npm install --before` and `npm ci`.
+- `tests/load_plugin_test.rs`, the binary through its page:
+  - a candidate allowed twice under a given `name`, its tool offered at the
+    next turn and asking with the loaded tool's own question; a call that
+    kills it (an Error notice, its tools not offered at the next turn); the
+    block on stderr after Ctrl+C, the server marked stopped; no
+    `agent.lock`; its `postinstall` never run, and said in the question;
+    its dependency taken at the version a week old, not its day-old newest;
+    every server it started gone;
+  - unanswered at either question not remembered, Block at either one
+    remembered, a server with no tools refused after the first Allow
+    (an Error notice), each server it started stopped;
+  - a run aborted while npm installs (npm stopped, no `.partial-` folder
+    left) and one aborted while the owner is asked (the question
+    withdrawn), neither leaving a load in progress.
+- Unit tests (`run/load/tests.rs`): every refusal before the install
+  (shapes, not a candidate, not loadable, another version, loaded already
+  and stopped, blocked, `max_attempts`, `max_loads`, two loads at once,
+  `--once`, a name in use or bad, `args` guarded, a required environment
+  variable), the default name, the tool list's judgement, a path outside
+  the folder, the block read back by the manifest, `Loaded` as a tool
+  source and a server found gone (during a call, or dead while idle), the
+  words of a start that fails, several programs, what the scan reads and
+  missed. The gate's `with_asked`, and the hints, in their own tests.
+- `find_plugin_test` (PR 3): one source down and both down, what `check`
+  lists (both tools allowed).
+- Not tested end to end: a publish time that cannot be read (unit tests
+  of `find_plugin`), `min_age_days = 0` (no `--before`), a reset with a
+  server loaded.
+- A scripted demo in the gallery (PR 5, below), run in CI with both
+  questions answered over the page's WebSocket.
 
 ### The demo
 
