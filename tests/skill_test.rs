@@ -79,7 +79,7 @@ fn the_whole_manifest_in_manifest_md_is_one_yobuild_reads() {
     let manifest = Manifest::parse(toml, &dir.join("agent.toml"), dir)
         .unwrap_or_else(|e| panic!("manifest.md's manifest: {e}"));
     // What it shows: three kinds of plugin, a stdio and an HTTP server,
-    // the gate on, a priced model (it sets a budget).
+    // the gate on, a priced model (it sets a budget), `[extend]`.
     let kinds: Vec<&str> = manifest
         .plugins
         .iter()
@@ -96,6 +96,7 @@ fn the_whole_manifest_in_manifest_md_is_one_yobuild_reads() {
     assert_eq!(manifest.mcp[0].name, "files");
     assert_eq!(manifest.builtins.gate, Gate::AllowList);
     assert!(manifest.limits.budget_usd.is_some());
+    assert!(manifest.extend.is_some());
 }
 
 #[test]
@@ -138,7 +139,8 @@ fn manifest_md_names_every_provider_and_key() {
         "max_minutes", "budget_usd", "session_budget_usd", "pi", "dsh", "rutis", "runtime",
         "config", "allow", "policy", "npm", "bin", "url", "args", "env", "headers", "ask_owner",
         "report", "facts", "gate", "scratch", "tools", "host_services", "web", "phone", "terminal",
-        "grants", "workspace", "trust", "wake", "exec",
+        "grants", "workspace", "trust", "wake", "exec", "kinds", "max_loads", "max_attempts",
+        "min_age_days",
     ] {
         let in_toml = text.lines().any(|l| {
             let l = l.trim_start();

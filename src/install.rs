@@ -420,6 +420,11 @@ fn npm_variable_kept(key: &str) -> bool {
 /// Runs npm in `dir`; its stdout. A failure carries npm's message
 /// (`npm_error`).
 pub(crate) fn npm(dir: &Path, args: &[String]) -> Result<String, BoxError> {
+    npm_within(dir, args, NPM_TIME)
+}
+
+/// [`npm`], killed after `limit`.
+pub(crate) fn npm_within(dir: &Path, args: &[String], limit: Duration) -> Result<String, BoxError> {
     let failed = |e: &dyn std::fmt::Display| format!("npm {} in {}: {e}", args[0], dir.display());
     let mut command = std::process::Command::new("npm");
     command
@@ -442,7 +447,7 @@ pub(crate) fn npm(dir: &Path, args: &[String]) -> Result<String, BoxError> {
     };
     let stdout = drain(Box::new(child.stdout.take().expect("piped")));
     let stderr = drain(Box::new(child.stderr.take().expect("piped")));
-    let deadline = Instant::now() + NPM_TIME;
+    let deadline = Instant::now() + limit;
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| failed(&e))? {
             break status;
@@ -450,7 +455,7 @@ pub(crate) fn npm(dir: &Path, args: &[String]) -> Result<String, BoxError> {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(failed(&format!("not done in {} s", NPM_TIME.as_secs())).into());
+            return Err(failed(&format!("not done in {} s", limit.as_secs())).into());
         }
         std::thread::sleep(Duration::from_millis(50));
     };

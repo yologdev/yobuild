@@ -194,6 +194,9 @@ phone = true
             terminal: false
         }
     );
+    // `[extend]` is refused with `gate = "off"`: its keys are read in
+    // `extend_is_off_unless_its_table_is_there_and_alone_takes_the_defaults`.
+    assert_eq!(m.extend, None);
 }
 
 #[test]
@@ -1580,5 +1583,65 @@ fn built_in_plugins_are_named_and_resolved_to_their_files() {
         ),
     ] {
         assert_eq!(error(&with(text)), said, "{text}");
+    }
+}
+
+#[test]
+fn extend_is_off_unless_its_table_is_there_and_alone_takes_the_defaults() {
+    assert_eq!(read(MINIMAL).unwrap().extend, None);
+    let m = read(&with("[extend]\n")).unwrap();
+    assert_eq!(m.extend, Some(Extend::default()));
+    let e = m.extend.unwrap();
+    assert_eq!(e.kinds, vec![ExtendKind::Mcp]);
+    assert_eq!((e.max_loads, e.max_attempts, e.min_age_days), (2, 4, 7));
+    let m = read(&with(
+        "[extend]\nkinds = [\"mcp\"]\nmax_loads = 5\nmax_attempts = 10\nmin_age_days = 0\n",
+    ))
+    .unwrap();
+    let e = m.extend.unwrap();
+    assert_eq!((e.max_loads, e.max_attempts, e.min_age_days), (5, 10, 0));
+}
+
+#[test]
+fn extend_is_refused_out_of_bounds_with_other_kinds_or_with_the_gate_off() {
+    let cases = [
+        ("[extend]\nmax_loads = 0\n", "5:13: [extend] max_loads 0: 1 to 5"),
+        ("[extend]\nmax_loads = 6\n", "5:13: [extend] max_loads 6: 1 to 5"),
+        ("[extend]\nmax_attempts = 11\n", "5:16: [extend] max_attempts 11: 1 to 10"),
+        ("[extend]\nmin_age_days = -1\n", "5:16: [extend] min_age_days -1: 0 to 365"),
+        ("[extend]\nmin_age_days = 366\n", "5:16: [extend] min_age_days 366: 0 to 365"),
+        (
+            "[extend]\nkinds = []\n",
+            "5:9: [extend] kinds is empty: name what may be found (\"mcp\"), or leave out [extend]",
+        ),
+        (
+            "[extend]\nkinds = [\"mcp\", \"pi\"]\n",
+            "5:17: [extend] kinds \"pi\": only \"mcp\" so far; pi plugins come in a later step (design §14)",
+        ),
+        ("[extend]\nkinds = [\"npm\"]\n", "5:10: [extend] kinds \"npm\": only \"mcp\" so far"),
+        ("[extend]\nkinds = [\"mcp\", \"mcp\"]\n", "5:17: [extend] kinds \"mcp\": named twice"),
+        (
+            "[builtins]\ngate = \"off\"\n[extend]\n",
+            "6:1: [extend] with gate = \"off\": a loaded server's tools would run without asking",
+        ),
+    ];
+    for (extra, expected) in cases {
+        assert_eq!(error(&with(extra)), expected, "{extra}");
+    }
+    // Integers only, and no other key.
+    assert!(error(&with("[extend]\nmax_loads = 2.5\n")).starts_with("5:13: "));
+    assert!(error(&with("[extend]\nloads = 2\n")).starts_with("5:1: unknown field `loads`"));
+}
+
+#[test]
+fn a_plugin_may_not_allow_the_tools_extend_brings() {
+    for name in EXTEND_TOOLS {
+        let text = with(&format!(
+            "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\nallow = [\"{name}\"]\n"
+        ));
+        assert_eq!(
+            error(&text),
+            format!("7:10: allow \"{name}\": `[extend]` allows its own; a plugin's tool of that name asks")
+        );
     }
 }

@@ -526,7 +526,7 @@ impl SessionService {
 
 /// `text` with every line break, and every other character `one_line`
 /// refuses, made a space.
-fn flatten(text: &str) -> String {
+pub(crate) fn flatten(text: &str) -> String {
     text.chars()
         .map(
             |c| match c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
@@ -535,6 +535,22 @@ fn flatten(text: &str) -> String {
             },
         )
         .collect()
+}
+
+/// `text` [`flatten`]ed, its runs of spaces made one, trimmed, and cut to
+/// `max` characters with an ellipsis: text from outside (a package's
+/// description) on one line, at a length.
+pub(crate) fn clip(text: &str, max: usize) -> String {
+    let flat = flatten(text);
+    let words: Vec<&str> = flat.split_whitespace().collect();
+    let line = words.join(" ");
+    match line.chars().count() > max {
+        true => {
+            let cut: String = line.chars().take(max.saturating_sub(1)).collect();
+            format!("{}…", cut.trim_end())
+        }
+        false => line,
+    }
 }
 
 impl HostDispatch for SessionService {

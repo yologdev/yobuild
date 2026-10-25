@@ -63,6 +63,12 @@ host_services = false                 # DSH's own services, for DSH plugins that
 web      = true
 phone    = false                      # the web page on the local network, with a link
 terminal = false                      # the terminal UI instead of the web page
+
+[extend]                              # optional: the agent may search for MCP servers it lacks
+kinds        = ["mcp"]                # "mcp" only
+max_loads    = 2                      # 1 to 5
+max_attempts = 4                      # 1 to 10
+min_age_days = 7                      # 0 to 365: newer versions are not taken
 ```
 
 ## The keys
@@ -266,6 +272,19 @@ inside the agent's folder).
 **`[frontend]`**: `web`, `phone` (needs `web`), `terminal` (not with
 `web`). Nothing set: the web page. `yobuild run --web ADDR` sets where it
 listens.
+
+**`[extend]`**: off unless the table is there (empty, it takes the
+defaults). The agent gets `find_plugin(need)`, which the gate allows: it
+searches the MCP registry and npm for MCP servers over stdio and returns
+candidates — each with the version that could be taken (the newest
+release published `min_age_days` or more days ago, default 7) and what
+the packages say of themselves, unverified. It installs and starts
+nothing; loading one (`load_plugin`, with the person's approval each
+time, up to `max_loads` servers and `max_attempts` tries a session) is
+not in this yobuild yet. `kinds` is `["mcp"]` only. Refused with
+`gate = "off"`; a plugin's `allow` may not name `find_plugin` or
+`load_plugin`. `check` lists `find_plugin` as allowed and says what
+`[extend]` lets the agent do.
 
 ## Writing the prompt
 

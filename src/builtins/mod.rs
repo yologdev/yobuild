@@ -16,6 +16,8 @@
 //!   it does not know to be harmless (deleting, discarding or overwriting
 //!   what they have above all); refuses it when nobody answers.
 //! - [`Scratch`]: a private working folder, named to the agent and the gate.
+//! - [`FindPlugin`] (`[extend]`): searches the MCP registry and npm for a
+//!   server the agent lacks; installs and starts nothing.
 //!
 //! `AskOwner`'s question itself ([`AskOwner::ask`], with a validated
 //! [`Question`]) is separate from the tool, so a host service can offer it to
@@ -24,12 +26,14 @@
 
 mod ask_owner;
 mod facts;
+mod find_plugin;
 mod gate;
 mod report;
 mod scratch;
 
 pub use ask_owner::{AskOwner, OpenQuestions, Question};
 pub use facts::Facts;
+pub use find_plugin::{Candidate, FindPlugin, Sources, MCP_REGISTRY, MCP_REGISTRY_ENV};
 pub use gate::{Check, Gate, OfferedCheck, JUDGED_TOOLS, READ_ONLY_TOOLS};
 pub use report::Report;
 pub use scratch::Scratch;

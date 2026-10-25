@@ -47,6 +47,9 @@ pub struct Manifest {
     pub plugins: Vec<Plugin>,
     pub mcp: Vec<Mcp>,
     pub builtins: Builtins,
+    /// `[extend]`: the agent may find plugins (design §14); `None` when
+    /// the manifest has no such table.
+    pub extend: Option<Extend>,
     pub dsh: Dsh,
     pub frontend: Frontend,
 }
@@ -713,6 +716,52 @@ impl Default for Builtins {
     }
 }
 
+/// `[extend]` (design §14): the agent finds plugins (`find_plugin`) and,
+/// with the owner's approval each time, loads them for the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Extend {
+    /// What may be found and loaded: step 1 is MCP stdio servers only.
+    pub kinds: Vec<ExtendKind>,
+    /// Servers kept per session (1 to 5).
+    pub max_loads: u32,
+    /// `load_plugin` calls per session (1 to 10).
+    pub max_attempts: u32,
+    /// Whole days a version must have been published (0 to 365).
+    pub min_age_days: u32,
+}
+
+/// A kind of plugin `[extend]` may find.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExtendKind {
+    /// An MCP server over stdio, from npm.
+    Mcp,
+}
+
+impl ExtendKind {
+    /// Its name in the manifest and in `find_plugin`'s `kind`.
+    pub fn name(self) -> &'static str {
+        match self {
+            ExtendKind::Mcp => "mcp",
+        }
+    }
+}
+
+impl Default for Extend {
+    fn default() -> Self {
+        Self {
+            kinds: vec![ExtendKind::Mcp],
+            max_loads: 2,
+            max_attempts: 4,
+            min_age_days: 7,
+        }
+    }
+}
+
+/// The tool names `[extend]` brings: never another tool's.
+pub const EXTEND_TOOLS: [&str; 2] = ["find_plugin", "load_plugin"];
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Dsh {
@@ -767,6 +816,7 @@ struct Raw {
     mcp: Vec<Spanned<RawMcp>>,
     #[serde(default)]
     builtins: RawBuiltins,
+    extend: Option<Spanned<RawExtend>>,
     #[serde(default)]
     dsh: RawDsh,
     #[serde(default)]
@@ -847,6 +897,15 @@ struct RawBuiltins {
     #[serde(default)]
     scratch: bool,
     tools: Option<Spanned<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawExtend {
+    kinds: Option<Spanned<Vec<Spanned<String>>>>,
+    max_loads: Option<Spanned<i64>>,
+    max_attempts: Option<Spanned<i64>>,
+    min_age_days: Option<Spanned<i64>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1102,6 +1161,16 @@ impl Manifest {
             let m = "allow with gate = \"off\": nothing asks, so there is nothing to allow";
             return Err(located((span, m.into())));
         }
+        let extend = match raw.extend {
+            None => None,
+            Some(raw) => {
+                if builtins.gate == Gate::Off {
+                    let m = "[extend] with gate = \"off\": a loaded server's tools would run without asking";
+                    return Err(located((raw.span(), m.into())));
+                }
+                Some(extend(raw.into_inner()).map_err(located)?)
+            }
+        };
         let frontend = frontend(raw.frontend).map_err(located)?;
 
         Ok(Manifest {
@@ -1112,6 +1181,7 @@ impl Manifest {
             plugins,
             mcp,
             builtins,
+            extend,
             dsh: Dsh {
                 host_services: raw.dsh.host_services,
             },
@@ -1250,7 +1320,7 @@ fn model(raw: &RawAgent) -> Result<Model, Located> {
 
 /// An endpoint the agent sends its key or headers to: https, or http on
 /// this machine (`localhost`, `127.0.0.1`, `[::1]`), with no user in it.
-fn endpoint(text: &str) -> Result<url::Url, String> {
+pub(crate) fn endpoint(text: &str) -> Result<url::Url, String> {
     let url = url::Url::parse(text).map_err(|e| format!("{text:?} is not a URL: {e}"))?;
     if !url.username().is_empty() || url.password().is_some() {
         return Err(format!(
@@ -1981,6 +2051,10 @@ fn allow(
             ))
         } else if plugin && text == "ask_owner" {
             Some("allow \"ask_owner\": the built-in allows its own (`ask_owner = true`); a plugin's tool of that name asks".into())
+        } else if plugin && EXTEND_TOOLS.contains(&text.as_str()) {
+            Some(format!(
+                "allow {text:?}: `[extend]` allows its own; a plugin's tool of that name asks"
+            ))
         } else {
             None
         };
@@ -2047,6 +2121,52 @@ fn builtins(raw: RawBuiltins) -> Result<Builtins, Located> {
         scratch: raw.scratch,
         tools,
     })
+}
+
+fn extend(raw: RawExtend) -> Result<Extend, Located> {
+    let mut extend = Extend::default();
+    if let Some(kinds) = raw.kinds {
+        if kinds.get_ref().is_empty() {
+            let m =
+                "[extend] kinds is empty: name what may be found (\"mcp\"), or leave out [extend]";
+            return Err((kinds.span(), m.into()));
+        }
+        let mut seen = Vec::new();
+        for kind in kinds.into_inner() {
+            let made = match kind.get_ref().as_str() {
+                "mcp" => ExtendKind::Mcp,
+                other @ ("pi" | "dsh" | "rutis") => {
+                    let m = format!("[extend] kinds {other:?}: only \"mcp\" so far; {other} plugins come in a later step (design §14)");
+                    return Err((kind.span(), m));
+                }
+                other => {
+                    let m = format!("[extend] kinds {other:?}: only \"mcp\" so far");
+                    return Err((kind.span(), m));
+                }
+            };
+            if seen.contains(&made) {
+                let m = format!("[extend] kinds {:?}: named twice", made.name());
+                return Err((kind.span(), m));
+            }
+            seen.push(made);
+        }
+        extend.kinds = seen;
+    }
+    let bounded = |raw: Option<Spanned<i64>>, key: &str, low: i64, high: i64, default: u32| {
+        let Some(value) = raw else {
+            return Ok(default);
+        };
+        match *value.get_ref() {
+            n if (low..=high).contains(&n) => Ok(n as u32),
+            n => Err((value.span(), format!("[extend] {key} {n}: {low} to {high}"))),
+        }
+    };
+    extend.max_loads = bounded(raw.max_loads, "max_loads", 1, 5, extend.max_loads)?;
+    extend.max_attempts = bounded(raw.max_attempts, "max_attempts", 1, 10, extend.max_attempts)?;
+    extend.min_age_days = bounded(
+        raw.min_age_days, "min_age_days", 0, 365, extend.min_age_days,
+    )?;
+    Ok(extend)
 }
 
 fn frontend(raw: RawFrontend) -> Result<Frontend, Located> {
