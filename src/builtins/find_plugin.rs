@@ -821,13 +821,14 @@ fn version_to_take(view: &Viewed, min_age_days: u32, now: i64) -> Result<String,
                 "npm gives no publish time for {version}, so its age cannot be told"
             ));
         };
-        match seconds(at) {
-            Some(at) if at <= enough => return Ok((*version).clone()),
-            Some(_) => continue,
-            None => return Err(format!(
-                "npm's publish time for {version}, {:?}, cannot be read, so its age cannot be told",
-                clip(at, 40)
-            )),
+        let Some(at) = seconds(at) else {
+            let at = clip(at, 40);
+            return Err(format!(
+                "npm's publish time for {version}, {at:?}, cannot be read, so its age cannot be told"
+            ));
+        };
+        if at <= enough {
+            return Ok((*version).clone());
         }
     }
     let when = view
