@@ -243,7 +243,7 @@ starts (2026-10-23; a tool's own, `run`).
 **Done when** visualize's chart shows on the page from a sandboxed origin,
 and a plugin's model call is charged to the run's budget.
 
-## M4 — Share (design §13; built 2026-10-24: `yobuild:` built-ins, the runtime sets, `yobuild new`, `yobuild skill install`, the release groundwork, `docs/guide.md`, `docs/use-cases.md`)
+## M4 — Share (done 2026-10-25; design §13; built 2026-10-24: `yobuild:` built-ins, the runtime sets, `yobuild new`, `yobuild skill install`, the release groundwork, `docs/guide.md`, `docs/use-cases.md`; 0.1 released 2026-10-25)
 
 - `yobuild new <folder> [--from <agent>]` (a manifest, prompt and demo to
   edit, or a gallery agent or example; built), `yobuild skill install
@@ -261,6 +261,18 @@ and a plugin's model call is charged to the run's budget.
 runs `yobuild new`, and has a gallery agent running from the docs alone;
 0.1 is tagged (and published, if open question 2 says so) — checked in
 CI by a `fresh-machine` job with the checkout moved out of reach.
+**Done:** 0.1.0 is tagged, on crates.io and on the releases page. On
+2026-10-25 the released macOS arm64 tarball was checked as a newcomer
+would use it, in an empty `HOME` with nothing but Node 24 and npm 11.19:
+- its checksum matched;
+- `skill install` and `new --list` worked;
+- `new research --from web-research`, then `check agent.toml`, gave `ok`;
+- the scripted demo `--once` ran its searches and ended `Completed`;
+- the web page served, and `/ws` refused a request without the token.
+
+Seen there: on Node 24, `dsh-free-search`'s own cache (`node:sqlite`)
+prints Node's `ExperimentalWarning` on stderr. It is harmless, and it
+is the plugin's.
 Later: a docs site, the video re-cut for yobuild, posts.
 
 ## M5 — Agents that extend themselves
@@ -297,7 +309,9 @@ never loading, and a denied approval leaves the agent without the plugin.
    rule for what belongs in Rust: are the five reasons in design §9 (safety, hot
    path, footprint, target, ownership) the right ones, and is "over 5 % of
    a turn" the right threshold?
-7. **Windows.** rutis supports it; the frontend's terminal UI and the
-   tests are Unix-only today. In scope for 0.1?
-8. **Models.** DeepSeek and Claude first? (Any provider in design §2's
-   table runs.) DeepSeek pricing: done (yoagent 0.25.6).
+7. **Windows.** Decided for 0.1: not supported. `run` and `check` say
+   so, and CI keeps it compiling. rutis supports Windows; the terminal UI,
+   the kept environment (`env -u`) and the tests are Unix-only today.
+8. **Models.** Answered by 0.1: any provider yoagent knows runs, and so
+   does a local model. The gallery and the examples use
+   `deepseek/deepseek-flash`. DeepSeek pricing: done (yoagent 0.25.6).
