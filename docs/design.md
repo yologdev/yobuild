@@ -3890,12 +3890,13 @@ the agent reports what it could not do.
 
 1. *How the tools reach the agent.* Recommended (a), a yoagent change;
    (b) works without one, at the cost of a second run.
-2. *Sources.* Recommended: the MCP registry and npm search, both. The MCP
-   registry lists servers others have named as such; npm search finds more
-   of them, and the same search finds pi and DSH packages later.
-3. *`min_age_days` defaulting to 7.* Or 0, leaving it to the owner.
-4. *Loaded tools all ask.* Or an option at the question to let them run
-   unasked for the session.
+2. *Sources.* Decided (2026-10-25): the MCP registry and npm search, both.
+   The MCP registry lists servers others have named as such; npm search
+   finds more of them, and the same search finds pi and DSH packages later.
+3. *`min_age_days`.* Decided (2026-10-25): it defaults to 7, and the owner
+   may set 0.
+4. *Loaded tools.* Decided (2026-10-25): they all ask, call by call. There
+   is no option at the question to let them run unasked.
 
 ### Order of PRs
 
