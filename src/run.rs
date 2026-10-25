@@ -225,6 +225,9 @@ pub struct Ended {
     pub error: Option<String>,
     pub notices: Vec<(NoticeLevel, String)>,
     pub agent: Option<Agent>,
+    /// The servers the agent loaded this session and the `[[mcp]]` blocks
+    /// that would keep them (`[extend]`), to write once the session ends.
+    pub loaded: Option<String>,
 }
 
 /// Runs the agent: until the frontend ends the session (terminal; an error
@@ -352,10 +355,23 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // What the agent loads this session (design §14): offered from the next
     // turn, each tool asking.
     let loaded = load::Loaded::default();
+    let files = load::Files {
+        manifest: crate::install::file_name(&manifest.path),
+        lock: crate::install::file_name(&crate::install::lock_path(&manifest)),
+    };
     if let (Some(extend), Some(sources)) = (&manifest.extend, &checked.sources) {
+        // Loaded tools ask only through the gate: the manifest refuses
+        // `[extend]` with `gate = "off"`, and this keeps that true here.
+        if judge.is_none() {
+            return Err(
+                "[extend] needs the gate (`gate = \"off\"` would let loaded tools run unasked)"
+                    .into(),
+            );
+        }
         let find = FindPlugin::new(session.clone(), extend.clone(), sources.clone());
         let load = load::LoadPlugin::new(
             session.clone(),
+            files.clone(),
             &manifest,
             extend.clone(),
             find.clone(),
@@ -587,14 +603,18 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         }
     };
     drop(served);
-    let ended = finish(seen, watching, agent, once, interrupted).await;
+    let mut ended = finish(seen, watching, agent, once, interrupted).await;
     // However it ended: what was loaded, and how to keep it (nothing is
-    // written). Each was said as a notice when it was kept.
+    // written). Each was said as a notice when it was kept; the binary
+    // writes this once the runtimes have stopped (the terminal UI may hold
+    // the terminal until then), and on an error it is written here.
+    loaded.stopped();
     let kept = loaded.kept();
-    if !kept.is_empty() {
-        eprintln!("{}", load::kept_text(&kept));
-    }
     loaded.close().await;
+    ended.loaded = (!kept.is_empty()).then(|| load::kept_text(&kept, &files));
+    if let (Some(_), Some(text)) = (&failure, &ended.loaded) {
+        eprintln!("{text}");
+    }
     match failure {
         Some(failure) => Err(match ended.outcome {
             Some(outcome) => format!(
@@ -1507,6 +1527,7 @@ async fn finish(
         error,
         notices: seen.notices,
         agent,
+        loaded: None,
     }
 }
 

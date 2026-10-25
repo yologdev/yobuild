@@ -1320,8 +1320,13 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         }
         if let (Some(extend), Some(sources)) = (&manifest.extend, sources) {
             let find = FindPlugin::new(session.clone(), extend.clone(), sources.clone());
+            let files = super::load::Files {
+                manifest: String::new(),
+                lock: String::new(),
+            };
             let load = super::load::LoadPlugin::new(
                 session.clone(),
+                files,
                 manifest,
                 extend.clone(),
                 find.clone(),

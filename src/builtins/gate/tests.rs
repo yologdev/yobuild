@@ -2162,7 +2162,7 @@ fn a_tool_the_asked_check_names_asks_even_when_allowed() {
     let check = |tool: &str| rules.check_in(tool, &json!({}), Some("r"));
     assert_eq!(
         check("eslint__lint-files").question(),
-        Some("Run `eslint__lint-files`?")
+        Some("Run `eslint__lint-files`, a tool of a server loaded this session?")
     );
     assert!(check("eslint__fix").question().is_some());
     assert!(

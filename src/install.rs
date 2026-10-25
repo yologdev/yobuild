@@ -56,7 +56,7 @@ fn lock_beside(manifest_file: &Path) -> PathBuf {
 }
 
 /// A manifest's lock, in its (absolute) folder.
-fn lock_path(manifest: &Manifest) -> PathBuf {
+pub(crate) fn lock_path(manifest: &Manifest) -> PathBuf {
     let name = manifest.path.file_name().unwrap_or_default();
     lock_beside(&manifest.dir.join(name))
 }
@@ -426,19 +426,19 @@ pub(crate) fn npm(dir: &Path, args: &[String]) -> Result<String, BoxError> {
 
 /// [`npm`], killed after `limit`.
 pub(crate) fn npm_within(dir: &Path, args: &[String], limit: Duration) -> Result<String, BoxError> {
-    npm_as(dir, args, &Npm { limit, stop: None })
+    npm_as(dir, args, &NpmRun { limit, stop: None })
 }
 
 /// How npm runs: killed after `limit`, or as soon as `stop` is set (a run
 /// aborted while `load_plugin` installs).
-pub(crate) struct Npm<'a> {
+pub(crate) struct NpmRun<'a> {
     pub limit: Duration,
     pub stop: Option<&'a AtomicBool>,
 }
 
-impl Default for Npm<'_> {
+impl Default for NpmRun<'_> {
     fn default() -> Self {
-        Npm {
+        NpmRun {
             limit: NPM_TIME,
             stop: None,
         }
@@ -446,7 +446,7 @@ impl Default for Npm<'_> {
 }
 
 /// [`npm`], run as `how` says.
-fn npm_as(dir: &Path, args: &[String], how: &Npm) -> Result<String, BoxError> {
+fn npm_as(dir: &Path, args: &[String], how: &NpmRun) -> Result<String, BoxError> {
     let limit = how.limit;
     let failed = |e: &dyn std::fmt::Display| format!("npm {} in {}: {e}", args[0], dir.display());
     let mut command = std::process::Command::new("npm");
@@ -460,6 +460,10 @@ fn npm_as(dir: &Path, args: &[String], how: &Npm) -> Result<String, BoxError> {
         if !npm_variable_kept(&key.to_string_lossy()) {
             command.env_remove(&key);
         }
+    }
+    // Stopped meanwhile (a run aborted between two npm calls): none started.
+    if how.stop.is_some_and(|stop| stop.load(Ordering::Relaxed)) {
+        return Err(failed(&"stopped").into());
     }
     let mut child = command.spawn().map_err(|e| failed(&e))?;
     let drain = |mut from: Box<dyn Read + Send>| {
@@ -637,7 +641,7 @@ fn resolve(
     pins: &BTreeMap<String, String>,
     adapters: &Path,
     extra: &[String],
-    how: &Npm,
+    how: &NpmRun,
 ) -> Result<SetLock, BoxError> {
     let dir = tempfile::tempdir().map_err(|e| format!("a temp folder to resolve in: {e}"))?;
     write(&dir.path().join(".npmrc"), npmrc(set))?;
@@ -947,7 +951,7 @@ fn install_set(
     set: Set,
     entry: &SetLock,
     adapters: &Path,
-    how: &Npm,
+    how: &NpmRun,
 ) -> Result<PathBuf, BoxError> {
     let hash = hash(set, entry, adapters)?;
     let parent = home.join("plugins").join(set.name());
@@ -1005,7 +1009,7 @@ fn make(
     entry: &SetLock,
     adapters: &Path,
     hash: &str,
-    how: &Npm,
+    how: &NpmRun,
 ) -> Result<(), BoxError> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let dependencies = match entry.packages.get("").map(|root| &root["dependencies"]) {
@@ -1077,7 +1081,7 @@ pub(crate) fn remove_old_partials(parent: &Path) {
     }
 }
 
-fn file_name(path: &Path) -> String {
+pub(crate) fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(
         || path.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
@@ -1146,7 +1150,7 @@ pub fn install(
             )
             .into());
         }
-        let entry = resolve(*set, wanted, adapters, &[], &Npm::default())
+        let entry = resolve(*set, wanted, adapters, &[], &NpmRun::default())
             .map_err(|e| format!("resolving the `{}` set: {e}", set.name()))?;
         let verb = match previous {
             Some(_) => "resolved again",
@@ -1164,7 +1168,7 @@ pub fn install(
         lock.write(&path)?;
     }
     for set in pins.keys() {
-        let dir = install_set(&home, *set, &lock.sets[set], adapters, &Npm::default())
+        let dir = install_set(&home, *set, &lock.sets[set], adapters, &NpmRun::default())
             .map_err(|e| format!("installing the `{}` set: {e}", set.name()))?;
         installed.dirs.insert(*set, dir);
     }
@@ -1182,7 +1186,7 @@ pub(crate) fn install_one(
     package: &str,
     version: &str,
     before: Option<&str>,
-    how: &Npm,
+    how: &NpmRun,
 ) -> Result<(PathBuf, Vec<String>), BoxError> {
     let home = match home {
         Some(home) => home.to_path_buf(),
@@ -1861,7 +1865,7 @@ mod tests {
                     Set::Mcp,
                     &entry,
                     Path::new(""),
-                    &Npm::default()
+                    &NpmRun::default()
                 )
                 .unwrap(),
                 dir
@@ -1880,7 +1884,7 @@ mod tests {
             Set::Mcp,
             &entry,
             Path::new(""),
-            &Npm::default(),
+            &NpmRun::default(),
         )
         .unwrap();
         assert!(dir.join("junk").exists());
@@ -1906,7 +1910,7 @@ mod tests {
             Set::Mcp,
             &entry,
             Path::new(""),
-            &Npm::default(),
+            &NpmRun::default(),
         )
         .unwrap_err()
         .to_string();

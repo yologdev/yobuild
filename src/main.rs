@@ -211,6 +211,11 @@ fn start() -> Result<ExitCode, BoxError> {
                         }
                     }
                 }
+                // What the agent loaded, once the runtimes (the terminal
+                // UI among them) have stopped: how to keep it.
+                if let Some(loaded) = &ended.loaded {
+                    eprintln!("{loaded}");
+                }
                 match ended.outcome {
                     Some(RunOutcome::Completed) | None => ExitCode::SUCCESS,
                     Some(_) => ExitCode::FAILURE,

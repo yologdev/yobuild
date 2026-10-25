@@ -33,8 +33,10 @@ const DESCRIPTION_CHARS: usize = 300;
 const SCHEMA_CHARS: usize = 400;
 const DAY: i64 = 24 * 60 * 60;
 
-/// What the owner sees a loaded server as, and what the end of the session
-/// says to keep it.
+/// A server the owner kept this session, as the end of the session says
+/// it. Made only by `load` once both questions were allowed: `name` passed
+/// [`name_problem`] and `tools` [`tools_problem`] (each once, each
+/// `<name>__<tool>` a tool name), which [`Loaded::asks`] relies on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Kept {
     pub name: String,
@@ -43,6 +45,8 @@ pub(crate) struct Kept {
     pub args: Vec<String>,
     /// As the server names them (the agent sees `<name>__<tool>`).
     pub tools: Vec<String>,
+    /// Why it stopped, once it was seen to.
+    pub stopped: Option<String>,
 }
 
 impl Kept {
@@ -71,16 +75,29 @@ impl Kept {
     }
 }
 
+/// The manifest's file and its lock's, as the owner names them
+/// (`agent.toml`, `agent.lock`; `handoff.toml`, `handoff.lock`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Files {
+    pub manifest: String,
+    pub lock: String,
+}
+
 /// What the session loaded, said when it ends (on stderr) and as each is
-/// kept (an Info notice): the `[[mcp]]` blocks that would keep them.
-pub(crate) fn kept_text(kept: &[Kept]) -> String {
+/// kept (an Info notice): the `[[mcp]]` blocks that would keep them, a
+/// server that stopped marked so.
+pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
     let mut text = String::from("Loaded this session: ");
     text.push_str(
         &kept
             .iter()
             .map(|k| {
+                let stopped = match &k.stopped {
+                    Some(why) => format!(", stopped this session: {why}"),
+                    None => String::new(),
+                };
                 format!(
-                    "{}@{} as {} (tools: {})",
+                    "{}@{} as {} (tools: {}{stopped})",
                     k.package,
                     k.version,
                     k.name,
@@ -90,40 +107,56 @@ pub(crate) fn kept_text(kept: &[Kept]) -> String {
             .collect::<Vec<_>>()
             .join("; "),
     );
-    text.push_str(match kept.len() {
-        1 => ". To keep it, add to agent.toml:\n",
-        _ => ". To keep them, add to agent.toml:\n",
-    });
+    let (it, its) = match kept.len() {
+        1 => ("it", "its"),
+        _ => ("them", "their"),
+    };
+    text.push_str(&format!(". To keep {it}, add to {}:\n", files.manifest));
     for k in kept {
         text.push('\n');
         text.push_str(&k.block());
     }
-    text.push_str(match kept.len() {
-        1 => "\nThe next run resolves its dependencies again (the lock's `mcp` set, without the age limit) and writes agent.lock, which --locked needs.",
-        _ => "\nThe next run resolves their dependencies again (the lock's `mcp` set, without the age limit) and writes agent.lock, which --locked needs.",
-    });
+    text.push_str(&format!(
+        "\nThe next run resolves {its} dependencies again (the lock's `mcp` set, without the age limit) and writes {}, which --locked needs.",
+        files.lock
+    ));
     text
 }
 
 /// A server the owner kept, running.
 struct Server {
-    kept: Kept,
+    name: String,
     tools: Vec<Arc<dyn AgentTool>>,
     client: Arc<tokio::sync::Mutex<McpClient>>,
     /// Why it stopped, once a call found it gone ([`Watched`]).
     closed: Arc<Mutex<Option<String>>>,
 }
 
+impl Server {
+    fn is_closed(&self) -> bool {
+        locked(&self.closed).is_some()
+    }
+}
+
+#[derive(Default)]
+struct Lists {
+    /// The servers running (or found gone, until [`Loaded::stopped`]).
+    servers: Vec<Server>,
+    /// Every server kept this session, stopped ones too: never shrinks,
+    /// and holds each server before its tools are offered (one lock).
+    kept: Vec<Kept>,
+}
+
 #[derive(Default)]
 struct Shared {
-    servers: Mutex<Vec<Server>>,
-    /// Every server kept this session, stopped ones too.
-    kept: Mutex<Vec<Kept>>,
-    generation: AtomicU64,
+    lists: Mutex<Lists>,
+    /// Moves on each load, each server found gone ([`Watched`]) and the
+    /// close; only forward.
+    generation: Arc<AtomicU64>,
 }
 
 /// The servers loaded this session, as a tool source: their tools, and a
-/// generation bumped on each load and each server that stops, so yoagent
+/// generation bumped on each load and each server found gone, so yoagent
 /// offers the change from the next turn. Clones share it. Dropped, the
 /// servers are stopped (each `kill_on_drop`).
 #[derive(Clone, Default)]
@@ -137,7 +170,7 @@ impl Loaded {
     /// Whether `tool` is one of a loaded server's (stopped ones too): the
     /// gate asks it, call by call.
     pub fn asks(&self, tool: &str) -> bool {
-        locked(&self.0.kept).iter().any(|k| {
+        locked(&self.0.lists).kept.iter().any(|k| {
             tool.strip_prefix(&k.name)
                 .and_then(|t| t.strip_prefix("__"))
                 .is_some_and(|t| k.tools.iter().any(|own| own == t))
@@ -146,39 +179,50 @@ impl Loaded {
 
     /// Every server kept this session, stopped ones too.
     pub fn kept(&self) -> Vec<Kept> {
-        locked(&self.0.kept).clone()
+        locked(&self.0.lists).kept.clone()
     }
 
-    fn add(&self, server: Server) {
-        locked(&self.0.kept).push(server.kept.clone());
-        locked(&self.0.servers).push(server);
+    /// The generation [`Watched`] moves when it finds its server gone.
+    fn generation_handle(&self) -> Arc<AtomicU64> {
+        self.0.generation.clone()
+    }
+
+    fn add(&self, kept: Kept, server: Server) {
+        let mut lists = locked(&self.0.lists);
+        lists.kept.push(kept);
+        lists.servers.push(server);
         self.0.generation.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// The servers found stopped since the last look, each with why; their
-    /// tools are gone from the next turn.
+    /// The servers found gone since the last look, each with why, taken
+    /// out and marked stopped. Their tools already left the list (the
+    /// generation moved when they were found).
     pub fn stopped(&self) -> Vec<(String, String)> {
-        let mut servers = locked(&self.0.servers);
+        let mut lists = locked(&self.0.lists);
         let mut out = Vec::new();
-        servers.retain(|s| match locked(&s.closed).clone() {
+        lists.servers.retain(|s| match locked(&s.closed).clone() {
             Some(why) => {
-                out.push((s.kept.name.clone(), why));
+                out.push((s.name.clone(), why));
                 false
             }
             None => true,
         });
-        if !out.is_empty() {
-            self.0.generation.fetch_add(1, Ordering::SeqCst);
+        for (name, why) in &out {
+            if let Some(k) = lists.kept.iter_mut().find(|k| &k.name == name) {
+                k.stopped = Some(why.clone());
+            }
         }
         out
     }
 
-    /// Stops every server.
+    /// Stops every server (yoagent's stdio `close` kills it; it returns no
+    /// error of its own, but another transport's is logged).
     pub async fn close(&self) {
-        let servers = std::mem::take(&mut *locked(&self.0.servers));
+        let servers = std::mem::take(&mut locked(&self.0.lists).servers);
+        self.0.generation.fetch_add(1, Ordering::SeqCst);
         for server in servers {
             if let Err(e) = server.client.lock().await.close().await {
-                tracing::warn!("stopping the loaded MCP server {}: {e}", server.kept.name);
+                tracing::warn!("stopping the loaded MCP server {}: {e}", server.name);
             }
         }
     }
@@ -186,9 +230,12 @@ impl Loaded {
 
 #[async_trait::async_trait]
 impl ToolSource for Loaded {
+    /// The running servers' tools: one found gone is left out at once.
     async fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
-        locked(&self.0.servers)
+        locked(&self.0.lists)
+            .servers
             .iter()
+            .filter(|s| !s.is_closed())
             .flat_map(|s| s.tools.iter().cloned())
             .collect()
     }
@@ -199,36 +246,69 @@ impl ToolSource for Loaded {
 }
 
 /// yoagent's stdio transport, noting why the server is gone when a call
-/// finds it so (its exit status and last stderr): yoagent keeps the child
-/// to itself, so a server that dies is seen at its next call.
+/// finds it so, and moving the generation then, so its tools leave at the
+/// next turn: yoagent keeps the child to itself, so a server that dies is
+/// seen at its next call (one that died while idle fails that call's
+/// write).
 struct Watched {
     inner: yoagent::mcp::StdioTransport,
     closed: Arc<Mutex<Option<String>>>,
+    generation: Arc<AtomicU64>,
 }
 
 impl Watched {
     fn see<T>(&self, out: &Result<T, McpError>) {
-        if let Some(why) = gone(out) {
-            locked(&self.closed).get_or_insert(why);
+        let Some(why) = gone(out) else { return };
+        let mut closed = locked(&self.closed);
+        if closed.is_none() {
+            *closed = Some(why);
+            self.generation.fetch_add(1, Ordering::SeqCst);
         }
     }
 }
 
-/// Why a call's result says the server is gone, if it does.
+/// Why a call's result says the server is gone, if it does: its output
+/// closed during the call, or its input would not take the call (it had
+/// exited before it).
 fn gone<T>(out: &Result<T, McpError>) -> Option<String> {
     match out {
         Err(McpError::ConnectionClosed) => Some("its connection closed".to_owned()),
-        // "Connection closed: MCP server '<program>' exited with …": the
-        // program is `/usr/bin/env` (the kept environment), so not named.
-        Err(McpError::Transport(m)) if m.starts_with("Connection closed") => {
-            let rest = m
-                .strip_prefix("Connection closed: MCP server '")
-                .and_then(|r| r.split_once("' "))
-                .map_or(m.as_str(), |(_, rest)| rest);
-            Some(clip(&format!("it {rest}"), 400))
+        Err(McpError::Transport(m)) if m.starts_with("Connection closed") => Some(said(m)),
+        Err(McpError::Transport(m))
+            if m.starts_with("Write error") || m.starts_with("Flush error") =>
+        {
+            Some(clip(
+                &format!("it no longer reads its input: it had exited ({m})"),
+                400,
+            ))
         }
         _ => None,
     }
+}
+
+/// yoagent's words for a server that ended or did not start, without the
+/// program they name — the kept environment's wrapper (`/usr/bin/env`, or
+/// `/bin/sh`), not the server — made one line and cut: "Connection closed:
+/// MCP server '<program>' exited with …; last stderr: …" → "it exited with
+/// …; last stderr: …", "Failed to spawn '<program>': …" → "it could not be
+/// started: …".
+fn said(message: &str) -> String {
+    let message = message.strip_prefix("Transport error: ").unwrap_or(message);
+    let text = if let Some(rest) = message
+        .strip_prefix("Connection closed: MCP server '")
+        .and_then(|r| r.split_once("' "))
+        .map(|(_, rest)| rest)
+    {
+        format!("it {rest}")
+    } else if let Some((_, why)) = message
+        .strip_prefix("Failed to spawn '")
+        .and_then(|r| r.split_once("': "))
+    {
+        format!("it could not be started: {why}")
+    } else {
+        message.to_owned()
+    };
+    clip(&text, 400)
 }
 
 #[async_trait::async_trait]
@@ -252,25 +332,26 @@ impl McpTransport for Watched {
     // has seen it (a `list_changed` is ignored).
 }
 
-/// What `load_plugin` refuses, and how the owner hears of it.
+/// What `load_plugin` refuses, and the notice the owner hears it by.
 struct Refused {
     message: String,
-    /// An Error notice (it failed after the owner allowed it), else a
-    /// Warning.
-    after_allow: bool,
+    level: NoticeLevel,
 }
 
+/// A refusal: a Warning notice.
 fn refused(message: impl Into<String>) -> Refused {
     Refused {
         message: message.into(),
-        after_allow: false,
+        level: NoticeLevel::Warning,
     }
 }
 
+/// The server failing once the owner allowed it to start (it did not
+/// start, or its tool list is refused): an Error notice.
 fn failed(message: impl Into<String>) -> Refused {
     Refused {
         message: message.into(),
-        after_allow: true,
+        level: NoticeLevel::Error,
     }
 }
 
@@ -287,6 +368,7 @@ struct State {
 #[derive(Clone)]
 pub(crate) struct LoadPlugin {
     session: Session,
+    files: Files,
     extend: Extend,
     find: FindPlugin,
     loaded: Loaded,
@@ -302,6 +384,14 @@ pub(crate) struct LoadPlugin {
 
 /// Clears `busy` however a load ends (an aborted run drops it).
 struct Busy(Arc<Mutex<State>>);
+
+impl Busy {
+    /// The one way to set `busy`: with its guard.
+    fn claim(shared: &Arc<Mutex<State>>, state: &mut State) -> Busy {
+        state.busy = true;
+        Busy(shared.clone())
+    }
+}
 
 impl Drop for Busy {
     fn drop(&mut self) {
@@ -321,9 +411,12 @@ impl Drop for StopOnDrop {
 impl LoadPlugin {
     pub const TOOL: &'static str = "load_plugin";
 
+    /// `files`: the manifest's and its lock's names, for the block that
+    /// keeps a server.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         session: Session,
+        files: Files,
         manifest: &Manifest,
         extend: Extend,
         find: FindPlugin,
@@ -340,6 +433,7 @@ impl LoadPlugin {
             .collect();
         Self {
             session,
+            files,
             extend,
             find,
             loaded,
@@ -385,8 +479,18 @@ impl LoadPlugin {
             }
             Ok(_) => {}
         }
-        if self.loaded.kept().iter().any(|k| k.package == package) {
-            return Err(refused(format!("{package} is loaded already this session")));
+        if let Some(k) = self
+            .loaded
+            .kept()
+            .into_iter()
+            .find(|k| k.package == package)
+        {
+            return Err(refused(match k.stopped {
+                None => format!("{package} is loaded already this session, as {}", k.name),
+                Some(why) => format!(
+                    "{package} was loaded this session and stopped ({why}): it is not loaded again this session"
+                ),
+            }));
         }
         if state.blocked.contains(package) {
             return Err(refused(format!(
@@ -407,8 +511,7 @@ impl LoadPlugin {
                 self.extend.max_loads
             )));
         }
-        state.busy = true;
-        Ok((candidate, Busy(self.state.clone())))
+        Ok((candidate, Busy::claim(&self.state, &mut state)))
     }
 
     /// Step 2, the name: given, or the package's.
@@ -433,8 +536,20 @@ impl LoadPlugin {
         Ok(name)
     }
 
-    /// Steps 2 to 7; the result's text.
+    /// The arguments' shapes, then steps 1 to 7; the result's text.
     async fn load(&self, params: &Json, ctx: &ToolContext) -> Result<String, Refused> {
+        let object = params
+            .as_object()
+            .ok_or_else(|| refused("the arguments must be an object"))?;
+        if let Some(key) = object
+            .keys()
+            .find(|k| !["package", "version", "name", "args"].contains(&k.as_str()))
+        {
+            return Err(refused(format!(
+                "unknown key `{}` (use package, version, name, args)",
+                clip(key, 40)
+            )));
+        }
         let text = |key: &str| -> Result<Option<String>, Refused> {
             match &params[key] {
                 Json::Null => Ok(None),
@@ -477,11 +592,13 @@ impl LoadPlugin {
                 env.join(", ")
             )));
         }
-        // 4. Installed, running nothing.
-        let (dir, scripts) = self.install(&package, &version, ctx).await?;
-        let code = dir.join("node_modules").join(&package);
-        let bin = bin(&code, &package).map_err(|e| refused(format!("{package}: {e}")))?;
-        let reads = self.reads(&code);
+        // 4. Installed, running nothing; its program and what its code
+        // reads found by reading files.
+        let Installed {
+            bin,
+            scripts,
+            reads,
+        } = self.install(&package, &version, ctx).await?;
         // 5. Ask: start it?
         let details = first_details(
             &candidate, &version, &name, &args, &self.cwd, &scripts, &reads,
@@ -492,23 +609,28 @@ impl LoadPlugin {
         // 6. Started, its tools listed and judged.
         let closed: Arc<Mutex<Option<String>>> = Arc::default();
         let (client, listed) = self
-            .start(&bin, &args, closed.clone(), ctx)
-            .await
-            .map_err(|e| failed(format!("{package} did not start: {e}")))?;
+            .start(&package, &bin, &args, closed.clone(), ctx)
+            .await?;
         let own = tools_problem(&name, &listed).map_err(|e| failed(format!("{package}: {e}")))?;
         // 7. Ask: keep it?
         let title = format!(
             "Keep the MCP server {name}? It offers: {}",
             clip(&own.join(", "), 200)
         );
-        self.ask(
-            title,
-            second_details(&name, &listed),
-            &package,
-            "keep it",
-            ctx,
-        )
-        .await?;
+        if let Err(no) = self
+            .ask(
+                title,
+                second_details(&name, &listed),
+                &package,
+                "keep it",
+                ctx,
+            )
+            .await
+        {
+            // Not kept: stopped now (yoagent's stdio `close` kills it).
+            let _ = client.close().await;
+            return Err(no);
+        }
         let client = Arc::new(tokio::sync::Mutex::new(client));
         let tools: Vec<Arc<dyn AgentTool>> = listed
             .into_iter()
@@ -527,20 +649,24 @@ impl LoadPlugin {
             version: version.clone(),
             args,
             tools: own,
+            stopped: None,
         };
         self.session.notice(
             NoticeLevel::Info,
             format!(
                 "The agent loaded {package}@{version} as {name}, for this session. {}",
-                kept_text(std::slice::from_ref(&kept))
+                kept_text(std::slice::from_ref(&kept), &self.files)
             ),
         );
-        self.loaded.add(Server {
+        self.loaded.add(
             kept,
-            tools,
-            client,
-            closed,
-        });
+            Server {
+                name: name.clone(),
+                tools,
+                client,
+                closed,
+            },
+        );
         Ok(format!(
             "Loaded {package}@{version} as {name}, for this session. Its tools are yours from your next step: {}. Each call asks the owner.",
             names.join(", ")
@@ -548,14 +674,18 @@ impl LoadPlugin {
     }
 
     /// Step 4: a one-entry `mcp` set, every package in its tree published
-    /// `min_age_days` ago, installed without its scripts. Stopped (npm
-    /// killed, the partial folder removed) when the run is.
+    /// `min_age_days` ago, installed without its scripts; then its program
+    /// and what its code reads, by reading files — all off the async
+    /// threads. Stopped (npm killed, the partial folder removed) when the
+    /// run is: the blocking thread may outlive this call by the moment npm
+    /// takes to see `stop`, and a later load meanwhile makes its own
+    /// `.partial-` folder (`install_set`'s rename decides).
     async fn install(
         &self,
         package: &str,
         version: &str,
         ctx: &ToolContext,
-    ) -> Result<(PathBuf, Vec<String>), Refused> {
+    ) -> Result<Installed, Refused> {
         let before = match self.extend.min_age_days {
             0 => None,
             days => {
@@ -569,19 +699,27 @@ impl LoadPlugin {
         let _stop = StopOnDrop(stop.clone());
         let (home, package_, version_) =
             (self.home.clone(), package.to_owned(), version.to_owned());
+        let withheld = self.withheld.clone();
         let installing = tokio::task::spawn_blocking(move || {
-            let how = crate::install::Npm {
+            let how = crate::install::NpmRun {
                 limit: NPM_TIME,
                 stop: Some(&stop),
             };
-            crate::install::install_one(
+            let (dir, scripts) = crate::install::install_one(
                 home.as_deref(),
                 &package_,
                 &version_,
                 before.as_deref(),
                 &how,
             )
-            .map_err(|e| e.to_string())
+            .map_err(|e| format!("{package_}@{version_} could not be installed: {e}"))?;
+            let code = dir.join("node_modules").join(&package_);
+            let bin = bin(&code, &package_)?;
+            Ok::<_, String>(Installed {
+                bin,
+                scripts,
+                reads: reads(&code, &withheld),
+            })
         });
         let out = tokio::select! {
             _ = ctx.cancel.cancelled() => return Err(refused("the run was stopped while it installed")),
@@ -589,22 +727,9 @@ impl LoadPlugin {
         };
         match out {
             Ok(Ok(done)) => Ok(done),
-            Ok(Err(e)) => Err(refused(format!(
-                "{package}@{version} could not be installed: {e}"
-            ))),
+            Ok(Err(e)) => Err(refused(e)),
             Err(e) => Err(refused(format!("the install's task failed: {e}"))),
         }
-    }
-
-    /// What its code reads that it would not get: set here, and not in the
-    /// kept environment (a credential yoagent reads among them).
-    fn reads(&self, code: &Path) -> Vec<String> {
-        let scan = crate::environment::names_read(code);
-        scan.names
-            .into_iter()
-            .filter(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
-            .filter(|name| self.withheld.contains(name) || !crate::environment::kept(name.as_ref()))
-            .collect()
     }
 
     /// Asks the owner Allow/Block. Block remembers the package; nobody
@@ -642,21 +767,31 @@ impl LoadPlugin {
     }
 
     /// Step 6: the server started with the kept environment, `initialize`
-    /// and `tools/list` each within [`START_TIME`].
+    /// and `tools/list` each within [`START_TIME`]. Its failing is an
+    /// Error notice; the run stopped meanwhile, a Warning.
     async fn start(
         &self,
+        package: &str,
         bin: &Path,
         args: &[String],
         closed: Arc<Mutex<Option<String>>>,
         ctx: &ToolContext,
-    ) -> Result<(McpClient, Vec<McpToolInfo>), String> {
-        let (program, argv, env) = super::without(bin, args, &HashMap::new(), &self.withheld)
-            .map_err(|e| e.to_string())?;
+    ) -> Result<(McpClient, Vec<McpToolInfo>), Refused> {
+        let did_not = |e: &dyn std::fmt::Display| {
+            failed(format!("{package} did not start: {}", said(&e.to_string())))
+        };
+        let (program, argv, env) =
+            super::without(bin, args, &HashMap::new(), &self.withheld).map_err(|e| did_not(&e))?;
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         let inner = yoagent::mcp::StdioTransport::new(&program, &argv, Some(env))
             .await
-            .map_err(|e| e.to_string())?;
-        let mut client = McpClient::from_transport(Box::new(Watched { inner, closed }))
+            .map_err(|e| did_not(&e))?;
+        let watched = Watched {
+            inner,
+            closed,
+            generation: self.loaded.generation_handle(),
+        };
+        let mut client = McpClient::from_transport(Box::new(watched))
             .with_call_timeout(Some(McpToolAdapter::DEFAULT_CALL_TIMEOUT));
         let started = async {
             tokio::time::timeout(START_TIME, client.initialize())
@@ -679,22 +814,21 @@ impl LoadPlugin {
                 .map_err(|e| e.to_string())
         };
         let listed = tokio::select! {
-            _ = ctx.cancel.cancelled() => Err("the run was stopped while it started".to_owned()),
-            listed = started => listed,
+            _ = ctx.cancel.cancelled() => Err(refused("the run was stopped while it started")),
+            listed = started => listed.map_err(|e| did_not(&e)),
         };
-        match listed {
-            Ok(listed) => Ok((client, listed)),
-            Err(e) => {
-                let _ = client.close().await;
-                Err(e)
-            }
+        if listed.is_err() {
+            // yoagent's stdio `close` kills it and returns no error.
+            let _ = client.close().await;
         }
+        listed.map(|listed| (client, listed))
     }
 }
 
 /// The name a package's server gets: without its scope, a leading
-/// `server-` or `mcp-server-`, a trailing `-mcp` or `-mcp-server`; when
-/// nothing is left (`@eslint/mcp`), the scope.
+/// `server-` or `mcp-server-` and a trailing `-mcp` or `-mcp-server`; when
+/// nothing is left, or only `mcp`, `server` or `mcp-server` (`@eslint/mcp`),
+/// the scope; unscoped with nothing left, the package's name as it is.
 fn default_name(package: &str) -> String {
     let (scope, base) = match package.strip_prefix('@').and_then(|p| p.split_once('/')) {
         Some((scope, base)) => (Some(scope), base),
@@ -721,7 +855,9 @@ fn default_name(package: &str) -> String {
 }
 
 /// Why `name` cannot prefix a server's tools, if it cannot: letters,
-/// digits, `-` and `_`, no `__`, short enough for `<name>__<tool>`.
+/// digits, `-` and `_` (not `.`, which a manifest's name may hold: tool
+/// names take none), no `__` nor a `_` at its end (`a_` + `__` + `_x`
+/// would read as `a` + `__` + `__x`), short enough for `<name>__<tool>`.
 fn name_problem(name: &str) -> Option<&'static str> {
     if name.is_empty() {
         return Some("is empty");
@@ -735,6 +871,9 @@ fn name_problem(name: &str) -> Option<&'static str> {
     if name.contains("__") {
         return Some("holds `__`, which parts a server's name from its tools'");
     }
+    if name.ends_with('_') {
+        return Some("ends in `_`, which would run into the `__` before its tools'");
+    }
     if name.len() + 3 > 64 {
         return Some("is too long: `<name>__<tool>` must fit in 64 characters");
     }
@@ -742,7 +881,8 @@ fn name_problem(name: &str) -> Option<&'static str> {
 }
 
 /// The tools as the server names them, once each can be offered as
-/// `<name>__<tool>`; else why not (none listed, a name a model cannot take).
+/// `<name>__<tool>`; else why not (none listed, a name a model cannot take,
+/// one listed twice).
 fn tools_problem(name: &str, listed: &[McpToolInfo]) -> Result<Vec<String>, String> {
     if listed.is_empty() {
         return Err("it lists no tools".into());
@@ -772,16 +912,55 @@ fn tools_problem(name: &str, listed: &[McpToolInfo]) -> Result<Vec<String>, Stri
 }
 
 /// The program the package runs: its one `bin`, or of several the one
-/// named like the package.
+/// named like the package (`load_plugin` takes no `bin`: a server with
+/// several and none so named is refused).
 fn bin(code: &Path, package: &str) -> Result<PathBuf, String> {
     match super::bin_of(code, package, None) {
         Err(e) if e.contains("several bins") => {
             let unscoped = package.rsplit('/').next().unwrap_or(package);
-            super::bin_of(code, package, Some(unscoped))
-                .map_err(|_| format!("{e}, and none is named {unscoped}"))
+            super::bin_of(code, package, Some(unscoped)).map_err(|second| {
+                format!(
+                    "{package} has several programs (its `bin`) and yobuild cannot tell which to start: {second}"
+                )
+            })
         }
         other => other,
     }
+}
+
+/// What its code reads that it would not get — set here, and not in the
+/// kept environment, or a credential yoagent reads (`withheld`) — and
+/// what the scan missed, if anything.
+fn reads(code: &Path, withheld: &[String]) -> Reads {
+    let scan = crate::environment::names_read(code);
+    let missed = match (scan.files, scan.missed()) {
+        (0, None) => Some("no JavaScript or TypeScript code was found in it to scan".into()),
+        (_, missed) => missed,
+    };
+    Reads {
+        names: scan
+            .names
+            .into_iter()
+            .filter(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
+            .filter(|name| withheld.contains(name) || !crate::environment::kept(name.as_ref()))
+            .collect(),
+        missed,
+    }
+}
+
+/// [`reads`]: the names, and what the scan missed.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Reads {
+    names: Vec<String>,
+    missed: Option<String>,
+}
+
+/// What step 4 found: the program, the packages with install scripts (not
+/// run), what its code reads.
+struct Installed {
+    bin: PathBuf,
+    scripts: Vec<String>,
+    reads: Reads,
 }
 
 /// An argument naming a path outside the agent's folder (`/x`, `~/x`,
@@ -819,7 +998,7 @@ fn first_details(
     args: &[String],
     cwd: &Path,
     scripts: &[String],
-    reads: &[String],
+    reads: &Reads,
 ) -> String {
     let mut lines = vec![
         format!("The agent needs: {}", candidate.need),
@@ -879,10 +1058,15 @@ fn first_details(
             scripts.join(", ")
         ),
     });
-    if !reads.is_empty() {
+    if !reads.names.is_empty() {
         lines.push(format!(
             "Its code reads {}, set here, which it will not get (it starts with the kept environment)",
-            reads.join(", ")
+            reads.names.join(", ")
+        ));
+    }
+    if let Some(missed) = &reads.missed {
+        lines.push(format!(
+            "Its code was scanned in part for what it reads ({missed}): there may be more"
         ));
     }
     lines.push(
@@ -943,32 +1127,15 @@ impl AgentTool for LoadPlugin {
         })
     }
 
+    /// Every refusal, a malformed call's too, is the result and a notice.
     async fn execute(&self, params: Json, ctx: ToolContext) -> Result<ToolResult, ToolError> {
-        let object = params
-            .as_object()
-            .ok_or_else(|| ToolError::InvalidArgs("the arguments must be an object".into()))?;
-        if let Some(key) = object
-            .keys()
-            .find(|k| !["package", "version", "name", "args"].contains(&k.as_str()))
-        {
-            return Err(ToolError::InvalidArgs(format!(
-                "unknown key `{key}` (use package, version, name, args)"
-            )));
-        }
         match self.load(&params, &ctx).await {
             Ok(text) => Ok(ToolResult {
                 content: vec![Content::Text { text }],
                 details: json!({}),
             }),
-            Err(Refused {
-                message,
-                after_allow,
-            }) => {
+            Err(Refused { message, level }) => {
                 let package = params["package"].as_str().unwrap_or("?");
-                let level = match after_allow {
-                    true => NoticeLevel::Error,
-                    false => NoticeLevel::Warning,
-                };
                 self.session.notice(
                     level,
                     format!(

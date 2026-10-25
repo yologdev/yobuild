@@ -94,6 +94,14 @@ fn kept(name: &str, args: &[&str]) -> Kept {
         version: "0.3.15".into(),
         args: args.iter().map(|a| a.to_string()).collect(),
         tools: vec!["lint-files".into()],
+        stopped: None,
+    }
+}
+
+fn files() -> Files {
+    Files {
+        manifest: "handoff.toml".into(),
+        lock: "handoff.lock".into(),
     }
 }
 
@@ -103,11 +111,15 @@ fn the_end_says_each_server_and_the_block_that_keeps_it() {
         kept("eslint", &[]).block(),
         "[[mcp]]\nname = \"eslint\"\nnpm  = \"@eslint/mcp@0.3.15\"\n# allow = [\"lint-files\"]   # tools that would run without asking\n"
     );
-    let text = kept_text(&[kept("eslint", &["--dir", "a \"b\""])]);
+    let text = kept_text(&[kept("eslint", &["--dir", "a \"b\""])], &files());
     assert!(
         text.starts_with(
-            "Loaded this session: @eslint/mcp@0.3.15 as eslint (tools: lint-files). To keep it, add to agent.toml:\n\n[[mcp]]\n"
+            "Loaded this session: @eslint/mcp@0.3.15 as eslint (tools: lint-files). To keep it, add to handoff.toml:\n\n[[mcp]]\n"
         ),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("writes handoff.lock, which --locked needs."),
         "{text}"
     );
     assert!(
@@ -115,9 +127,47 @@ fn the_end_says_each_server_and_the_block_that_keeps_it() {
         "{text}"
     );
     assert!(text.ends_with("which --locked needs."), "{text}");
-    let both = kept_text(&[kept("a", &[]), kept("b", &[])]);
-    assert!(both.contains("as a (tools: lint-files); @eslint/mcp@0.3.15 as b"));
+    let mut stopped = kept("b", &[]);
+    stopped.stopped = Some("it exited with 1".into());
+    let both = kept_text(&[kept("a", &[]), stopped], &files());
+    assert!(both.contains(
+        "as a (tools: lint-files); @eslint/mcp@0.3.15 as b (tools: lint-files, stopped this session: it exited with 1)"
+    ));
     assert!(both.contains("To keep them, add"));
+    assert!(both.contains("resolves their dependencies"));
+}
+
+/// The block reads back as the manifest server it says: quotes,
+/// backslashes and other scripts in its arguments too.
+#[test]
+fn the_block_that_keeps_a_server_is_a_manifest_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let args = ["--dir", "a \"b\" \\ c", "日本語", "x=${NOT}"];
+    let block = kept("eslint", &args[..3]).block();
+    let text = format!("[agent]\nname = \"t\"\nmodel = \"deepseek/deepseek-flash\"\n\n{block}");
+    let m = Manifest::parse(&text, &dir.path().join("agent.toml"), dir.path()).unwrap();
+    let [server] = &m.mcp[..] else {
+        panic!("{:?}", m.mcp)
+    };
+    assert_eq!(server.name, "eslint");
+    assert!(server.allow.is_empty(), "the allow line is a comment");
+    match &server.transport {
+        crate::manifest::Transport::Stdio {
+            source, args: read, ..
+        } => {
+            assert!(
+                matches!(source, crate::manifest::Source::Package(p) if p.spec() == "@eslint/mcp@0.3.15")
+            );
+            let read: Vec<&str> = read.iter().map(|v| v.as_str()).collect();
+            assert_eq!(read, args[..3]);
+        }
+        other => panic!("{other:?}"),
+    }
+    // What would not read back is refused when the agent passes it.
+    assert!(crate::manifest::loaded_arguments(&["a\u{7f}".into()])
+        .unwrap_err()
+        .contains("control character"));
+    assert!(crate::manifest::loaded_arguments(&[args[3].into()]).is_err());
 }
 
 /// A transport whose server is gone.
@@ -140,11 +190,15 @@ fn server(name: &str, closed: Option<&str>) -> Server {
     let tool: Arc<dyn AgentTool> =
         Arc::new(McpToolAdapter::new(client.clone(), info("lint-files")).with_prefix(name));
     Server {
-        kept: kept(name, &[]),
+        name: name.into(),
         tools: vec![tool],
         client,
         closed: Arc::new(Mutex::new(closed.map(String::from))),
     }
+}
+
+fn add(loaded: &Loaded, name: &str, closed: Option<&str>) {
+    loaded.add(kept(name, &[]), server(name, closed));
 }
 
 #[tokio::test]
@@ -152,8 +206,8 @@ async fn loaded_servers_are_a_tool_source_that_moves_on_each_change() {
     let loaded = Loaded::default();
     assert_eq!(loaded.generation(), 0);
     assert!(loaded.tools().await.is_empty());
-    loaded.add(server("eslint", None));
-    loaded.add(server("gone", Some("exited with 1")));
+    add(&loaded, "eslint", None);
+    add(&loaded, "gone", Some("exited with 1"));
     assert_eq!(loaded.generation(), 2);
     let names: Vec<String> = loaded
         .tools()
@@ -161,24 +215,56 @@ async fn loaded_servers_are_a_tool_source_that_moves_on_each_change() {
         .iter()
         .map(|t| t.name().to_owned())
         .collect();
-    assert_eq!(names, ["eslint__lint-files", "gone__lint-files"]);
+    // One found gone is offered no more, before anyone looks.
+    assert_eq!(names, ["eslint__lint-files"]);
     // Asked by membership: a loaded tool, not a name that merely looks so.
     assert!(loaded.asks("eslint__lint-files"));
     assert!(!loaded.asks("eslint__other"));
     assert!(!loaded.asks("lint-files"));
-    // The one found gone leaves, said once; it is still asked and kept.
+    // The one found gone is said once, then kept marked stopped; still
+    // asked.
     assert_eq!(
         loaded.stopped(),
         [("gone".to_owned(), "exited with 1".to_owned())]
     );
-    assert_eq!(loaded.generation(), 3);
     assert!(loaded.stopped().is_empty());
-    assert_eq!(loaded.generation(), 3, "no change, no move");
+    assert_eq!(loaded.generation(), 2, "the list did not change again");
     assert_eq!(loaded.tools().await.len(), 1);
     assert!(loaded.asks("gone__lint-files"));
-    assert_eq!(loaded.kept().len(), 2);
+    let kept = loaded.kept();
+    assert_eq!(kept.len(), 2);
+    assert_eq!(kept[1].stopped.as_deref(), Some("exited with 1"));
+    assert_eq!(kept[0].stopped, None);
     loaded.close().await;
     assert!(loaded.tools().await.is_empty());
+    assert_eq!(loaded.generation(), 3, "closing moves it");
+}
+
+/// A call through the transport that finds the server gone moves the
+/// generation then, once: its tools leave at the next turn whoever looks.
+#[tokio::test]
+async fn the_transport_moves_the_generation_when_it_finds_the_server_gone() {
+    let generation = Arc::new(AtomicU64::new(5));
+    let closed: Arc<Mutex<Option<String>>> = Arc::default();
+    let see = |out: Result<(), McpError>| {
+        let why = gone(&out);
+        let mut c = locked(&closed);
+        if let (Some(why), true) = (why, c.is_none()) {
+            *c = Some(why);
+            generation.fetch_add(1, Ordering::SeqCst);
+        }
+    };
+    see(Err(McpError::Protocol("odd".into())));
+    assert_eq!(generation.load(Ordering::SeqCst), 5);
+    see(Err(McpError::Transport(
+        "Write error: Broken pipe (os error 32)".into(),
+    )));
+    see(Err(McpError::ConnectionClosed));
+    assert_eq!(generation.load(Ordering::SeqCst), 6, "once");
+    assert!(locked(&closed)
+        .as_deref()
+        .unwrap()
+        .contains("it had exited"));
 }
 
 #[test]
@@ -194,9 +280,99 @@ fn a_call_that_finds_the_server_gone_says_why() {
         gone(&Err::<(), _>(McpError::ConnectionClosed)).as_deref(),
         Some("its connection closed")
     );
+    // Dead while idle: the call's write fails before anything is read.
     assert_eq!(
-        gone(&Err::<(), _>(McpError::Transport("Write error: x".into()))),
+        gone(&Err::<(), _>(McpError::Transport(
+            "Write error: Broken pipe (os error 32)".into()
+        )))
+        .as_deref(),
+        Some(
+            "it no longer reads its input: it had exited (Write error: Broken pipe (os error 32))"
+        )
+    );
+    assert!(gone(&Err::<(), _>(McpError::Transport("Flush error: x".into()))).is_some());
+    assert_eq!(
+        gone(&Err::<(), _>(McpError::Transport("Read error: x".into()))),
         None
+    );
+}
+
+#[test]
+fn a_start_that_fails_names_the_server_not_its_wrapper() {
+    assert_eq!(
+        said("Transport error: Connection closed: MCP server '/usr/bin/env' exited with exit status: 3; last stderr:\nCannot find module\n  at x"),
+        "it exited with exit status: 3; last stderr: Cannot find module at x"
+    );
+    assert_eq!(
+        said("Transport error: Failed to spawn '/usr/bin/env': No such file or directory"),
+        "it could not be started: No such file or directory"
+    );
+    assert_eq!(
+        said("no answer to `initialize` within 30 s"),
+        "no answer to `initialize` within 30 s"
+    );
+}
+
+#[test]
+fn a_package_with_several_programs_starts_the_one_named_like_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |bin: serde_json::Value| {
+        std::fs::write(
+            dir.path().join("package.json"),
+            json!({ "name": "@a/tool", "bin": bin }).to_string(),
+        )
+        .unwrap()
+    };
+    write(json!({ "tool": "a.js", "other": "b.js" }));
+    assert_eq!(bin(dir.path(), "@a/tool").unwrap(), dir.path().join("a.js"));
+    write(json!({ "x": "a.js", "y": "b.js" }));
+    let e = bin(dir.path(), "@a/tool").unwrap_err();
+    assert!(
+        e.starts_with("@a/tool has several programs (its `bin`) and yobuild cannot tell which to start: @a/tool has no bin \"tool\""),
+        "{e}"
+    );
+    write(json!("only.js"));
+    assert_eq!(
+        bin(dir.path(), "@a/tool").unwrap(),
+        dir.path().join("only.js")
+    );
+}
+
+#[test]
+fn what_its_code_reads_and_what_the_scan_missed_are_said() {
+    let dir = tempfile::tempdir().unwrap();
+    // No code: said, not taken for "reads nothing".
+    let none = reads(dir.path(), &[]);
+    assert_eq!(none.names, Vec::<String>::new());
+    assert!(none
+        .missed
+        .unwrap()
+        .contains("no JavaScript or TypeScript code"));
+    // A name set here (this process has `PATH` and the test's own) that
+    // the kept set keeps is not said; one withheld is.
+    std::fs::write(
+        dir.path().join("index.js"),
+        "process.env.PATH; process.env.CARGO_PKG_NAME;",
+    )
+    .unwrap();
+    let r = reads(dir.path(), &["CARGO_PKG_NAME".into()]);
+    assert_eq!(r.names, ["CARGO_PKG_NAME"]);
+    assert_eq!(r.missed, None);
+    let details = first_details(
+        &candidate("x", Ok("1.0.0")),
+        "1.0.0",
+        "x",
+        &[],
+        dir.path(),
+        &[],
+        &Reads {
+            names: vec![],
+            missed: Some("1 link(s) not followed".into()),
+        },
+    );
+    assert!(
+        details.contains("Its code was scanned in part for what it reads (1 link(s) not followed): there may be more"),
+        "{details}"
     );
 }
 
@@ -252,6 +428,7 @@ fn tool(once: bool) -> (LoadPlugin, Driver, tempfile::TempDir) {
     ]);
     let load = LoadPlugin::new(
         session,
+        files(),
         &manifest,
         extend,
         find,
@@ -388,7 +565,7 @@ async fn a_second_load_at_once_and_one_past_max_loads_are_refused() {
     assert!(why.contains("another load is in progress"), "{why}");
     locked(&load.state).busy = false;
     // One kept, stopped or not, is as many as `max_loads = 1` allows.
-    load.loaded.add(server("other", Some("exited")));
+    add(&load.loaded, "other", Some("exited"));
     load.loaded.stopped();
     let why = refusal(&load, json!({ "package": "lint-mcp", "version": "1.2.0" })).await;
     assert!(
@@ -396,4 +573,46 @@ async fn a_second_load_at_once_and_one_past_max_loads_are_refused() {
         "{why}"
     );
     assert_eq!(locked(&load.state).attempts, 1, "counted before max_loads");
+}
+
+#[tokio::test]
+async fn a_package_loaded_or_stopped_is_not_loaded_again_and_its_name_is_taken() {
+    let (mut load, _driver, _dir) = tool(false);
+    load.extend.max_loads = 5;
+    let mut lint = kept("lint", &[]);
+    lint.package = "lint-mcp".into();
+    load.loaded.add(lint, server("lint", None));
+    let why = refusal(
+        &load,
+        json!({ "package": "lint-mcp", "version": "1.2.0", "name": "other" }),
+    )
+    .await;
+    assert!(
+        why.contains("lint-mcp is loaded already this session, as lint"),
+        "{why}"
+    );
+    // A loaded server's name is in use, as a manifest entry's is.
+    let why = refusal(
+        &load,
+        json!({ "package": "taken-mcp", "version": "1.0.0", "name": "lint" }),
+    )
+    .await;
+    assert!(
+        why.contains("the name \"lint\" is in use by another plugin or server"),
+        "{why}"
+    );
+    // Once it stopped: said so, not "loaded already".
+    *locked(&locked(&load.loaded.0.lists).servers[0].closed) = Some("it exited".into());
+    load.loaded.stopped();
+    let why = refusal(&load, json!({ "package": "lint-mcp", "version": "1.2.0" })).await;
+    assert!(
+        why.contains("lint-mcp was loaded this session and stopped (it exited): it is not loaded again this session"),
+        "{why}"
+    );
+}
+
+#[test]
+fn a_name_may_not_end_in_an_underscore() {
+    assert!(name_problem("a_").unwrap().contains("ends in `_`"));
+    assert_eq!(name_problem("_a"), None);
 }

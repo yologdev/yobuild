@@ -195,7 +195,8 @@ impl Gate {
 
     /// Makes every tool `asked` names ask, call by call, before any other
     /// rule (a loaded server's tools: the owner's yes to the load is not
-    /// one to each call).
+    /// one to each call), its question saying so. Replaces an earlier
+    /// check rather than adding to it.
     pub fn with_asked(self, asked: AskedCheck) -> Self {
         self.change(|rules| rules.asked = Some(asked))
     }
@@ -396,7 +397,9 @@ impl Rules {
         };
         let free = |creates: Vec<PathBuf>| Check::Free { creates };
         if self.asked.as_ref().is_some_and(|asked| asked(tool)) {
-            return ask(format!("Run `{tool}`?"));
+            return ask(format!(
+                "Run `{tool}`, a tool of a server loaded this session?"
+            ));
         }
         match tool {
             "bash" => {

@@ -279,12 +279,16 @@ searches the MCP registry and npm for MCP servers over stdio and returns
 candidates — each with the version that could be taken (the newest
 release published `min_age_days` or more days ago, default 7) and what
 the packages say of themselves, unverified. It installs and starts
-nothing; loading one (`load_plugin`, with the person's approval each
-time, up to `max_loads` servers and `max_attempts` tries a session) is
-not in this yobuild yet. `kinds` is `["mcp"]` only. Refused with
-`gate = "off"`; a plugin's `allow` may not name `find_plugin` or
-`load_plugin`. `check` lists `find_plugin` as allowed and says what
-`[extend]` lets the agent do.
+nothing. Then `load_plugin(package, version, name?, args?)` loads one of
+them for the session: installed without running anything (every package
+in its tree `min_age_days` old), the person asked before it starts and
+again with its tools; its tools are the agent's from its next step
+(`<name>__<tool>`), and each call asks. Up to `max_loads` servers and
+`max_attempts` calls a session. Nothing is written to the manifest: when
+the session ends, yobuild prints the `[[mcp]]` block that would keep
+each one. `kinds` is `["mcp"]` only. Refused with `gate = "off"`; a
+plugin's `allow` may not name `find_plugin` or `load_plugin`. `check`
+lists both as allowed and says what `[extend]` lets the agent do.
 
 ## Writing the prompt
 
