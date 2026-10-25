@@ -1201,10 +1201,8 @@ Runtime memory: pi 335 MB, dsh 157 MB."
 ## 10. Later: agents that extend themselves
 
 Two tools for a running agent: `find_plugin` (search + vet) and
-`load_plugin` (install + hot-load through `PluginHost`). Both behind the
-owner's approval (`ask_owner`) and the fail-closed rules. This is what
-rutis was built for — software that adds its own plugins while it runs —
-and the riskiest part of the plan, so it comes last.
+`load_plugin` (install, check, ask the owner, then load). The design is
+§14 (M5).
 
 ## 11. The skill, and what to do when a run fails (M3; decided 2026-10-19)
 
@@ -3685,3 +3683,228 @@ pty). PR 3's findings:
    `fresh-machine` job;
 7. README and `docs/guide.md`;
 8. tag 0.1 (and publish, per decision 1).
+
+## 14. Agents that extend themselves (M5; proposed 2026-10-25)
+
+**Why.** An agent sometimes finds it lacks a capability: it has no linter,
+or no way to read a spreadsheet. Today it stops and says so, and the person
+edits `agent.toml`. M5 lets the agent find a plugin, ask the owner, load it
+and go on, without anything loading that the owner did not allow or that
+`check` would refuse. This is what rutis was built for: software that adds
+plugins to itself while it runs. It is also the riskiest part of the plan:
+a running agent proposes code to run on the owner's computer.
+
+M5's "Done when" (roadmap): the demo runs live end to end, a refused
+plugin is shown never loading, and a denied approval leaves the agent
+without the plugin.
+
+### What is decided (2026-10-25)
+
+- **No catalogue built into yobuild.** Plugins are found by searching live
+  sources: the npm registry and the MCP registry. yobuild does not keep a
+  list of good plugins to go stale between releases; it vets what it finds,
+  every time.
+- **`check` before the owner is asked.** Each candidate is installed (no
+  install scripts) and checked alone, as `yobuild check` checks an entry.
+  One that `check` would refuse is never offered for approval and never
+  loads.
+- **For the session only.** A loaded plugin is not written to
+  `agent.toml` or `agent.lock`. When the session ends, yobuild says what
+  was loaded and the `[[mcp]]` block that would keep it. The manifest stays
+  the owner's to change.
+- **MCP stdio servers first.** Each runs in its own process, so loading one
+  touches nothing already running. pi, DSH and rutis plugins come in a
+  later step (below).
+
+### The two tools
+
+Both are yobuild built-ins, offered only when the manifest turns them on
+(below). The gate treats them as it treats `ask_owner`: allowed, since
+asking the owner is part of what they do.
+
+**`find_plugin(need, kind?)`** searches and returns candidates. It loads
+nothing and installs nothing.
+- `need`: a few words, such as "lint TypeScript" or "read xlsx files".
+- `kind`: `"mcp"` only in step 1; later `"pi"`, `"dsh"`, `"rutis"`.
+- Sources, for MCP servers:
+  - the MCP registry (`registry.modelcontextprotocol.io/v0/servers?search=`):
+    only entries with an `npm` package and a `stdio` transport. A remote
+    server, a PyPI or OCI package is left out, and the result says how many
+    were;
+  - npm's search (`/-/v1/search?text=keywords:mcp <need>`), through the
+    registry npm itself is set to use, so a mirror or a private registry
+    holds.
+- Each candidate: the package and its newest version (exact; a registry
+  entry saying `latest` is resolved with `npm view`), its description,
+  weekly downloads, when that version was published, its repository and
+  licence, and the required arguments and environment variables the MCP
+  registry lists.
+- At most 10 candidates, ranked by the source's own order. All of it is
+  text the packages' authors wrote: each field is one line and cut to a
+  length (`one_line`), and the result says that it is unverified.
+
+**`load_plugin(package, version, args?)`** proposes one server. In order,
+stopping at the first failure, which is the tool's result:
+1. **The limits.** `max_loads` per session (below) not reached; the
+   package name and version well-formed (`Package`'s rules: full semver,
+   no git or URL spec); not a package the session already loaded.
+2. **What it may be handed.** `args` pass the manifest's own rule for a
+   server's `args` (`guard`): no secret written in; nothing in `${…}`.
+   A server whose MCP registry entry lists a required environment variable
+   is refused: in step 1 nothing hands a loaded server a credential, and
+   it would only start broken.
+3. **Install.** A one-entry `mcp` set, resolved and installed as `install`
+   installs a set (`--ignore-scripts`, the kept npm settings, 10 minutes),
+   in the same cache. Its lock lives with the session, not beside the
+   manifest.
+4. **Check alone.** `check`'s MCP step: start it with the kept environment,
+   `tools/list`, the prefixed names (`<server>__<tool>`) a model can take.
+   Also `check`'s notes: what its code reads that it does not get, what its
+   install would have run. A server with no tools, one that does not start,
+   or one with a tool name a model cannot take is refused.
+5. **Ask the owner.** One Allow/Block question, held like the gate's (it
+   waits; nobody there means Block):
+   - title: `Load the MCP server <package>@<version>? (asked by the agent)`;
+   - details: what the agent said it needs, the args, the tools and their
+     descriptions, the version's age and downloads, its repository, and
+     `check`'s notes;
+   - Block: the result says the owner declined, and the agent goes on
+     without it. A blocked package is not proposed again this session
+     (refused at step 1).
+6. **Start.** The server is started again for real (the check's process
+   ended with the check), its tools added to the session's loaded set,
+   and the result names them.
+
+A failure at 1 to 4 is said to the owner as an Info notice ("The agent's
+plugin `x` was refused: …"), so a refused plugin is shown, never loading.
+
+### How the tools reach the agent
+
+yoagent asks for tools once per run (`ToolSource`, "per run, not per
+turn"): a tool that appears mid-run is first offered on the next run.
+Loading is mid-run by nature. Two ways out:
+
+- **(a) Recommended: yoagent asks again at a turn boundary when a source
+  says its list changed.** A `ToolSource` gains a way to say "changed"
+  (say, a generation number); the loop asks again only before a request
+  that follows a turn whose tool calls have all returned, so no call the
+  model made is stranded. The prompt-cache rewrite happens once per load.
+  This is a yoagent change, with its own PR there.
+- **(b) No yoagent change: the run that loads ends, and yobuild starts the
+  next one.** After a load, `load_plugin`'s result tells the agent its
+  tools come with the next run, and when the run ends yobuild starts a
+  run of its own ("[yobuild] loaded `x`: its tools are `…`; go on with the
+  task"). It works today, but it splits one task into two runs: the
+  per-run budget and limits start again, `report` is checked twice, and
+  `--once` (one run) cannot use it.
+
+Either way the loaded tools come from a `ToolSource` yobuild installs
+(`Loaded`, a shared list), so the agent's own tools and the manifest's
+servers win a name collision, as yoagent's rule says.
+
+### The gate and the loaded tools
+
+A loaded server's tools all **ask**, call by call: the owner's Allow on
+the load is not an `allow` list, and the descriptions a server gives its
+tools are its own claims (MCP's `readOnlyHint` included). The gate needs
+nothing new: a tool it does not know asks.
+
+### The manifest
+
+Off unless the manifest says so:
+
+```toml
+[extend]
+kinds     = ["mcp"]         # what may be found and loaded (step 1: "mcp")
+max_loads = 2               # per session; at most 5
+min_age_days = 7            # a version newer than this is refused
+```
+
+- `[extend]` alone turns both tools on, with these defaults.
+- `min_age_days` (default 7, 0 allowed): a version published less than
+  that long ago is refused at step 1. A package taken over and republished
+  is most often caught within days; a week is a cheap guard against that.
+- `kinds` other than `"mcp"` is refused in step 1, naming the step that
+  brings it.
+- With `gate = "off"` the loaded tools would run unasked, so `[extend]` is
+  refused with it.
+- `check` lists `find_plugin` and `load_plugin` as allowed, and notes that
+  the agent may load MCP servers (up to `max_loads`) with the owner's
+  approval.
+
+### What stays the same
+
+- **The kept environment.** A loaded server starts as a manifest's does,
+  with the kept environment and no `env` table: no credential, no other
+  variable beyond the kept set.
+- **Not a sandbox.** A loaded server runs with the owner's rights, like any
+  other. The owner's approval and `check` decide whether it runs, not what
+  it can reach once it does. The question's details say so.
+- **Budgets and limits.** A loaded tool's call counts as any call;
+  `facts` counts it; `measure` times it.
+
+### When the session ends
+
+An Info notice: `Loaded this session: <package>@<version> (tools: …). To
+keep it, add:` and the `[[mcp]]` block, with `allow` empty. Under
+`--once` the same goes to stderr. Nothing is written.
+
+### Later steps
+
+- **Step 2: rutis, pi and DSH plugins.** npm search finds them by their
+  keywords (`pi-package`, `dsh-plugin`). Loading them is harder:
+  - a rutis plugin runs in a Node runtime of its own package, and
+    `PluginHost`'s runtimes are fixed at `start`; it needs a host that adds
+    a runtime while running;
+  - every pi extension runs in one runtime, as every DSH plugin does:
+    loading one changes a runtime other plugins share, and its grants must
+    match theirs (§12).
+
+  Their own design comes then.
+- **Remote MCP servers**, and a loaded server handed a credential, once
+  there is a way for the owner to grant one at the question.
+
+### Tests
+
+- The sources are stubbed: an axum server in the tests answers the MCP
+  registry's and npm's search URLs (npm's base from the kept registry
+  setting), so no test reaches the network.
+- `run_test`: a candidate installed from a seeded `mcp` set, checked,
+  allowed through the page, its tool called; Block leaves it unloaded and
+  refused again; a server with no tools refused before any question;
+  `min_age_days`; `max_loads`; a required environment variable refused.
+- A scripted demo in the gallery (below), run in CI with the approval
+  answered over the page's WebSocket, as `cli_test` does for questions.
+
+### The demo
+
+A code reviewer that starts without ESLint (`tools = "read-only"`,
+`[extend]`). Asked to lint a TypeScript project, it calls `find_plugin`
+("lint TypeScript"), proposes `@eslint/mcp`, the owner allows it, and it
+lints with `eslint__lint-files`. Run once live (cost in its README), and
+scripted in CI. A second reply file proposes a server that `check` refuses
+(no tools), shown never loading; a third has the owner block the load, and
+the agent reports what it could not do.
+
+### Decisions for review
+
+1. *How the tools reach the agent.* Recommended (a), a yoagent change;
+   (b) works without one, at the cost of a second run.
+2. *Sources.* Recommended: the MCP registry and npm search, both. The MCP
+   registry lists servers others have named as such; npm search finds more
+   of them, and the same search finds pi and DSH packages later.
+3. *`min_age_days` defaulting to 7.* Or 0, leaving it to the owner.
+4. *Loaded tools all ask.* Or an option at the question to let them run
+   unasked for the session.
+
+### Order of PRs
+
+1. this design;
+2. (if decision 1 is (a)) yoagent: tool sources asked again at a turn
+   boundary after a change;
+3. `[extend]` in the manifest, `find_plugin` with its sources, and the
+   stub registry in the tests;
+4. `load_plugin`: the session set, the check, the question, the `Loaded`
+   source, the end-of-session notice;
+5. the demo agent, the skill (`manifest.md`, `parts.md`), the guide and
+   the roadmap.
