@@ -958,7 +958,7 @@ fn check_says_what_run_would_refuse() {
     assert_eq!(code, Some(1), "{out}");
     // As JSON: the problem and its fix.
     let report: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(report["version"], 3);
+    assert_eq!(report["version"], 4);
     assert_eq!(report["agent"]["together"], "refused");
     let problem = &report["agent"]["problems"][0];
     assert!(

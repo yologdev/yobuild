@@ -40,7 +40,7 @@ use yoagent::tools::{
 use yoagent::{Agent, AgentEvent, AgentTool, Content};
 use yoagent_rutis::RutisBridge;
 
-use crate::builtins::{AskOwner, Facts, Gate, OfferedCheck, Scratch};
+use crate::builtins::{AskOwner, Facts, FindPlugin, Gate, OfferedCheck, Scratch, Sources};
 use crate::frontend::host::{DshHome, PluginHost, PluginHostBuilder, Row};
 use crate::frontend::session::UI_TIMEOUT;
 use crate::frontend::{
@@ -48,7 +48,7 @@ use crate::frontend::{
 };
 use crate::install;
 use crate::manifest::{
-    Gate as GateMode, Manifest, Mcp, PluginKind, Source, Tools as ToolSet, Transport,
+    Gate as GateMode, Manifest, Mcp, PluginKind, Source, Tools as ToolSet, Transport, EXTEND_TOOLS,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -130,9 +130,11 @@ impl Default for Layout {
 
 /// Whether running `manifest` needs Node and npm: a plugin (each runs in a
 /// Node runtime, or has its package installed), a pinned MCP server (npm
-/// installs it), or the terminal UI (`terminal`).
+/// installs it), `[extend]` (`find_plugin` searches with npm), or the
+/// terminal UI (`terminal`).
 pub(crate) fn needs_node(manifest: &Manifest, terminal: bool) -> bool {
     terminal
+        || manifest.extend.is_some()
         || !manifest.plugins.is_empty()
         || manifest.mcp.iter().any(|s| {
             matches!(
@@ -344,6 +346,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     tools.add("yoagent", tools_for(manifest.builtins.tools, &cwd));
     if let Some(ask) = &ask_owner {
         tools.add(AskOwner::TOOL, vec![Box::new(ask.clone())]);
+    }
+    if let Some(extend) = &manifest.extend {
+        let find = FindPlugin::new(session.clone(), extend.clone(), Sources::from_env()?);
+        tools.add(FindPlugin::TOOL, vec![Box::new(find)]);
     }
     for server in &manifest.mcp {
         let found = mcp(server, &checked.servers[&server.name]).await?;
@@ -598,6 +604,9 @@ fn gate(
     }
     if manifest.builtins.ask_owner {
         gate = gate.with_allowed_tools([AskOwner::TOOL]);
+    }
+    if manifest.extend.is_some() {
+        gate = gate.with_allowed_tools([FindPlugin::TOOL]);
     }
     Some(gate)
 }
@@ -1161,8 +1170,9 @@ impl Tools {
         }
     }
 
-    /// No two tools of one name, and none named `ask_owner` but yobuild's
-    /// (a server's would be allowed by the gate when the built-in is on).
+    /// No two tools of one name, and none named `ask_owner`, `find_plugin`
+    /// or `load_plugin` but yobuild's (a server's would be allowed by the
+    /// gate when the built-in is on).
     fn check(&self) -> Result<(), BoxError> {
         let mut seen: HashMap<&str, &str> = HashMap::new();
         for (name, source) in &self.from {
@@ -1171,6 +1181,11 @@ impl Tools {
                     "tool ask_owner from {source}: the name is yobuild's ([builtins] ask_owner)"
                 )
                 .into());
+            }
+            if EXTEND_TOOLS.contains(&name.as_str()) && source != name {
+                return Err(
+                    format!("tool {name} from {source}: the name is yobuild's ([extend])").into(),
+                );
             }
             if let Some(first) = seen.insert(name, source) {
                 return Err(format!("two tools named {name}: from {first} and {source}").into());
@@ -2786,6 +2801,25 @@ mod tests {
         theirs.add("mcp x", vec![Box::new(AskOwner::new(session))]);
         let e = theirs.check().unwrap_err().to_string();
         assert!(e.starts_with("tool ask_owner from mcp x"), "{e}");
+        let extend = crate::manifest::Extend::default();
+        let sources = Sources::at("http://127.0.0.1:9").unwrap();
+        let find = || {
+            Box::new(FindPlugin::new(
+                Session::new(false).0,
+                extend.clone(),
+                sources.clone(),
+            ))
+        };
+        let mut ours = Tools::default();
+        ours.add(FindPlugin::TOOL, vec![find()]);
+        assert!(ours.check().is_ok());
+        let mut theirs = Tools::default();
+        theirs.add("mcp x", vec![find()]);
+        let e = theirs.check().unwrap_err().to_string();
+        assert_eq!(
+            e,
+            "tool find_plugin from mcp x: the name is yobuild's ([extend])"
+        );
         tools.add("mcp files", tools_for(ToolSet::Coding, dir.path()));
         let e = tools.check().unwrap_err().to_string();
         assert_eq!(e, "two tools named bash: from yoagent and mcp files");
@@ -2830,6 +2864,18 @@ mod tests {
             !ask(&judge),
             "a tool named ask_owner asks without the built-in"
         );
+        let find = |gate: &Gate| {
+            gate.check(FindPlugin::TOOL, &serde_json::json!({ "need": "lint" }))
+                .question()
+                .is_none()
+        };
+        assert!(
+            !find(&judge),
+            "a tool named find_plugin asks without [extend]"
+        );
+        let extend = manifest(dir.path(), "[extend]\n");
+        let judge = gate(&extend, &session, &project, None).unwrap();
+        assert!(find(&judge), "find_plugin is allowed with [extend]");
         let off = manifest(dir.path(), "[builtins]\ngate = \"off\"\n");
         assert!(gate(&off, &session, &project, None).is_none());
     }
@@ -3207,6 +3253,10 @@ mod tests {
         // Node: a plugin, a pinned server, the terminal UI.
         assert!(!needs_node(&m(""), false));
         assert!(needs_node(&m(""), true));
+        assert!(
+            needs_node(&m("[extend]\n"), false),
+            "find_plugin searches with npm"
+        );
         assert!(needs_node(
             &m("[[plugin]]\nrutis = \"./r.ts\"\nruntime = \"node\"\n"),
             false

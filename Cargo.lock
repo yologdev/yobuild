@@ -2716,6 +2716,7 @@ dependencies = [
  "axum",
  "futures",
  "libc",
+ "reqwest",
  "rutis",
  "rutis-bridge",
  "rutis-loader",

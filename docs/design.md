@@ -3736,7 +3736,11 @@ loads and installs nothing.
     `https://registry.modelcontextprotocol.io`, or `YOBUILD_MCP_REGISTRY`
     for the tests: https, or http on a loopback address): only entries with
     an `npm` package and a `stdio` transport. Remote servers and PyPI or
-    OCI packages are left out, and the result says how many were;
+    OCI packages are left out, and the result says how many were. Its
+    search matches any part of a server's name (`lint` finds
+    `maxwellintl`), so it is searched for each of the need's words (up to
+    four), and a server is kept only when its name, package or description
+    has one of them as a word;
   - npm's search, through the `npm` CLI (`npm search --json`, then
     `npm view <package> --json` for each candidate) with the npm settings
     `install` keeps (the registry and its login keys), so a mirror or a
@@ -3746,15 +3750,16 @@ loads and installs nothing.
   source failing is said there and the other's candidates are given; both
   failing makes the result an error (`is_error`) and a Warning notice to
   the owner, never an empty list that reads as "nothing found".
-- Each candidate (registry entries first, then npm's; one per package; at
-  most 10):
+- Each candidate (those both sources found first, then each source's own
+  in turn; one per package; at most 10):
   - the package and the version `load_plugin` would take: the newest one
     published at least `min_age_days` ago (from `npm view`'s `time`).
     With none old enough, or no publish time, the candidate is listed as
     not loadable, saying why;
   - its description, licence, and repository, marked "claimed by the
-    package" (nothing checks it); npm's provenance when the version has a
-    verified attestation, else "no provenance";
+    package" (nothing checks it); whether a provenance attestation is
+    published with the version (npm checks one at install with
+    `npm audit signatures`; yobuild does not);
   - weekly downloads, from npm's downloads API only when the registry is
     `registry.npmjs.org`, else "unknown";
   - when it is in the MCP registry, the arguments and environment

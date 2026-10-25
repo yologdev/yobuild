@@ -22,7 +22,7 @@ use super::{
     install, mcp, offerers, plugins, prepare, start, tools_for, Adapters, Layout, Prepared, Prompt,
     Started,
 };
-use crate::builtins::{AskOwner, JUDGED_TOOLS, READ_ONLY_TOOLS};
+use crate::builtins::{AskOwner, FindPlugin, Sources, JUDGED_TOOLS, READ_ONLY_TOOLS};
 use crate::frontend::host::{rows_from_file, PluginHost};
 use crate::frontend::{services, Session};
 use crate::install::Set;
@@ -49,7 +49,7 @@ const SETTLE: Duration = Duration::from_secs(3);
 const STILL: Duration = Duration::from_millis(500);
 
 /// The report's shape, for whoever reads `--json`.
-const REPORT_VERSION: u32 = 3;
+const REPORT_VERSION: u32 = 4;
 
 /// The run id `check` starts its one run with.
 const RUN: &str = "yobuild-check";
@@ -274,6 +274,30 @@ pub struct Agent {
     /// JSON, empty too, as the environment note points to it; the text
     /// report says only the note's count.
     pub left_out: Vec<String>,
+    /// `[extend]` as the manifest sets it; `null` without it.
+    pub extend: Option<Extend>,
+}
+
+/// `[extend]`'s settings, as `check --json` says them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Extend {
+    pub kinds: Vec<String>,
+    pub max_loads: u32,
+    pub max_attempts: u32,
+    pub min_age_days: u32,
+}
+
+impl From<&crate::manifest::Extend> for Extend {
+    fn from(extend: &crate::manifest::Extend) -> Self {
+        Self {
+            kinds: extend.kinds.iter().map(|k| k.name().to_owned()).collect(),
+            max_loads: extend.max_loads,
+            max_attempts: extend.max_attempts,
+            min_age_days: extend.min_age_days,
+        }
+    }
 }
 
 /// What `check` found.
@@ -549,6 +573,12 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         }),
     );
     agent_notes.extend(super::proxy_note(&manifest, std::env::vars_os()));
+    if let Some(extend) = &manifest.extend {
+        agent_notes.push(format!(
+            "[extend]: the agent may search the MCP registry and npm for MCP servers (`find_plugin`, versions published {} or more days ago); loading one (`load_plugin`, with the owner's approval each time) is not in this yobuild yet",
+            extend.min_age_days
+        ));
+    }
     // An entry's own code reads a variable it does not get, or its grant
     // hands over one that looks like a secret or loads code: on the entry.
     // A scan that missed some, or found nothing to read, is said: no note
@@ -908,6 +938,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         notes: agent_notes,
         install_scripts: scripts.base.clone(),
         left_out,
+        extend: manifest.extend.as_ref().map(Extend::from),
         ..Agent::default()
     };
     if entries.iter().all(|e| e.problems.is_empty()) {
@@ -1282,11 +1313,18 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         if manifest.builtins.ask_owner {
             seen.extend([schema_of(&AskOwner::new(session.clone()))]);
         }
+        if let Some(extend) = &manifest.extend {
+            let find = FindPlugin::new(session.clone(), extend.clone(), Sources::from_env()?);
+            seen.extend([schema_of(&find)]);
+        }
         seen.extend(offered.iter().map(|o| (o.name.clone(), (o.description.clone(), o.parameters.clone()))));
         schemas.lock().unwrap().extend(seen);
         let mut own: HashSet<String> = yoagents.iter().cloned().collect();
         if manifest.builtins.ask_owner {
             own.insert(AskOwner::TOOL.to_owned());
+        }
+        if manifest.extend.is_some() {
+            own.insert(FindPlugin::TOOL.to_owned());
         }
         own.extend(server_tools.iter().map(|t| t.name.clone()));
         let adapters = Adapters {
@@ -1318,6 +1356,9 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
                 AskOwner::TOOL,
                 kind_of(gate_off, AskOwner::TOOL, ToolKind::Allowed),
             ));
+        }
+        if manifest.extend.is_some() {
+            tools.push(Tool::new(FindPlugin::TOOL, ToolKind::Allowed));
         }
         tools.extend(server_tools.iter().cloned());
         for Offer { name, owner, .. } in &offered {
@@ -1506,7 +1547,8 @@ mod tests {
             },
         );
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["version"], 3);
+        assert_eq!(json["version"], 4);
+        assert_eq!(json["agent"]["extend"], serde_json::Value::Null);
         assert_eq!(json["ok"], true);
         assert_eq!(json["agent"]["together"], "started");
         assert_eq!(json["entries"][0]["kind"], "plugin");
