@@ -3784,8 +3784,8 @@ yoagent asks for tools once per run (`ToolSource`, "per run, not per
 turn"): a tool that appears mid-run is first offered on the next run.
 Loading is mid-run by nature. Two ways out:
 
-- **(a) Recommended: yoagent asks again at a turn boundary when a source
-  says its list changed.** A `ToolSource` gains a way to say "changed"
+- **(a) Decided (2026-10-25): yoagent asks again at a turn boundary when a
+  source says its list changed.** A `ToolSource` gains a way to say "changed"
   (say, a generation number); the loop asks again only before a request
   that follows a turn whose tool calls have all returned, so no call the
   model made is stranded. The prompt-cache rewrite happens once per load.
@@ -3888,8 +3888,8 @@ the agent reports what it could not do.
 
 ### Decisions for review
 
-1. *How the tools reach the agent.* Recommended (a), a yoagent change;
-   (b) works without one, at the cost of a second run.
+1. *How the tools reach the agent.* Decided (2026-10-25): (a), a yoagent
+   change. (b) would work without one, at the cost of a second run.
 2. *Sources.* Decided (2026-10-25): the MCP registry and npm search, both.
    The MCP registry lists servers others have named as such; npm search
    finds more of them, and the same search finds pi and DSH packages later.
@@ -3901,8 +3901,8 @@ the agent reports what it could not do.
 ### Order of PRs
 
 1. this design;
-2. (if decision 1 is (a)) yoagent: tool sources asked again at a turn
-   boundary after a change;
+2. yoagent: tool sources asked again at a turn boundary after a change
+   (decision 1);
 3. `[extend]` in the manifest, `find_plugin` with its sources, and the
    stub registry in the tests;
 4. `load_plugin`: the session set, the check, the question, the `Loaded`
