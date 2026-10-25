@@ -370,7 +370,7 @@ not left waiting.
 
 M2b (below) installs pinned packages into a cache (#30), records what
 was installed in `agent.lock`, and adds `yobuild check` (#31). Unix only, as the
-terminal UI and `--measure` are (Windows: open question 7).
+terminal UI and `--measure` are (Windows: not in 0.1, roadmap open question 7).
 
 ### Install: sets, the cache, `agent.lock` (M2b, decided 2026-10-18)
 
@@ -3557,7 +3557,7 @@ made plain:
 
 ### Distribution
 
-- **crates.io (open question 2).** Recommended: publish `yobuild` 0.1 as
+- **crates.io (open question 2).** Decided, and done in 0.1: publish `yobuild` 0.1 as
   a binary crate (`cargo install yobuild`).
   - Its library (`yobuild::builtins`, `frontend`, `install`, `manifest`,
     `run`) stays, since the tests use it, documented as having no API
@@ -3587,14 +3587,14 @@ made plain:
   identity, none stored). A version already there is skipped; a failure
   is said on the release ("Not on crates.io yet", with the run); a
   pre-release (a tag with `-`) stays off crates.io.
-- **Windows (open question 7).** Recommended: not in 0.1.
+- **Windows (open question 7).** Decided, and shipped so in 0.1: not
+  supported.
   - Off unix there is no kept environment (only the credentials, set
     empty), the terminal UI reads `/dev/tty`, and nothing is tested there.
-    Nothing is known to compile there either: no CI job builds it.
   - So no Windows binary, and the README says unsupported.
   - On Windows `yobuild run` and `check` refuse with one line, "Windows is
-    not supported yet (yobuild 0.1: macOS and Linux)". A
-    `cargo check --target x86_64-pc-windows-msvc` CI job keeps it
+    not supported yet (yobuild 0.1: macOS and Linux)". The CI job
+    `windows` (`cargo check --locked` on windows-latest) keeps it
     compiling for later.
 - **The version.** 0.1.0, with a `CHANGELOG.md` from the milestones.
 
@@ -3633,9 +3633,9 @@ No key is needed.
 
 ### Decisions for review
 
-1. *crates.io* (open question 2). Recommended: publish the binary crate,
+1. *crates.io* (open question 2). Decided: publish the binary crate,
    the library unpromised.
-2. *Windows* (open question 7). Recommended: not in 0.1, refused with a
+2. *Windows* (open question 7). Decided: not in 0.1, refused with a
    line, kept compiling in CI.
 3. *The adapters' files.* Recommended: (a) yoagent-rutis exposing them;
    (b) a build-script link; (c) vendoring.
