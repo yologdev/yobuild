@@ -1,6 +1,6 @@
 # Roadmap
 
-Draft for review. Each milestone ends with something that runs.
+Each milestone ends with something that runs. The open questions at the end are for review.
 
 ## M0 — Bootstrap (done 2026-10-15)
 
@@ -243,7 +243,7 @@ starts (2026-10-23; a tool's own, `run`).
 **Done when** visualize's chart shows on the page from a sandboxed origin,
 and a plugin's model call is charged to the run's budget.
 
-## M4 — Share (done 2026-10-25; design §13; built 2026-10-24: `yobuild:` built-ins, the runtime sets, `yobuild new`, `yobuild skill install`, the release groundwork, `docs/guide.md`, `docs/use-cases.md`; 0.1 released 2026-10-25)
+## M4 — Share (done 2026-10-25; design §13; built 2026-10-24: `yobuild:` built-ins, the runtime sets, `yobuild new`, `yobuild skill install`, the release groundwork, `docs/guide.md`, `docs/use-cases.md`)
 
 - `yobuild new <folder> [--from <agent>]` (a manifest, prompt and demo to
   edit, or a gallery agent or example; built), `yobuild skill install
@@ -259,20 +259,34 @@ and a plugin's model call is charged to the run's budget.
 
 **Done when** someone who has not seen the repository installs yobuild,
 runs `yobuild new`, and has a gallery agent running from the docs alone;
-0.1 is tagged (and published, if open question 2 says so) — checked in
-CI by a `fresh-machine` job with the checkout moved out of reach.
-**Done:** 0.1.0 is tagged, on crates.io and on the releases page. On
-2026-10-25 the released macOS arm64 tarball was checked as a newcomer
-would use it, in an empty `HOME` with nothing but Node 24 and npm 11.19:
-- its checksum matched;
-- `skill install` and `new --list` worked;
-- `new research --from web-research`, then `check agent.toml`, gave `ok`;
-- the scripted demo `--once` ran its searches and ended `Completed`;
-- the web page served, and `/ws` refused a request without the token.
+0.1 is tagged and published on crates.io — checked in CI by a
+`fresh-machine` job with the checkout moved out of reach.
 
-Seen there: on Node 24, `dsh-free-search`'s own cache (`node:sqlite`)
-prints Node's `ExperimentalWarning` on stderr. It is harmless, and it
-is the plugin's.
+**Done:** 0.1.0 is tagged, on crates.io and on the releases page (8
+files: 4 tarballs and their checksums).
+- **In CI, on every push:** the `fresh-machine` job runs on Linux. It
+  copies out the binary built from the checkout, then moves the checkout
+  out of reach and runs `skill install` and `new --from web-research`
+  and `--from coding`. Each agent is checked, and its demo runs to
+  `Completed`.
+- **By hand, on 2026-10-25:** I checked the released macOS arm64
+  tarball myself, not a newcomer. It ran in an empty `HOME`, with only
+  the binary, Node 24.7 and npm 11.19 installed beyond the system. The
+  run was scripted, with no key:
+  - its checksum matched;
+  - `skill install` and `new --list` worked;
+  - `new research --from web-research`, then `check agent.toml`, gave
+    `ok`;
+  - the scripted demo `--once` ran its searches and ended `Completed`;
+  - the web page served, and `/ws` refused a request without the token.
+- **Not yet:** nobody has checked the Linux tarballs by hand, and no
+  newcomer has followed the docs alone.
+
+Seen there: `dsh-free-search`'s own cache loads `node:sqlite`, which Node
+(22.5 and later) still marks experimental, so Node prints an
+`ExperimentalWarning` on stderr. It is harmless, and it comes from the
+plugin. The skill's `parts.md` says so.
+
 Later: a docs site, the video re-cut for yobuild, posts.
 
 ## M5 — Agents that extend themselves
@@ -289,9 +303,10 @@ never loading, and a denied approval leaves the agent without the plugin.
 
 1. **Name and home.** Decided: `yologdev/yobuild`, public.
 2. **Publish to crates.io?** Decided: yes, from 0.1 (`cargo install
-   yobuild`). Asked: as a binary crate (`cargo install yobuild`),
-   and the library (`yobuild::builtins`, `frontend`, `install`, `manifest`, `run`) for people who
-   would rather write Rust than a manifest?
+   yobuild`). The library (`yobuild::builtins`, `frontend`, `install`,
+   `manifest`, `run`) is published with it, but with no API promise.
+   Still open: should it be promised to people who would rather write
+   Rust than a manifest?
 3. **The probe as a library.** Decided: exposed from yoagent-rutis as a
    public module (so `check` and the compatibility matrix cannot drift
    apart), together with the adapter files' location.
@@ -310,8 +325,16 @@ never loading, and a denied approval leaves the agent without the plugin.
    path, footprint, target, ownership) the right ones, and is "over 5 % of
    a turn" the right threshold?
 7. **Windows.** Decided for 0.1: not supported. `run` and `check` say
-   so, and CI keeps it compiling. rutis supports Windows; the terminal UI,
-   the kept environment (`env -u`) and the tests are Unix-only today.
-8. **Models.** Answered by 0.1: any provider yoagent knows runs, and so
-   does a local model. The gallery and the examples use
-   `deepseek/deepseek-flash`. DeepSeek pricing: done (yoagent 0.25.6).
+   so, and CI keeps it compiling. rutis supports Windows. The terminal
+   UI, the kept environment (`env -u`), `--measure` (`ps`) and the tests
+   are Unix-only today.
+8. **Models.** Answered by 0.1. The manifest takes:
+   - yoagent's 11 providers;
+   - any OpenAI-compatible endpoint (`base_url` + `api_key_env`);
+   - local models (`ollama`, `local`).
+
+   Only DeepSeek has been run live: the gallery and the examples use
+   `deepseek/deepseek-flash`. Claude has not been run live with yobuild
+   yet. A local model has not been run at all, and it gets no dollar
+   budget, because it has no price. DeepSeek pricing: done (yoagent
+   0.25.6).
