@@ -3,7 +3,7 @@
 //! registry and npm's search. It starts, loads and installs nothing; what
 //! it returns is the packages' own words, each made one line and cut. The
 //! session keeps each candidate it returned, for `load_plugin` (design
-//! §14; not built yet) to take only those.
+//! §14, `run/load.rs`) to take only those.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env::VarError;
@@ -78,6 +78,8 @@ impl Sources {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Candidate {
+    /// What the agent said it needs, in the search that found it.
+    pub need: String,
     pub package: String,
     /// The version `load_plugin` would take — the newest release, not
     /// past `latest`, published at least `min_age_days` ago — or why none.
@@ -173,7 +175,7 @@ impl FindPlugin {
         };
         let now = now();
         let viewed: Vec<(Candidate, Option<String>)> = stream::iter(hits)
-            .map(|hit| candidate(hit, &self.extend, now, &downloads))
+            .map(|hit| candidate(need, hit, &self.extend, now, &downloads))
             .buffered(VIEWS_AT_ONCE)
             .collect()
             .await;
@@ -193,7 +195,7 @@ impl FindPlugin {
     /// Keeps `candidates`, each in place of its package's, but for one
     /// with a version to take, which only another such replaces (npm
     /// failing once does not lose it).
-    fn remember(&self, candidates: &[Candidate]) {
+    pub(crate) fn remember(&self, candidates: &[Candidate]) {
         let mut found = self.found.lock().unwrap_or_else(|e| e.into_inner());
         for candidate in candidates {
             match found.iter_mut().find(|c| c.package == candidate.package) {
@@ -878,8 +880,20 @@ fn day(seconds: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// `YYYY-MM-DDTHH:MM:SSZ` of `seconds` since 1970: npm's `--before`.
+pub(crate) fn iso(seconds: i64) -> String {
+    let s = seconds.rem_euclid(DAY);
+    format!(
+        "{}T{:02}:{:02}:{:02}Z",
+        day(seconds),
+        s / 3600,
+        s % 3600 / 60,
+        s % 60
+    )
+}
+
 /// Seconds since 1970; `None` for a clock that reads before it.
-fn now() -> Option<i64> {
+pub(crate) fn now() -> Option<i64> {
     let since = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
     i64::try_from(since.as_secs()).ok()
 }
@@ -889,12 +903,14 @@ fn now() -> Option<i64> {
 /// `downloads` says why not. Beside it, why npm could not be asked about
 /// it at all.
 async fn candidate(
+    need: &str,
     hit: Hit,
     extend: &Extend,
     now: Option<i64>,
     downloads: &Result<(), String>,
 ) -> (Candidate, Option<String>) {
     let mut candidate = Candidate {
+        need: need.to_owned(),
         package: hit.package.clone(),
         version: Err(String::new()),
         registry_name: hit.registry_name,

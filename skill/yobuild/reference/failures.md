@@ -82,6 +82,11 @@ and show as `name ✗` under `--once`. The run goes on.
 | `plugin handler \`X\` did not answer \`before_tool\` within 330s` <!-- hint: policy-timeout --> | the policy took longer than its wait (the dialogs' 300 s plus 30 s) | answer its question sooner; the plugin may hang |
 | `a required plugin handler failed this run: …` <!-- hint: handler-failed --> | a plugin's hook failed: its calls are denied this run | the log says which; `yobuild check` |
 | `the plugin host is not running (…)` <!-- hint: host-down-call --> | the plugin host shut down | restart |
+| `load_plugin refused it: X is not loadable: no version was published 7 or more days ago (…)` <!-- hint: load-too-new --> | `[extend]`: every version of the server the agent proposed is newer than `min_age_days` | wait, or lower `min_age_days` (0 turns the guard off) |
+| `load_plugin refused it: this session has loaded N servers, as many as it may ([extend] max_loads N)` <!-- hint: load-max-loads --> | the session's loads are spent (a server that stopped still counts) | raise `max_loads` (up to 5) and restart, or add the server to `agent.toml` as an `[[mcp]]` entry |
+| `load_plugin refused it: this session's load_plugin calls are spent ([extend] max_attempts N)` <!-- hint: load-max-attempts --> | every `load_plugin` call counts, refused ones too | raise `max_attempts` (up to 10) and restart |
+| `load_plugin refused it: the name "X" is in use by another plugin or server: pass another \`name\` …` <!-- hint: load-name-in-use --> | the name a loaded server would get is a manifest entry's, or another loaded server's | the agent passes another `name`; or rename the entry |
+| `load_plugin refused it: the owner blocked it …`, `… nobody answered …`, `… is not among this session's candidates` | the owner said Block (the package is not proposed again this session); nobody was there (it may be proposed again); a package `find_plugin` did not return | nothing, if meant; open the page and answer; call `find_plugin` first |
 | a policy's own reason (`confirm-dangerous.ts`'s Block) | the policy refused the call | as the policy says |
 
 ## During a run: Notices

@@ -3919,9 +3919,11 @@ agent's own tools, then earlier sources, then extensions' tools, so a
 loaded tool loses to the built-ins and the manifest's servers and wins
 over a pi, DSH or rutis plugin's tool of the same name. Step 2's naming
 makes the first two impossible; the third is rare (a plugin's tool named
-`x__y`). yoagent only logs a collision, so `Loaded` checks, at the next
-`before_model`, that each of its tools was offered, and one that was not
-is a Warning notice naming it.
+`x__y`), and there the loaded tool is the one offered (yoagent logs the
+plugin's it dropped). So every tool `Loaded` holds is offered: there is
+nothing to check at `before_model`. (The first draft had `Loaded` check
+that its tools were offered; built, it was seen that no case leaves one
+out.)
 
 ### The gate and the loaded tools
 
@@ -3937,10 +3939,17 @@ does not know.
   session ends stops them: the driver returning, Ctrl+C, a failed start,
   the terminal UI stopping (each child `kill_on_drop`, its client closed).
 - A reset keeps them: they are the session's, as its plugins are.
-- A server that stops mid-session: the watcher's tick sees its process
-  gone, an Error notice says so ("The loaded MCP server `x` stopped: …"),
-  and it leaves `Loaded` (its generation bumped). It still counts toward
-  `max_loads`.
+- A server that stops mid-session: an Error notice says so ("The loaded
+  MCP server `x` stopped: it exited with …; last stderr: …"), and it
+  leaves `Loaded` (its generation bumped), so its tools are gone from the
+  next turn. It still counts toward `max_loads`. yoagent 0.25.14 keeps
+  the server's process to itself, so yobuild sees a death at the next
+  call that finds the connection closed (a transport of its own around
+  yoagent's stdio one notes it; the watcher's tick says it). A server
+  that dies while idle is seen at its next call. yoagent has been asked
+  for a check that does not wait for a call (`McpClient::exited()`, an
+  exit watch the transport hands the client when it is built); the tick
+  will use it once it ships.
 - A run aborted mid-load stops the load where it is: npm killed, the
   set's `.partial-` folder removed as `install` removes one, an open
   question withdrawn, a started process stopped. Nothing is remembered.
@@ -3977,8 +3986,7 @@ min_age_days = 7         # whole days, 0 to 365: newer versions are not taken
 - `--locked` is unaffected: nothing loaded goes into the lock.
 - `check` lists both tools as allowed and notes that the agent may load
   MCP servers, up to `max_loads`, with the owner's approval each time.
-  Until `load_plugin` is built (PR 4), it lists `find_plugin` alone and
-  its note says loading is not in this yobuild yet.
+  (Until `load_plugin` was built, in PR 4, it listed `find_plugin` alone.)
   `check --json` gains the agent's `extend` (`kinds`, `maxLoads`,
   `maxAttempts`, `minAgeDays`), and its report version becomes 4.
 
@@ -4008,8 +4016,10 @@ npm  = "@eslint/mcp@0.3.15"
 # allow = ["lint-files"]   # tools that would run without asking
 ```
 
-with its `args` when it had any. A session that ends normally also sends
-it as an Info notice. It adds that the next run resolves the server's
+with its `args` when it had any. The same text is an Info notice the
+moment the owner keeps the server ("The agent loaded … for this
+session."): once the session ends, no frontend is left to hear one. It
+adds that the next run resolves the server's
 dependencies again (the lock's `mcp` set, without `--before`), so the
 first run after adding it writes `agent.lock`, which `--locked` needs.
 Nothing is written by yobuild.

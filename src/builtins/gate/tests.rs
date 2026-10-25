@@ -50,6 +50,7 @@ impl Project {
             scratch: Some(scratch.clone()),
             free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
             allowed_if: None,
+            asked: None,
             created: Arc::default(),
         };
         Self {
@@ -961,6 +962,7 @@ fn cd_follows_the_logical_path_as_bash_does() {
         scratch: None,
         free_tools: HashSet::new(),
         allowed_if: None,
+        asked: None,
         created: Arc::default(),
     };
     let asks = |c: &str| {
@@ -2105,6 +2107,7 @@ fn a_tool_allowed_by_its_offerer_runs_only_when_that_one_offers_it() {
         scratch: None,
         free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
         allowed_if: Some((["todo".to_owned(), "plan".to_owned()].into(), offered)),
+        asked: None,
         created: Arc::default(),
     };
     let free =
@@ -2128,6 +2131,7 @@ fn a_tool_allowed_by_its_offerer_runs_only_when_that_one_offers_it() {
         scratch: None,
         free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
         allowed_if: Some((["todo".to_owned()].into(), yes)),
+        asked: None,
         created: Arc::default(),
     };
     assert!(rules
@@ -2138,6 +2142,33 @@ fn a_tool_allowed_by_its_offerer_runs_only_when_that_one_offers_it() {
         .check_in("delete_all", &json!({}), Some("r"))
         .question()
         .is_some());
+}
+
+/// A loaded server's tool asks whatever else would free it: by
+/// membership, before the allowed lists.
+#[test]
+fn a_tool_the_asked_check_names_asks_even_when_allowed() {
+    let p = Project::new();
+    let yes: OfferedCheck = Arc::new(|_: &str, _: &str| true);
+    let asked: AskedCheck = Arc::new(|tool: &str| tool.starts_with("eslint__"));
+    let rules = Rules {
+        start: p.rules.start.clone(),
+        scratch: None,
+        free_tools: ["eslint__lint-files".to_owned(), "read_file".to_owned()].into(),
+        allowed_if: Some((["eslint__fix".to_owned()].into(), yes)),
+        asked: Some(asked),
+        created: Arc::default(),
+    };
+    let check = |tool: &str| rules.check_in(tool, &json!({}), Some("r"));
+    assert_eq!(
+        check("eslint__lint-files").question(),
+        Some("Run `eslint__lint-files`?")
+    );
+    assert!(check("eslint__fix").question().is_some());
+    assert!(
+        check("read_file").question().is_none(),
+        "the rest as before"
+    );
 }
 
 #[test]

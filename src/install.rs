@@ -22,6 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -425,6 +426,28 @@ pub(crate) fn npm(dir: &Path, args: &[String]) -> Result<String, BoxError> {
 
 /// [`npm`], killed after `limit`.
 pub(crate) fn npm_within(dir: &Path, args: &[String], limit: Duration) -> Result<String, BoxError> {
+    npm_as(dir, args, &Npm { limit, stop: None })
+}
+
+/// How npm runs: killed after `limit`, or as soon as `stop` is set (a run
+/// aborted while `load_plugin` installs).
+pub(crate) struct Npm<'a> {
+    pub limit: Duration,
+    pub stop: Option<&'a AtomicBool>,
+}
+
+impl Default for Npm<'_> {
+    fn default() -> Self {
+        Npm {
+            limit: NPM_TIME,
+            stop: None,
+        }
+    }
+}
+
+/// [`npm`], run as `how` says.
+fn npm_as(dir: &Path, args: &[String], how: &Npm) -> Result<String, BoxError> {
+    let limit = how.limit;
     let failed = |e: &dyn std::fmt::Display| format!("npm {} in {}: {e}", args[0], dir.display());
     let mut command = std::process::Command::new("npm");
     command
@@ -456,6 +479,11 @@ pub(crate) fn npm_within(dir: &Path, args: &[String], limit: Duration) -> Result
             let _ = child.kill();
             let _ = child.wait();
             return Err(failed(&format!("not done in {} s", limit.as_secs())).into());
+        }
+        if how.stop.is_some_and(|stop| stop.load(Ordering::Relaxed)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(failed(&"stopped").into());
         }
         std::thread::sleep(Duration::from_millis(50));
     };
@@ -603,10 +631,13 @@ fn write_json(path: &Path, value: &Json) -> Result<(), BoxError> {
 }
 
 /// Resolves a set anew in a temp folder: its lock entry (nothing unpacked).
+/// `extra`: more of npm's options (`--before`).
 fn resolve(
     set: Set,
     pins: &BTreeMap<String, String>,
     adapters: &Path,
+    extra: &[String],
+    how: &Npm,
 ) -> Result<SetLock, BoxError> {
     let dir = tempfile::tempdir().map_err(|e| format!("a temp folder to resolve in: {e}"))?;
     write(&dir.path().join(".npmrc"), npmrc(set))?;
@@ -634,7 +665,8 @@ fn resolve(
     )?;
     let mut args = vec!["install".to_owned(), "--package-lock-only".to_owned()];
     args.extend(npm_flags(set));
-    npm(dir.path(), &args)?;
+    args.extend(extra.iter().cloned());
+    npm_as(dir.path(), &args, how)?;
     let path = dir.path().join("package-lock.json");
     let lock: Json = serde_json::from_slice(&read(&path)?)
         .map_err(|e| format!("npm's lock for {}: {e}", set.name()))?;
@@ -915,6 +947,7 @@ fn install_set(
     set: Set,
     entry: &SetLock,
     adapters: &Path,
+    how: &Npm,
 ) -> Result<PathBuf, BoxError> {
     let hash = hash(set, entry, adapters)?;
     let parent = home.join("plugins").join(set.name());
@@ -950,7 +983,7 @@ fn install_set(
         return Ok(dir);
     }
     let fresh = partial("");
-    if let Err(e) = make(&fresh, set, entry, adapters, &hash) {
+    if let Err(e) = make(&fresh, set, entry, adapters, &hash, how) {
         remove_quietly(&fresh, "an install that failed");
         return Err(e);
     }
@@ -972,6 +1005,7 @@ fn make(
     entry: &SetLock,
     adapters: &Path,
     hash: &str,
+    how: &Npm,
 ) -> Result<(), BoxError> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let dependencies = match entry.packages.get("").map(|root| &root["dependencies"]) {
@@ -1005,7 +1039,7 @@ fn make(
     }
     let mut args = vec!["ci".to_owned(), "--prefer-offline".to_owned()];
     args.extend(npm_flags(set));
-    npm(dir, &args)?;
+    npm_as(dir, &args, how)?;
     write(&dir.join(STAMP), format!("{hash}\n"))
 }
 
@@ -1112,7 +1146,7 @@ pub fn install(
             )
             .into());
         }
-        let entry = resolve(*set, wanted, adapters)
+        let entry = resolve(*set, wanted, adapters, &[], &Npm::default())
             .map_err(|e| format!("resolving the `{}` set: {e}", set.name()))?;
         let verb = match previous {
             Some(_) => "resolved again",
@@ -1130,11 +1164,53 @@ pub fn install(
         lock.write(&path)?;
     }
     for set in pins.keys() {
-        let dir = install_set(&home, *set, &lock.sets[set], adapters)
+        let dir = install_set(&home, *set, &lock.sets[set], adapters, &Npm::default())
             .map_err(|e| format!("installing the `{}` set: {e}", set.name()))?;
         installed.dirs.insert(*set, dir);
     }
     Ok(installed)
+}
+
+/// One stdio MCP server for this session only (`load_plugin`, design
+/// §14): `package@version` resolved alone as an `mcp` set — with `before`
+/// (an ISO time), every package in its tree published by then — and
+/// installed as [`install`] installs a set, in the same cache. Its lock
+/// is the session's, not beside a manifest. The folder, and the packages
+/// it brings with install scripts (not run).
+pub(crate) fn install_one(
+    home: Option<&Path>,
+    package: &str,
+    version: &str,
+    before: Option<&str>,
+    how: &Npm,
+) -> Result<(PathBuf, Vec<String>), BoxError> {
+    let home = match home {
+        Some(home) => home.to_path_buf(),
+        None => self::home()?,
+    };
+    let pins = BTreeMap::from([(package.to_owned(), version.to_owned())]);
+    let extra: Vec<String> = before
+        .map(|b| format!("--before={b}"))
+        .into_iter()
+        .collect();
+    let entry = resolve(Set::Mcp, &pins, Path::new(""), &extra, how)?;
+    if let Some(why) = unsound(&entry) {
+        return Err(format!("npm's lock for {package}@{version}: {why}").into());
+    }
+    let dir = install_set(&home, Set::Mcp, &entry, Path::new(""), how)?;
+    let mut scripts: Vec<String> = brought(&entry.packages, &format!("node_modules/{package}"))
+        .into_iter()
+        .filter(|at| {
+            entry
+                .packages
+                .get(at)
+                .is_some_and(|p| p["hasInstallScript"] == Json::Bool(true))
+        })
+        .filter_map(|at| at.rsplit_once("node_modules/").map(|(_, n)| n.to_owned()))
+        .collect();
+    scripts.sort();
+    scripts.dedup();
+    Ok((dir, scripts))
 }
 
 /// For tests: a set installed by hand, with a lock beside `manifest_file`
@@ -1780,7 +1856,14 @@ mod tests {
                 std::fs::write(dir.join(STAMP), stamp).unwrap();
             }
             assert_eq!(
-                install_set(home.path(), Set::Mcp, &entry, Path::new("")).unwrap(),
+                install_set(
+                    home.path(),
+                    Set::Mcp,
+                    &entry,
+                    Path::new(""),
+                    &Npm::default()
+                )
+                .unwrap(),
                 dir
             );
             assert!(!dir.join("junk").exists(), "{stamp:?}");
@@ -1792,7 +1875,14 @@ mod tests {
         }
         // Stamped: kept as it is (npm not run again).
         std::fs::write(dir.join("junk"), "x").unwrap();
-        install_set(home.path(), Set::Mcp, &entry, Path::new("")).unwrap();
+        install_set(
+            home.path(),
+            Set::Mcp,
+            &entry,
+            Path::new(""),
+            &Npm::default(),
+        )
+        .unwrap();
         assert!(dir.join("junk").exists());
         let leftovers: Vec<_> = std::fs::read_dir(home.path().join("plugins/mcp"))
             .unwrap()
@@ -1811,9 +1901,15 @@ mod tests {
             String::new(),
             json!({ "name": "yobuild-mcp", "dependencies": 5 }),
         );
-        let e = install_set(home.path(), Set::Mcp, &entry, Path::new(""))
-            .unwrap_err()
-            .to_string();
+        let e = install_set(
+            home.path(),
+            Set::Mcp,
+            &entry,
+            Path::new(""),
+            &Npm::default(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(e.contains("root dependencies are not an object"), "{e}");
         let left: Vec<_> = std::fs::read_dir(home.path().join("plugins/mcp"))
             .unwrap()
