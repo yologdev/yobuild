@@ -306,7 +306,35 @@ fn npm_search_and_view_are_read_as_npm_writes_them() {
     assert!(found.hits[0].from_npm && found.hits[0].required_env.is_none());
     assert_eq!(
         found.line(),
-        "npm: 1 found (1 left out: a name yobuild does not take)"
+        "npm: 1 found (1 left out: 1 with a name yobuild does not take)"
+    );
+    // npm's `keywords:mcp` only ranks: a package marked by neither an MCP
+    // keyword nor "mcp" in its name or description is left out.
+    let found = npm_hits(
+        r#"[{"name":"@reactuses/core","description":"React hooks","keywords":["react","typescript"]},
+            {"name":"fallow","description":"Codebase intelligence: CLI, LSP, and MCP server"},
+            {"name":"mcp-use","keywords":["typescript"]},
+            {"name":"tool-kit","keywords":["Model-Context-Protocol"]},
+            {"name":"fastmcp"},
+            {"name":"tools","keywords":["MCPServer"]},
+            {"name":"@modelcontextprotocol/server-x","description":"Files"},
+            {"name":"bridge","description":"A Model Context Protocol bridge"},
+            {"name":"kit","keywords":"mcp","description":"keywords as text, not a list"},
+            {"name":"gamcpx","description":"the letters inside a word only"},
+            {"name":"lib","description":"describes mcpish things"}]"#,
+    )
+    .unwrap();
+    let names: Vec<&str> = found.hits.iter().map(|h| h.package.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "fallow", "mcp-use", "tool-kit", "fastmcp", "tools", "@modelcontextprotocol/server-x",
+            "bridge"
+        ]
+    );
+    assert_eq!(
+        found.line(),
+        "npm: 7 found (4 left out: 4 not marked as MCP)"
     );
     assert_eq!(npm_hits("[]").unwrap().line(), "npm: 0 found");
     assert!(npm_hits("npm error").is_err());
@@ -331,6 +359,19 @@ fn npm_search_and_view_are_read_as_npm_writes_them() {
         Some("https://github.com/eslint/rewrite")
     );
     assert_eq!(v.provenance, Some(true));
+    assert!(!v.program, "no `bin`: a library");
+    for (bin, program) in [
+        (r#""bin":"cli.js""#, true),
+        (r#""bin":{"eslint-mcp":"dist/cli.js"}"#, true),
+        (r#""bin":{}"#, false),
+        (r#""bin":"""#, false),
+    ] {
+        assert_eq!(
+            viewed(&format!("{{{bin}}}")).unwrap().program,
+            program,
+            "{bin}"
+        );
+    }
     // One version: `versions` is a string.
     let v = viewed(r#"{"version":"1.0.0","versions":"1.0.0","license":{"type":"MIT"},"dist":{}}"#)
         .unwrap();
@@ -393,7 +434,8 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
                 required_args: None,
             },
         ],
-        total: 2,
+        found: 2,
+        not_viewed: 0,
         unviewed: None,
     };
     let text = said_to_agent("lint", &found, &Extend::default());
@@ -408,7 +450,10 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
          2. new-mcp (found in npm's search): not loadable: no version was published 7 or more days ago (the newest, 0.1.0, on 2026-10-24)"
     );
     let json = details(&found);
-    assert_eq!(json["found"], 2);
+    assert_eq!(
+        (&json["found"], &json["notLookedAt"]),
+        (&json!(2), &json!(0))
+    );
     assert_eq!(
         json["candidates"][0],
         serde_json::json!({
@@ -423,17 +468,11 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
     assert_eq!(json["candidates"][1]["version"], Json::Null);
     assert_eq!(json["candidates"][1]["provenance"], Json::Null);
 
-    // Cut to fewer than found: said.
     let mut cut = found;
-    cut.total = 14;
     cut.candidates.truncate(1);
     cut.candidates[0].downloads = Ok(1200);
     cut.candidates[0].provenance = Some(true);
     let text = said_to_agent("lint", &cut, &Extend::default());
-    assert!(
-        text.contains("\nCandidates (the first 1 of 14 found; their"),
-        "{text}"
-    );
     assert!(
         text.contains("downloads last week: 1200; ")
             && text.contains("provenance: an attestation is published with it (not verified)"),
@@ -507,15 +546,158 @@ fn both_sources_finds_come_first_then_each_sources_in_turn() {
         hit("both", false, true),
         hit("n2", false, true),
     ];
-    let (first, total) = merged(registry, npm);
-    assert_eq!(total, 5);
+    let first = merged(registry, npm);
     let names: Vec<&str> = first.iter().map(|h| h.package.as_str()).collect();
     assert_eq!(names, ["both", "r1", "n1", "r2", "n2"]);
     assert!(first[0].from_npm && first[0].registry_name.is_some());
-    let many: Vec<Hit> = (0..8).map(|i| hit(&format!("r{i}"), true, false)).collect();
-    let more: Vec<Hit> = (0..8).map(|i| hit(&format!("n{i}"), false, true)).collect();
-    let (cut, total) = merged(many, more);
-    assert_eq!((cut.len(), total), (MAX_CANDIDATES, 16));
+}
+
+/// Libraries (npm says no program) are left out; a candidate npm could
+/// not be asked about stays, said not loadable.
+#[test]
+fn libraries_are_left_out() {
+    let viewing = |name: &str, error: Option<&str>, program: Option<bool>| -> Viewing {
+        (
+            candidate_of(name, Ok("1.0.0")),
+            error.map(String::from),
+            program,
+        )
+    };
+    let mut viewed: Vec<Viewing> = (0..8)
+        .map(|i| viewing(&format!("s{i}"), None, Some(true)))
+        .collect();
+    viewed.insert(1, viewing("sdk", None, Some(false)));
+    viewed.insert(2, viewing("unviewed", Some("HTTP 500"), None));
+    let (kept, libraries, unviewed) = cut(viewed);
+    let names: Vec<&str> = kept.iter().map(|c| c.package.as_str()).collect();
+    assert_eq!(
+        names,
+        ["s0", "unviewed", "s1", "s2", "s3", "s4", "s5", "s6", "s7"]
+    );
+    assert_eq!((libraries, unviewed), (1, None));
+    // Every one unviewed: why (the first's).
+    let all = vec![
+        viewing("a", Some("HTTP 500"), None),
+        viewing("b", Some("HTTP 502"), None),
+    ];
+    assert_eq!(cut(all).2.as_deref(), Some("HTTP 500"));
+    // Every one a library: none kept, and none "unviewed".
+    let libraries = vec![
+        viewing("a", None, Some(false)),
+        viewing("b", None, Some(false)),
+    ];
+    assert_eq!(cut(libraries), (Vec::new(), 2, None));
+    assert_eq!(cut(Vec::new()), (Vec::new(), 0, None));
+}
+
+/// npm is asked in rounds until ten are kept, at most twenty in all.
+#[test]
+fn npm_is_asked_until_the_candidates_are_full() {
+    assert_eq!(next_round(0, 0), 10);
+    assert_eq!(next_round(10, 7), 3, "three libraries make room for three");
+    assert_eq!(next_round(13, 10), 0, "full");
+    assert_eq!(next_round(18, 2), 2, "twenty at most");
+    assert_eq!(next_round(20, 0), 0);
+}
+
+#[test]
+fn downloads_are_read_in_one_answer_or_many() {
+    let one = vec!["a".to_owned()];
+    assert_eq!(
+        counts(&json!({ "downloads": 7, "package": "a" }), &one),
+        [("a".to_owned(), Ok(7))]
+    );
+    // npm's own error kept, for one package or a whole answer.
+    assert_eq!(
+        counts(&json!({ "error": "package a not found" }), &one),
+        [(
+            "a".to_owned(),
+            Err("npm's downloads API answered: package a not found".to_owned())
+        )]
+    );
+    let three = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+    let all = counts(&json!({ "a": { "downloads": 3 }, "b": null }), &three);
+    assert_eq!(all[0], ("a".to_owned(), Ok(3)));
+    assert_eq!(
+        all[1].1,
+        Err("npm's downloads API knows no such package".to_owned())
+    );
+    assert_eq!(
+        all[2].1,
+        Err("npm's downloads API failed (its answer left this package out)".to_owned())
+    );
+    let all = counts(&json!({ "error": "rate limited" }), &three);
+    assert!(all
+        .iter()
+        .all(|(_, c)| c == &Err("npm's downloads API answered: rate limited".to_owned())));
+    assert_eq!(
+        counts(&json!({ "a": {} }), &one[..]),
+        [(
+            "a".to_owned(),
+            Err("npm's downloads API failed (it answered without a count)".to_owned())
+        )]
+    );
+}
+
+/// The unscoped packages in bulk, in order, then each scoped one alone.
+#[test]
+fn downloads_are_asked_in_bulk_but_for_scoped_packages() {
+    let mut packages: Vec<String> = (0..130).map(|i| format!("p{i}")).collect();
+    packages.insert(3, "@a/x".into());
+    packages.push("@b/y".into());
+    let asked = requests(&packages);
+    let sizes: Vec<usize> = asked.iter().map(Vec::len).collect();
+    assert_eq!(sizes, [128, 2, 1, 1]);
+    assert_eq!(
+        (&asked[0][..2], &asked[1][..]),
+        (
+            &["p0".to_owned(), "p1".to_owned()][..],
+            &["p128".to_owned(), "p129".to_owned()][..]
+        )
+    );
+    assert_eq!(
+        (&asked[2], &asked[3]),
+        (&vec!["@a/x".to_owned()], &vec!["@b/y".to_owned()])
+    );
+    assert!(requests(&[]).is_empty());
+}
+
+/// Against a stub of the API: a failed request fails only its own
+/// packages, a bulk answer read by name.
+#[tokio::test]
+async fn a_failed_downloads_request_fails_only_its_own_packages() {
+    use axum::extract::Path;
+    use axum::http::StatusCode;
+    use axum::routing::get;
+    let app = axum::Router::new().route(
+        "/{*names}",
+        get(|Path(names): Path<String>| async move {
+            match names.as_str() {
+                "a,b" => {
+                    Ok(json!({ "a": { "downloads": 1 }, "b": { "downloads": 2 } }).to_string())
+                }
+                "@s/ok" => Ok(json!({ "downloads": 5, "package": "@s/ok" }).to_string()),
+                _ => Err(StatusCode::TOO_MANY_REQUESTS),
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let names: Vec<String> = ["a", "@s/busy", "b", "@s/ok"].map(String::from).into();
+    let got = downloads_of(&base, &names).await;
+    assert_eq!(got["a"], Ok(1));
+    assert_eq!(got["b"], Ok(2));
+    assert_eq!(got["@s/ok"], Ok(5));
+    assert_eq!(
+        got["@s/busy"],
+        Err("npm's downloads API failed (HTTP 429 Too Many Requests)".to_owned())
+    );
+    // Another registry than npmjs's: not asked.
+    let got = downloads(&Ok("http://127.0.0.1:9/".into()), &names).await;
+    assert!(got
+        .values()
+        .all(|c| c.as_ref().unwrap_err().starts_with("not asked: ")));
 }
 
 #[test]

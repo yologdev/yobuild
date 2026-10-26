@@ -474,11 +474,15 @@ async fn what_the_limits_refuse_before_anything_is_installed() {
         ),
         (
             json!({ "package": "young", "version": "1.0.0" }),
-            "young is not loadable: no version was published 7 or more days ago (min_age_days is 7)",
+            "young is not loadable: no version was published 7 or more days ago",
+        ),
+        (
+            json!({ "package": "young" }),
+            "young is not loadable: no version was published 7 or more days ago",
         ),
         (
             json!({ "package": "lint-mcp", "version": "1.3.0" }),
-            "lint-mcp@1.3.0 is not the version find_plugin offered: lint-mcp@1.2.0",
+            "lint-mcp@1.3.0 is not the version find_plugin offered: lint-mcp@1.2.0 (or give no `version`)",
         ),
     ];
     for (args, said) in cases {
@@ -486,8 +490,10 @@ async fn what_the_limits_refuse_before_anything_is_installed() {
         assert!(why.contains(said), "{args}: {why}");
     }
     assert_eq!(locked(&load.state).attempts, 0, "none of these counted");
-    // Counted from here: a name in use, then the attempts spent.
-    let why = refusal(&load, json!({ "package": "taken-mcp", "version": "1.0.0" })).await;
+    assert_eq!(load.parameters_schema()["required"], json!(["package"]));
+    // Counted from here: a name in use (a `null` version is none: the
+    // offered one), then the attempts spent.
+    let why = refusal(&load, json!({ "package": "taken-mcp", "version": null })).await;
     assert!(
         why.contains(
             "the name \"taken\" is in use by another plugin or server: pass another `name`"

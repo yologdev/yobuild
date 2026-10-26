@@ -506,7 +506,8 @@ async fn a_server_allowed_twice_is_offered_from_the_next_turn_each_call_asking()
         "",
         &json!([
             call("find_plugin", json!({ "need": "echo text" })),
-            call("load_plugin", json!({ "package": "echo-mcp", "version": "1.0.0",
+            // No `version`: the one find_plugin offered.
+            call("load_plugin", json!({ "package": "echo-mcp",
                                         "name": "talk", "args": ["../elsewhere"] })),
             call("talk__echo", json!({ "text": "hi" })),
             call("talk__echo", json!({ "text": "die" })),
