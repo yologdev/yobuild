@@ -384,7 +384,7 @@ mod tests {
             // run/load.rs: `limits` and `name`, as `execute` returns them.
             (
                 Scope::Call,
-                "load_plugin refused it: young is not loadable: no version was published 7 or more days ago (the newest, 1.0.0, on 2026-10-24) (min_age_days is 7)".into(),
+                "load_plugin refused it: young is not loadable: no version was published 7 or more days ago (the newest, 1.0.0, on 2026-10-24)".into(),
                 "load-too-new",
             ),
             (

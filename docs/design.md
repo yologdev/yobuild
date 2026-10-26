@@ -3729,11 +3729,14 @@ is part of what `load_plugin` does, and `find_plugin` only reads.
 
 **`find_plugin(need, kind?)`** searches and returns candidates. It starts,
 loads and installs nothing.
-- `need`: a few words, such as "lint TypeScript" or "read xlsx files".
+- `need`: a few words, naming the tool when one is known, such as
+  "eslint" or "read xlsx files" (a description alone may miss: tried
+  live, "lint TypeScript" did not find ESLint's server, below).
 - `kind`: `"mcp"` only in stage 1; later `"pi"`, `"dsh"`, `"rutis"`
   (stage 2, below). The stages are what is found and loaded; the PRs that
   build stage 1 are numbered apart ("Order of PRs").
-- Sources, for MCP servers, each with a 15-second limit:
+- Sources, for MCP servers, each with a 15-second limit (npm's search
+  30, below):
   - the MCP registry, its `v0` API (`/v0/servers?search=`; base
     `https://registry.modelcontextprotocol.io`, or `YOBUILD_MCP_REGISTRY`
     for the tests: https, or http on a loopback address; its path kept;
@@ -3769,9 +3772,11 @@ loads and installs nothing.
     qualifier only ranks (tried live on 2026-10-26, "lint TypeScript"
     brought React hooks and the MCP SDKs), so a package is kept only when
     it is marked as MCP: an MCP keyword (`mcp`, `mcp-server`,
-    `model-context-protocol`, `modelcontextprotocol`), or "MCP" or "Model
-    Context Protocol" in its name or description; the rest are counted
-    as left out ("not marked as MCP").
+    `model-context-protocol`, `modelcontextprotocol`); a word of its name
+    or of a keyword that begins or ends with "mcp" (`fastmcp`,
+    `mcpserver`) or is `modelcontextprotocol` (the scope); or "MCP" or
+    "Model Context Protocol" as words in its description. The rest are
+    counted as left out ("not marked as MCP").
 - The result opens with one line per source: how many it found, or that
   it failed and why (a time-out, an HTTP status, npm's message). One
   source failing is said there and the other's candidates are given; both
@@ -3782,13 +3787,17 @@ loads and installs nothing.
   `name`) is a failure, never "0 found"; packages under names yobuild does
   not take (npm's old forms) are counted as left out.
 - Each candidate (those both sources found first, then each source's own
-  in turn; one per package; at most 10, and "the first 10 of N" said when
-  cut), npm asked about at most four at once. npm is asked about up to
-  20 before the cut, and one whose latest version names no program to
-  start (no `bin`: a library, an SDK, which `load_plugin` could only
-  refuse) is left out, counted on the sources' line ("6 left out once npm
-  was asked: no program to start (a library, not a server)"); a version
-  to take without one, where the latest has one, is listed not loadable.
+  in turn; one per package; at most 10), npm asked about at most four at
+  once. npm is asked in rounds, each as many as could still be kept, up
+  to 20 in all: one that names no program to start (no `bin`: a library,
+  an SDK, which `load_plugin` could only refuse) — at the version it
+  would take, else (none to take) its latest — is left out, counted on
+  the sources' line ("6 left out once npm was asked: no program to start
+  (a library, not a server)"), and makes room for the next. A version to
+  take without one, where the latest has one, is listed not loadable;
+  one with one, where the latest has none, is taken. Those never asked
+  about are counted there too ("12 more found and not looked at (…): a
+  narrower need puts others first"), so an empty list never hides them.
   For each:
   - the package and the version `load_plugin` would take: the newest
     release (`a.b.c`) not past the `latest` tag (before a pre-release
@@ -3807,10 +3816,14 @@ loads and installs nothing.
   - weekly downloads, from npm's downloads API only when npm's registry
     is `registry.npmjs.org` (with or without its last `/`), so a private
     registry's package names never reach npmjs; else "unknown", with why
-    (another registry, or the API's error). The unscoped packages are
+    (another registry, the API's error in its words, a package it does
+    not know, or one its answer left out). The unscoped packages are
     asked for in one request (the API's bulk form, up to 128), each scoped
-    one alone (the bulk form takes none): asking one at a time ran into
-    the API's rate limit (HTTP 429) for half of a search's candidates;
+    one alone (the bulk form takes none): asking each package in a
+    request of its own ran into the API's rate limit (HTTP 429) for half
+    of a search's candidates. The requests go one after another, 5 s
+    each and 10 s for a round's together (those past it "not asked");
+    a failed request makes "unknown" only its own packages;
   - when it is in the MCP registry, the arguments and environment
     variables the entry lists as required; from npm only, "not listed".
 - All of it is text the packages' authors wrote. Each field has its line
@@ -4002,7 +4015,7 @@ refuses `[extend]` without it, as the manifest does with `gate = "off"`.
   `install` removes one, an open question withdrawn, a started process
   stopped. Nothing is remembered, but the call counted toward
   `max_attempts`; no load is left "in progress".
-- Each step has its own limit (15 s a source, 5 min an npm call, 30 s to
+- Each step has its own limit (15 s a source, 30 s npm's search, 5 min an npm call, 30 s to
   start and list, `UI_TIMEOUT` a question), and all of them sit inside the
   run's `max_minutes`.
 
@@ -4136,9 +4149,9 @@ As built (PR 4), each named where it lives:
 
 A code reviewer that starts without ESLint (`tools = "read-only"`,
 `[extend]`). Asked to lint a TypeScript project, it calls `find_plugin`
-(in its own words: tried live on 2026-10-26, "eslint" finds ESLint's
-server and "lint TypeScript" does not, its words being neither "lint"
-nor "TypeScript" as written), proposes `@eslint/mcp`, the owner allows starting it
+(in its own words: tried live on 2026-10-26, the need "eslint" finds
+ESLint's server and "lint TypeScript" does not — the server's name and
+description hold neither word as written), proposes `@eslint/mcp`, the owner allows starting it
 and then keeping it, and it lints with `eslint__lint-files`, each call
 asked and allowed. Run once live (cost in its README), and scripted in CI
 against the live sources (decided 2026-10-26): its reply files name no

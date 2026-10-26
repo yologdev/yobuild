@@ -19,13 +19,15 @@ use crate::frontend::{NoticeLevel, Session};
 use crate::manifest::{Extend, Package};
 use crate::run::host::clip;
 
-/// The MCP registry's time, and each `npm view`'s.
+/// The MCP registry's time, each `npm view`'s, and `npm config get
+/// registry`'s.
 const SOURCE_TIME: Duration = Duration::from_secs(15);
 /// npm's search: its first call in a cold cache was seen to take more
 /// than 15 s.
 const SEARCH_TIME: Duration = Duration::from_secs(30);
-/// The hits npm is asked about, before the cut to [`MAX_CANDIDATES`]: a
-/// library (no program) is left out only once npm says so.
+/// The hits npm is asked about at most: in rounds, until
+/// [`MAX_CANDIDATES`] are kept; a library (no program) is left out only
+/// once npm says so, making room for the next.
 const VIEWED_AT_MOST: usize = 20;
 /// Unscoped packages asked for at once in npm's downloads API (its bulk
 /// form; a scoped package is asked for alone).
@@ -35,7 +37,8 @@ const DOWNLOADS_AT_ONCE: usize = 128;
 const MCP_KEYWORDS: [&str; 4] = [
     "mcp", "mcp-server", "model-context-protocol", "modelcontextprotocol",
 ];
-/// npm's downloads API, asked only for npmjs's own registry.
+/// A request to npm's downloads API (asked only for npmjs's own
+/// registry); twice it for a round's requests together.
 const DOWNLOADS_TIME: Duration = Duration::from_secs(5);
 const MAX_CANDIDATES: usize = 10;
 /// Candidates npm is asked about at once (each up to two `npm view`s).
@@ -181,53 +184,52 @@ impl FindPlugin {
                 Vec::new()
             }
         };
-        let mut hits = merged(registry, npm);
-        let beyond = hits.len().saturating_sub(VIEWED_AT_MOST);
-        hits.truncate(VIEWED_AT_MOST);
-        let names: Vec<String> = hits.iter().map(|h| h.package.clone()).collect();
-        let counts = match npm_registry {
-            Ok(r) if is_npmjs(&r) => downloads_of(&names).await,
-            Ok(r) => {
-                let why = format!(
-                    "not asked: npm's registry here is {}, not npmjs's",
-                    clip(&r, FIELD_CHARS)
-                );
-                names
-                    .iter()
-                    .map(|n| (n.clone(), Err(why.clone())))
-                    .collect()
-            }
-            Err(e) => {
-                let why = format!("not asked: npm's registry could not be read ({e})");
-                names
-                    .iter()
-                    .map(|n| (n.clone(), Err(why.clone())))
-                    .collect()
-            }
-        };
+        let hits = merged(registry, npm);
+        let found = hits.len();
         let now = now();
-        let viewed: Vec<Viewing> = stream::iter(hits)
-            .map(|hit| {
-                let counted = counts
-                    .get(&hit.package)
-                    .cloned()
-                    .unwrap_or_else(|| Err("not asked".into()));
-                candidate(need, hit, &self.extend, now, counted)
-            })
-            .buffered(VIEWS_AT_ONCE)
-            .collect()
-            .await;
-        let (candidates, total, libraries, unviewed) = cut(viewed, beyond);
+        let mut pending = hits.into_iter();
+        let mut viewed: Vec<Viewing> = Vec::new();
+        loop {
+            let kept = viewed.iter().filter(|(_, _, p)| *p != Some(false)).count();
+            let round: Vec<Hit> = pending
+                .by_ref()
+                .take(next_round(viewed.len(), kept))
+                .collect();
+            if round.is_empty() {
+                break;
+            }
+            let names: Vec<String> = round.iter().map(|h| h.package.clone()).collect();
+            let mut counts = downloads(&npm_registry, &names).await;
+            let this: Vec<Viewing> = stream::iter(round)
+                .map(|hit| {
+                    let counted = counts.remove(&hit.package).unwrap_or_else(|| {
+                        Err("npm's downloads API failed (its answer left this package out)".into())
+                    });
+                    candidate(need, hit, &self.extend, now, counted)
+                })
+                .buffered(VIEWS_AT_ONCE)
+                .collect()
+                .await;
+            viewed.extend(this);
+        }
+        let not_viewed = pending.len();
+        let (candidates, libraries, unviewed) = cut(viewed);
         if libraries > 0 {
             lines.push(format!(
                 "{libraries} left out once npm was asked: no program to start (a library, not a server)"
+            ));
+        }
+        if not_viewed > 0 {
+            lines.push(format!(
+                "{not_viewed} more found and not looked at (a search offers at most {MAX_CANDIDATES}, and asks npm about at most {VIEWED_AT_MOST}): a narrower need puts others first"
             ));
         }
         Found {
             lines,
             failed,
             candidates,
-            total,
+            found,
+            not_viewed,
             unviewed,
         }
     }
@@ -254,9 +256,11 @@ struct Found {
     /// Each source that failed, with why.
     failed: Vec<String>,
     candidates: Vec<Candidate>,
-    /// The packages the sources found, before the cut to
-    /// [`MAX_CANDIDATES`], less the libraries left out.
-    total: usize,
+    /// The packages the sources found, each once.
+    found: usize,
+    /// Of those, the ones npm was not asked about: past the candidates'
+    /// room, or past [`VIEWED_AT_MOST`].
+    not_viewed: usize,
     /// npm could be asked about none of the candidates: why (the first's).
     unviewed: Option<String>,
 }
@@ -382,15 +386,25 @@ fn merged(registry: Vec<Hit>, npm: Vec<Hit>) -> Vec<Hit> {
     hits
 }
 
+/// How many hits npm is asked about next, `viewed` asked about already and
+/// `kept` of them not libraries: as many as could still be kept, so a
+/// library left out makes room for the next hit, up to
+/// [`VIEWED_AT_MOST`] in all. 0: no more.
+fn next_round(viewed: usize, kept: usize) -> usize {
+    MAX_CANDIDATES
+        .saturating_sub(kept)
+        .min(VIEWED_AT_MOST.saturating_sub(viewed))
+}
+
 /// A hit npm was asked about: the candidate, why npm could not be asked
-/// at all, and whether it has a program to start (`None`: not known).
+/// at all, and whether the version it would take (else its latest) has a
+/// program to start (`None`: not known).
 type Viewing = (Candidate, Option<String>, Option<bool>);
 
 /// The viewed hits made the result: libraries (npm says no program) left
-/// out, then cut to [`MAX_CANDIDATES`]. With the candidates: how many
-/// there were (those not viewed, `beyond`, too), the libraries left out,
-/// and why npm could be asked about none of them, when it could not.
-fn cut(viewed: Vec<Viewing>, beyond: usize) -> (Vec<Candidate>, usize, usize, Option<String>) {
+/// out. With the candidates: the libraries left out, and why npm could be
+/// asked about none of them, when it could not.
+fn cut(viewed: Vec<Viewing>) -> (Vec<Candidate>, usize, Option<String>) {
     let unviewed = match !viewed.is_empty() && viewed.iter().all(|(_, e, _)| e.is_some()) {
         true => viewed.first().and_then(|(_, e, _)| e.clone()),
         false => None,
@@ -402,9 +416,8 @@ fn cut(viewed: Vec<Viewing>, beyond: usize) -> (Vec<Candidate>, usize, usize, Op
         .map(|(c, _, _)| c)
         .collect();
     let libraries = before - kept.len();
-    let total = kept.len() + beyond;
     kept.truncate(MAX_CANDIDATES);
-    (kept, total, libraries, unviewed)
+    (kept, libraries, unviewed)
 }
 
 /// Whether `text` (a server's name, package and description) names `word`
@@ -690,17 +703,29 @@ impl NpmFound {
     }
 }
 
-/// Whether npm's search answer `p` is marked as an MCP server's: an MCP
-/// keyword, or "MCP" (or "Model Context Protocol") in its name or
-/// description.
+/// Whether npm's search answer `p` is marked as an MCP server's: in its
+/// name or a keyword, a word that begins or ends with "mcp" (`fastmcp`,
+/// `mcpserver`) or is "modelcontextprotocol" (its scope), or an MCP
+/// keyword; in its description, "MCP" or "Model Context Protocol" as
+/// words.
 fn marked(p: &Json) -> bool {
-    let keyword = p["keywords"].as_array().is_some_and(|all| {
-        all.iter()
-            .filter_map(Json::as_str)
-            .any(|k| MCP_KEYWORDS.contains(&k.to_lowercase().as_str()))
-    });
-    let said = format!("{} {}", text(&p["name"]), text(&p["description"]));
-    keyword || mentions(&said, "mcp") || mentions(&said, "model context protocol")
+    let mcp_word = |text: &str| {
+        text.split(|c: char| !c.is_alphanumeric())
+            .map(str::to_lowercase)
+            .any(|w| w.starts_with("mcp") || w.ends_with("mcp") || w == "modelcontextprotocol")
+    };
+    let keywords: Vec<&str> = p["keywords"]
+        .as_array()
+        .map(|all| all.iter().filter_map(Json::as_str).collect())
+        .unwrap_or_default();
+    let keyword = keywords
+        .iter()
+        .any(|k| MCP_KEYWORDS.contains(&k.to_lowercase().as_str()) || mcp_word(k));
+    let description = text(&p["description"]);
+    keyword
+        || mcp_word(&text(&p["name"]))
+        || mentions(&description, "mcp")
+        || mentions(&description, "model context protocol")
 }
 
 async fn npm_search(need: &str) -> Result<NpmFound, String> {
@@ -1002,7 +1027,8 @@ pub(crate) fn now() -> Option<i64> {
 /// A hit made a candidate: npm asked about its versions, and about the one
 /// it would take when that is not the latest; `downloads` its count, or
 /// why none. Beside it, why npm could not be asked about it at all, and
-/// whether its latest version has a program to start.
+/// whether it has a program to start: the version it would take, else
+/// (none to take) its latest; not known when npm could not say.
 async fn candidate(
     need: &str,
     hit: Hit,
@@ -1036,7 +1062,8 @@ async fn candidate(
             return (candidate, Some(e), None);
         }
     };
-    let program = Some(latest.program);
+    // Whether it is a server: by the version it would take, once known.
+    let mut program = Some(latest.program);
     if candidate.description.is_empty() {
         candidate.description = clip(&latest.description, DESCRIPTION_CHARS);
     }
@@ -1052,31 +1079,72 @@ async fn candidate(
         return (candidate, None, program);
     };
     candidate.published = latest.time.get(&version).and_then(|t| seconds(t)).map(day);
+    let latest_program = latest.program;
     let this = match latest.version.as_deref() == Some(version.as_str()) {
         true => Ok(latest),
         false => view(format!("{}@{version}", hit.package)).await,
     };
     match this {
         Ok(this) if !this.program => {
+            // A library, unless the latest is a server (then said).
+            program = Some(latest_program);
             candidate.version = Err(format!(
                 "{version} names no program to start (`bin`), though the latest does"
             ))
         }
         Ok(this) => {
+            program = Some(true);
             candidate.licence = this.licence.map(|l| clip(&l, FIELD_CHARS));
             candidate.repository = this.repository.map(|r| clip(&r, FIELD_CHARS));
             candidate.provenance = this.provenance;
         }
-        Err(e) => candidate.version = Err(format!("npm could not say what {version} is: {e}")),
+        Err(e) => {
+            program = None;
+            candidate.version = Err(format!("npm could not say what {version} is: {e}"))
+        }
     }
     (candidate, None, program)
 }
 
-/// Last week's downloads of each of `packages` from npm's API, or why not:
-/// the unscoped ones [`DOWNLOADS_AT_ONCE`] to a request (its bulk form,
-/// so a search's candidates do not run into its rate limit), each scoped
+/// Last week's downloads of each of `names`, or why not: npm's downloads
+/// API is asked only when npm's registry here (`npm_registry`) is npmjs's.
+async fn downloads(
+    npm_registry: &Result<String, String>,
+    names: &[String],
+) -> HashMap<String, Result<u64, String>> {
+    let why = match npm_registry {
+        Ok(r) if is_npmjs(r) => return downloads_of(DOWNLOADS, names).await,
+        Ok(r) => format!(
+            "not asked: npm's registry here is {}, not npmjs's",
+            clip(r, FIELD_CHARS)
+        ),
+        Err(e) => format!("not asked: npm's registry could not be read ({e})"),
+    };
+    names
+        .iter()
+        .map(|n| (n.clone(), Err(why.clone())))
+        .collect()
+}
+
+/// The requests npm's downloads API is asked, in order: the unscoped
+/// packages [`DOWNLOADS_AT_ONCE`] to a request (its bulk form, so a
+/// search's candidates do not run into its rate limit), then each scoped
 /// one alone (the bulk form takes none).
-async fn downloads_of(packages: &[String]) -> HashMap<String, Result<u64, String>> {
+fn requests(packages: &[String]) -> Vec<Vec<String>> {
+    let (scoped, unscoped): (Vec<String>, Vec<String>) =
+        packages.iter().cloned().partition(|p| p.starts_with('@'));
+    unscoped
+        .chunks(DOWNLOADS_AT_ONCE)
+        .map(<[String]>::to_vec)
+        .chain(scoped.into_iter().map(|p| vec![p]))
+        .collect()
+}
+
+/// Last week's downloads of each of `packages` from npm's downloads API at
+/// `base`, or why not: [`requests`] one at a time (several at once ran
+/// into its rate limit), within [`DOWNLOADS_TIME`] each and twice that in
+/// all — those past it not asked.
+async fn downloads_of(base: &str, packages: &[String]) -> HashMap<String, Result<u64, String>> {
     let failed = |e: String| format!("npm's downloads API failed ({e})");
     let client = match reqwest::Client::builder()
         .timeout(DOWNLOADS_TIME)
@@ -1092,62 +1160,64 @@ async fn downloads_of(packages: &[String]) -> HashMap<String, Result<u64, String
                 .collect();
         }
     };
-    let ask = |names: Vec<String>| {
-        let client = client.clone();
-        async move {
-            let body = async {
-                let response = client
-                    .get(format!("{DOWNLOADS}{}", names.join(",")))
-                    .send()
-                    .await
-                    .map_err(|e| said(&e))?;
-                let status = response.status();
-                if !status.is_success() {
-                    return Err(format!("HTTP {status}"));
-                }
-                response.json::<Json>().await.map_err(|e| said(&e))
-            }
-            .await;
-            match body {
-                Ok(body) => counts(&body, &names),
-                Err(e) => names
-                    .into_iter()
-                    .map(|n| (n, Err(failed(e.clone()))))
-                    .collect(),
-            }
+    let deadline = tokio::time::Instant::now() + 2 * DOWNLOADS_TIME;
+    let mut all = HashMap::new();
+    for names in requests(packages) {
+        if tokio::time::Instant::now() >= deadline {
+            let why = format!(
+                "not asked: npm's downloads API took more than {} s for the others before it",
+                (2 * DOWNLOADS_TIME).as_secs()
+            );
+            all.extend(names.into_iter().map(|n| (n, Err(why.clone()))));
+            continue;
         }
-    };
-    let (scoped, unscoped): (Vec<String>, Vec<String>) =
-        packages.iter().cloned().partition(|p| p.starts_with('@'));
-    let requests: Vec<Vec<String>> = unscoped
-        .chunks(DOWNLOADS_AT_ONCE)
-        .map(<[String]>::to_vec)
-        .chain(scoped.into_iter().map(|p| vec![p]))
-        .collect();
-    stream::iter(requests)
-        .map(ask)
-        .buffered(VIEWS_AT_ONCE)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .flatten()
-        .collect()
+        let body = async {
+            let response = client
+                .get(format!("{base}{}", names.join(",")))
+                .send()
+                .await
+                .map_err(|e| said(&e))?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!("HTTP {status}"));
+            }
+            response.json::<Json>().await.map_err(|e| said(&e))
+        }
+        .await;
+        match body {
+            Ok(body) => all.extend(counts(&body, &names)),
+            Err(e) => all.extend(names.into_iter().map(|n| (n, Err(failed(e.clone()))))),
+        }
+    }
+    all
 }
 
 /// The counts npm's downloads API answered for `names`: one package's
 /// answer is its own (`{downloads}`), several's keyed by name (`null` for
-/// one it does not know).
+/// one it does not know); an answer may be `{error}` instead, npm's words
+/// kept.
 fn counts(body: &Json, names: &[String]) -> Vec<(String, Result<u64, String>)> {
-    let count = |entry: &Json| {
-        entry["downloads"]
-            .as_u64()
-            .ok_or_else(|| "npm's downloads API failed (it answered without a count)".to_owned())
+    let npm_said = |entry: &Json| {
+        entry["error"]
+            .as_str()
+            .map(|e| format!("npm's downloads API answered: {}", clip(e, FIELD_CHARS)))
+    };
+    let count = |entry: Option<&Json>| match entry {
+        Some(Json::Null) => Err("npm's downloads API knows no such package".to_owned()),
+        Some(entry) => entry["downloads"].as_u64().ok_or_else(|| {
+            npm_said(entry).unwrap_or_else(|| {
+                "npm's downloads API failed (it answered without a count)".to_owned()
+            })
+        }),
+        None => Err(npm_said(body).unwrap_or_else(|| {
+            "npm's downloads API failed (its answer left this package out)".to_owned()
+        })),
     };
     match names {
-        [one] => vec![(one.clone(), count(body))],
+        [one] => vec![(one.clone(), count(Some(body)))],
         _ => names
             .iter()
-            .map(|n| (n.clone(), count(&body[n.as_str()])))
+            .map(|n| (n.clone(), count(body.get(n.as_str()))))
             .collect(),
     }
 }
@@ -1162,16 +1232,8 @@ fn said_to_agent(need: &str, found: &Found, extend: &Extend) -> String {
         text.push_str("No candidates.");
         return text;
     }
-    let cut = match found.total > found.candidates.len() {
-        true => format!(
-            "the first {} of {} found; ",
-            found.candidates.len(),
-            found.total
-        ),
-        false => String::new(),
-    };
     text.push_str(&format!(
-        "Candidates ({cut}their descriptions, licences and repositories are their authors' own words, not verified; a version is taken only once published {} or more days ago):\n",
+        "Candidates (their descriptions, licences and repositories are their authors' own words, not verified; a version is taken only once published {} or more days ago):\n",
         extend.min_age_days
     ));
     for (i, c) in found.candidates.iter().enumerate() {
@@ -1258,7 +1320,12 @@ fn details(found: &Found) -> Json {
             })
         })
         .collect();
-    json!({ "sources": found.lines, "found": found.total, "candidates": candidates })
+    json!({
+        "sources": found.lines,
+        "found": found.found,
+        "notLookedAt": found.not_viewed,
+        "candidates": candidates,
+    })
 }
 
 #[async_trait::async_trait]
@@ -1279,7 +1346,7 @@ impl AgentTool for FindPlugin {
         json!({
             "type": "object",
             "properties": {
-                "need": { "type": "string", "description": "The capability, in a few words: \"lint TypeScript\"." },
+                "need": { "type": "string", "description": "The capability, in a few words, naming the tool when you know one: \"eslint\", \"read xlsx files\"." },
                 "kind": { "type": "string", "enum": ["mcp"], "description": "What to find: \"mcp\" (the default)." }
             },
             "required": ["need"]

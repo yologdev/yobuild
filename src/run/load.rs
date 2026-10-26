@@ -473,10 +473,7 @@ impl LoadPlugin {
         };
         let version = match (&candidate.version, version) {
             (Err(why), _) => {
-                return Err(refused(format!(
-                    "{package} is not loadable: {why} (min_age_days is {})",
-                    self.extend.min_age_days
-                )))
+                return Err(refused(format!("{package} is not loadable: {why}")))
             }
             (Ok(v), Some(version)) if v != version => {
                 return Err(refused(format!(
