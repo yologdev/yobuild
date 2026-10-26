@@ -279,7 +279,7 @@ searches the MCP registry and npm for MCP servers over stdio and returns
 candidates — each with the version that could be taken (the newest
 release published `min_age_days` or more days ago, default 7) and what
 the packages say of themselves, unverified. It installs and starts
-nothing. Then `load_plugin(package, version, name?, args?)` loads one of
+nothing. Then `load_plugin(package, name?, args?)` (a `version` may be given: it must be the offered one) loads one of
 them for the session: installed without running anything (every package
 in its tree `min_age_days` old), the person asked before it starts and
 again with its tools; its tools are the agent's from its next step

@@ -446,8 +446,14 @@ impl LoadPlugin {
         }
     }
 
-    /// Step 1, the limits: the candidate, and the call counted.
-    fn limits(&self, package: &str, version: &str) -> Result<(Candidate, Busy), Refused> {
+    /// Step 1, the limits: the candidate, the version taken — `version`, or
+    /// without one the version `find_plugin` offered — and the call
+    /// counted.
+    fn limits(
+        &self,
+        package: &str,
+        version: Option<&str>,
+    ) -> Result<(Candidate, String, Busy), Refused> {
         if self.once {
             return Err(refused(
                 "not under --once: nobody is there to allow it (nothing was counted)",
@@ -465,20 +471,20 @@ impl LoadPlugin {
                 "{package} is not among this session's candidates: only a package find_plugin returned can be loaded"
             )));
         };
-        match &candidate.version {
-            Err(why) => {
+        let version = match (&candidate.version, version) {
+            (Err(why), _) => {
                 return Err(refused(format!(
                     "{package} is not loadable: {why} (min_age_days is {})",
                     self.extend.min_age_days
                 )))
             }
-            Ok(v) if v != version => {
+            (Ok(v), Some(version)) if v != version => {
                 return Err(refused(format!(
-                    "{package}@{version} is not the version find_plugin offered: {package}@{v}"
+                    "{package}@{version} is not the version find_plugin offered: {package}@{v} (or give no `version`)"
                 )))
             }
-            Ok(_) => {}
-        }
+            (Ok(v), _) => v.clone(),
+        };
         if let Some(k) = self
             .loaded
             .kept()
@@ -511,7 +517,7 @@ impl LoadPlugin {
                 self.extend.max_loads
             )));
         }
-        Ok((candidate, Busy::claim(&self.state, &mut state)))
+        Ok((candidate, version, Busy::claim(&self.state, &mut state)))
     }
 
     /// Step 2, the name: given, or the package's.
@@ -561,7 +567,7 @@ impl LoadPlugin {
             }
         };
         let package = text("package")?.ok_or_else(|| refused("`package` is required"))?;
-        let version = text("version")?.ok_or_else(|| refused("`version` is required"))?;
+        let version = text("version")?;
         let given = text("name")?;
         let args: Vec<String> = match &params["args"] {
             Json::Null => Vec::new(),
@@ -582,7 +588,7 @@ impl LoadPlugin {
                 )))
             }
         };
-        let (candidate, _busy) = self.limits(&package, &version)?;
+        let (candidate, version, _busy) = self.limits(&package, version.as_deref())?;
         let name = self.name(&package, given.as_deref())?;
         // 3. What it is handed.
         crate::manifest::loaded_arguments(&args).map_err(refused)?;
@@ -1109,7 +1115,7 @@ impl AgentTool for LoadPlugin {
         "Load a plugin"
     }
     fn description(&self) -> &str {
-        "Propose an MCP server find_plugin returned, at the version it offered, for this session. \
+        "Propose an MCP server find_plugin returned, for this session (at the version it offered). \
          The owner is asked before it starts, and again with its tools before you get them; its \
          tools are yours from your next step, each call asking the owner. A refusal says why: do \
          not propose a package the owner blocked again."
@@ -1119,11 +1125,11 @@ impl AgentTool for LoadPlugin {
             "type": "object",
             "properties": {
                 "package": { "type": "string", "description": "The npm package, as find_plugin gave it." },
-                "version": { "type": "string", "description": "The version find_plugin said could be loaded." },
+                "version": { "type": "string", "description": "The version find_plugin said could be loaded; leave it out to take that one." },
                 "name": { "type": "string", "description": "What to call it (its tools are <name>__<tool>); by default from the package's name." },
                 "args": { "type": "array", "items": { "type": "string" }, "description": "The server's own arguments, as its documentation gives them." }
             },
-            "required": ["package", "version"]
+            "required": ["package"]
         })
     }
 

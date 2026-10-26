@@ -68,7 +68,8 @@ fn packument(name: &str, versions: &[(&str, u64)]) -> Value {
                 "name": name, "version": version, "description": format!("{name} lints"),
                 "license": "MIT",
                 "repository": { "type": "git", "url": format!("git+https://example.com/{name}.git") },
-                "dist": { "tarball": format!("http://example.invalid/{name}.tgz"), "shasum": "0" }
+                "dist": { "tarball": format!("http://example.invalid/{name}.tgz"), "shasum": "0" },
+                "bin": { name: "cli.js" }
             }),
         );
         time.insert(version.to_string(), json!(ago(*days)));
@@ -133,13 +134,20 @@ fn stub(broken: Broken) -> (u16, Asked) {
                     return StatusCode::NOT_FOUND.into_response();
                 }
                 let object = |name: &str| {
+                    let keywords = match name {
+                        "lint-sdk" => json!(["mcp", "sdk"]),
+                        _ => json!(["lint"]),
+                    };
                     json!({ "package": { "name": name, "version": "1.0.0",
-                        "description": format!("{name} lints"), "date": ago(1),
+                        "description": format!("{name} lints"), "date": ago(1), "keywords": keywords,
                         "links": {}, "maintainers": [] }, "score": { "final": 1.0 }, "searchScore": 1.0 })
                 };
+                // Beside the servers: an MCP library (no program) and a
+                // package nothing marks as MCP (npm's `keywords:` ranks).
                 Json(json!({
-                    "objects": [object("lint-mcp"), object("fresh-mcp"), object("broken-mcp")],
-                    "total": 3, "time": ago(0)
+                    "objects": [object("lint-mcp"), object("fresh-mcp"), object("broken-mcp"),
+                                object("lint-sdk"), object("lint-hooks")],
+                    "total": 5, "time": ago(0)
                 }))
             };
             let package = move |UrlPath(name): UrlPath<String>| async move {
@@ -149,6 +157,11 @@ fn stub(broken: Broken) -> (u16, Asked) {
                 match name.as_str() {
                     "lint-mcp" => Json(packument("lint-mcp", &[("0.9.0", 60), ("1.0.0", 30), ("1.1.0", 2)])),
                     "fresh-mcp" => Json(packument("fresh-mcp", &[("0.1.0", 1)])),
+                    "lint-sdk" => {
+                        let mut p = packument("lint-sdk", &[("2.0.0", 90)]);
+                        p["versions"]["2.0.0"].as_object_mut().unwrap().remove("bin");
+                        Json(p)
+                    }
                     _ => StatusCode::NOT_FOUND.into_response(),
                 }
             };
@@ -205,7 +218,7 @@ fn find_plugin_returns_candidates_from_both_sources_with_the_version_old_enough(
     let (port, asked) = stub(Broken::default());
     let dir = project(
         r#"[{ "tools": [{ "name": "find_plugin", "arguments": { "need": "lint code" }, "expect": [
-              "Sources: MCP registry: 1 found (2 left out: 1 remote only, 1 naming none of the need's words); npm: 3 found.",
+              "Sources: MCP registry: 1 found (2 left out: 1 remote only, 1 naming none of the need's words); npm: 4 found (1 left out: 1 not marked as MCP); 1 left out once npm was asked: no program to start (a library, not a server).",
               "1. lint-mcp 1.0.0 (published ",
               "; found in the MCP registry as io.example/lint and npm's search)\n   Lint your code\n",
               "licence MIT; downloads last week: unknown (not asked: npm's registry here is http://127.0.0.1:",
@@ -236,7 +249,7 @@ fn one_source_failing_is_said_and_the_other_still_gives_candidates() {
     for (broken, line, said) in [
         (
             Broken { registry: true, ..Broken::default() },
-            "Sources: MCP registry: failed (HTTP 503 Service Unavailable); npm: 3 found.",
+            "Sources: MCP registry: failed (HTTP 503 Service Unavailable); npm: 4 found (1 left out: 1 not marked as MCP); 1 left out once npm was asked: no program to start (a library, not a server).",
             "\n  Warning: find_plugin searched one source only: MCP registry: HTTP 503 Service Unavailable.\n",
         ),
         (

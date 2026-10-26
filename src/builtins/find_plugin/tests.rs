@@ -306,7 +306,23 @@ fn npm_search_and_view_are_read_as_npm_writes_them() {
     assert!(found.hits[0].from_npm && found.hits[0].required_env.is_none());
     assert_eq!(
         found.line(),
-        "npm: 1 found (1 left out: a name yobuild does not take)"
+        "npm: 1 found (1 left out: 1 with a name yobuild does not take)"
+    );
+    // npm's `keywords:mcp` only ranks: a package marked by neither an MCP
+    // keyword nor "MCP" in its name or description is left out.
+    let found = npm_hits(
+        r#"[{"name":"@reactuses/core","description":"React hooks","keywords":["react","typescript"]},
+            {"name":"fallow","description":"Codebase intelligence: CLI, LSP, and MCP server"},
+            {"name":"mcp-use","keywords":["typescript"]},
+            {"name":"tool-kit","keywords":["Model-Context-Protocol"]},
+            {"name":"gamcp","description":"its name holds the letters only"}]"#,
+    )
+    .unwrap();
+    let names: Vec<&str> = found.hits.iter().map(|h| h.package.as_str()).collect();
+    assert_eq!(names, ["fallow", "mcp-use", "tool-kit"]);
+    assert_eq!(
+        found.line(),
+        "npm: 3 found (2 left out: 2 not marked as MCP)"
     );
     assert_eq!(npm_hits("[]").unwrap().line(), "npm: 0 found");
     assert!(npm_hits("npm error").is_err());
@@ -331,6 +347,19 @@ fn npm_search_and_view_are_read_as_npm_writes_them() {
         Some("https://github.com/eslint/rewrite")
     );
     assert_eq!(v.provenance, Some(true));
+    assert!(!v.program, "no `bin`: a library");
+    for (bin, program) in [
+        (r#""bin":"cli.js""#, true),
+        (r#""bin":{"eslint-mcp":"dist/cli.js"}"#, true),
+        (r#""bin":{}"#, false),
+        (r#""bin":"""#, false),
+    ] {
+        assert_eq!(
+            viewed(&format!("{{{bin}}}")).unwrap().program,
+            program,
+            "{bin}"
+        );
+    }
     // One version: `versions` is a string.
     let v = viewed(r#"{"version":"1.0.0","versions":"1.0.0","license":{"type":"MIT"},"dist":{}}"#)
         .unwrap();
@@ -507,15 +536,59 @@ fn both_sources_finds_come_first_then_each_sources_in_turn() {
         hit("both", false, true),
         hit("n2", false, true),
     ];
-    let (first, total) = merged(registry, npm);
-    assert_eq!(total, 5);
+    let first = merged(registry, npm);
     let names: Vec<&str> = first.iter().map(|h| h.package.as_str()).collect();
     assert_eq!(names, ["both", "r1", "n1", "r2", "n2"]);
     assert!(first[0].from_npm && first[0].registry_name.is_some());
-    let many: Vec<Hit> = (0..8).map(|i| hit(&format!("r{i}"), true, false)).collect();
-    let more: Vec<Hit> = (0..8).map(|i| hit(&format!("n{i}"), false, true)).collect();
-    let (cut, total) = merged(many, more);
-    assert_eq!((cut.len(), total), (MAX_CANDIDATES, 16));
+}
+
+/// A library (npm says it has no program) is left out and counted; one
+/// npm could not be asked about stays, said not loadable; the rest cut to
+/// [`MAX_CANDIDATES`], the total counting those not viewed.
+#[test]
+fn libraries_are_left_out_before_the_cut() {
+    let viewing = |name: &str, error: Option<&str>, program: Option<bool>| -> Viewing {
+        (
+            candidate_of(name, Ok("1.0.0")),
+            error.map(String::from),
+            program,
+        )
+    };
+    let mut viewed: Vec<Viewing> = (0..12)
+        .map(|i| viewing(&format!("s{i}"), None, Some(true)))
+        .collect();
+    viewed.insert(1, viewing("sdk", None, Some(false)));
+    viewed.insert(2, viewing("unviewed", Some("HTTP 500"), None));
+    let (kept, total, libraries, unviewed) = cut(viewed, 3);
+    let names: Vec<&str> = kept.iter().map(|c| c.package.as_str()).collect();
+    assert_eq!(
+        names,
+        ["s0", "unviewed", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"]
+    );
+    assert_eq!((total, libraries, unviewed), (13 + 3, 1, None));
+    // Every one unviewed: why (the first's).
+    let all = vec![
+        viewing("a", Some("HTTP 500"), None),
+        viewing("b", Some("HTTP 502"), None),
+    ];
+    assert_eq!(cut(all, 0).3.as_deref(), Some("HTTP 500"));
+    assert_eq!(cut(Vec::new(), 0), (Vec::new(), 0, 0, None));
+}
+
+#[test]
+fn downloads_are_read_in_one_answer_or_many() {
+    let one = vec!["a".to_owned()];
+    assert_eq!(
+        counts(&serde_json::json!({ "downloads": 7, "package": "a" }), &one),
+        [("a".to_owned(), Ok(7))]
+    );
+    let two = vec!["a".to_owned(), "b".to_owned()];
+    let both = counts(
+        &serde_json::json!({ "a": { "downloads": 3 }, "b": null }),
+        &two,
+    );
+    assert_eq!(both[0], ("a".to_owned(), Ok(3)));
+    assert!(both[1].1.as_ref().unwrap_err().contains("without a count"));
 }
 
 #[test]
