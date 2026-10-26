@@ -3,8 +3,8 @@
 //! without running anything, asks the owner, starts it and lists its tools,
 //! asks again with the tools in front of them, and only then offers them —
 //! through [`Loaded`], a tool source yoagent asks again at the next turn
-//! (yoagent 0.25.14's `generation`), and leave it once yoagent's exit watch
-//! (0.25.15) says their server has gone. Every loaded tool asks, call by call
+//! (yoagent 0.25.14's `generation`); they leave that list once yoagent's
+//! exit watch (0.25.15) says their server has gone. Every loaded tool asks, call by call
 //! (the gate's [`Gate::with_asked`](crate::builtins::Gate::with_asked)).
 //! For the session only: nothing is written to `agent.toml` or its lock.
 
@@ -127,27 +127,69 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
 /// exit text settles within 0.5 s (the last of its stderr read).
 const SETTLE: Duration = Duration::from_millis(600);
 
+/// How an exit by SIGINT reads (Rust's `ExitStatus`): a Ctrl+C typed in
+/// the terminal reaches the servers too.
+const SIGINT: &str = "signal: 2 (SIGINT)";
+
 /// A server the owner kept, running.
 struct Server {
     name: String,
     tools: Vec<Arc<dyn AgentTool>>,
     client: Arc<tokio::sync::Mutex<McpClient>>,
-    /// yoagent's watch over its process, read without the client's lock
-    /// (a call in flight holds it); `None` for a transport with none, never
-    /// seen gone.
-    exit: Option<ExitWatch>,
-    /// When the watch first said it had gone.
-    gone_at: Mutex<Option<Instant>>,
+    /// yoagent's watch over its process, taken from the transport before
+    /// the client was built: read without the `tokio::Mutex` yobuild keeps
+    /// the client in (a call in flight holds it).
+    exit: ExitWatch,
+    /// Once the watch said it had gone: when it first did, and the longest
+    /// reason read since (yoagent answers without the stderr tail while a
+    /// call or `close` holds the child).
+    gone: Mutex<Option<(Instant, String)>>,
 }
 
 impl Server {
-    /// Why it has gone, if it has (yoagent's words, made yobuild's).
-    fn exited(&self) -> Option<String> {
-        self.exit.as_ref()?.exited().map(|why| said(&why))
+    fn new(
+        name: String,
+        tools: Vec<Arc<dyn AgentTool>>,
+        client: Arc<tokio::sync::Mutex<McpClient>>,
+        exit: ExitWatch,
+    ) -> Self {
+        Server {
+            name,
+            tools,
+            client,
+            exit,
+            gone: Mutex::default(),
+        }
+    }
+
+    /// Reads the watch: whether the server was newly seen gone. A reason
+    /// read is kept when longer than the one before.
+    fn look(&self) -> bool {
+        let Some(why) = self.exit.exited().map(|why| said(&why)) else {
+            return false;
+        };
+        let mut gone = locked(&self.gone);
+        match gone.as_mut() {
+            None => {
+                *gone = Some((Instant::now(), why));
+                true
+            }
+            Some((_, kept)) => {
+                if why.chars().count() > kept.chars().count() {
+                    *kept = why;
+                }
+                false
+            }
+        }
     }
 
     fn is_gone(&self) -> bool {
-        locked(&self.gone_at).is_some()
+        locked(&self.gone).is_some()
+    }
+
+    /// When it was first seen gone, and why (the longest reason read).
+    fn gone(&self) -> Option<(Instant, String)> {
+        locked(&self.gone).clone()
     }
 }
 
@@ -199,9 +241,7 @@ impl Loaded {
     /// and moves the generation, so its tools leave at the next turn.
     fn look(&self, lists: &Lists) {
         for server in &lists.servers {
-            let mut gone_at = locked(&server.gone_at);
-            if gone_at.is_none() && server.exited().is_some() {
-                *gone_at = Some(Instant::now());
+            if server.look() {
                 self.0.generation.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -214,24 +254,51 @@ impl Loaded {
         self.0.generation.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// The servers gone since the last look — seen so for [`SETTLE`], so
-    /// the reason is whole — each with why, taken out and marked stopped.
-    /// Their tools left the list when they were first seen gone (the
-    /// generation moved then). `run`'s tick asks every 250 ms, so a server
-    /// that dies while idle is said within a second.
+    /// The servers seen gone for at least [`SETTLE`] (so the reason is
+    /// whole) and not said yet, each with why, taken out and marked
+    /// stopped. Their tools left the list when they were first seen gone
+    /// (the generation moved then). `run`'s tick asks every 250 ms, so a
+    /// server that dies while idle is said within about a second.
     pub fn stopped(&self) -> Vec<(String, String)> {
+        self.take_stopped(|at, _| at.elapsed() >= SETTLE)
+    }
+
+    /// At the session's end: every server seen gone, once the reasons of
+    /// those seen within [`SETTLE`] have settled (at most that long) — but
+    /// after `interrupted`, the owner's Ctrl+C, which reaches them too
+    /// (they share yobuild's process group), one first seen after it or
+    /// ended by its SIGINT is not said stopped: the session stopped it.
+    pub async fn stopped_at_end(&self, interrupted: Option<Instant>) -> Vec<(String, String)> {
+        let wait = {
+            let lists = locked(&self.0.lists);
+            self.look(&lists);
+            lists
+                .servers
+                .iter()
+                .filter_map(|s| s.gone())
+                .map(|(at, _)| SETTLE.saturating_sub(at.elapsed()))
+                .max()
+        };
+        if let Some(wait) = wait.filter(|w| !w.is_zero()) {
+            tokio::time::sleep(wait).await;
+        }
+        self.take_stopped(|at, why| {
+            interrupted.is_none_or(|ctrl_c| at < ctrl_c && !why.contains(SIGINT))
+        })
+    }
+
+    /// The servers seen gone whose first sighting `say` accepts, taken out
+    /// and marked stopped.
+    fn take_stopped(&self, say: impl Fn(Instant, &str) -> bool) -> Vec<(String, String)> {
         let mut lists = locked(&self.0.lists);
         self.look(&lists);
         let mut out = Vec::new();
-        lists.servers.retain(|s| {
-            let settled = locked(&s.gone_at).is_some_and(|at| at.elapsed() >= SETTLE);
-            match s.exited().filter(|_| settled) {
-                Some(why) => {
-                    out.push((s.name.clone(), why));
-                    false
-                }
-                None => true,
+        lists.servers.retain(|s| match s.gone() {
+            Some((at, why)) if say(at, &why) => {
+                out.push((s.name.clone(), why));
+                false
             }
+            _ => true,
         });
         for (name, why) in &out {
             if let Some(k) = lists.kept.iter_mut().find(|k| &k.name == name) {
@@ -256,7 +323,9 @@ impl Loaded {
 
 #[async_trait::async_trait]
 impl ToolSource for Loaded {
-    /// The running servers' tools: one seen gone is left out at once.
+    /// The running servers' tools: one seen gone is left out at once. A
+    /// server's `list_changed` is not heeded: its tools are those the
+    /// owner saw at the second question.
     async fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
         let lists = locked(&self.0.lists);
         self.look(&lists);
@@ -277,11 +346,12 @@ impl ToolSource for Loaded {
 
 /// yoagent's words for a server that ended or did not start, without the
 /// program they name — the kept environment's wrapper (`/usr/bin/env`, or
-/// `/bin/sh`), not the server — made one line and cut: "Connection closed:
-/// MCP server '<program>' exited with …; last stderr: …" and its exit
-/// watch's "MCP server '<program>' exited with …" → "it exited with …;
-/// last stderr: …", "Failed to spawn '<program>': …" → "it could not be
-/// started: …".
+/// `/bin/sh`), not the server — made one line and cut, the end of a
+/// stderr tail kept (where a crash is): "Connection closed: MCP server
+/// '<program>' exited with …; last stderr: …" and the exit watch's "MCP
+/// server '<program>' exited with …" (or "closed its output (…)", "has
+/// gone (…)", "was closed …") → "it exited with …; last stderr: …",
+/// "Failed to spawn '<program>': …" → "it could not be started: …".
 fn said(message: &str) -> String {
     let message = message.strip_prefix("Transport error: ").unwrap_or(message);
     let message = message
@@ -301,7 +371,30 @@ fn said(message: &str) -> String {
     } else {
         message.to_owned()
     };
-    clip(&text, 400)
+    match text.split_once("; last stderr:") {
+        Some((head, tail)) => {
+            let head = clip(head, 150);
+            format!(
+                "{head}; last stderr: {}",
+                clip_start(tail, 400 - head.chars().count())
+            )
+        }
+        None => clip(&text, 400),
+    }
+}
+
+/// `text` made one line, cut from its start to `max` characters (an
+/// ellipsis marking the cut): the end of a stderr tail is kept.
+fn clip_start(text: &str, max: usize) -> String {
+    let line = clip(text, usize::MAX);
+    let count = line.chars().count();
+    match count > max {
+        true => {
+            let kept: String = line.chars().skip(count - max.saturating_sub(1)).collect();
+            format!("…{}", kept.trim_start())
+        }
+        false => line,
+    }
 }
 
 /// What `load_plugin` refuses, and the notice the owner hears it by.
@@ -603,6 +696,13 @@ impl LoadPlugin {
             let _ = client.close().await;
             return Err(no);
         }
+        // Gone while the owner was asked: not announced as loaded.
+        if let Some(why) = exit.exited().map(|why| said(&why)) {
+            let _ = client.close().await;
+            return Err(failed(format!(
+                "{package} stopped while you were asked to keep it: {why}"
+            )));
+        }
         let client = Arc::new(tokio::sync::Mutex::new(client));
         let tools: Vec<Arc<dyn AgentTool>> = listed
             .into_iter()
@@ -630,16 +730,8 @@ impl LoadPlugin {
                 kept_text(std::slice::from_ref(&kept), &self.files)
             ),
         );
-        self.loaded.add(
-            kept,
-            Server {
-                name: name.clone(),
-                tools,
-                client,
-                exit,
-                gone_at: Mutex::default(),
-            },
-        );
+        self.loaded
+            .add(kept, Server::new(name.clone(), tools, client, exit));
         Ok(format!(
             "Loaded {package}@{version} as {name}, for this session. Its tools are yours from your next step: {}. Each call asks the owner.",
             names.join(", ")
@@ -748,7 +840,7 @@ impl LoadPlugin {
         bin: &Path,
         args: &[String],
         ctx: &ToolContext,
-    ) -> Result<(McpClient, Option<ExitWatch>, Vec<McpToolInfo>), Refused> {
+    ) -> Result<(McpClient, ExitWatch, Vec<McpToolInfo>), Refused> {
         let did_not = |e: &dyn std::fmt::Display| {
             failed(format!("{package} did not start: {}", said(&e.to_string())))
         };
@@ -758,7 +850,12 @@ impl LoadPlugin {
         let inner = yoagent::mcp::StdioTransport::new(&program, &argv, Some(env))
             .await
             .map_err(|e| did_not(&e))?;
-        let exit = inner.exit_watch();
+        // Without a watch its death would go unseen: refused (yoagent's
+        // stdio transport always gives one).
+        let Some(exit) = inner.exit_watch() else {
+            let _ = inner.close().await;
+            return Err(did_not(&"yoagent gives no exit watch for its transport"));
+        };
         let mut client = McpClient::from_transport(Box::new(inner))
             .with_call_timeout(Some(McpToolAdapter::DEFAULT_CALL_TIMEOUT));
         let started = async {

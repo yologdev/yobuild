@@ -4000,20 +4000,35 @@ refuses `[extend]` without it, as the manifest does with `gate = "off"`.
 - A server that stops mid-session, during a call or while idle: yoagent
   0.25.15's exit watch (`McpTransport::exit_watch`, taken from the stdio
   transport before the client is built, so reading it never waits behind
-  a call in flight, which holds the client's lock) says it has gone and
-  why. `Loaded` looks at every running server's watch whenever yoagent
-  asks it for its generation or its tools (each turn) and whenever the
-  watcher's tick asks what stopped (every 250 ms): one newly gone leaves
-  the list and moves the generation at once, so its tools are gone from
-  the next turn. Once it has been seen gone for 0.6 s — yoagent's text
-  settles within 0.5 s, the last of its stderr read — the tick says so,
-  an Error notice ("The loaded MCP server `x` stopped: it exited with …;
-  last stderr: …"; also "it closed its output (its process is still
-  running)", "it has gone (exit status unknown: …)"), and marks it
-  stopped (the end of the session says so beside its block). It still
-  counts toward `max_loads`, and is not loaded again this session.
-  (Before 0.25.15 yobuild wrapped the transport and saw a death only at
-  the next call.)
+  a call in flight, which holds the `tokio::Mutex` yobuild keeps the
+  client in) says it has gone and why; a transport without one is
+  refused at the start (yoagent's stdio always gives one). `Loaded` looks
+  at every running server's watch whenever yoagent asks it for its
+  generation (each turn) or its tools, and whenever the watcher's tick
+  asks what stopped (every 250 ms): one newly gone leaves the list and
+  moves the generation at once, so its tools are gone from the next
+  turn. Once it has been seen gone for 0.6 s — yoagent's text settles
+  within 0.5 s, the last of its stderr read — the tick says so, an Error
+  notice ("The loaded MCP server `x` stopped: it exited with …; last
+  stderr: …", the tail's end kept when cut; also "it closed its output
+  (its process is still running)", "it has gone (exit status unknown:
+  …)"), with the longest reason read (yoagent answers without the tail
+  while a call holds the child), and marks it stopped: about a second
+  after a death while idle. It still counts toward `max_loads`, and is
+  not loaded again this session.
+  - At the session's end, every server seen gone is marked stopped in
+    the block (`stopped_at_end`), those seen within 0.6 s waited for —
+    but after a Ctrl+C one first seen after it, or ended by SIGINT, is
+    not: a Ctrl+C typed in the terminal reaches the servers too (they
+    share yobuild's process group; a group of their own is asked of
+    yoagent).
+  - One that dies while the owner is asked to keep it is refused then
+    (an Error notice), never announced as loaded.
+  - Not seen: a server whose process lives on but no longer reads its
+    input (every call "Write error: Broken pipe"); asked of yoagent, to
+    count a failed write as closed.
+  - Before 0.25.15 yobuild wrapped the transport and saw a death only at
+    the next call.
 - A run aborted mid-load stops the load where it is: npm killed (and no
   later npm call started), the set's `.partial-` folder removed as
   `install` removes one, an open question withdrawn, a started process
@@ -4138,8 +4153,9 @@ As built (PR 4), each named where it lives:
   `--once`, a name in use or bad, `args` guarded, a required environment
   variable), the default name, the tool list's judgement, a path outside
   the folder, the block read back by the manifest, `Loaded` as a tool
-  source and a server found gone (by a stand-in watch, and a real stdio
-  server dying while idle, with no call made), the
+  source and a server found gone (a stand-in watch; a real stdio server
+  dying while idle, with no call made; one yobuild closes never said;
+  the end of the session and a Ctrl+C; the longest reason), the
   words of a start that fails, several programs, what the scan reads and
   missed. The gate's `with_asked`, and the hints, in their own tests.
 - `find_plugin_test` (PR 3): one source down and both down, what `check`
