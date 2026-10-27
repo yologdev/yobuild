@@ -4268,9 +4268,20 @@ answers calls to its own tools and reaches nothing else. A plugin is more:
    - `add_runtime` applies what `start` applies to a runtime: the kept
      environment (`withhold`, `inherit`, `keep`: here the kept set alone,
      no `env` grant) and its own service catalog (point 3);
-   - a loaded runtime's rows are routed to it only, keyed by runtime and
-     name, so its rows never meet the manifest's;
+   - a loaded runtime's rows are routed to it only: the loader resolves
+     a row by its name alone, so the host gives it `<runtime>::<name>`,
+     and its rows never meet the manifest's; a row naming no runtime
+     never goes to it;
    - `remove_runtime` unloads its rows, then stops its process.
+
+   Built (PR 3, `host_test`): the same file loaded in `ui` and in an
+   added runtime, two processes; the added runtime keeps nothing `keep`
+   gave another; one given no service never reaches `yoagent`; removed,
+   its handler and its process gone, the other's kept. Found there: a row
+   whose injected service is left to its runtime's own Cordis reads as
+   running to the host (`load` is `Ok`) while it never starts, so
+   `load_plugin` learns that a plugin started from its handler, never
+   from `load`.
 
    The adapters' runtime set is installed when `[extend]` names `pi` or
    `dsh`, as when the manifest has such a plugin. The cost is memory: a

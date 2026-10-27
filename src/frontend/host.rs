@@ -23,7 +23,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rutis::{BoxFuture, Ctx, FiberState};
+use rutis::{BoxFuture, Ctx, FiberState, FiberView};
 use rutis_bridge::runtime::{Launcher, LocalRuntime, Stdio};
 use rutis_loader::{
     Chain, EntryStatus, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch, Resolved,
@@ -553,9 +553,71 @@ pub struct PluginHostBuilder {
     local: Vec<String>,
     terminal: Option<String>,
     env: Vec<(String, OsString, OsString)>,
-    withhold: Vec<OsString>,
     keep: Vec<(String, OsString)>,
+    launch: Launch,
+}
+
+/// What every runtime's environment loses ([`PluginHostBuilder::withhold`],
+/// [`PluginHostBuilder::inherit`]): kept by the host, so a runtime added
+/// while it runs ([`PluginHost::add_runtime`]) starts as the others did.
+#[derive(Clone, Default)]
+struct Launch {
+    withhold: Vec<OsString>,
     inherit: Option<Inherit>,
+}
+
+impl Launch {
+    /// How to start the runtime `name` on `dir`: `env` set on top of what
+    /// it inherits, and what neither `keep` (names, or prefixes ending in
+    /// `*`) nor `env` keeps taken out.
+    fn launcher(
+        &self,
+        name: &str,
+        dir: &Path,
+        env: &[(&OsString, &OsString)],
+        keep: &[&OsString],
+    ) -> Result<Launcher, BoxError> {
+        // Kept for this runtime: an entry of `keep`, or set by its launch
+        // (`env -u` removes a name whoever set it).
+        let kept = |key: &std::ffi::OsStr| {
+            keep.iter().any(|k| matches(k, key)) || env.iter().any(|(k, _)| *k == key)
+        };
+        let withheld: Vec<OsString> = self
+            .withhold
+            .iter()
+            .filter(|key| !kept(key))
+            .cloned()
+            .chain(self.not_inherited(&kept))
+            .collect();
+        let withheld: Vec<&OsString> = withheld.iter().collect();
+        let launcher = env.iter().fold(
+            Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
+            |launcher, (key, value)| launcher.env(key, value),
+        );
+        Ok(without(launcher, &withheld).map_err(|e| format!("runtime `{name}`: {e}"))?)
+    }
+
+    /// What [`PluginHostBuilder::inherit`] takes out of a runtime's
+    /// environment beside what it `kept`: on unix every name of this
+    /// process's not inherited; off unix nothing (there is no `env` to
+    /// start through).
+    #[cfg(unix)]
+    fn not_inherited(&self, kept: &dyn Fn(&std::ffi::OsStr) -> bool) -> Vec<OsString> {
+        match &self.inherit {
+            Some(inherit) => not_inherited(
+                std::env::vars_os().map(|(k, _)| k),
+                |key| inherit.keeps(key) || kept(key),
+                loopback(),
+            ),
+            None => Vec::new(),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn not_inherited(&self, _kept: &dyn Fn(&std::ffi::OsStr) -> bool) -> Vec<OsString> {
+        let _ = &self.inherit;
+        Vec::new()
+    }
 }
 
 impl PluginHostBuilder {
@@ -597,7 +659,7 @@ impl PluginHostBuilder {
     /// `/usr/bin/env -u NAME … <rutis's command>`: `env` execs it, the same
     /// process. Without `env` (not unix) it is set empty instead.
     pub fn withhold(mut self, name: impl Into<OsString>) -> Self {
-        self.withhold.push(name.into());
+        self.launch.withhold.push(name.into());
         self
     }
 
@@ -619,7 +681,7 @@ impl PluginHostBuilder {
     /// withheld is set empty). Unset: the whole environment, but what is
     /// withheld.
     pub fn inherit(mut self, inherit: Inherit) -> Self {
-        self.inherit = Some(inherit);
+        self.launch.inherit = Some(inherit);
         self
     }
 
@@ -637,27 +699,6 @@ impl PluginHostBuilder {
     pub fn local(mut self, service: impl Into<String>) -> Self {
         self.local.push(service.into());
         self
-    }
-
-    /// What [`inherit`](Self::inherit) takes out of a runtime's environment
-    /// beside what it `kept`: on unix every name of this process's not
-    /// inherited; off unix nothing (there is no `env` to start through).
-    #[cfg(unix)]
-    fn not_inherited(&self, kept: &dyn Fn(&std::ffi::OsStr) -> bool) -> Vec<OsString> {
-        match &self.inherit {
-            Some(inherit) => not_inherited(
-                std::env::vars_os().map(|(k, _)| k),
-                |key| inherit.keeps(key) || kept(key),
-                loopback(),
-            ),
-            None => Vec::new(),
-        }
-    }
-
-    #[cfg(not(unix))]
-    fn not_inherited(&self, _kept: &dyn Fn(&std::ffi::OsStr) -> bool) -> Vec<OsString> {
-        let _ = &self.inherit;
-        Vec::new()
     }
 
     /// Start the runtimes and the loader on `root`.
@@ -694,28 +735,19 @@ impl PluginHostBuilder {
         // `start` before any runtime is registered.
         let mut launchers = Vec::new();
         for (name, dir) in &self.runtimes {
-            let env: Vec<_> = self.env.iter().filter(|(r, ..)| r == name).collect();
-            // Kept for this runtime: an entry of `keep`, or set by its
-            // launch (`env -u` removes a name whoever set it).
-            let kept = |key: &std::ffi::OsStr| {
-                self.keep.iter().any(|(r, k)| r == name && matches(k, key))
-                    || env.iter().any(|(_, k, _)| k == key)
-            };
-            let withheld: Vec<OsString> = self
-                .withhold
+            let env: Vec<_> = self
+                .env
                 .iter()
-                .filter(|key| !kept(key))
-                .cloned()
-                .chain(self.not_inherited(&kept))
+                .filter(|(r, ..)| r == name)
+                .map(|(_, key, value)| (key, value))
                 .collect();
-            let withheld: Vec<&OsString> = withheld.iter().collect();
-            let launcher = env.iter().fold(
-                Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
-                |launcher, (_, key, value)| launcher.env(key, value),
-            );
-            let launcher =
-                without(launcher, &withheld).map_err(|e| format!("runtime `{name}`: {e}"))?;
-            launchers.push((name, dir, launcher));
+            let keep: Vec<_> = self
+                .keep
+                .iter()
+                .filter(|(r, _)| r == name)
+                .map(|(_, key)| key)
+                .collect();
+            launchers.push((name, dir, self.launch.launcher(name, dir, &env, &keep)?));
         }
         for (name, dir, launcher) in launchers {
             let mut runtime =
@@ -727,9 +759,11 @@ impl PluginHostBuilder {
             root.plugin(runtime);
             resolvers.push((name.clone(), rows));
         }
+        let added: Added = Arc::default();
         let routed = Routed {
             routes: routes.clone(),
             runtimes: resolvers.clone(),
+            added: added.clone(),
         };
         let runtimes = resolvers.clone();
         let loader_plugin = LoaderPlugin::new(
@@ -749,10 +783,22 @@ impl PluginHostBuilder {
             root: root.clone(),
             routes,
             runtimes,
+            added,
+            views: Vec::new(),
+            launch: self.launch,
             rows: Vec::new(),
         })
     }
 }
+
+/// The runtimes [`PluginHost::add_runtime`] added, by name: shared with the
+/// resolver, which routes their rows to them only.
+type Added = Arc<Mutex<Vec<(String, Arc<RuntimeResolver>)>>>;
+
+/// Between an added runtime's name and a row's own in what the loader is
+/// given (`<runtime>::<name>`): its rows never meet another runtime's of
+/// the same name, as the loader resolves a row by its name alone.
+const ADDED: &str = "::";
 
 /// Running runtimes and a loader; [`PluginHost::load`] adds plugins.
 pub struct PluginHost {
@@ -763,6 +809,11 @@ pub struct PluginHost {
     routes: Arc<Mutex<HashMap<String, String>>>,
     /// Each runtime's resolver: `reload` makes them forget a module.
     runtimes: Vec<(String, Arc<RuntimeResolver>)>,
+    /// The runtimes added while running, and the fibers that run each
+    /// (its rows' resolver, then the runtime), for `remove_runtime`.
+    added: Added,
+    views: Vec<(String, Vec<FiberView>)>,
+    launch: Launch,
     rows: Vec<Row>,
 }
 
@@ -823,7 +874,9 @@ impl PluginHost {
 
     fn add(&mut self, rows: impl IntoIterator<Item = Row>) -> Result<(), BoxError> {
         for row in rows {
-            if let Some(runtime) = &row.runtime {
+            // An added runtime's rows are routed by their own names.
+            let added = row.runtime.as_ref().filter(|r| self.is_added(r));
+            if let (Some(runtime), None) = (&row.runtime, added) {
                 let mut routes = self.routes.lock().unwrap();
                 match routes.get(&row.name) {
                     Some(other) if other != runtime => {
@@ -905,6 +958,9 @@ impl PluginHost {
         for (_, resolver) in &self.runtimes {
             resolver.invalidate(&name);
         }
+        for (_, resolver) in self.added.lock().unwrap().iter() {
+            resolver.invalidate(&name);
+        }
         let result = match self.loader.reload(id).await {
             Ok(report) if !report.new_failures.is_empty() => {
                 Err(format!("{:?}", report.new_failures).into())
@@ -921,9 +977,93 @@ impl PluginHost {
         })
     }
 
+    /// Start another Node runtime, `name`, its packages in `dir`, while the
+    /// host runs (a plugin the agent loads, design §14 "Stage 2"). It starts
+    /// with the environment every runtime gets (`withhold`, `inherit`),
+    /// nothing kept or set for it. Its rows reach only the services named
+    /// in `shared`: the others its plugins inject are left to its own Cordis,
+    /// where nobody provides them. Rows naming it are routed to it only, by
+    /// their own names, so a file the other runtimes load too is loaded
+    /// again here; a row naming no runtime never comes to it.
+    pub fn add_runtime(
+        &mut self,
+        name: impl Into<String>,
+        dir: impl Into<PathBuf>,
+        shared: &[&str],
+    ) -> Result<(), BoxError> {
+        let (name, dir) = (name.into(), dir.into());
+        let plain = !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !plain {
+            return Err(format!(
+                "runtime `{name}`: a runtime's name is lowercase letters, digits and `-`"
+            )
+            .into());
+        }
+        if self.runtimes.iter().any(|(n, _)| *n == name) || self.is_added(&name) {
+            return Err(format!("a runtime `{name}` runs already").into());
+        }
+        let launcher = self.launch.launcher(&name, &dir, &[], &[])?;
+        let mut catalog = ServiceCatalog::new();
+        catalog.share_registered_only();
+        for service in shared {
+            catalog.register_shared(*service);
+        }
+        let runtime = LocalRuntime::launcher(name.clone(), launcher, dir.join("package.json"));
+        let resolver = Arc::new(RuntimeResolver::node(runtime.handle()).with_catalog(&catalog));
+        let runtime = self.root.plugin(runtime);
+        let rows = self.root.plugin(RuntimeRowsPlugin::new(resolver.clone()));
+        self.added.lock().unwrap().push((name.clone(), resolver));
+        self.views.push((name, vec![rows, runtime]));
+        Ok(())
+    }
+
+    /// Stop a runtime [`add_runtime`](Self::add_runtime) started: its rows
+    /// unloaded, then its process. It is removed whatever fails on the way,
+    /// and the error says what did.
+    pub async fn remove_runtime(&mut self, name: &str) -> Result<(), BoxError> {
+        let index = self
+            .views
+            .iter()
+            .position(|(n, _)| n == name)
+            .ok_or_else(|| format!("no runtime `{name}` was added"))?;
+        self.rows.retain(|row| !row.runtime_is(name));
+        let mut failed = Vec::new();
+        if let Err(e) = self.reconcile(&[]).await {
+            failed.push(format!("its plugins: {e}"));
+        }
+        self.added.lock().unwrap().retain(|(n, _)| n != name);
+        let (_, views) = self.views.remove(index);
+        for view in views {
+            if let Err(e) = view.dispose().await {
+                failed.push(e.to_string());
+            }
+        }
+        match failed.is_empty() {
+            true => Ok(()),
+            false => Err(format!("removing runtime `{name}`: {}", failed.join("; ")).into()),
+        }
+    }
+
+    fn is_added(&self, runtime: &str) -> bool {
+        self.views.iter().any(|(n, _)| n == runtime)
+    }
+
     /// The loader's layers for the rows loaded now.
     fn layers(&self) -> Result<Vec<Layer>, BoxError> {
-        let insert: Vec<Json> = self.rows.iter().map(Row::json).collect();
+        let insert: Vec<Json> = self
+            .rows
+            .iter()
+            .map(|row| {
+                let mut json = row.json();
+                if let Some(runtime) = row.runtime.as_ref().filter(|r| self.is_added(r)) {
+                    json["name"] = json!(format!("{runtime}{ADDED}{}", row.name));
+                }
+                json
+            })
+            .collect();
         let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": insert }]))?;
         Ok(vec![Layer::new("app", patches)])
     }
@@ -1044,12 +1184,21 @@ impl PluginHost {
 struct Routed {
     routes: Arc<Mutex<HashMap<String, String>>>,
     runtimes: Vec<(String, Arc<RuntimeResolver>)>,
+    added: Added,
 }
 
 impl Resolver for Routed {
     fn resolve<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Arc<Resolved>, LoaderError>> {
         let route = self.routes.lock().unwrap().get(name).cloned();
+        let added = name.split_once(ADDED).and_then(|(runtime, inner)| {
+            let added = self.added.lock().unwrap();
+            let (_, resolver) = added.iter().find(|(n, _)| n == runtime)?;
+            Some((resolver.clone(), inner))
+        });
         Box::pin(async move {
+            if let Some((resolver, inner)) = added {
+                return resolver.resolve(inner).await;
+            }
             if let Some(route) = route {
                 let Some((_, resolver)) = self.runtimes.iter().find(|(n, _)| *n == route) else {
                     return Err(LoaderError::NotFound {
