@@ -535,7 +535,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                 // As the driver sees it: the observer's copy may lag.
                 let interrupted = session.is_running();
                 break match stop {
-                    Ok(()) => End::Interrupted { running: interrupted },
+                    Ok(()) => End::Interrupted {
+                        running: interrupted,
+                        at: std::time::Instant::now(),
+                    },
                     Err(e) => End::NoSignal(e),
                 };
             }
@@ -561,7 +564,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                         }
                     }
                 }
-                // A loaded server found gone: its tools leave at the next turn.
+                // A loaded server gone, its reason settled: said, and marked
+                // stopped (its tools left when it was first seen gone).
                 for (server, why) in loaded.stopped() {
                     tracing::error!("the loaded MCP server {server} stopped: {why}");
                     session.notice(
@@ -575,12 +579,16 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             }
         }
     };
+    let ctrl_c = match &end {
+        End::Interrupted { at, .. } => Some(*at),
+        _ => None,
+    };
     let (agent, interrupted, failure) = match end {
         End::Driven(joined) => match *joined {
             Ok(agent) => (Some(agent), false, None),
             Err(e) => (None, false, Some(format!("the agent's task failed: {e}"))),
         },
-        End::Interrupted { running } => {
+        End::Interrupted { running, .. } => {
             driving.abort();
             drop(driving.await);
             (None, running, None)
@@ -607,8 +615,12 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // However it ended: what was loaded, and how to keep it (nothing is
     // written). Each was said as a notice when it was kept; the binary
     // writes this once the runtimes have stopped (the terminal UI may hold
-    // the terminal until then), and on an error it is written here.
-    loaded.stopped();
+    // the terminal until then), and on an error it is written here. A
+    // server gone since the last tick is marked stopped in it (not one
+    // first seen gone after a Ctrl+C, which reached it too).
+    for (server, why) in loaded.stopped_at_end(ctrl_c).await {
+        tracing::error!("the loaded MCP server {server} stopped: {why}");
+    }
     let kept = loaded.kept();
     loaded.close().await;
     ended.loaded = (!kept.is_empty()).then(|| load::kept_text(&kept, &files));
@@ -632,8 +644,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
 enum End {
     /// The driver returned (or its task failed).
     Driven(Box<Result<Agent, tokio::task::JoinError>>),
-    /// Ctrl+C; whether a run was in progress.
-    Interrupted { running: bool },
+    /// Ctrl+C; whether a run was in progress, and when it came.
+    Interrupted {
+        running: bool,
+        at: std::time::Instant,
+    },
     /// Ctrl+C cannot be listened for.
     NoSignal(std::io::Error),
     /// The terminal UI's runtime stopped.

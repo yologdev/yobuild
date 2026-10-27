@@ -3,7 +3,8 @@
 //! without running anything, asks the owner, starts it and lists its tools,
 //! asks again with the tools in front of them, and only then offers them —
 //! through [`Loaded`], a tool source yoagent asks again at the next turn
-//! (yoagent 0.25.14's `generation`). Every loaded tool asks, call by call
+//! (yoagent 0.25.14's `generation`); they leave that list once yoagent's
+//! exit watch (0.25.15) says their server has gone. Every loaded tool asks, call by call
 //! (the gate's [`Gate::with_asked`](crate::builtins::Gate::with_asked)).
 //! For the session only: nothing is written to `agent.toml` or its lock.
 
@@ -11,11 +12,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value as Json};
-use yoagent::mcp::types::{JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
-use yoagent::mcp::{McpClient, McpError, McpToolAdapter, McpToolInfo, McpTransport};
+use yoagent::mcp::{ExitWatch, McpClient, McpToolAdapter, McpToolInfo, McpTransport};
 use yoagent::tool_source::ToolSource;
 use yoagent::{AgentTool, Content, ToolContext, ToolError, ToolResult};
 
@@ -123,18 +123,73 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
     text
 }
 
+/// How long a server is seen gone before it is said stopped: yoagent's
+/// exit text settles within 0.5 s (the last of its stderr read).
+const SETTLE: Duration = Duration::from_millis(600);
+
+/// How an exit by SIGINT reads (Rust's `ExitStatus`): a Ctrl+C typed in
+/// the terminal reaches the servers too.
+const SIGINT: &str = "signal: 2 (SIGINT)";
+
 /// A server the owner kept, running.
 struct Server {
     name: String,
     tools: Vec<Arc<dyn AgentTool>>,
     client: Arc<tokio::sync::Mutex<McpClient>>,
-    /// Why it stopped, once a call found it gone ([`Watched`]).
-    closed: Arc<Mutex<Option<String>>>,
+    /// yoagent's watch over its process, taken from the transport before
+    /// the client was built: read without the `tokio::Mutex` yobuild keeps
+    /// the client in (a call in flight holds it).
+    exit: ExitWatch,
+    /// Once the watch said it had gone: when it first did, and the longest
+    /// reason read since (yoagent answers without the stderr tail while a
+    /// call or `close` holds the child).
+    gone: Mutex<Option<(Instant, String)>>,
 }
 
 impl Server {
-    fn is_closed(&self) -> bool {
-        locked(&self.closed).is_some()
+    fn new(
+        name: String,
+        tools: Vec<Arc<dyn AgentTool>>,
+        client: Arc<tokio::sync::Mutex<McpClient>>,
+        exit: ExitWatch,
+    ) -> Self {
+        Server {
+            name,
+            tools,
+            client,
+            exit,
+            gone: Mutex::default(),
+        }
+    }
+
+    /// Reads the watch: whether the server was newly seen gone. A reason
+    /// read is kept when longer than the one before.
+    fn look(&self) -> bool {
+        let Some(why) = self.exit.exited().map(|why| said(&why)) else {
+            return false;
+        };
+        let mut gone = locked(&self.gone);
+        match gone.as_mut() {
+            None => {
+                *gone = Some((Instant::now(), why));
+                true
+            }
+            Some((_, kept)) => {
+                if why.chars().count() > kept.chars().count() {
+                    *kept = why;
+                }
+                false
+            }
+        }
+    }
+
+    fn is_gone(&self) -> bool {
+        locked(&self.gone).is_some()
+    }
+
+    /// When it was first seen gone, and why (the longest reason read).
+    fn gone(&self) -> Option<(Instant, String)> {
+        locked(&self.gone).clone()
     }
 }
 
@@ -150,9 +205,9 @@ struct Lists {
 #[derive(Default)]
 struct Shared {
     lists: Mutex<Lists>,
-    /// Moves on each load, each server found gone ([`Watched`]) and the
-    /// close; only forward.
-    generation: Arc<AtomicU64>,
+    /// Moves on each load, each server found gone and the close; only
+    /// forward.
+    generation: AtomicU64,
 }
 
 /// The servers loaded this session, as a tool source: their tools, and a
@@ -182,9 +237,14 @@ impl Loaded {
         locked(&self.0.lists).kept.clone()
     }
 
-    /// The generation [`Watched`] moves when it finds its server gone.
-    fn generation_handle(&self) -> Arc<AtomicU64> {
-        self.0.generation.clone()
+    /// Looks at each running server's exit watch: one newly gone is marked
+    /// and moves the generation, so its tools leave at the next turn.
+    fn look(&self, lists: &Lists) {
+        for server in &lists.servers {
+            if server.look() {
+                self.0.generation.fetch_add(1, Ordering::SeqCst);
+            }
+        }
     }
 
     fn add(&self, kept: Kept, server: Server) {
@@ -194,18 +254,51 @@ impl Loaded {
         self.0.generation.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// The servers found gone since the last look, each with why, taken
-    /// out and marked stopped. Their tools already left the list (the
-    /// generation moved when they were found).
+    /// The servers seen gone for at least [`SETTLE`] (so the reason is
+    /// whole) and not said yet, each with why, taken out and marked
+    /// stopped. Their tools left the list when they were first seen gone
+    /// (the generation moved then). `run`'s tick asks every 250 ms, so a
+    /// server that dies while idle is said within about a second.
     pub fn stopped(&self) -> Vec<(String, String)> {
+        self.take_stopped(|at, _| at.elapsed() >= SETTLE)
+    }
+
+    /// At the session's end: every server seen gone, once the reasons of
+    /// those seen within [`SETTLE`] have settled (at most that long) — but
+    /// after `interrupted`, the owner's Ctrl+C, which reaches them too
+    /// (they share yobuild's process group), one first seen after it or
+    /// ended by its SIGINT is not said stopped: the session stopped it.
+    pub async fn stopped_at_end(&self, interrupted: Option<Instant>) -> Vec<(String, String)> {
+        let wait = {
+            let lists = locked(&self.0.lists);
+            self.look(&lists);
+            lists
+                .servers
+                .iter()
+                .filter_map(|s| s.gone())
+                .map(|(at, _)| SETTLE.saturating_sub(at.elapsed()))
+                .max()
+        };
+        if let Some(wait) = wait.filter(|w| !w.is_zero()) {
+            tokio::time::sleep(wait).await;
+        }
+        self.take_stopped(|at, why| {
+            interrupted.is_none_or(|ctrl_c| at < ctrl_c && !why.contains(SIGINT))
+        })
+    }
+
+    /// The servers seen gone whose first sighting `say` accepts, taken out
+    /// and marked stopped.
+    fn take_stopped(&self, say: impl Fn(Instant, &str) -> bool) -> Vec<(String, String)> {
         let mut lists = locked(&self.0.lists);
+        self.look(&lists);
         let mut out = Vec::new();
-        lists.servers.retain(|s| match locked(&s.closed).clone() {
-            Some(why) => {
+        lists.servers.retain(|s| match s.gone() {
+            Some((at, why)) if say(at, &why) => {
                 out.push((s.name.clone(), why));
                 false
             }
-            None => true,
+            _ => true,
         });
         for (name, why) in &out {
             if let Some(k) = lists.kept.iter_mut().find(|k| &k.name == name) {
@@ -230,72 +323,42 @@ impl Loaded {
 
 #[async_trait::async_trait]
 impl ToolSource for Loaded {
-    /// The running servers' tools: one found gone is left out at once.
+    /// The running servers' tools: one seen gone is left out at once. A
+    /// server's `list_changed` is not heeded: its tools are those the
+    /// owner saw at the second question.
     async fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
-        locked(&self.0.lists)
+        let lists = locked(&self.0.lists);
+        self.look(&lists);
+        lists
             .servers
             .iter()
-            .filter(|s| !s.is_closed())
+            .filter(|s| !s.is_gone())
             .flat_map(|s| s.tools.iter().cloned())
             .collect()
     }
 
+    /// Looks first, so a server gone since moves it before yoagent reads it.
     fn generation(&self) -> u64 {
+        self.look(&locked(&self.0.lists));
         self.0.generation.load(Ordering::SeqCst)
-    }
-}
-
-/// yoagent's stdio transport, noting why the server is gone when a call
-/// finds it so, and moving the generation then, so its tools leave at the
-/// next turn: yoagent keeps the child to itself, so a server that dies is
-/// seen at its next call (one that died while idle fails that call's
-/// write).
-struct Watched {
-    inner: yoagent::mcp::StdioTransport,
-    closed: Arc<Mutex<Option<String>>>,
-    generation: Arc<AtomicU64>,
-}
-
-impl Watched {
-    fn see<T>(&self, out: &Result<T, McpError>) {
-        let Some(why) = gone(out) else { return };
-        let mut closed = locked(&self.closed);
-        if closed.is_none() {
-            *closed = Some(why);
-            self.generation.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-}
-
-/// Why a call's result says the server is gone, if it does: its output
-/// closed during the call, or its input would not take the call (it had
-/// exited before it).
-fn gone<T>(out: &Result<T, McpError>) -> Option<String> {
-    match out {
-        Err(McpError::ConnectionClosed) => Some("its connection closed".to_owned()),
-        Err(McpError::Transport(m)) if m.starts_with("Connection closed") => Some(said(m)),
-        Err(McpError::Transport(m))
-            if m.starts_with("Write error") || m.starts_with("Flush error") =>
-        {
-            Some(clip(
-                &format!("it no longer reads its input: it had exited ({m})"),
-                400,
-            ))
-        }
-        _ => None,
     }
 }
 
 /// yoagent's words for a server that ended or did not start, without the
 /// program they name — the kept environment's wrapper (`/usr/bin/env`, or
-/// `/bin/sh`), not the server — made one line and cut: "Connection closed:
-/// MCP server '<program>' exited with …; last stderr: …" → "it exited with
-/// …; last stderr: …", "Failed to spawn '<program>': …" → "it could not be
-/// started: …".
+/// `/bin/sh`), not the server — made one line and cut, the end of a
+/// stderr tail kept (where a crash is): "Connection closed: MCP server
+/// '<program>' exited with …; last stderr: …" and the exit watch's "MCP
+/// server '<program>' exited with …" (or "closed its output (…)", "has
+/// gone (…)", "was closed …") → "it exited with …; last stderr: …",
+/// "Failed to spawn '<program>': …" → "it could not be started: …".
 fn said(message: &str) -> String {
     let message = message.strip_prefix("Transport error: ").unwrap_or(message);
+    let message = message
+        .strip_prefix("Connection closed: ")
+        .unwrap_or(message);
     let text = if let Some(rest) = message
-        .strip_prefix("Connection closed: MCP server '")
+        .strip_prefix("MCP server '")
         .and_then(|r| r.split_once("' "))
         .map(|(_, rest)| rest)
     {
@@ -308,28 +371,30 @@ fn said(message: &str) -> String {
     } else {
         message.to_owned()
     };
-    clip(&text, 400)
+    match text.split_once("; last stderr:") {
+        Some((head, tail)) => {
+            let head = clip(head, 150);
+            format!(
+                "{head}; last stderr: {}",
+                clip_start(tail, 400 - head.chars().count())
+            )
+        }
+        None => clip(&text, 400),
+    }
 }
 
-#[async_trait::async_trait]
-impl McpTransport for Watched {
-    async fn send(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
-        let out = self.inner.send(request).await;
-        self.see(&out);
-        out
+/// `text` made one line, cut from its start to `max` characters (an
+/// ellipsis marking the cut): the end of a stderr tail is kept.
+fn clip_start(text: &str, max: usize) -> String {
+    let line = clip(text, usize::MAX);
+    let count = line.chars().count();
+    match count > max {
+        true => {
+            let kept: String = line.chars().skip(count - max.saturating_sub(1)).collect();
+            format!("…{}", kept.trim_start())
+        }
+        false => line,
     }
-
-    async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
-        let out = self.inner.notify(notification).await;
-        self.see(&out);
-        out
-    }
-
-    async fn close(&self) -> Result<(), McpError> {
-        self.inner.close().await
-    }
-    // Notifications are not reported: the tool list is fixed once the owner
-    // has seen it (a `list_changed` is ignored).
 }
 
 /// What `load_plugin` refuses, and the notice the owner hears it by.
@@ -610,10 +675,7 @@ impl LoadPlugin {
             format!("Start the MCP server {package}@{version} as {name}? (asked by the agent)");
         self.ask(title, details, &package, "start it", ctx).await?;
         // 6. Started, its tools listed and judged.
-        let closed: Arc<Mutex<Option<String>>> = Arc::default();
-        let (client, listed) = self
-            .start(&package, &bin, &args, closed.clone(), ctx)
-            .await?;
+        let (client, exit, listed) = self.start(&package, &bin, &args, ctx).await?;
         let own = tools_problem(&name, &listed).map_err(|e| failed(format!("{package}: {e}")))?;
         // 7. Ask: keep it?
         let title = format!(
@@ -633,6 +695,13 @@ impl LoadPlugin {
             // Not kept: stopped now (yoagent's stdio `close` kills it).
             let _ = client.close().await;
             return Err(no);
+        }
+        // Gone while the owner was asked: not announced as loaded.
+        if let Some(why) = exit.exited().map(|why| said(&why)) {
+            let _ = client.close().await;
+            return Err(failed(format!(
+                "{package} stopped while you were asked to keep it: {why}"
+            )));
         }
         let client = Arc::new(tokio::sync::Mutex::new(client));
         let tools: Vec<Arc<dyn AgentTool>> = listed
@@ -661,15 +730,8 @@ impl LoadPlugin {
                 kept_text(std::slice::from_ref(&kept), &self.files)
             ),
         );
-        self.loaded.add(
-            kept,
-            Server {
-                name: name.clone(),
-                tools,
-                client,
-                closed,
-            },
-        );
+        self.loaded
+            .add(kept, Server::new(name.clone(), tools, client, exit));
         Ok(format!(
             "Loaded {package}@{version} as {name}, for this session. Its tools are yours from your next step: {}. Each call asks the owner.",
             names.join(", ")
@@ -777,9 +839,8 @@ impl LoadPlugin {
         package: &str,
         bin: &Path,
         args: &[String],
-        closed: Arc<Mutex<Option<String>>>,
         ctx: &ToolContext,
-    ) -> Result<(McpClient, Vec<McpToolInfo>), Refused> {
+    ) -> Result<(McpClient, ExitWatch, Vec<McpToolInfo>), Refused> {
         let did_not = |e: &dyn std::fmt::Display| {
             failed(format!("{package} did not start: {}", said(&e.to_string())))
         };
@@ -789,12 +850,13 @@ impl LoadPlugin {
         let inner = yoagent::mcp::StdioTransport::new(&program, &argv, Some(env))
             .await
             .map_err(|e| did_not(&e))?;
-        let watched = Watched {
-            inner,
-            closed,
-            generation: self.loaded.generation_handle(),
+        // Without a watch its death would go unseen: refused (yoagent's
+        // stdio transport always gives one).
+        let Some(exit) = inner.exit_watch() else {
+            let _ = inner.close().await;
+            return Err(did_not(&"yoagent gives no exit watch for its transport"));
         };
-        let mut client = McpClient::from_transport(Box::new(watched))
+        let mut client = McpClient::from_transport(Box::new(inner))
             .with_call_timeout(Some(McpToolAdapter::DEFAULT_CALL_TIMEOUT));
         let started = async {
             tokio::time::timeout(START_TIME, client.initialize())
@@ -824,7 +886,7 @@ impl LoadPlugin {
             // yoagent's stdio `close` kills it and returns no error.
             let _ = client.close().await;
         }
-        listed.map(|listed| (client, listed))
+        listed.map(|listed| (client, exit, listed))
     }
 }
 

@@ -3997,19 +3997,38 @@ refuses `[extend]` without it, as the manifest does with `gate = "off"`.
   is also `kill_on_drop`). A server the owner does not keep, or that fails
   to start, is stopped at once.
 - A reset keeps them: they are the session's, as its plugins are.
-- A server that stops mid-session: its tools leave `Loaded`'s list and
-  its generation moves the moment it is found gone, so they are gone from
-  the next turn; the watcher's tick then says so, an Error notice ("The
-  loaded MCP server `x` stopped: it exited with …; last stderr: …"), and
-  marks it stopped (the end of the session says so beside its block). It
-  still counts toward `max_loads`, and is not loaded again this session.
-  yoagent 0.25.14 keeps the server's process to itself, so yobuild sees a
-  death at the next call: a transport of its own around yoagent's stdio
-  one notes a call whose output closed (it died during the call) or whose
-  input would not take it (it had died while idle: "it no longer reads
-  its input"). yoagent has been asked for a check that does not wait for
-  a call (`McpClient::exited()`, an exit watch the transport hands the
-  client when it is built); the tick will use it once it ships.
+- A server that stops mid-session, during a call or while idle: yoagent
+  0.25.15's exit watch (`McpTransport::exit_watch`, taken from the stdio
+  transport before the client is built, so reading it never waits behind
+  a call in flight, which holds the `tokio::Mutex` yobuild keeps the
+  client in) says it has gone and why; a transport without one is
+  refused at the start (yoagent's stdio always gives one). `Loaded` looks
+  at every running server's watch whenever yoagent asks it for its
+  generation (each turn) or its tools, and whenever the watcher's tick
+  asks what stopped (every 250 ms): one newly gone leaves the list and
+  moves the generation at once, so its tools are gone from the next
+  turn. Once it has been seen gone for 0.6 s — yoagent's text settles
+  within 0.5 s, the last of its stderr read — the tick says so, an Error
+  notice ("The loaded MCP server `x` stopped: it exited with …; last
+  stderr: …", the tail's end kept when cut; also "it closed its output
+  (its process is still running)", "it has gone (exit status unknown:
+  …)"), with the longest reason read (yoagent answers without the tail
+  while a call holds the child), and marks it stopped: about a second
+  after a death while idle. It still counts toward `max_loads`, and is
+  not loaded again this session.
+  - At the session's end, every server seen gone is marked stopped in
+    the block (`stopped_at_end`), those seen within 0.6 s waited for —
+    but after a Ctrl+C one first seen after it, or ended by SIGINT, is
+    not: a Ctrl+C typed in the terminal reaches the servers too (they
+    share yobuild's process group; a group of their own is asked of
+    yoagent).
+  - One that dies while the owner is asked to keep it is refused then
+    (an Error notice), never announced as loaded.
+  - Not seen: a server whose process lives on but no longer reads its
+    input (every call "Write error: Broken pipe"); asked of yoagent, to
+    count a failed write as closed.
+  - Before 0.25.15 yobuild wrapped the transport and saw a death only at
+    the next call.
 - A run aborted mid-load stops the load where it is: npm killed (and no
   later npm call started), the set's `.partial-` folder removed as
   `install` removes one, an open question withdrawn, a started process
@@ -4134,7 +4153,9 @@ As built (PR 4), each named where it lives:
   `--once`, a name in use or bad, `args` guarded, a required environment
   variable), the default name, the tool list's judgement, a path outside
   the folder, the block read back by the manifest, `Loaded` as a tool
-  source and a server found gone (during a call, or dead while idle), the
+  source and a server found gone (a stand-in watch; a real stdio server
+  dying while idle, with no call made; one yobuild closes never said;
+  the end of the session and a Ctrl+C; the longest reason), the
   words of a start that fails, several programs, what the scan reads and
   missed. The gate's `with_asked`, and the hints, in their own tests.
 - `find_plugin_test` (PR 3): one source down and both down, what `check`
@@ -4185,5 +4206,8 @@ the owner block the load, and the agent reports what it could not do.
    stub registry in the tests;
 4. `load_plugin`: the session set, the two questions, `Loaded` and its
    lifetime, the end-of-session block, the hints;
+   - between 4 and 5, `find_plugin`'s quality (#79: only servers
+     offered, `version` optional) and yoagent 0.25.15's exit watch in
+     place of yobuild's own transport wrapper;
 5. the demo agent, the skill (`manifest.md`, `parts.md`, `failures.md`),
    the guide, `CLAUDE.md` and the roadmap.

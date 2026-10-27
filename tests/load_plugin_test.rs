@@ -60,7 +60,8 @@ fn ago(days: u64) -> String {
 }
 
 /// An MCP stdio server in Node offering `tools`: `echo` answers
-/// `echoed <text>`, and exits when the text is `die`. As it starts it
+/// `echoed <text>`, and exits when the text is `die` (at once) or
+/// `die-soon` (0.3 s after answering, idle). As it starts it
 /// leaves `echo-<pid>.pid` in its home, so a test can tell it stopped.
 fn server_js(tools: &Value) -> String {
     format!(
@@ -79,6 +80,7 @@ require("readline").createInterface({{ input: process.stdin }}).on("line", (line
   }} else if (m.method === "tools/call") {{
     const text = m.params.arguments.text;
     if (text === "die") {{ process.stderr.write("dying as asked\n"); process.exit(3); }}
+    if (text === "die-soon") setTimeout(() => {{ process.stderr.write("dying idle\n"); process.exit(4); }}, 300);
     say({{ jsonrpc: "2.0", id: m.id, result: {{ content: [{{ type: "text", text: "echoed " + text }}] }} }});
   }} else {{
     say({{ jsonrpc: "2.0", id: m.id, error: {{ code: -32601, message: "no such method" }} }});
@@ -380,22 +382,27 @@ impl Page {
     }
 
     /// Answers each question with the next of `answers` (title prefix →
-    /// value), in order, until `runs` runs ended `completed`, then reads on
-    /// for `after` (a notice the watcher's tick gives). Every answer must
-    /// be used, and no other question come. The questions (title and
-    /// details), the notices (`level: text`), and the tool results
-    /// (`name ✓|✗ text`).
-    async fn drive(&mut self, answers: &[(&str, Value)], after: Duration) -> Seen {
+    /// value), in order, until a run ended `completed` and a notice holding
+    /// each of `until` came (the watcher's tick gives some; 10 s at most),
+    /// then reads on for `after`. Every answer must be used, and no other
+    /// question come. The questions (title and details), the notices
+    /// (`level: text`), and the tool results (`name ✓|✗ text`).
+    async fn drive(&mut self, answers: &[(&str, Value)], until: &[&str], after: Duration) -> Seen {
         let mut seen = Seen::default();
         let mut left = answers.iter();
         let mut ended = false;
         loop {
-            let wait = match ended {
-                true => after,
-                false => Duration::from_secs(120),
+            let waiting = until
+                .iter()
+                .any(|u| !seen.notices.iter().any(|n| n.contains(u)));
+            let wait = match (ended, waiting) {
+                (true, false) => after,
+                (true, true) => Duration::from_secs(10),
+                (false, _) => Duration::from_secs(120),
             };
             let Some(m) = self.next_within(wait).await else {
                 assert!(ended, "no run ended in 120 s: {seen:#?}");
+                assert!(!waiting, "a notice of {until:?} never came: {seen:#?}");
                 break;
             };
             match m["type"].as_str() {
@@ -533,7 +540,8 @@ async fn a_server_allowed_twice_is_offered_from_the_next_turn_each_call_asking()
                 // not found.
                 (asked, json!("Allow")),
             ],
-            Duration::from_secs(1),
+            &["error: The loaded MCP server `talk` stopped"],
+            Duration::from_millis(300),
         )
         .await;
     let (_, first) = &seen.questions[0];
@@ -606,6 +614,64 @@ async fn a_server_allowed_twice_is_offered_from_the_next_turn_each_call_asking()
     assert_eq!(installed, ["1.0.0"]);
 }
 
+/// A loaded server that dies while idle, between runs: said by the
+/// watcher's tick with no call made, its tool gone from the next run (still
+/// asked by its name, then not found), and the block at the end marking it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_dies_while_idle_is_said_with_no_call_made() {
+    let packages: Packages = Arc::new(BTreeMap::from([(
+        "echo-mcp".to_owned(),
+        vec![pack("echo-mcp", "1.0.0", 60, Some(echo_tools()), json!({}))],
+    )]));
+    let (port, _) = stub(packages, &[]);
+    let dir = project(
+        "",
+        &json!([
+            call("find_plugin", json!({ "need": "echo text" })),
+            call("load_plugin", json!({ "package": "echo-mcp", "name": "talk" })),
+            call("talk__echo", json!({ "text": "die-soon" })),
+            { "text": "loaded" },
+            call("talk__echo", json!({ "text": "again" })),
+            { "text": "done" }
+        ]),
+    );
+    let home = dir.path().join("home");
+    let mut page = Page::open(dir.path(), port).await;
+    let asked = "Run `talk__echo`, a tool of a server loaded this session?";
+    let died = "error: The loaded MCP server `talk` stopped: it exited with exit status: 4; last stderr: dying idle";
+    let first = page
+        .drive(
+            &[
+                (
+                    "Start the MCP server echo-mcp@1.0.0 as talk?",
+                    json!("Allow"),
+                ),
+                ("Keep the MCP server talk?", json!("Allow")),
+                (asked, json!("Allow")),
+            ],
+            &[died],
+            Duration::from_millis(300),
+        )
+        .await;
+    assert_eq!(first.calls[2], "talk__echo ✓ echoed die-soon", "{first:#?}");
+    page.send(json!({ "type": "prompt", "text": "again" }))
+        .await;
+    let second = page
+        .drive(&[(asked, json!("Allow"))], &[], Duration::from_millis(300))
+        .await;
+    assert_eq!(
+        second.calls,
+        ["talk__echo ✗ Tool talk__echo not found"],
+        "{second:#?}"
+    );
+    let (_, stderr) = page.interrupt();
+    assert!(
+        stderr.contains("as talk (tools: echo, stopped this session: it exited with exit status: 4; last stderr: dying idle)"),
+        "{stderr}"
+    );
+    all_stopped(&home);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn unanswered_is_not_remembered_block_is_at_either_question_and_no_tools_never_offered() {
     let packages: Packages = Arc::new(BTreeMap::from([
@@ -643,6 +709,7 @@ async fn unanswered_is_not_remembered_block_is_at_either_question_and_no_tools_n
                     json!("Allow"),
                 ),
             ],
+            &[],
             Duration::from_millis(500),
         )
         .await;

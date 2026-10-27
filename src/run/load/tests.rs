@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use serde_json::json;
-use yoagent::mcp::McpToolInfo;
+use yoagent::mcp::types::{JsonRpcRequest, JsonRpcResponse};
+use yoagent::mcp::{McpError, McpToolInfo};
 use yoagent::{AgentTool, ToolContext, ToolError};
 
 use super::*;
@@ -170,11 +171,11 @@ fn the_block_that_keeps_a_server_is_a_manifest_entry() {
     assert!(crate::manifest::loaded_arguments(&[args[3].into()]).is_err());
 }
 
-/// A transport whose server is gone.
-struct Gone;
+/// A transport that answers nothing (its calls are never made here).
+struct Mute;
 
 #[async_trait::async_trait]
-impl McpTransport for Gone {
+impl McpTransport for Mute {
     async fn send(&self, _: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
         Err(McpError::ConnectionClosed)
     }
@@ -183,22 +184,36 @@ impl McpTransport for Gone {
     }
 }
 
-fn server(name: &str, closed: Option<&str>) -> Server {
+/// What a stand-in exit watch answers: set it to say the server has gone.
+type Exit = Arc<Mutex<Option<String>>>;
+
+fn server(name: &str, exit: &Exit) -> Server {
     let client = Arc::new(tokio::sync::Mutex::new(McpClient::from_transport(
-        Box::new(Gone),
+        Box::new(Mute),
     )));
     let tool: Arc<dyn AgentTool> =
         Arc::new(McpToolAdapter::new(client.clone(), info("lint-files")).with_prefix(name));
-    Server {
-        name: name.into(),
-        tools: vec![tool],
+    let exit = exit.clone();
+    Server::new(
+        name.into(),
+        vec![tool],
         client,
-        closed: Arc::new(Mutex::new(closed.map(String::from))),
-    }
+        ExitWatch::new(move || locked(&exit).clone()),
+    )
 }
 
-fn add(loaded: &Loaded, name: &str, closed: Option<&str>) {
-    loaded.add(kept(name, &[]), server(name, closed));
+/// `exit` says its server has gone with `why`, said stopped once settled.
+async fn stop(loaded: &Loaded, exit: &Exit, why: &str) {
+    *locked(exit) = Some(why.into());
+    loaded.stopped();
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(loaded.stopped().len(), 1);
+}
+
+fn add(loaded: &Loaded, name: &str) -> Exit {
+    let exit = Exit::default();
+    loaded.add(kept(name, &[]), server(name, &exit));
+    exit
 }
 
 #[tokio::test]
@@ -206,94 +221,161 @@ async fn loaded_servers_are_a_tool_source_that_moves_on_each_change() {
     let loaded = Loaded::default();
     assert_eq!(loaded.generation(), 0);
     assert!(loaded.tools().await.is_empty());
-    add(&loaded, "eslint", None);
-    add(&loaded, "gone", Some("exited with 1"));
+    add(&loaded, "eslint");
+    let gone = add(&loaded, "gone");
     assert_eq!(loaded.generation(), 2);
+    assert_eq!(loaded.tools().await.len(), 2);
+    // Its watch says it has gone (yoagent's words, its wrapper named): the
+    // generation moves once, at the first look, and its tools leave.
+    *locked(&gone) = Some("MCP server '/usr/bin/env' exited with exit status: 1".into());
+    assert_eq!(loaded.generation(), 3);
+    assert_eq!(loaded.generation(), 3, "once");
     let names: Vec<String> = loaded
         .tools()
         .await
         .iter()
         .map(|t| t.name().to_owned())
         .collect();
-    // One found gone is offered no more, before anyone looks.
     assert_eq!(names, ["eslint__lint-files"]);
     // Asked by membership: a loaded tool, not a name that merely looks so.
     assert!(loaded.asks("eslint__lint-files"));
     assert!(!loaded.asks("eslint__other"));
     assert!(!loaded.asks("lint-files"));
-    // The one found gone is said once, then kept marked stopped; still
-    // asked.
-    assert_eq!(
-        loaded.stopped(),
-        [("gone".to_owned(), "exited with 1".to_owned())]
-    );
+    // Said stopped only once its reason has settled, with the text as it
+    // is then; once, then kept marked stopped; still asked.
+    assert!(loaded.stopped().is_empty(), "not settled yet");
+    *locked(&gone) =
+        Some("MCP server '/usr/bin/env' exited with exit status: 1; last stderr:\nboom".into());
+    tokio::time::sleep(SETTLE).await;
+    let why = "it exited with exit status: 1; last stderr: boom";
+    assert_eq!(loaded.stopped(), [("gone".to_owned(), why.to_owned())]);
     assert!(loaded.stopped().is_empty());
-    assert_eq!(loaded.generation(), 2, "the list did not change again");
+    assert_eq!(loaded.generation(), 3, "the list did not change again");
     assert_eq!(loaded.tools().await.len(), 1);
     assert!(loaded.asks("gone__lint-files"));
     let kept = loaded.kept();
     assert_eq!(kept.len(), 2);
-    assert_eq!(kept[1].stopped.as_deref(), Some("exited with 1"));
+    assert_eq!(kept[1].stopped.as_deref(), Some(why));
     assert_eq!(kept[0].stopped, None);
     loaded.close().await;
     assert!(loaded.tools().await.is_empty());
-    assert_eq!(loaded.generation(), 3, "closing moves it");
+    assert_eq!(loaded.generation(), 4, "closing moves it");
 }
 
-/// A call through the transport that finds the server gone moves the
-/// generation then, once: its tools leave at the next turn whoever looks.
-#[tokio::test]
-async fn the_transport_moves_the_generation_when_it_finds_the_server_gone() {
-    let generation = Arc::new(AtomicU64::new(5));
-    let closed: Arc<Mutex<Option<String>>> = Arc::default();
-    let see = |out: Result<(), McpError>| {
-        let why = gone(&out);
-        let mut c = locked(&closed);
-        if let (Some(why), true) = (why, c.is_none()) {
-            *c = Some(why);
-            generation.fetch_add(1, Ordering::SeqCst);
-        }
-    };
-    see(Err(McpError::Protocol("odd".into())));
-    assert_eq!(generation.load(Ordering::SeqCst), 5);
-    see(Err(McpError::Transport(
-        "Write error: Broken pipe (os error 32)".into(),
+/// A real stdio server (`/bin/sh`) on yoagent's transport, with one tool.
+async fn real(loaded: &Loaded, name: &str, script: &str) {
+    let inner = yoagent::mcp::StdioTransport::new("/bin/sh", &["-c", script], None)
+        .await
+        .unwrap();
+    let exit = inner.exit_watch().expect("stdio gives a watch");
+    let client = Arc::new(tokio::sync::Mutex::new(McpClient::from_transport(
+        Box::new(inner),
     )));
-    see(Err(McpError::ConnectionClosed));
-    assert_eq!(generation.load(Ordering::SeqCst), 6, "once");
-    assert!(locked(&closed)
-        .as_deref()
-        .unwrap()
-        .contains("it had exited"));
+    let tool: Arc<dyn AgentTool> =
+        Arc::new(McpToolAdapter::new(client.clone(), info("echo")).with_prefix(name));
+    loaded.add(
+        kept(name, &[]),
+        Server::new(name.into(), vec![tool], client, exit),
+    );
 }
 
-#[test]
-fn a_call_that_finds_the_server_gone_says_why() {
-    assert_eq!(gone(&Err::<(), _>(McpError::Protocol("odd".into()))), None);
-    assert_eq!(gone(&Ok::<(), McpError>(())), None);
-    let why = gone(&Err::<(), _>(McpError::Transport(
-        "Connection closed: MCP server 'x' exited with exit status: 1; last stderr:\nboom".into(),
-    )))
-    .unwrap();
-    assert_eq!(why, "it exited with exit status: 1; last stderr: boom");
-    assert_eq!(
-        gone(&Err::<(), _>(McpError::ConnectionClosed)).as_deref(),
-        Some("its connection closed")
+/// A real stdio server that dies while idle: its watch says so with no
+/// call made, its tools leave at the first look, and it is said once its
+/// reason settled, the stderr tail in it.
+#[tokio::test]
+async fn a_server_that_dies_while_idle_is_seen_without_a_call() {
+    let loaded = Loaded::default();
+    real(&loaded, "sh", "sleep 0.3; echo bye >&2; exit 3").await;
+    assert_eq!(loaded.tools().await.len(), 1, "running");
+    let start = Instant::now();
+    let mut stopped = Vec::new();
+    let mut gone_seen = None;
+    while start.elapsed() < Duration::from_secs(4) && stopped.is_empty() {
+        if gone_seen.is_none() && loaded.tools().await.is_empty() {
+            gone_seen = Some(Instant::now());
+        }
+        stopped = loaded.stopped();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let gone_seen = gone_seen.expect("its tools left");
+    assert!(
+        gone_seen.elapsed() >= SETTLE - Duration::from_millis(60),
+        "said only once settled"
     );
-    // Dead while idle: the call's write fails before anything is read.
     assert_eq!(
-        gone(&Err::<(), _>(McpError::Transport(
-            "Write error: Broken pipe (os error 32)".into()
-        )))
-        .as_deref(),
-        Some(
-            "it no longer reads its input: it had exited (Write error: Broken pipe (os error 32))"
-        )
+        stopped,
+        [(
+            "sh".to_owned(),
+            "it exited with exit status: 3; last stderr: bye".to_owned()
+        )]
     );
-    assert!(gone(&Err::<(), _>(McpError::Transport("Flush error: x".into()))).is_some());
+    assert_eq!(loaded.generation(), 2, "added, then gone");
+}
+
+/// The servers yobuild closes are never said stopped.
+#[tokio::test]
+async fn a_server_yobuild_closes_is_not_said_stopped() {
+    let loaded = Loaded::default();
+    real(&loaded, "sh", "sleep 30").await;
+    loaded.close().await;
+    tokio::time::sleep(SETTLE).await;
+    assert!(loaded.stopped().is_empty());
+    assert!(loaded.stopped_at_end(None).await.is_empty());
+    assert_eq!(loaded.kept()[0].stopped, None);
+}
+
+/// At the session's end a server just seen gone is waited for and marked
+/// stopped in the block; after a Ctrl+C, one first seen after it or
+/// ended by its SIGINT is not.
+#[tokio::test]
+async fn the_end_marks_a_server_just_gone_but_not_one_the_ctrl_c_stopped() {
+    let loaded = Loaded::default();
+    let early = add(&loaded, "early");
+    let sigint = add(&loaded, "sigint");
+    let late = add(&loaded, "late");
+    *locked(&early) = Some("MCP server '/usr/bin/env' exited with exit status: 1".into());
+    *locked(&sigint) = Some("MCP server '/usr/bin/env' exited with signal: 2 (SIGINT)".into());
+    loaded.generation();
+    let ctrl_c = Instant::now();
+    *locked(&late) = Some("MCP server '/usr/bin/env' exited with exit status: 0".into());
+    let said = loaded.stopped_at_end(Some(ctrl_c)).await;
     assert_eq!(
-        gone(&Err::<(), _>(McpError::Transport("Read error: x".into()))),
-        None
+        said,
+        [(
+            "early".to_owned(),
+            "it exited with exit status: 1".to_owned()
+        )]
+    );
+    let text = kept_text(&loaded.kept(), &files());
+    assert!(
+        text.contains("stopped this session: it exited with exit status: 1"),
+        "{text}"
+    );
+    assert_eq!(text.matches("stopped this session").count(), 1, "{text}");
+
+    // Without a Ctrl+C: one first seen at the end is waited for, and said.
+    let loaded = Loaded::default();
+    let gone = add(&loaded, "gone");
+    *locked(&gone) = Some("MCP server '/usr/bin/env' exited with exit status: 1".into());
+    let start = Instant::now();
+    assert_eq!(loaded.stopped_at_end(None).await.len(), 1);
+    assert!(start.elapsed() >= SETTLE, "its reason left to settle");
+    assert!(loaded.kept()[0].stopped.is_some());
+}
+
+/// The longest reason read is kept: yoagent answers without the stderr
+/// tail while a call holds the child.
+#[tokio::test]
+async fn the_reason_said_is_the_longest_read() {
+    let loaded = Loaded::default();
+    let exit = add(&loaded, "x");
+    *locked(&exit) = Some("MCP server 'sh' exited with exit status: 1; last stderr:\nboom".into());
+    loaded.generation();
+    *locked(&exit) = Some("MCP server 'sh' exited with exit status: 1".into());
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        loaded.stopped()[0].1,
+        "it exited with exit status: 1; last stderr: boom"
     );
 }
 
@@ -310,6 +392,41 @@ fn a_start_that_fails_names_the_server_not_its_wrapper() {
     assert_eq!(
         said("no answer to `initialize` within 30 s"),
         "no answer to `initialize` within 30 s"
+    );
+    // The exit watch's words, each.
+    for (watch, ours) in [
+        (
+            "MCP server '/usr/bin/env' closed its output (its process is still running)",
+            "it closed its output (its process is still running)",
+        ),
+        (
+            "MCP server '/usr/bin/env' has gone (exit status unknown: ECHILD)",
+            "it has gone (exit status unknown: ECHILD)",
+        ),
+        (
+            "MCP server '/usr/bin/env' was closed (`close`)",
+            "it was closed (`close`)",
+        ),
+        (
+            "MCP server '/bin/sh' was closed: its client was dropped",
+            "it was closed: its client was dropped",
+        ),
+    ] {
+        assert_eq!(said(watch), ours);
+    }
+    // A long stderr tail keeps its end (where a crash is).
+    let tail: String = (0..200).map(|i| format!("line{i}\n")).collect();
+    let long = said(&format!(
+        "MCP server '/usr/bin/env' exited with exit status: 1; last stderr:\n{tail}"
+    ));
+    assert!(
+        long.starts_with("it exited with exit status: 1; last stderr: …"),
+        "{long}"
+    );
+    assert!(long.ends_with("line198 line199"), "{long}");
+    assert!(
+        long.chars().count() <= 400 + "; last stderr: ".len(),
+        "{long}"
     );
 }
 
@@ -571,8 +688,12 @@ async fn a_second_load_at_once_and_one_past_max_loads_are_refused() {
     assert!(why.contains("another load is in progress"), "{why}");
     locked(&load.state).busy = false;
     // One kept, stopped or not, is as many as `max_loads = 1` allows.
-    add(&load.loaded, "other", Some("exited"));
-    load.loaded.stopped();
+    stop(
+        &load.loaded,
+        &add(&load.loaded, "other"),
+        "MCP server 'x' exited",
+    )
+    .await;
     let why = refusal(&load, json!({ "package": "lint-mcp", "version": "1.2.0" })).await;
     assert!(
         why.contains("this session has loaded 1 servers, as many as it may ([extend] max_loads 1)"),
@@ -587,7 +708,8 @@ async fn a_package_loaded_or_stopped_is_not_loaded_again_and_its_name_is_taken()
     load.extend.max_loads = 5;
     let mut lint = kept("lint", &[]);
     lint.package = "lint-mcp".into();
-    load.loaded.add(lint, server("lint", None));
+    let exit = Exit::default();
+    load.loaded.add(lint, server("lint", &exit));
     let why = refusal(
         &load,
         json!({ "package": "lint-mcp", "version": "1.2.0", "name": "other" }),
@@ -608,8 +730,7 @@ async fn a_package_loaded_or_stopped_is_not_loaded_again_and_its_name_is_taken()
         "{why}"
     );
     // Once it stopped: said so, not "loaded already".
-    *locked(&locked(&load.loaded.0.lists).servers[0].closed) = Some("it exited".into());
-    load.loaded.stopped();
+    stop(&load.loaded, &exit, "MCP server 'x' exited").await;
     let why = refusal(&load, json!({ "package": "lint-mcp", "version": "1.2.0" })).await;
     assert!(
         why.contains("lint-mcp was loaded this session and stopped (it exited): it is not loaded again this session"),
