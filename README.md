@@ -31,6 +31,8 @@ each was run live for a real task (costs with DeepSeek's `deepseek-flash`):
   totals ($0.0109).
 - **`code-health`**: the type errors a real TypeScript server finds, and
   an outline of the project ($0.0034).
+- **`self-extending-reviewer`**: finds the linter it lacks, asks you,
+  loads it for the session and lints ($0.0054).
 - **`handoff`**: hand it any task and walk away; it asks only what is
   yours to decide, without waiting, and ends with a report.
 

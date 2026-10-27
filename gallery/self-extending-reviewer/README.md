@@ -121,4 +121,33 @@ Under `--once`, every `load_plugin` call is refused alike ("not under
 
 ## A live run
 
-Not made yet.
+2026-10-27, `deepseek/deepseek-flash`, on the page, in the project the
+tests use (an ESLint config for `.js` only, `src/util.js` and
+`src/math.ts`). The task was "Review this project and tell me what to
+fix, most important first.", and every question was answered Allow by a
+script over the page's WebSocket. It went like this:
+
+1. It read the project, its config and both files, and searched for
+   risky patterns.
+2. `find_plugin("eslint")` returned ESLint's server among its
+   candidates. The MCP registry found none: its ESLint entry is remote
+   only.
+3. It proposed `@eslint/mcp`. Started and kept as `eslint` (0.3.15, the
+   newest a week old), it linted both files with `eslint__lint-files`.
+
+The run cost `$0.0054` (31,327 tokens in, 2,251 out; 8 turns) and
+ended `Completed`. Nothing in the project changed. Its report gave:
+- ESLint's three errors in `src/util.js` (`no-unused-vars` 2:9,
+  `eqeqeq` 3:13, `no-eval` 4:12);
+- the type error in `src/math.ts:5`, found by reading;
+- that ESLint ignored `src/math.ts`, which the config does not cover;
+- why it did not load the other candidates: they were not ESLint's own
+  server.
+
+After Ctrl+C yobuild printed the `[[mcp]]` block that would keep the
+server.
+
+One search failed on the day: `eval\(` as a pattern (`Search error:
+grep: parentheses not balanced`). Without ripgrep, yoagent's `search`
+falls back to `grep`, which reads `\(` as a group. The agent searched
+`eval` instead.

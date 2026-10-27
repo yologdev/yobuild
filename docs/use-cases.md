@@ -45,6 +45,7 @@ each README). Another model costs what its provider charges.
 | `code-reviewer` | "Review this project and tell me what to fix first." It lints and reads, and changes nothing. | ESLint's MCP server | $0.0049 |
 | `spreadsheet-clerk` | "Build the spreadsheet for expenses-2026-09.csv." It makes an `.xlsx` with totals by category, asking before each step that runs code or writes a file. | a spreadsheet plugin (DeepSeek Harness's `dsh-univer-office`) | $0.0109 |
 | `code-health` | "Check this TypeScript project." It lists the type errors a real TypeScript server finds, and an outline of what is where. | the `pi-lens` pi package | $0.0034 |
+| `self-extending-reviewer` | "Review this project and tell me what to fix, most important first." It starts with no linter: it finds the one the project's config names, asks you before loading it and before each call, and changes nothing. | `[extend]`: ESLint's MCP server, found and loaded while it runs | $0.0054 |
 | `handoff` | Any task (research, writing, planning, code): you hand it over and walk away. It plans, asks only what is yours to decide without waiting for the answer, and ends with a report. | a to-do plan (a pi package) and the web search | depends on the task; at most $2 a session |
 | `coding` | A coding agent in your terminal. A safety policy asks before commands known to be dangerous (`rm -rf` and the like); everything else runs. | a pi safety policy, web search, questions | depends on the task; no spending limit set |
 
