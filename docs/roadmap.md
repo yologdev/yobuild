@@ -315,8 +315,9 @@ never loading, and a denied approval leaves the agent without the plugin.
 sources. The no-tools refusal is tested against a stub registry
 (`load_plugin_test`).
 
-Later: pi, DSH and rutis plugins, and remote MCP servers (§14, "Later
-steps").
+Next, stage 2: pi and DSH plugins (proposed 2026-10-27; §14, "Stage 2:
+pi and DSH plugins"). Later: rutis plugins and remote MCP servers (§14,
+"Later steps").
 
 ## Open questions (for review)
 
