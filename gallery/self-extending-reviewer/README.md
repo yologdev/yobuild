@@ -23,7 +23,9 @@ not offered, and when I say no."*
   - `load_plugin` loads one of the candidates for this session only. For
     an `eslint.config.js` that is ESLint's own server, `@eslint/mcp`,
     loaded as `eslint` with the tool `eslint__lint-files`.
-- **The guards:** at most 2 servers and 4 load attempts a session. Only
+- **The guards:** at most 2 servers and 4 counted `load_plugin` calls a
+  session (a call for a package not offered, or one already blocked, is
+  not counted). Only
   versions published at least 7 days ago are taken, and that holds for
   every package the server brings with it.
 - **Reading:** `tools = "read-only"`: read, list and search only, inside
@@ -103,8 +105,10 @@ yobuild run path/to/gallery/self-extending-reviewer/agent.toml \
 
 - `scripts/demo.json`: Allow, Allow, then Allow for the lint call. ESLint
   finds `no-eval`, `eqeqeq` and `no-unused-vars` in `src/util.js`.
-- `scripts/blocked.json`: Block at the first question. Nothing is
-  installed or run.
+- `scripts/blocked.json`: Block at the first question. Nothing of it
+  runs: by then it was installed into yobuild's cache (its install
+  scripts not run), which is how the question can say what its code
+  reads.
 - `scripts/not-offered.json`: you ask for a package `find_plugin` did
   not return. It is refused before anything installs, and no question
   is put to you.
@@ -112,8 +116,10 @@ yobuild run path/to/gallery/self-extending-reviewer/agent.toml \
 yobuild's tests run all three this way, answering over the page's
 WebSocket, in a project like the one they expect: an `eslint.config.js`
 for `.js` files, `src/util.js` and `src/math.ts`. Their searches use the
-live MCP registry and npm. A registry that is down fails the test, and
-the candidates change with the sources: the reply files expect only
+live MCP registry and npm. npm's registry down fails the test (ESLint's
+server is found by npm's search and installed from npm; the MCP
+registry down alone gives a Warning), and the candidates change with
+the sources: the reply files expect only
 `@eslint/mcp` among them, and take whatever version is offered.
 
 Under `--once`, every `load_plugin` call is refused alike ("not under

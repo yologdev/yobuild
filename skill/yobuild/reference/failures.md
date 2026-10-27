@@ -70,7 +70,8 @@ make the last one name every section.
 
 ## During a run: a tool call refused
 
-These come back to the agent as the tool's result (`Tool call denied: …`)
+These come back to the agent as the tool's result — the gate's as
+`Tool call denied: …`, `load_plugin`'s as `load_plugin refused it: …` —
 and show as `name ✗` under `--once`. The run goes on.
 
 | What it says | What it means | What to do |

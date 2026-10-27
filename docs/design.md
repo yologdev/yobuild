@@ -4169,7 +4169,7 @@ As built (PR 4), each named where it lives:
 ### The demo
 
 A code reviewer that starts without ESLint (`tools = "read-only"`,
-`[extend]`). Asked to lint a TypeScript project, it calls `find_plugin`
+`[extend]`). Asked to review a project whose ESLint config it reads, it calls `find_plugin`
 (in its own words: tried live on 2026-10-26, the need "eslint" finds
 ESLint's server and "lint TypeScript" does not — the server's name and
 description hold neither word as written), proposes `@eslint/mcp`, the owner allows starting it
@@ -4177,9 +4177,11 @@ and then keeping it, and it lints with `eslint__lint-files`, each call
 asked and allowed. Run once live (cost in its README), and scripted in CI
 against the live sources (decided 2026-10-26): its reply files name no
 version (`load_plugin` takes the one offered) and expect only what holds
-as the sources change; a registry down fails the job, said so in its
-README. A second reply file has the agent propose a package
-`find_plugin` did not return (as one named on a page it read would be):
+as the sources change; npm's registry down fails the job (`@eslint/mcp`
+is found by npm's search, and installed from npm; the MCP registry down
+alone is a Warning), said so in its README. A second reply file has the agent propose a package
+`find_plugin` did not return (the task names it, as a friend's
+recommendation would, or a page the agent read):
 refused before anything installs, never offered (decided 2026-10-27: a
 real server that `check` refuses, as first planned here, cannot be
 counted on among live sources; that refusal is `load_plugin_test`'s,

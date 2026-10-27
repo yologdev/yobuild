@@ -105,8 +105,9 @@ found. Nobody is there to answer:
   network, as a search plugin does) and prints `✓`; `load_plugin` prints
   `✗ load_plugin refused it: not under --once: nobody is there to allow it
   (nothing was counted)`, after a Warning notice saying the same. That
-  refusal comes before every other, so under `--once` every `load_plugin`
-  call looks alike, whatever the reply file means to show. A call to the
+  refusal comes before every other but a malformed call's (a key it does
+  not take, such as `kind`), so under `--once` every `load_plugin` call
+  looks alike, whatever the reply file means to show. A call to the
   tools it would have loaded prints `✗ Tool call denied: …`, and its
   `expect` the Warning "… was not checked: the call did not run". All of
   these are expected under `--once`: it shows the search and the agent's

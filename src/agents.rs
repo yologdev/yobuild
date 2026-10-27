@@ -193,7 +193,7 @@ web = true                  # the web page, at 127.0.0.1:8787
 # session, asking you before it starts and again with its tools.
 # [extend]
 # max_loads    = 2          # servers a session
-# min_age_days = 7          # only versions published this many days ago
+# min_age_days = 7          # only versions published at least this many days ago
 "##;
 
 const STARTER_PROMPT: &str = "You are NAME, an agent working in {cwd}.
@@ -446,7 +446,21 @@ mod tests {
                     _ => break,
                 }
             }
-            read(&changed.join("\n")).unwrap_or_else(|e| panic!("{block}: {e}"));
+            // `[extend]`'s keys are its defaults: set others, to see them read.
+            if block == "# [extend]" {
+                for line in changed.iter_mut() {
+                    if line.starts_with("max_loads") {
+                        *line = "max_loads = 3".into();
+                    } else if line.starts_with("min_age_days") {
+                        *line = "min_age_days = 9".into();
+                    }
+                }
+            }
+            let m = read(&changed.join("\n")).unwrap_or_else(|e| panic!("{block}: {e}"));
+            if block == "# [extend]" {
+                let extend = m.extend.expect("[extend]");
+                assert_eq!((extend.max_loads, extend.min_age_days), (3, 9));
+            }
         }
         // Its demo is a reply file.
         let demo = std::fs::read_to_string(dir.join("scripts/demo.json")).unwrap();
