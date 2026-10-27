@@ -4178,9 +4178,15 @@ asked and allowed. Run once live (cost in its README), and scripted in CI
 against the live sources (decided 2026-10-26): its reply files name no
 version (`load_plugin` takes the one offered) and expect only what holds
 as the sources change; a registry down fails the job, said so in its
-README. A second reply file proposes a
-server that `check` refuses (no tools), shown never offered; a third has
-the owner block the load, and the agent reports what it could not do.
+README. A second reply file has the agent propose a package
+`find_plugin` did not return (as one named on a page it read would be):
+refused before anything installs, never offered (decided 2026-10-27: a
+real server that `check` refuses, as first planned here, cannot be
+counted on among live sources; that refusal is `load_plugin_test`'s,
+against the stub). A third has the owner block the load, and the agent
+reports what it could not do. Under `--once` `load_plugin` is refused, so
+`gallery_test` runs these reply files on the page, answering over its
+WebSocket.
 
 ### Decisions
 

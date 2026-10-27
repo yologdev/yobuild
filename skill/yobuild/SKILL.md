@@ -59,6 +59,9 @@ my-agent/
    then a plugin from [reference/parts.md](reference/parts.md) at the
    version it lists (**CI** rows first: yobuild's own CI runs them); then
    an MCP server. A part not listed: pin `npm view <package> version`.
+   When the person cannot say which tool a task will need, `[extend]`
+   lets the agent find an MCP server and load it for the session, the
+   person asked twice (parts.md, "Servers the agent finds itself").
 3. **Write** `agent.toml` and a first prompt — from `yobuild new <folder>
    --from <agent>` when a built-in agent is near the request, else from
    `yobuild new <folder>`'s starter (`check` reads it) — then
@@ -110,6 +113,9 @@ my-agent/
    there). A tool whose arguments are ids from an
    earlier result cannot be scripted past that point (scripted.md): stop
    the reply file there.
+   With `[extend]`, `load_plugin` is refused under `--once` (nobody is
+   there to allow it): the `--once` run shows the search; the person tries
+   the load on the page (scripted.md, "A reply file that loads a server").
    - A DSH plugin with `grants` gets the note "probed without the DSH
      host: its grants are not exercised alone": `check` alone proves it
      loads, not that its granted tools work — the scripted run does.

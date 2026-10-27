@@ -3,7 +3,7 @@
 //! in `scripts/<x>.task`) run scripted under `--once --locked`, in a temp
 //! folder, with a temp `HOME` (so a plugin's cache or config there is the
 //! test's own). What holds an agent:
-//! - `check`: `ok`, no note, each name an entry's `allow` lists `allowed`,
+//! - `check`: `ok`, no note (but those every such agent gets), each name an entry's `allow` lists `allowed`,
 //!   and no tool that writes with `tools = "read-only"`;
 //! - each reply file (its folder holding the files the agent's test puts
 //!   there, unchanged afterwards): `Completed` with its last `text` as the answer, each call it
@@ -13,7 +13,12 @@
 //!   engine down), never one of the bridge's (its plugin unloaded or
 //!   stopped answering), and never a denial;
 //!   A reply file meant to show refusals: every call `✗`;
-//! - every tool `check` says asks, called with nobody there: denied.
+//! - every tool `check` says asks, called with nobody there: denied;
+//! - a reply file that loads a server (`[extend]`, design §14), refused
+//!   under `--once`, runs on the page instead: its questions answered over
+//!   the WebSocket as the test says, `completed`, no `Error` notice, every
+//!   call `✓` but `load_plugin` when the owner did not allow it twice (and
+//!   then no loaded tool ran).
 //!
 //! A scripted run cannot tell whether the task fits the replies (the model
 //! is the script): the task is the one a reader would type. Unix (as
@@ -193,10 +198,185 @@ fn script(replies: &Json) -> (Vec<String>, String) {
 /// agent's plugin keeps a large cache there (else a temporary one each).
 struct Rules<'a> {
     files: &'a [(&'a str, &'a str)],
+    page: &'a [Page<'a>],
     home: Option<&'a Path>,
     refusing: &'a [&'a str],
     asks: HashSet<String>,
     theirs: HashSet<String>,
+}
+
+/// A reply file run on the page, and each question's answer in order:
+/// (the title's start, `Allow` or `Block`).
+struct Page<'a> {
+    file: &'a str,
+    answers: &'a [(&'a str, &'a str)],
+}
+
+/// One reply file's run on the page (`--web`), its questions answered as
+/// `answers` says, then Ctrl+C: held to the rules above.
+fn on_page(manifest: &str, file: &Path, task: &str, answers: &[(&str, &str)], rules: &Rules) {
+    use futures::{SinkExt, StreamExt};
+    use std::io::{BufRead, BufReader};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let name = file.file_name().unwrap().to_string_lossy();
+    let replies: Json = serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+    let (called, _) = script(&replies);
+    let (work, own) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let home = rules.home.unwrap_or(own.path());
+    for (path, contents) in rules.files {
+        let path = work.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_yobuild"));
+    for key in yobuild::manifest::KEY_VARIABLES {
+        command.env_remove(key);
+    }
+    let mut child = command
+        .env("YOBUILD_HOME", CACHE)
+        .env("HOME", home)
+        .env_remove("RUST_LOG")
+        .args(["run", manifest, "--scripted"])
+        .arg(file)
+        .args(["--web", "127.0.0.1:0", "--locked", task])
+        .current_dir(work.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    /// Killed however the test ends.
+    struct Kill(std::process::Child);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut err = child.stderr.take().unwrap();
+    let stderr = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = err.read_to_string(&mut text);
+        text
+    });
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let mut child = Kill(child);
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
+    let Some(url) = line.split_whitespace().nth(1) else {
+        let _ = child.0.kill();
+        panic!("{name}: no URL: {line:?}\n{}", stderr.join().unwrap());
+    };
+    let ws = url.replace("http://", "ws://").replace("/?t=", "/ws?t=");
+
+    // (title, answer) asked, notices as `level: text`, calls as (name, ✓ | ✗ text).
+    let mut asked: Vec<String> = vec![];
+    let mut notices: Vec<String> = vec![];
+    let mut made: Vec<(String, String)> = vec![];
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let outcome = runtime.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(ws).await.unwrap();
+        let mut left = answers.iter();
+        loop {
+            let next = tokio::time::timeout(DEADLINE, socket.next()).await;
+            let Ok(Some(Ok(message))) = next else {
+                return None;
+            };
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let m: Json = serde_json::from_str(&text).unwrap();
+            match m["type"].as_str() {
+                Some("uiRequest") => {
+                    let title = m["request"]["title"].as_str().unwrap().to_owned();
+                    let Some((start, value)) = left.next() else {
+                        panic!("{name}: a question not expected: {title}");
+                    };
+                    assert!(
+                        title.starts_with(start),
+                        "{name}: {title:?} is not {start:?}"
+                    );
+                    asked.push(title);
+                    let answer =
+                        serde_json::json!({ "type": "uiResponse", "id": m["id"], "value": value });
+                    socket
+                        .send(Message::Text(answer.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+                Some("notice") => notices.push(format!(
+                    "{}: {}",
+                    m["level"].as_str().unwrap(),
+                    m["message"].as_str().unwrap()
+                )),
+                Some("event") if m["event"]["type"] == "toolExecutionEnd" => {
+                    let text: Vec<&str> = m["event"]["result"]["content"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|c| c["text"].as_str())
+                        .collect();
+                    let mark = match m["event"]["isError"] == true {
+                        true => format!("✗ {}", text.join("\n")),
+                        false => "✓".to_owned(),
+                    };
+                    made.push((m["event"]["toolName"].as_str().unwrap().to_owned(), mark));
+                }
+                Some("runEnd") => return Some(m["outcome"].as_str().unwrap_or("").to_owned()),
+                _ => {}
+            }
+        }
+    });
+    // The block a kept server would be kept by comes once the runtimes stop.
+    let pid = child.0.id().to_string();
+    Command::new("kill").args(["-INT", &pid]).status().unwrap();
+    let status = child.0.wait().unwrap();
+    let stderr = stderr.join().unwrap();
+    let all = format!("{name} on the page:\n{asked:#?}\n{notices:#?}\n{made:#?}\n{stderr}");
+    assert_eq!(outcome.as_deref(), Some("completed"), "{all}");
+    assert_eq!(status.code(), Some(0), "{all}");
+    assert_eq!(asked.len(), answers.len(), "answers left unused: {all}");
+    assert!(!notices.iter().any(|n| n.starts_with("error: ")), "{all}");
+    assert!(
+        !notices.iter().any(|n| n.contains("expectation for `")),
+        "{all}"
+    );
+    let mut names: Vec<&str> = made.iter().map(|(n, _)| n.as_str()).collect();
+    let mut called: Vec<&str> = called.iter().map(String::as_str).collect();
+    names.sort_unstable();
+    called.sort_unstable();
+    assert_eq!(names, called, "{all}");
+    for (path, contents) in rules.files {
+        let now = std::fs::read_to_string(work.path().join(path)).unwrap_or_default();
+        assert_eq!(&now, contents, "{path} changed: {all}");
+    }
+    // Loaded only when allowed to start and then kept.
+    let kept = ["Start the MCP server ", "Keep the MCP server "]
+        .iter()
+        .all(|q| {
+            answers
+                .iter()
+                .any(|(t, v)| t.starts_with(q) && *v == "Allow")
+        });
+    for (tool, mark) in &made {
+        if tool == "load_plugin" && !kept {
+            assert!(
+                mark.starts_with("✗ load_plugin refused it: "),
+                "{tool}: {all}"
+            );
+        } else if tool.contains("__") && !kept {
+            assert!(mark.starts_with("✗ "), "{tool} ran unloaded: {all}");
+        } else {
+            assert_eq!(mark, "✓", "{tool}: {all}");
+        }
+    }
+    assert_eq!(
+        stderr.contains("To keep it, add to "),
+        kept,
+        "the block said: {all}"
+    );
 }
 
 /// One reply file's run, held to the rules above.
@@ -264,6 +444,17 @@ fn scripted(manifest: &str, file: &Path, task: &str, rules: &Rules) {
 /// `files` in its folder; in the reply files `refusing` names, every call
 /// refused.
 fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str], home: Option<&Path>) {
+    holds_with(dir, files, refusing, &[], home)
+}
+
+/// As [`holds`], the reply files `page` names run on the page.
+fn holds_with(
+    dir: &Path,
+    files: &[(&str, &str)],
+    refusing: &[&str],
+    page: &[Page],
+    home: Option<&Path>,
+) {
     let path = dir.join("agent.toml");
     let manifest = path.display().to_string();
     let parsed = Manifest::load(&path).unwrap();
@@ -306,8 +497,10 @@ fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str], home: Option<&Pa
             // A pi package's skills, which yobuild does not load (pi-lens
             // ships four).
             let skills = n.starts_with("plugin ") && n.contains(" skills are not loaded (");
+            // What `[extend]` lets the agent do, said whenever it is there.
+            let extend = parsed.extend.is_some() && n.starts_with("[extend]: ");
             assert!(
-                n == GRANTED_DSH || n.starts_with(KEPT) || here(n) || skills,
+                n == GRANTED_DSH || n.starts_with(KEPT) || here(n) || skills || extend,
                 "{report:#}"
             );
             if n.starts_with(KEPT) {
@@ -355,6 +548,7 @@ fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str], home: Option<&Pa
 
     let rules = Rules {
         files,
+        page,
         home,
         refusing,
         asks,
@@ -377,7 +571,11 @@ fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str], home: Option<&Pa
         );
         if file.extension().is_some_and(|x| x == "json") {
             let task = std::fs::read_to_string(file.with_extension("task")).unwrap();
-            scripted(&manifest, file, task.trim(), &rules);
+            let stem = file.file_name().unwrap().to_string_lossy();
+            match rules.page.iter().find(|p| p.file == stem) {
+                Some(page) => on_page(&manifest, file, task.trim(), page.answers, &rules),
+                None => scripted(&manifest, file, task.trim(), &rules),
+            }
             if file.file_stem().is_some_and(|s| s == "demo") {
                 demo = Some(file.clone());
             }
@@ -463,6 +661,41 @@ fn code_reviewer() {
             ("tsconfig.json", "{\n  \"compilerOptions\": {\n    \"target\": \"ES2022\",\n    \"module\": \"ESNext\",\n    \"moduleResolution\": \"Bundler\",\n    \"strict\": true,\n    \"noEmit\": true\n  },\n  \"include\": [\"src\"]\n}\n"),
         ],
         &["no-writes.json"],
+        None,
+    );
+}
+
+#[test]
+fn self_extending_reviewer() {
+    let Some(dir) = agent("self-extending-reviewer") else {
+        return;
+    };
+    // A tiny project whose ESLint config covers `.js` only: ESLint's
+    // findings in `src/util.js`, `src/math.ts` ignored. Each reply file on
+    // the page (`load_plugin` is refused under `--once`), against the
+    // live sources (design §14 "The demo").
+    let start = "Start the MCP server @eslint/mcp@";
+    holds_with(
+        &dir,
+        &[
+            ("eslint.config.js", "export default [\n  {\n    files: [\"**/*.js\"],\n    rules: {\n      \"no-unused-vars\": \"error\",\n      \"no-eval\": \"error\",\n      \"eqeqeq\": \"error\"\n    }\n  }\n];\n"),
+            ("package.json", "{\n  \"name\": \"tiny-ts\",\n  \"version\": \"1.0.0\",\n  \"private\": true,\n  \"type\": \"module\"\n}\n"),
+            ("src/util.js", "export function check(value) {\n  const unused = 42;\n  if (value == null) {\n    return eval(\"'empty'\");\n  }\n  return value;\n}\n"),
+            ("src/math.ts", "export function add(a: number, b: number): number {\n  return a + b;\n}\n\nexport const total: number = add(1, \"2\");\n"),
+        ],
+        &[],
+        &[
+            Page {
+                file: "demo.json",
+                answers: &[
+                    (start, "Allow"),
+                    ("Keep the MCP server eslint? It offers: lint-files", "Allow"),
+                    ("Run `eslint__lint-files`, a tool of a server loaded this session?", "Allow"),
+                ],
+            },
+            Page { file: "blocked.json", answers: &[(start, "Block")] },
+            Page { file: "not-offered.json", answers: &[] },
+        ],
         None,
     );
 }

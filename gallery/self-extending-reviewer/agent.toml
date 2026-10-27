@@ -1,0 +1,38 @@
+# self-extending-reviewer: reviews a JavaScript / TypeScript project, read-only.
+# It sets up no linter in advance: when it needs one it searches for an MCP
+# server (find_plugin) and loads it for the session (load_plugin) — you are
+# asked before it starts, again with its tools in front of you, and before
+# each call of them. It never writes: tools = "read-only", and every loaded
+# tool asks.
+#
+#   cd <your project>
+#   yobuild check <this folder>/agent.toml
+#   yobuild run <this folder>/agent.toml --scripted <this folder>/scripts/demo.json --once "$(cat <this folder>/scripts/demo.task)"
+#   DEEPSEEK_API_KEY=… yobuild run <this folder>/agent.toml      # live, on the web page
+#
+# It works in the folder `yobuild run` starts in: start it in the project.
+
+[agent]
+name   = "self-extending-reviewer"
+model  = "deepseek/deepseek-flash"   # needs DEEPSEEK_API_KEY
+prompt = "prompts/agent.md"
+
+[limits]
+budget_usd         = 0.25   # dollars per run
+session_budget_usd = 1.0    # dollars in all, until yobuild stops
+max_turns          = 40     # model turns per run
+
+[builtins]
+tools  = "read-only"        # read, list and search only, inside the project: it never changes your code
+report = ["Fix first", "Fix later", "Tools loaded", "Not checked"]
+# gate stays "allow-list" (the default): [extend] needs it, and every
+# tool of a loaded server asks you before each call.
+
+[frontend]
+web = true                  # the web page: you answer the load questions there
+
+[extend]                    # find an MCP server it lacks and load it, asking you twice
+kinds        = ["mcp"]
+max_loads    = 2            # servers per session
+max_attempts = 4            # load_plugin calls per session
+min_age_days = 7            # only versions published a week ago or more

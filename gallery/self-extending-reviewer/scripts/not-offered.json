@@ -1,0 +1,13 @@
+[
+  { "tools": [
+      { "name": "list_files", "arguments": { "path": "." } },
+      { "name": "read_file", "arguments": { "path": "eslint.config.js" }, "expect": "no-eval" }
+  ] },
+  { "tools": [{ "name": "find_plugin", "arguments": { "need": "acme-lint-mcp", "kind": "mcp" } }] },
+  { "tools": [{ "name": "load_plugin", "arguments": { "package": "acme-lint-mcp" } }] },
+  { "tools": [
+      { "name": "read_file", "arguments": { "path": "src/util.js" }, "expect": "eval(" },
+      { "name": "read_file", "arguments": { "path": "src/math.ts" }, "expect": "add(1, \"2\")" }
+  ] },
+  { "text": "## Fix first\n1. src/util.js:4 — `eval(\"'empty'\")` runs arbitrary code (from reading the code): return `'empty'` directly.\n2. src/math.ts:5 — `add(1, \"2\")` passes a string for a `number` parameter (from reading the code): pass `2`.\n\n## Fix later\n1. src/util.js:3 — `value == null` where your config asks for `eqeqeq` (from reading).\n2. src/util.js:2 — `unused` is never used (from reading).\n\n## Tools loaded\n- none. You asked for `acme-lint-mcp`; find_plugin did not return it, so load_plugin refused it before installing anything. I did not load another package in its place.\n\n## Not checked\n- No linter ran: the findings come from reading. If you want ESLint run, tell me and I will propose ESLint's own server, `@eslint/mcp`.\n- The type checker (`npx tsc --noEmit`) and tests were not run." }
+]
