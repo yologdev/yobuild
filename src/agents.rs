@@ -39,6 +39,18 @@ macro_rules! file {
 
 /// A gallery agent's files: its folder as it is.
 macro_rules! gallery {
+    // An agent that pins nothing has no lock.
+    (unlocked $name:literal, [$($script:literal),*]) => {
+        &[
+            file!("agent.toml", concat!("gallery/", $name, "/agent.toml")),
+            file!("prompts/agent.md", concat!("gallery/", $name, "/prompts/agent.md")),
+            file!("README.md", concat!("gallery/", $name, "/README.md")),
+            $(
+                file!(concat!("scripts/", $script, ".json"), concat!("gallery/", $name, "/scripts/", $script, ".json")),
+                file!(concat!("scripts/", $script, ".task"), concat!("gallery/", $name, "/scripts/", $script, ".task")),
+            )*
+        ]
+    };
     ($name:literal, [$($script:literal),*]) => {
         &[
             file!("agent.toml", concat!("gallery/", $name, "/agent.toml")),
@@ -84,6 +96,12 @@ pub const BUILTIN: &[Builtin] = &[
         kind: "gallery",
         summary: "finds a TypeScript project's type errors and outlines it, read-only (pi-lens)",
         files: gallery!("code-health", ["demo", "question"]),
+    },
+    Builtin {
+        name: "self-extending-reviewer",
+        kind: "gallery",
+        summary: "reviews a JavaScript or TypeScript project, read-only, loading a linter it finds when you allow it ([extend])",
+        files: gallery!(unlocked "self-extending-reviewer", ["demo", "blocked", "not-offered"]),
     },
     Builtin {
         name: "handoff",
@@ -170,6 +188,12 @@ web = true                  # the web page, at 127.0.0.1:8787
 # npm   = "@modelcontextprotocol/server-filesystem@1.0.0"
 # args  = ["."]
 # allow = ["read_text_file"]
+
+# The agent may search for an MCP server it lacks and load it for the
+# session, asking you before it starts and again with its tools.
+# [extend]
+# max_loads    = 2          # servers a session
+# min_age_days = 7          # only versions published at least this many days ago
 "##;
 
 const STARTER_PROMPT: &str = "You are NAME, an agent working in {cwd}.
@@ -413,7 +437,7 @@ mod tests {
         }
         assert!(tried >= 8, "{tried}");
         // The blocks, whole.
-        for block in ["# [[plugin]]", "# [[mcp]]"] {
+        for block in ["# [[plugin]]", "# [[mcp]]", "# [extend]"] {
             let start = lines.iter().position(|l| *l == block).unwrap();
             let mut changed: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
             for line in changed.iter_mut().skip(start) {
@@ -422,7 +446,21 @@ mod tests {
                     _ => break,
                 }
             }
-            read(&changed.join("\n")).unwrap_or_else(|e| panic!("{block}: {e}"));
+            // `[extend]`'s keys are its defaults: set others, to see them read.
+            if block == "# [extend]" {
+                for line in changed.iter_mut() {
+                    if line.starts_with("max_loads") {
+                        *line = "max_loads = 3".into();
+                    } else if line.starts_with("min_age_days") {
+                        *line = "min_age_days = 9".into();
+                    }
+                }
+            }
+            let m = read(&changed.join("\n")).unwrap_or_else(|e| panic!("{block}: {e}"));
+            if block == "# [extend]" {
+                let extend = m.extend.expect("[extend]");
+                assert_eq!((extend.max_loads, extend.min_age_days), (3, 9));
+            }
         }
         // Its demo is a reply file.
         let demo = std::fs::read_to_string(dir.join("scripts/demo.json")).unwrap();

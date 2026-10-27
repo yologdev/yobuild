@@ -101,6 +101,17 @@ found. Nobody is there to answer:
   `Tool call denied: …` when the gate asks about it first (nobody
   answers), or `Tool <name> not found` when the gate would let it run (one
   of yoagent's writers with `tools = "read-only"`, say).
+- With `[extend]`, `find_plugin` searches the live sources (the
+  network, as a search plugin does) and prints `✓`; `load_plugin` prints
+  `✗ load_plugin refused it: not under --once: nobody is there to allow it
+  (nothing was counted)`, after a Warning notice saying the same. That
+  refusal comes before every other but a malformed call's (a key it does
+  not take, such as `kind`), so under `--once` every `load_plugin` call
+  looks alike, whatever the reply file means to show. A call to the
+  tools it would have loaded prints `✗ Tool call denied: …`, and its
+  `expect` the Warning "… was not checked: the call did not run". All of
+  these are expected under `--once`: it shows the search and the agent's
+  proposal; the rest is seen on the page (below).
 - A tool that reports (a linter, diagnostics, a type check) can print
   `✓` with a false "clean": a tool that cannot do its work may say it
   found nothing. Give it a file with a known problem and look for that
@@ -142,3 +153,41 @@ found. Nobody is there to answer:
 - **A run that leaves files behind** (a new `.univer`, a cache) changes
   the next run's start: a tool that refuses to overwrite fails the second
   time. Start each scripted run from the same files.
+
+## A reply file that loads a server (`[extend]`)
+
+`find_plugin`'s candidates come from the live sources and change: give
+its call an `expect` that holds as they do — the package's name, never a
+version, a count or a position — and give `load_plugin` no `version` (it
+takes the one offered). The next reply calls the loaded tools by
+`<name>__<tool>` (parts.md: the default `name`), with arguments their
+schema takes — `check` cannot list them, as the server is not known
+before the run; parts.md has those of the servers listed there. To see
+them, and that the call and its `expect` hold, put the server in a
+throwaway copy of the manifest as an `[[mcp]]` entry at the version
+`find_plugin` offers (in a folder of its own, outside the agent's), `check`
+it and run that one call scripted; then delete the copy. Run it
+without `--once`, on the page: the person answers both questions
+(start it, then keep it) and each call of its tools. Under `--once` the
+same file stops at `load_plugin`'s refusal: that run shows the search.
+
+Do not answer the page yourself (no script or client of your own
+playing the person): run each reply file under `--once`, then tell the
+person how to run it on the page and what to answer — Allow, Allow and
+Allow for each call; or Block — and ask what they saw.
+
+Three reply files show the shape of a run with `[extend]`:
+
+- `scripts/demo.json`: the load allowed, its tools used (each call asked
+  and allowed);
+- a package `find_plugin` did not return, refused before anything
+  installs (`… is not among this session's candidates …`): the agent
+  goes on without it. The task names the package (the owner's friend
+  recommended it, say); the prompt has the agent search for a package
+  the owner names, propose it, and load nothing in its place when it is
+  refused;
+- the person says Block: the agent reports what it could not do.
+
+Each file's last `text` is the report the agent would give on the page,
+where the load went as the file means: under `--once` it reads against
+the `✗` lines above it.

@@ -289,7 +289,7 @@ plugin. The skill's `parts.md` says so.
 
 Later: a docs site, the video re-cut for yobuild, posts.
 
-## M5 — Agents that extend themselves
+## M5 — Agents that extend themselves (step 1, MCP stdio servers: done 2026-10-27; design §14)
 
 - `find_plugin` / `load_plugin` tools, behind the owner's approval and the
   fail-closed rules; refused plugins never load (design §14). Found by
@@ -302,6 +302,21 @@ Later: a docs site, the video re-cut for yobuild, posts.
 
 **Done when** the demo runs live end to end, a refused plugin is shown
 never loading, and a denied approval leaves the agent without the plugin.
+
+**Done (step 1):** the gallery's `self-extending-reviewer` is the demo:
+- **Live:** on 2026-10-27 it ran end to end ($0.0054). It found ESLint's
+  server, was allowed to start and keep it, and linted with it.
+- **A refused plugin:** its `not-offered` reply file proposes a package
+  `find_plugin` did not return. It is refused before anything installs.
+- **A denied approval:** in its `blocked` reply file the owner says
+  Block, and the agent reviews without ESLint and says so.
+
+`gallery_test` runs all three on the page in CI, against the live
+sources. The no-tools refusal is tested against a stub registry
+(`load_plugin_test`).
+
+Later: pi, DSH and rutis plugins, and remote MCP servers (§14, "Later
+steps").
 
 ## Open questions (for review)
 

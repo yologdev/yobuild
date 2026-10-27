@@ -1,0 +1,15 @@
+[
+  { "tools": [
+      { "name": "list_files", "arguments": { "path": "." } },
+      { "name": "read_file", "arguments": { "path": "package.json" }, "expect": "tiny-ts" },
+      { "name": "read_file", "arguments": { "path": "eslint.config.js" }, "expect": "no-eval" }
+  ] },
+  { "tools": [
+      { "name": "read_file", "arguments": { "path": "src/util.js" }, "expect": "eval(" },
+      { "name": "read_file", "arguments": { "path": "src/math.ts" }, "expect": "add(1, \"2\")" }
+  ] },
+  { "tools": [{ "name": "find_plugin", "arguments": { "need": "eslint", "kind": "mcp" }, "expect": "@eslint/mcp" }] },
+  { "tools": [{ "name": "load_plugin", "arguments": { "package": "@eslint/mcp" } }] },
+  { "tools": [{ "name": "eslint__lint-files", "arguments": { "filePaths": ["{cwd}/src/util.js", "{cwd}/src/math.ts"] }, "expect": ["no-eval", "no-unused-vars", "eqeqeq", "File ignored"] }] },
+  { "text": "## Fix first\n1. src/util.js:4 — `eval(\"'empty'\")` (ESLint `no-eval`): eval runs arbitrary code; return the string `'empty'` directly.\n2. src/math.ts:5 — `add(1, \"2\")` passes a string where `b: number` is declared (from reading the code; a TypeScript error): pass `2`.\n\n## Fix later\n1. src/util.js:3 — `value == null` (ESLint `eqeqeq`): write `value === null || value === undefined`, or keep `== null` and disable the rule for this line on purpose.\n2. src/util.js:2 — `unused` is never used (ESLint `no-unused-vars`): remove it.\n\n## Tools loaded\n- `@eslint/mcp` (the version find_plugin offered) as `eslint`: linted src/util.js with the project's eslint.config.js.\n\n## Not checked\n- src/math.ts: the ESLint config covers only `**/*.js`, so ESLint ignored it; add typescript-eslint to lint TypeScript.\n- The type checker was not run (`npx tsc --noEmit`); there is no tsconfig.json.\n- No tests were run." }
+]

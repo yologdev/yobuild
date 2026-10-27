@@ -186,6 +186,24 @@ web = true
 - **Without `--locked`**, a changed pin is resolved again, and yobuild
   says what changed.
 
+**Servers the agent finds itself.** With an `[extend]` table, the agent
+gets two tools, `find_plugin` and `load_plugin`. With them it can find an
+MCP server it lacks and load it for the session. It works like this:
+- **The search:** `find_plugin` searches the MCP registry and npm live
+  (there is no list built in), and runs nothing.
+- **Two questions:** you are asked before any of the server's code runs,
+  and again once its tools are listed. After that, each call of its
+  tools asks too.
+- **The guards:** only versions at least `min_age_days` old (7 by
+  default) are taken, and a session loads at most `max_loads` servers
+  (2 by default).
+- **Nothing is written:** at the session's end yobuild prints the
+  `[[mcp]]` block that would keep each one, for you to add if you want.
+- **Someone must answer:** under `--once` it is refused.
+
+[§14](design.md#14-agents-that-extend-themselves-m5-decided-2026-10-25)
+is the design.
+
 ## Checking an agent
 
 ```sh

@@ -70,7 +70,8 @@ make the last one name every section.
 
 ## During a run: a tool call refused
 
-These come back to the agent as the tool's result (`Tool call denied: …`)
+These come back to the agent as the tool's result — the gate's as
+`Tool call denied: …`, `load_plugin`'s as `load_plugin refused it: …` —
 and show as `name ✗` under `--once`. The run goes on.
 
 | What it says | What it means | What to do |
@@ -87,6 +88,7 @@ and show as `name ✗` under `--once`. The run goes on.
 | `load_plugin refused it: this session's load_plugin calls are spent ([extend] max_attempts N)` <!-- hint: load-max-attempts --> | a call counts once it passes the candidate checks (`find_plugin` returned that package — at that version, when one is given — not loaded or blocked this session), refused later ones too: a name in use, bad `args`, the person's Block, a failed install, `max_loads` itself | raise `max_attempts` (up to 10) and restart |
 | `load_plugin refused it: the name "X" is in use by another plugin or server: pass another \`name\` …` <!-- hint: load-name-in-use --> | the name a loaded server would get is a manifest entry's, or another loaded server's | the agent passes another `name`; or rename the entry |
 | `load_plugin refused it: the owner blocked it …`, `… nobody answered …`, `… is not among this session's candidates` | the owner said Block (the package is not proposed again this session); nobody was there (it may be proposed again); a package `find_plugin` did not return | nothing, if meant; open the page and answer; call `find_plugin` first |
+| `load_plugin refused it: not under --once: nobody is there to allow it (nothing was counted)` | `[extend]` under `--once`: loading needs someone to answer | run without `--once` and answer on the page |
 | a policy's own reason (`confirm-dangerous.ts`'s Block) | the policy refused the call | as the policy says |
 
 ## During a run: Notices
@@ -98,6 +100,9 @@ and show as `name ✗` under `--once`. The run goes on.
 | Warning `plugin A offered no tool \`x\`, which its \`allow\` names (a typo, or a tool it offers only in some runs)` | the name is wrong, or the tool comes only sometimes | fix the name (`yobuild check` lists what it offers) |
 | Error `A plugin stopped: plugin \`…\` failed: …` (or `stopped itself`, `cannot load: …`) <!-- hint: plugin-failed --> | a plugin failed after it started | its error says why; the log has more |
 | Error `A plugin stopped: the \`X\` runtime is not running (its plugins wait: …)` <!-- hint: runtime-down --> | a plugin runtime died | the log; restart |
+| Info `The agent loaded X@V as N, for this session. …` | `[extend]`: the person allowed it twice; the block shown is what would keep it | add the block to `agent.toml` if the person wants it every session |
+| Warning or Error `The agent's plugin \`X\` was refused: …` | `load_plugin` refused it (the result says the same to the agent); an Error when the server failed after the person's first Allow (it did not start, or its tools were refused) | as the reason says; an Error's: its stderr is quoted, try another candidate |
+| Error `The loaded MCP server \`X\` stopped: …` | a server the agent loaded exited or closed its output; its tools are gone from the next step | its stderr is quoted; it is not loaded again this session |
 | Warning `Stopped early: <reason>.` | facts: any `Stopped` run | `What to do: …` follows it |
 | Warning `A DSH plugin's wake was refused: …` / `pi extension X's wake was refused: …` | a plugin's message to the agent was not delivered: its grant is missing, the owner's task has not started, or plugins already started their runs this session | grant `wake` if it should reach the agent; else nothing |
 | Warning `pi extension X asked ctx.isProjectTrusted(): answered false (grant \`trust = true\` to change it)` (or `ctx.model`), or a `check` note on the plugin | the extension was told the fixed answer, and may do less for it (`check` sees only what it asks as it starts, in `session_start`, `before_agent_start` or `session_shutdown`: what a tool asks only `run` says) | grant what it names, if the person agrees (`trust` lets it run the project's code) |

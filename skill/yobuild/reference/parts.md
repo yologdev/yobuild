@@ -15,6 +15,7 @@ a plugin listed here can still need a setting this list does not know.
 | a place to work freely | `scratch = true` | a fresh temp folder (`{scratch}` in the prompt) the gate leaves alone |
 | reading only | `tools = "read-only"` | yoagent's read, list and search, confined to the agent's folder |
 | a spending cap | `[limits] budget_usd`, `session_budget_usd` | stops a run (or the session) at that many dollars |
+| tools found while it runs | `[extend]` | `find_plugin` and `load_plugin`: the agent searches for an MCP server it lacks and loads it for the session, the owner asked twice (below) |
 
 ## Plugins that load
 
@@ -121,3 +122,44 @@ A stdio server's `args` reach it as written: a relative path (`"."`) is
 the folder `yobuild run` starts in — the server runs there, as the agent
 does — not the manifest's folder. `yobuild check` starts the server too,
 in the folder `check` runs in: run it from a folder the server may touch.
+
+## Servers the agent finds itself (`[extend]`)
+
+When the person cannot say in advance which tool a task will need, give
+the agent `[extend]` instead of guessing a server (manifest.md has the
+keys). It gets two tools, both allowed:
+
+- `find_plugin(need)` searches the MCP registry and npm, live, for MCP
+  servers over stdio, and returns up to 10 candidates with what their
+  packages claim (unverified) and the version it would take. It runs
+  nothing. Search with the tool's own name as packages spell it: the need
+  `"eslint"` finds ESLint's server (`@eslint/mcp`), `"lint TypeScript"`
+  does not — its name and description hold neither word as written.
+  The candidates can include unrelated packages: the agent judges them
+  (in the prompt: take the tool's own server, `@eslint/mcp` for ESLint).
+  When the person cannot name the tool in advance, the prompt has the
+  agent learn it from the project: the config it finds
+  (`eslint.config.js` → `"eslint"`, `biome.json` → `"biome"`).
+- `load_plugin(package, name?, args?)` loads one candidate for the
+  session: give no `version` (it takes the one `find_plugin` offered).
+  The person is asked twice — before anything of it runs, then with its
+  tools in front of them — and its tools are the agent's from its next
+  step as `<name>__<tool>`, each call asked. The default `name` is the
+  package's without its scope and `mcp`/`server` words, or the scope when
+  nothing else is left: `@eslint/mcp` loads as `eslint`, its tool
+  `eslint__lint-files`. A package `find_plugin` did not return is refused
+  before anything installs. The version taken is the one offered that
+  day, which can be newer than a pin listed above.
+
+`[extend]` loads MCP servers only — no pi, DSH or rutis plugin: a part
+that is one (pi-lens's type checks, say) goes in the manifest, or the
+person is told the agent cannot do it.
+
+Someone must be there to answer: the web page or the terminal. Under
+`--once` `load_plugin` is refused (scripted.md). In the prompt, tell the
+agent when to look for a tool (what it lacks, in the owner's words), to
+search by the tool's name, to load at most what the task needs, and to
+say in its report what it loaded and what it could not do when the person
+said Block. When the session ends yobuild prints the `[[mcp]]` block that
+would keep each loaded server: the person decides whether to add it to
+`agent.toml`.
