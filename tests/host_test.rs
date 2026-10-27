@@ -669,6 +669,11 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
         let said = refused(host.add_runtime(name, plugins(), &shared).await);
         assert!(said.contains(error), "{name}: {said}");
     }
+    // A refused call leaves nothing behind: its name is free.
+    host.add_runtime("loaded-b", plugins(), &["yoagent"])
+        .await
+        .unwrap();
+    host.remove_runtime("loaded-b").await.unwrap();
     host.add_runtime("loaded-a", plugins(), &["yoagent"])
         .await
         .unwrap();
@@ -717,14 +722,52 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
     let unrouted = processes_of(dir, "other", 1).await;
     assert_eq!(unrouted, [first], "the first runtime that has it: `ui`");
     host.unload("unrouted").await.unwrap();
+    // The loader keeps it in `ui`, and so does its route.
+    let said = refused(
+        host.load([Row::new("routed", other.display()).runtime("two")])
+            .await,
+    );
+    assert!(
+        said.ends_with(
+            "was loaded by runtime `ui` this session, where the loader keeps it: not `two`"
+        ),
+        "{said}"
+    );
+    // So does a batch that failed: what the loader saw stays where it went.
+    let failing = dir.join("failing.mjs");
+    write_failing_plugin(&failing);
+    assert!(host
+        .load([Row::new("failing", failing.display()).runtime("two")])
+        .await
+        .is_err());
+    let said = refused(
+        host.load([Row::new("failing", failing.display()).runtime("ui")])
+            .await,
+    );
+    assert!(
+        said.ends_with(
+            "was loaded by runtime `two` this session, where the loader keeps it: not `ui`"
+        ),
+        "{said}"
+    );
+    // A runtime that does not run is no row's.
+    assert_eq!(
+        refused(
+            host.load([Row::new("nowhere", other.display()).runtime("three")])
+                .await
+        ),
+        format!("`{}`: no runtime `three` runs", other.display())
+    );
 
     // Reloaded in the added runtime: its new code runs there.
+    // Texts of different lengths: the reload's query is the file's mtime
+    // and size, and an mtime may be as coarse as a second.
     let edited = plain_plugin(dir, "edited", "one");
     host.load([Row::new("fifth", edited.display()).runtime("loaded-a")])
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
-    plain_plugin(dir, "edited", "two");
+    plain_plugin(dir, "edited", "second");
     host.reload("fifth").await.unwrap();
     let path = dir.join(format!("edited-{second}.txt"));
     let lines = tokio::time::timeout(WAIT, async {
@@ -738,7 +781,7 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
     })
     .await
     .expect("reloaded");
-    assert_eq!(lines, "one\ntwo\n");
+    assert_eq!(lines, "one\nsecond\n");
     host.unload("fifth").await.unwrap();
 
     // `first` unloaded: the loader keeps that file's resolution, `ui`'s,
@@ -756,18 +799,20 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
         ),
         "{said}"
     );
+    std::fs::remove_file(dir.join(format!("pid-{first}.json"))).unwrap();
     host.load([Row::new("again", pid.display()).runtime("ui")])
         .await
         .unwrap();
-    let third = processes_of(dir, "pid", 2).await;
-    let third = *third.iter().find(|p| **p != second).unwrap();
-    assert_eq!(third, first, "back in `ui`'s process");
+    // Back in `ui`'s process, with what `ui` keeps.
+    let again = report(dir, "pid", first).await;
+    assert!(again["env"].is_string(), "{again}");
     handlers_become(
         &bridge,
         &["h-"],
-        vec![format!("h-{second}"), format!("h-{third}")],
+        vec![format!("h-{second}"), format!("h-{first}")],
     )
     .await;
+    let third = first;
 
     // Given no service, a plugin never reaches `yoagent`, though the host
     // takes its row for running (`load` is `Ok`: it waits in the runtime's
@@ -782,6 +827,7 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
     .await
     .unwrap();
     let bare = processes_of(dir, "control", 1).await[0];
+    assert!(host.is_running("third"), "the host takes it for running");
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
         !written_by(dir, "pid").iter().any(|(p, _)| *p == bare),
@@ -808,6 +854,47 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
         "{said}"
     );
 
+    // One that dies: a row naming it is refused, with why.
+    #[cfg(unix)]
+    {
+        host.add_runtime("doomed", plugins(), &[]).await.unwrap();
+        let doomed = plain_plugin(dir, "doomed", "ran");
+        host.load([Row::new("doomed", doomed.display()).runtime("doomed")])
+            .await
+            .unwrap();
+        let pid = processes_of(dir, "doomed", 1).await[0];
+        std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .unwrap();
+        let said = tokio::time::timeout(WAIT, async {
+            loop {
+                match host
+                    .load([Row::new("late", control.display()).runtime("doomed")])
+                    .await
+                {
+                    Err(e) if e.to_string().contains("is not running") => return e.to_string(),
+                    // Before rutis has seen it gone, the load itself fails.
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                    Ok(()) => {
+                        host.unload("late").await.unwrap();
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("said once it died");
+        assert!(
+            said.starts_with(&format!(
+                "`{}`: runtime `doomed` is not running: ",
+                control.display()
+            )),
+            "{said}"
+        );
+        host.remove_runtime("doomed").await.unwrap();
+    }
+
     // Removed: its plugin and its process gone, the others' still there.
     host.remove_runtime("loaded-a").await.unwrap();
     handlers_become(&bridge, &["h-"], vec![format!("h-{third}")]).await;
@@ -830,6 +917,14 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
         refused(host.remove_runtime("ui").await),
         "no runtime `ui` was added"
     );
+    // A row naming a runtime removed is no row's.
+    assert_eq!(
+        refused(
+            host.load([Row::new("gone", control.display()).runtime("loaded-a")])
+                .await
+        ),
+        format!("`{}`: no runtime `loaded-a` runs", control.display())
+    );
     host.remove_runtime("bare").await.unwrap();
     #[cfg(unix)]
     assert!(!alive(bare));
@@ -841,9 +936,10 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
 }
 
 /// A runtime that cannot start (no rutis runtime in its folder) is said
-/// at `add_runtime`, with why, and is gone again.
+/// at `add_runtime`, with why, and is gone again, its name free; one whose
+/// start is cut short is stopped, its name spent.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_added_runtime_that_cannot_start_is_said_and_gone() {
+async fn an_added_runtime_that_cannot_start_is_said_and_gone_and_one_cut_short_stopped() {
     if !runtime_installed() {
         return;
     }
@@ -863,9 +959,33 @@ async fn an_added_runtime_that_cannot_start_is_said_and_gone() {
         "{said}"
     );
     assert!(started.elapsed() < Duration::from_secs(25), "said at once");
+    assert!(
+        said.len() > "runtime `broken` did not start: ".len(),
+        "{said}"
+    );
     assert_eq!(
         refused(host.remove_runtime("broken").await),
         "no runtime `broken` was added"
+    );
+    // Nothing of it is left and nothing was resolved in it: its name is free.
+    host.add_runtime("broken", plugins(), &[]).await.unwrap();
+    host.remove_runtime("broken").await.unwrap();
+    // A call dropped while it waits (a run cancelled meanwhile): the
+    // runtime is stopped in a task of its own, never added, and its name
+    // stays spent, as rows may have been resolved under it.
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(1),
+        host.add_runtime("dropped", plugins(), &[]),
+    )
+    .await;
+    assert!(dropped.is_err(), "cut short while it waited");
+    assert_eq!(
+        refused(host.remove_runtime("dropped").await),
+        "no runtime `dropped` was added"
+    );
+    assert_eq!(
+        refused(host.add_runtime("dropped", plugins(), &[]).await),
+        "a runtime `dropped` ran already: give another name"
     );
     root.shutdown().await.unwrap();
 }

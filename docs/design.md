@@ -4286,8 +4286,12 @@ answers calls to its own tools and reaches nothing else. A plugin is more:
      so `load_plugin` learns that a plugin started from its handler, never
      from `load`;
    - the loader keeps a row's resolution by its name, the runtime's
-     among it: an added runtime's name is used once a session, and a name
-     unloaded from one of the host's runtimes is not loaded in another;
+     among it: an added runtime's name is used once a session (unless it
+     never started), and a name the loader saw in one of the host's
+     runtimes — unloaded since, in a batch that failed, or with no runtime
+     named — is not loaded in another;
+   - `add_runtime` is cancellable: dropped while it waits (the run
+     cancelled), it stops the runtime in a task of its own;
    - what a row provides is published to every runtime by name, whatever
      its catalog shares. A row of an added runtime that declares a service
      is refused; one an SDK plugin provides without declaring

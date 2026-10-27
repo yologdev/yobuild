@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, Ctx, FiberState, FiberView};
-use rutis_bridge::runtime::{Launcher, LocalRuntime, RuntimeState, Stdio};
+use rutis_bridge::runtime::{Launcher, LocalRuntime, RuntimeHandle, RuntimeState, Stdio};
 use rutis_bridge::transport::local::Processes;
 use rutis_loader::{
     Chain, EntryStatus, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch, Resolved,
@@ -813,18 +813,19 @@ pub const STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10)
 /// An added runtime's rows for [`RuntimeRowsPlugin`], which resolves again
 /// those its runtime has news of (resolved while it was not running): their
 /// names as the loader has them, `<runtime>::<name>`.
-struct AddedRows {
-    resolver: Arc<RuntimeResolver>,
+struct AddedRows<S> {
+    source: Arc<S>,
     runtime: String,
 }
 
-impl RowsSource for AddedRows {
+impl<S: RowsSource> RowsSource for AddedRows<S> {
     fn runtime_name(&self) -> &str {
-        RowsSource::runtime_name(&*self.resolver)
+        self.source.runtime_name()
     }
 
     fn take_stale(&self) -> std::collections::HashSet<String> {
-        RowsSource::take_stale(&*self.resolver)
+        self.source
+            .take_stale()
             .into_iter()
             .map(|name| format!("{}{ADDED}{name}", self.runtime))
             .collect()
@@ -862,6 +863,52 @@ struct Running {
     /// Its rows' resolver, then the runtime: disposed in that order.
     views: Vec<FiberView>,
     processes: Processes,
+    handle: RuntimeHandle,
+}
+
+impl Running {
+    /// Dispose its fibers and wait for its process ([`STOP_TIMEOUT`]): what
+    /// failed, said.
+    async fn stop(self) -> Vec<String> {
+        let mut failed = Vec::new();
+        for view in self.views {
+            if let Err(e) = view.dispose().await {
+                failed.push(e.to_string());
+            }
+        }
+        let ended = tokio::time::timeout(STOP_TIMEOUT, async {
+            while self.processes.running() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if ended.is_err() {
+            failed.push(format!(
+                "its process still runs {} s after it was stopped",
+                STOP_TIMEOUT.as_secs()
+            ));
+        }
+        failed
+    }
+}
+
+/// A runtime [`PluginHost::add_runtime`] is waiting for: stopped, in a task
+/// of its own, if that call is dropped first (a run cancelled meanwhile).
+struct Starting(Option<Running>);
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        if let Some(running) = self.0.take() {
+            let name = running.handle.name().to_owned();
+            tracing::info!("runtime `{name}`: its start was cancelled, stopping it");
+            tokio::spawn(async move {
+                let failed = running.stop().await;
+                if !failed.is_empty() {
+                    tracing::warn!("runtime `{name}`: stopping it: {}", failed.join("; "));
+                }
+            });
+        }
+    }
 }
 
 impl PluginHost {
@@ -896,23 +943,29 @@ impl PluginHost {
     /// failures, when any plugin fails to load.
     ///
     /// Rows are routed by `name`: two rows loading the same name must name
-    /// the same runtime, as must a row loading a name unloaded earlier (the
-    /// loader keeps its resolution). A batch that fails is dropped again, so a later
+    /// the same runtime, as must a row loading a name loaded earlier — one
+    /// unloaded since, one whose batch failed, one that named no runtime and
+    /// went to the first that has it — since the loader keeps a name's
+    /// resolution, its runtime among it. A runtime the host does not run is
+    /// refused, and so is an added runtime that has stopped. A batch that fails is dropped again, so a later
     /// `load` does not keep failing on it.
     pub async fn load(&mut self, rows: impl IntoIterator<Item = Row>) -> Result<(), BoxError> {
         let kept = self.rows.len();
         let routes = self.routes.lock().unwrap().clone();
-        let result = self.add(rows);
-        let result = match result {
+        let result = match self.add(rows) {
             Ok(()) => {
                 let added: Vec<String> = self.rows[kept..].iter().map(|r| r.id.clone()).collect();
                 self.reconcile(&added).await
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                // Refused before the loader saw it: its routes go too. One
+                // the loader saw keeps them, as it keeps the resolutions.
+                *self.routes.lock().unwrap() = routes;
+                Err(e)
+            }
         };
         if result.is_err() {
             self.rows.truncate(kept);
-            *self.routes.lock().unwrap() = routes;
             if let Err(e) = self.reconcile(&[]).await {
                 tracing::warn!("dropping a plugin batch that failed to load also failed: {e}");
             }
@@ -926,6 +979,18 @@ impl PluginHost {
             // loader (`ADDED`): no row's own name may look like one.
             if row.name.contains(ADDED) {
                 return Err(format!("`{}`: a plugin's name holds no `{ADDED}`", row.name).into());
+            }
+            if let Some(runtime) = &row.runtime {
+                if !self.runtimes.iter().any(|(n, _)| n == runtime) && !self.is_added(runtime) {
+                    return Err(format!("`{}`: no runtime `{runtime}` runs", row.name).into());
+                }
+                if let Some(RuntimeState::Down(why)) = self.added_state(runtime) {
+                    return Err(format!(
+                        "`{}`: runtime `{runtime}` is not running: {why}",
+                        row.name
+                    )
+                    .into());
+                }
             }
             // An added runtime's rows take no route by name: `layers` gives
             // them `<runtime>::<name>`, which `Routed` sends to that runtime.
@@ -1083,20 +1148,20 @@ impl PluginHost {
         let runtime = LocalRuntime::launcher(name.clone(), launcher, dir.join("package.json"));
         let (handle, processes) = (runtime.handle(), runtime.processes());
         let resolver = Arc::new(RuntimeResolver::node(handle.clone()).with_catalog(&catalog));
+        // Spent until it is stopped cleanly below: a call dropped while it
+        // waits leaves the name used.
         self.used.push(name.clone());
         let runtime = self.root.plugin(runtime);
         let rows = self.root.plugin(RuntimeRowsPlugin::new(Arc::new(AddedRows {
-            resolver: resolver.clone(),
+            source: resolver.clone(),
             runtime: name.clone(),
         })));
-        self.added.lock().unwrap().push((name.clone(), resolver));
-        self.views.push((
-            name.clone(),
-            Running {
-                views: vec![rows, runtime],
-                processes,
-            },
-        ));
+        // Stopped if the call is dropped while it waits.
+        let mut starting = Starting(Some(Running {
+            views: vec![rows, runtime],
+            processes,
+            handle: handle.clone(),
+        }));
         // Polled: `RuntimeHandle::changed` could miss a change made between
         // a look and the wait.
         let started = tokio::time::timeout(START_TIMEOUT, async {
@@ -1109,21 +1174,30 @@ impl PluginHost {
             }
         })
         .await;
+        let running = starting.0.take().expect("taken once");
         let why = match started {
-            Ok(Ok(())) => return Ok(()),
+            Ok(Ok(())) => {
+                self.added.lock().unwrap().push((name.clone(), resolver));
+                self.views.push((name, running));
+                return Ok(());
+            }
             Ok(Err(why)) => why,
             Err(_) => format!("it did not start within {} s", START_TIMEOUT.as_secs()),
         };
         let mut error = format!("runtime `{name}` did not start: {why}");
-        if let Err(e) = self.remove_runtime(&name).await {
-            error.push_str(&format!(" (and stopping it: {e})"));
+        let failed = running.stop().await;
+        match failed.is_empty() {
+            // Nothing of it is left, and no row was resolved in it.
+            true => self.used.retain(|n| *n != name),
+            false => error.push_str(&format!(" (and stopping it: {})", failed.join("; "))),
         }
         Err(error.into())
     }
 
     /// Stop a runtime [`add_runtime`](Self::add_runtime) started: its rows
     /// unloaded, then its fibers disposed, and its process waited for
-    /// ([`STOP_TIMEOUT`]). It is removed whatever fails on the way, and the
+    /// ([`STOP_TIMEOUT`]; one that had not connected yet is killed by rutis,
+    /// not waited for). It is removed whatever fails on the way, and the
     /// error says what did.
     pub async fn remove_runtime(&mut self, name: &str) -> Result<(), BoxError> {
         let index = self
@@ -1139,31 +1213,19 @@ impl PluginHost {
             .collect();
         self.rows.retain(|row| !row.runtime_is(name));
         let mut failed = Vec::new();
-        if let Err(e) = self.reconcile(&[]).await {
-            failed.push(match ids.is_empty() {
-                true => format!("the plugins' update failed: {e}"),
-                false => format!("unloading its plugins ({}) failed: {e}", ids.join(", ")),
-            });
+        // With none of its rows loaded there is nothing to unload, and
+        // another plugin's failure is not this runtime's.
+        if !ids.is_empty() {
+            if let Err(e) = self.reconcile(&[]).await {
+                failed.push(format!(
+                    "unloading its plugins ({}) failed: {e}",
+                    ids.join(", ")
+                ));
+            }
         }
         self.added.lock().unwrap().retain(|(n, _)| n != name);
         let (_, running) = self.views.remove(index);
-        for view in running.views {
-            if let Err(e) = view.dispose().await {
-                failed.push(e.to_string());
-            }
-        }
-        let ended = tokio::time::timeout(STOP_TIMEOUT, async {
-            while running.processes.running() {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-        })
-        .await;
-        if ended.is_err() {
-            failed.push(format!(
-                "its process still runs {} s after it was stopped",
-                STOP_TIMEOUT.as_secs()
-            ));
-        }
+        failed.extend(running.stop().await);
         match failed.is_empty() {
             true => Ok(()),
             false => Err(format!("removing runtime `{name}`: {}", failed.join("; ")).into()),
@@ -1172,6 +1234,14 @@ impl PluginHost {
 
     fn is_added(&self, runtime: &str) -> bool {
         self.views.iter().any(|(n, _)| n == runtime)
+    }
+
+    /// An added runtime's state, `None` for any other.
+    fn added_state(&self, runtime: &str) -> Option<RuntimeState> {
+        self.views
+            .iter()
+            .find(|(n, _)| n == runtime)
+            .map(|(_, running)| running.handle.state())
     }
 
     /// The loader's layers for the rows loaded now.
@@ -1357,10 +1427,19 @@ impl Resolver for Routed {
                 };
                 return resolver.resolve(name).await;
             }
-            for (_, resolver) in &self.runtimes {
+            for (runtime, resolver) in &self.runtimes {
                 match resolver.resolve(name).await {
                     Err(LoaderError::NotFound { .. }) => continue,
-                    other => return other,
+                    other => {
+                        // The loader keeps this resolution: the name is that
+                        // runtime's from now on.
+                        self.routes
+                            .lock()
+                            .unwrap()
+                            .entry(name.to_owned())
+                            .or_insert_with(|| runtime.clone());
+                        return other;
+                    }
                 }
             }
             Err(LoaderError::NotFound {
@@ -1380,6 +1459,27 @@ enum Started {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An added runtime's stale rows are named as the loader has them
+    /// (`<runtime>::<name>`), so `RuntimeRowsPlugin` resolves them again.
+    #[test]
+    fn an_added_runtimes_stale_rows_are_named_as_the_loader_has_them() {
+        struct Stub;
+        impl RowsSource for Stub {
+            fn runtime_name(&self) -> &str {
+                "loaded-a"
+            }
+            fn take_stale(&self) -> std::collections::HashSet<String> {
+                ["/x/p.mjs".to_owned()].into()
+            }
+        }
+        let rows = AddedRows {
+            source: Arc::new(Stub),
+            runtime: "loaded-a".into(),
+        };
+        assert_eq!(rows.runtime_name(), "loaded-a");
+        assert_eq!(rows.take_stale(), ["loaded-a::/x/p.mjs".to_owned()].into());
+    }
 
     /// What `env -u` is given: every name not kept, never rutis's channel
     /// token, and no name `env -u` would refuse.
