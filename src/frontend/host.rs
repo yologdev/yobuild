@@ -23,11 +23,12 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rutis::{BoxFuture, Ctx, FiberState};
-use rutis_bridge::runtime::{Launcher, LocalRuntime, Stdio};
+use rutis::{BoxFuture, Ctx, FiberState, FiberView};
+use rutis_bridge::runtime::{Launcher, LocalRuntime, RuntimeHandle, RuntimeState, Stdio};
+use rutis_bridge::transport::local::Processes;
 use rutis_loader::{
     Chain, EntryStatus, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch, Resolved,
-    Resolver, RuntimeResolver, RuntimeRowsPlugin, ServiceCatalog,
+    Resolver, RowsSource, RuntimeResolver, RuntimeRowsPlugin, ServiceCatalog,
 };
 use serde_json::{json, Value as Json};
 
@@ -553,9 +554,71 @@ pub struct PluginHostBuilder {
     local: Vec<String>,
     terminal: Option<String>,
     env: Vec<(String, OsString, OsString)>,
-    withhold: Vec<OsString>,
     keep: Vec<(String, OsString)>,
+    launch: Launch,
+}
+
+/// What every runtime's environment loses ([`PluginHostBuilder::withhold`],
+/// [`PluginHostBuilder::inherit`]): kept by the host, so a runtime added
+/// while it runs ([`PluginHost::add_runtime`]) starts as the others did.
+#[derive(Clone, Default)]
+struct Launch {
+    withhold: Vec<OsString>,
     inherit: Option<Inherit>,
+}
+
+impl Launch {
+    /// How to start the runtime `name` on `dir`: `env` set on top of what
+    /// it inherits, and what neither `keep` (names, or prefixes ending in
+    /// `*`) nor `env` keeps taken out.
+    fn launcher(
+        &self,
+        name: &str,
+        dir: &Path,
+        env: &[(&OsString, &OsString)],
+        keep: &[&OsString],
+    ) -> Result<Launcher, BoxError> {
+        // Kept for this runtime: an entry of `keep`, or set by its launch
+        // (`env -u` removes a name whoever set it).
+        let kept = |key: &std::ffi::OsStr| {
+            keep.iter().any(|k| matches(k, key)) || env.iter().any(|(k, _)| *k == key)
+        };
+        let withheld: Vec<OsString> = self
+            .withhold
+            .iter()
+            .filter(|key| !kept(key))
+            .cloned()
+            .chain(self.not_inherited(&kept))
+            .collect();
+        let withheld: Vec<&OsString> = withheld.iter().collect();
+        let launcher = env.iter().fold(
+            Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
+            |launcher, (key, value)| launcher.env(key, value),
+        );
+        Ok(without(launcher, &withheld).map_err(|e| format!("runtime `{name}`: {e}"))?)
+    }
+
+    /// What [`PluginHostBuilder::inherit`] takes out of a runtime's
+    /// environment beside what it `kept`: on unix every name of this
+    /// process's not inherited; off unix nothing (there is no `env` to
+    /// start through).
+    #[cfg(unix)]
+    fn not_inherited(&self, kept: &dyn Fn(&std::ffi::OsStr) -> bool) -> Vec<OsString> {
+        match &self.inherit {
+            Some(inherit) => not_inherited(
+                std::env::vars_os().map(|(k, _)| k),
+                |key| inherit.keeps(key) || kept(key),
+                loopback(),
+            ),
+            None => Vec::new(),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn not_inherited(&self, _kept: &dyn Fn(&std::ffi::OsStr) -> bool) -> Vec<OsString> {
+        let _ = &self.inherit;
+        Vec::new()
+    }
 }
 
 impl PluginHostBuilder {
@@ -597,7 +660,7 @@ impl PluginHostBuilder {
     /// `/usr/bin/env -u NAME … <rutis's command>`: `env` execs it, the same
     /// process. Without `env` (not unix) it is set empty instead.
     pub fn withhold(mut self, name: impl Into<OsString>) -> Self {
-        self.withhold.push(name.into());
+        self.launch.withhold.push(name.into());
         self
     }
 
@@ -619,7 +682,7 @@ impl PluginHostBuilder {
     /// withheld is set empty). Unset: the whole environment, but what is
     /// withheld.
     pub fn inherit(mut self, inherit: Inherit) -> Self {
-        self.inherit = Some(inherit);
+        self.launch.inherit = Some(inherit);
         self
     }
 
@@ -637,27 +700,6 @@ impl PluginHostBuilder {
     pub fn local(mut self, service: impl Into<String>) -> Self {
         self.local.push(service.into());
         self
-    }
-
-    /// What [`inherit`](Self::inherit) takes out of a runtime's environment
-    /// beside what it `kept`: on unix every name of this process's not
-    /// inherited; off unix nothing (there is no `env` to start through).
-    #[cfg(unix)]
-    fn not_inherited(&self, kept: &dyn Fn(&std::ffi::OsStr) -> bool) -> Vec<OsString> {
-        match &self.inherit {
-            Some(inherit) => not_inherited(
-                std::env::vars_os().map(|(k, _)| k),
-                |key| inherit.keeps(key) || kept(key),
-                loopback(),
-            ),
-            None => Vec::new(),
-        }
-    }
-
-    #[cfg(not(unix))]
-    fn not_inherited(&self, _kept: &dyn Fn(&std::ffi::OsStr) -> bool) -> Vec<OsString> {
-        let _ = &self.inherit;
-        Vec::new()
     }
 
     /// Start the runtimes and the loader on `root`.
@@ -694,28 +736,19 @@ impl PluginHostBuilder {
         // `start` before any runtime is registered.
         let mut launchers = Vec::new();
         for (name, dir) in &self.runtimes {
-            let env: Vec<_> = self.env.iter().filter(|(r, ..)| r == name).collect();
-            // Kept for this runtime: an entry of `keep`, or set by its
-            // launch (`env -u` removes a name whoever set it).
-            let kept = |key: &std::ffi::OsStr| {
-                self.keep.iter().any(|(r, k)| r == name && matches(k, key))
-                    || env.iter().any(|(_, k, _)| k == key)
-            };
-            let withheld: Vec<OsString> = self
-                .withhold
+            let env: Vec<_> = self
+                .env
                 .iter()
-                .filter(|key| !kept(key))
-                .cloned()
-                .chain(self.not_inherited(&kept))
+                .filter(|(r, ..)| r == name)
+                .map(|(_, key, value)| (key, value))
                 .collect();
-            let withheld: Vec<&OsString> = withheld.iter().collect();
-            let launcher = env.iter().fold(
-                Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
-                |launcher, (_, key, value)| launcher.env(key, value),
-            );
-            let launcher =
-                without(launcher, &withheld).map_err(|e| format!("runtime `{name}`: {e}"))?;
-            launchers.push((name, dir, launcher));
+            let keep: Vec<_> = self
+                .keep
+                .iter()
+                .filter(|(r, _)| r == name)
+                .map(|(_, key)| key)
+                .collect();
+            launchers.push((name, dir, self.launch.launcher(name, dir, &env, &keep)?));
         }
         for (name, dir, launcher) in launchers {
             let mut runtime =
@@ -727,9 +760,11 @@ impl PluginHostBuilder {
             root.plugin(runtime);
             resolvers.push((name.clone(), rows));
         }
+        let added: Added = Arc::default();
         let routed = Routed {
             routes: routes.clone(),
             runtimes: resolvers.clone(),
+            added: added.clone(),
         };
         let runtimes = resolvers.clone();
         let loader_plugin = LoaderPlugin::new(
@@ -749,8 +784,51 @@ impl PluginHostBuilder {
             root: root.clone(),
             routes,
             runtimes,
+            added,
+            views: Vec::new(),
+            used: self.runtimes.iter().map(|(name, _)| name.clone()).collect(),
+            shared: self.shared,
+            launch: self.launch,
             rows: Vec::new(),
         })
+    }
+}
+
+/// The runtimes [`PluginHost::add_runtime`] added, by name: shared with the
+/// resolver, which routes their rows to them only.
+type Added = Arc<Mutex<Vec<(String, Arc<RuntimeResolver>)>>>;
+
+/// Between an added runtime's name and a row's own in what the loader is
+/// given (`<runtime>::<name>`): its rows never meet another runtime's of
+/// the same name, as the loader resolves a row by its name alone.
+const ADDED: &str = "::";
+
+/// How long [`PluginHost::add_runtime`] waits for its runtime to start.
+pub const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long [`PluginHost::remove_runtime`] waits for its process to end
+/// once stopped (rutis kills it after 2 s).
+pub const STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// An added runtime's rows for [`RuntimeRowsPlugin`], which resolves again
+/// those its runtime has news of (resolved while it was not running): their
+/// names as the loader has them, `<runtime>::<name>`.
+struct AddedRows<S> {
+    source: Arc<S>,
+    runtime: String,
+}
+
+impl<S: RowsSource> RowsSource for AddedRows<S> {
+    fn runtime_name(&self) -> &str {
+        self.source.runtime_name()
+    }
+
+    fn take_stale(&self) -> std::collections::HashSet<String> {
+        self.source
+            .take_stale()
+            .into_iter()
+            .map(|name| format!("{}{ADDED}{name}", self.runtime))
+            .collect()
     }
 }
 
@@ -763,7 +841,74 @@ pub struct PluginHost {
     routes: Arc<Mutex<HashMap<String, String>>>,
     /// Each runtime's resolver: `reload` makes them forget a module.
     runtimes: Vec<(String, Arc<RuntimeResolver>)>,
+    /// Each added runtime's resolver, shared with [`Routed`].
+    added: Added,
+    /// Each added runtime's fibers (its rows' resolver, then the runtime)
+    /// and its processes, for `remove_runtime`.
+    views: Vec<(String, Running)>,
+    /// Every runtime's name used since the host started, added ones too:
+    /// the loader keeps a row's resolution by its name, so a runtime added
+    /// again under a name would get its rows as the old one resolved them.
+    used: Vec<String>,
+    /// The services the host's catalog shares: an added runtime is given
+    /// some of these.
+    shared: Vec<String>,
+    /// What an added runtime is started with: what every runtime loses.
+    launch: Launch,
     rows: Vec<Row>,
+}
+
+/// What runs an added runtime.
+struct Running {
+    /// Its rows' resolver, then the runtime: disposed in that order.
+    views: Vec<FiberView>,
+    processes: Processes,
+    handle: RuntimeHandle,
+}
+
+impl Running {
+    /// Dispose its fibers and wait for its process ([`STOP_TIMEOUT`]): what
+    /// failed, said.
+    async fn stop(self) -> Vec<String> {
+        let mut failed = Vec::new();
+        for view in self.views {
+            if let Err(e) = view.dispose().await {
+                failed.push(e.to_string());
+            }
+        }
+        let ended = tokio::time::timeout(STOP_TIMEOUT, async {
+            while self.processes.running() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if ended.is_err() {
+            failed.push(format!(
+                "its process still runs {} s after it was stopped",
+                STOP_TIMEOUT.as_secs()
+            ));
+        }
+        failed
+    }
+}
+
+/// A runtime [`PluginHost::add_runtime`] is waiting for: stopped, in a task
+/// of its own, if that call is dropped first (a run cancelled meanwhile).
+struct Starting(Option<Running>);
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        if let Some(running) = self.0.take() {
+            let name = running.handle.name().to_owned();
+            tracing::info!("runtime `{name}`: its start was cancelled, stopping it");
+            tokio::spawn(async move {
+                let failed = running.stop().await;
+                if !failed.is_empty() {
+                    tracing::warn!("runtime `{name}`: stopping it: {}", failed.join("; "));
+                }
+            });
+        }
+    }
 }
 
 impl PluginHost {
@@ -798,22 +943,29 @@ impl PluginHost {
     /// failures, when any plugin fails to load.
     ///
     /// Rows are routed by `name`: two rows loading the same name must name
-    /// the same runtime. A batch that fails is dropped again, so a later
+    /// the same runtime, as must a row loading a name loaded earlier — one
+    /// unloaded since, one whose batch failed, one that named no runtime and
+    /// went to the first that has it — since the loader keeps a name's
+    /// resolution, its runtime among it. A runtime the host does not run is
+    /// refused, and so is an added runtime that has stopped. A batch that fails is dropped again, so a later
     /// `load` does not keep failing on it.
     pub async fn load(&mut self, rows: impl IntoIterator<Item = Row>) -> Result<(), BoxError> {
         let kept = self.rows.len();
         let routes = self.routes.lock().unwrap().clone();
-        let result = self.add(rows);
-        let result = match result {
+        let result = match self.add(rows) {
             Ok(()) => {
                 let added: Vec<String> = self.rows[kept..].iter().map(|r| r.id.clone()).collect();
                 self.reconcile(&added).await
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                // Refused before the loader saw it: its routes go too. One
+                // the loader saw keeps them, as it keeps the resolutions.
+                *self.routes.lock().unwrap() = routes;
+                Err(e)
+            }
         };
         if result.is_err() {
             self.rows.truncate(kept);
-            *self.routes.lock().unwrap() = routes;
             if let Err(e) = self.reconcile(&[]).await {
                 tracing::warn!("dropping a plugin batch that failed to load also failed: {e}");
             }
@@ -823,12 +975,32 @@ impl PluginHost {
 
     fn add(&mut self, rows: impl IntoIterator<Item = Row>) -> Result<(), BoxError> {
         for row in rows {
+            // `<runtime>::<name>` is how an added runtime's rows reach the
+            // loader (`ADDED`): no row's own name may look like one.
+            if row.name.contains(ADDED) {
+                return Err(format!("`{}`: a plugin's name holds no `{ADDED}`", row.name).into());
+            }
             if let Some(runtime) = &row.runtime {
+                if !self.runtimes.iter().any(|(n, _)| n == runtime) && !self.is_added(runtime) {
+                    return Err(format!("`{}`: no runtime `{runtime}` runs", row.name).into());
+                }
+                if let Some(RuntimeState::Down(why)) = self.added_state(runtime) {
+                    return Err(format!(
+                        "`{}`: runtime `{runtime}` is not running: {why}",
+                        row.name
+                    )
+                    .into());
+                }
+            }
+            // An added runtime's rows take no route by name: `layers` gives
+            // them `<runtime>::<name>`, which `Routed` sends to that runtime.
+            let added = row.runtime.as_ref().filter(|r| self.is_added(r));
+            if let (Some(runtime), None) = (&row.runtime, added) {
                 let mut routes = self.routes.lock().unwrap();
                 match routes.get(&row.name) {
                     Some(other) if other != runtime => {
                         return Err(format!(
-                            "`{}` is loaded by runtime `{other}` already, not `{runtime}`",
+                            "`{}` was loaded by runtime `{other}` this session, where the loader keeps it: not `{runtime}`",
                             row.name
                         )
                         .into())
@@ -853,15 +1025,12 @@ impl PluginHost {
             .iter()
             .position(|row| row.id == id)
             .ok_or_else(|| format!("no plugin `{id}` is loaded"))?;
-        let routes = self.routes.lock().unwrap().clone();
+        // Its route stays: the loader keeps a name's resolution, the
+        // runtime's among it, so that name loaded later goes there again.
         let row = self.rows.remove(index);
-        if !self.rows.iter().any(|other| other.name == row.name) {
-            self.routes.lock().unwrap().remove(&row.name);
-        }
         let result = self.reconcile(&[]).await;
         if result.is_err() {
             self.rows.insert(index, row);
-            *self.routes.lock().unwrap() = routes;
             if let Err(e) = self.reconcile(&[]).await {
                 tracing::warn!("putting back plugin `{id}` after a failed unload also failed: {e}");
             }
@@ -905,6 +1074,9 @@ impl PluginHost {
         for (_, resolver) in &self.runtimes {
             resolver.invalidate(&name);
         }
+        for (_, resolver) in self.added.lock().unwrap().iter() {
+            resolver.invalidate(&name);
+        }
         let result = match self.loader.reload(id).await {
             Ok(report) if !report.new_failures.is_empty() => {
                 Err(format!("{:?}", report.new_failures).into())
@@ -921,9 +1093,170 @@ impl PluginHost {
         })
     }
 
+    /// Start another Node runtime, `name`, its packages in `dir`, while the
+    /// host runs (a plugin the agent loads, design §14 "Stage 2"), and wait
+    /// until it runs: one that does not start within [`START_TIMEOUT`] is
+    /// stopped again and the error says why.
+    ///
+    /// It starts with what every runtime loses (`withhold`, `inherit`),
+    /// nothing kept or set for it. Its rows reach only the services named
+    /// in `shared` (each one the host shares): the others its plugins inject
+    /// are left to its own Cordis, where only a plugin of that runtime could
+    /// provide them. A row that declares a service it provides is refused
+    /// (it would be published to every runtime); one that provides without
+    /// declaring (an SDK plugin's `ctx.provide`) is not seen here. Rows
+    /// naming it go to it only, as `<runtime>::<name>` (`ADDED`), so a
+    /// file another runtime loads is loaded again here; a row naming no
+    /// runtime never comes to it. A name is used once: a runtime removed is
+    /// not added again under its name.
+    pub async fn add_runtime(
+        &mut self,
+        name: impl Into<String>,
+        dir: impl Into<PathBuf>,
+        shared: &[&str],
+    ) -> Result<(), BoxError> {
+        let (name, dir) = (name.into(), dir.into());
+        let plain = !name.is_empty()
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        if !plain {
+            return Err(format!(
+                "runtime `{name}`: a runtime's name is lowercase letters, digits and `-`"
+            )
+            .into());
+        }
+        if self.runtimes.iter().any(|(n, _)| *n == name) || self.is_added(&name) {
+            return Err(format!("a runtime `{name}` runs already").into());
+        }
+        if self.used.contains(&name) {
+            return Err(format!("a runtime `{name}` ran already: give another name").into());
+        }
+        if let Some(unknown) = shared.iter().find(|s| !self.shared.iter().any(|h| h == *s)) {
+            return Err(format!(
+                "runtime `{name}`: `{unknown}` is not a service this host shares ({})",
+                self.shared.join(", ")
+            )
+            .into());
+        }
+        let launcher = self.launch.launcher(&name, &dir, &[], &[])?;
+        let mut catalog = ServiceCatalog::new();
+        catalog.share_registered_only();
+        for service in shared {
+            catalog.register_shared(*service);
+        }
+        let runtime = LocalRuntime::launcher(name.clone(), launcher, dir.join("package.json"));
+        let (handle, processes) = (runtime.handle(), runtime.processes());
+        let resolver = Arc::new(RuntimeResolver::node(handle.clone()).with_catalog(&catalog));
+        // Spent until it is stopped cleanly below: a call dropped while it
+        // waits leaves the name used.
+        self.used.push(name.clone());
+        let runtime = self.root.plugin(runtime);
+        let rows = self.root.plugin(RuntimeRowsPlugin::new(Arc::new(AddedRows {
+            source: resolver.clone(),
+            runtime: name.clone(),
+        })));
+        // Stopped if the call is dropped while it waits.
+        let mut starting = Starting(Some(Running {
+            views: vec![rows, runtime],
+            processes,
+            handle: handle.clone(),
+        }));
+        // Polled: `RuntimeHandle::changed` could miss a change made between
+        // a look and the wait.
+        let started = tokio::time::timeout(START_TIMEOUT, async {
+            loop {
+                match handle.state() {
+                    RuntimeState::Ready(_) => return Ok(()),
+                    RuntimeState::Down(why) => return Err(why),
+                    _ => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await;
+        let running = starting.0.take().expect("taken once");
+        let why = match started {
+            Ok(Ok(())) => {
+                self.added.lock().unwrap().push((name.clone(), resolver));
+                self.views.push((name, running));
+                return Ok(());
+            }
+            Ok(Err(why)) => why,
+            Err(_) => format!("it did not start within {} s", START_TIMEOUT.as_secs()),
+        };
+        let mut error = format!("runtime `{name}` did not start: {why}");
+        let failed = running.stop().await;
+        match failed.is_empty() {
+            // Nothing of it is left, and no row was resolved in it.
+            true => self.used.retain(|n| *n != name),
+            false => error.push_str(&format!(" (and stopping it: {})", failed.join("; "))),
+        }
+        Err(error.into())
+    }
+
+    /// Stop a runtime [`add_runtime`](Self::add_runtime) started: its rows
+    /// unloaded, then its fibers disposed, and its process waited for
+    /// ([`STOP_TIMEOUT`]; one that had not connected yet is killed by rutis,
+    /// not waited for). It is removed whatever fails on the way, and the
+    /// error says what did.
+    pub async fn remove_runtime(&mut self, name: &str) -> Result<(), BoxError> {
+        let index = self
+            .views
+            .iter()
+            .position(|(n, _)| n == name)
+            .ok_or_else(|| format!("no runtime `{name}` was added"))?;
+        let ids: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|row| row.runtime_is(name))
+            .map(|row| row.id.clone())
+            .collect();
+        self.rows.retain(|row| !row.runtime_is(name));
+        let mut failed = Vec::new();
+        // With none of its rows loaded there is nothing to unload, and
+        // another plugin's failure is not this runtime's.
+        if !ids.is_empty() {
+            if let Err(e) = self.reconcile(&[]).await {
+                failed.push(format!(
+                    "unloading its plugins ({}) failed: {e}",
+                    ids.join(", ")
+                ));
+            }
+        }
+        self.added.lock().unwrap().retain(|(n, _)| n != name);
+        let (_, running) = self.views.remove(index);
+        failed.extend(running.stop().await);
+        match failed.is_empty() {
+            true => Ok(()),
+            false => Err(format!("removing runtime `{name}`: {}", failed.join("; ")).into()),
+        }
+    }
+
+    fn is_added(&self, runtime: &str) -> bool {
+        self.views.iter().any(|(n, _)| n == runtime)
+    }
+
+    /// An added runtime's state, `None` for any other.
+    fn added_state(&self, runtime: &str) -> Option<RuntimeState> {
+        self.views
+            .iter()
+            .find(|(n, _)| n == runtime)
+            .map(|(_, running)| running.handle.state())
+    }
+
     /// The loader's layers for the rows loaded now.
     fn layers(&self) -> Result<Vec<Layer>, BoxError> {
-        let insert: Vec<Json> = self.rows.iter().map(Row::json).collect();
+        let insert: Vec<Json> = self
+            .rows
+            .iter()
+            .map(|row| {
+                let mut json = row.json();
+                if let Some(runtime) = row.runtime.as_ref().filter(|r| self.is_added(r)) {
+                    json["name"] = json!(format!("{runtime}{ADDED}{}", row.name));
+                }
+                json
+            })
+            .collect();
         let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": insert }]))?;
         Ok(vec![Layer::new("app", patches)])
     }
@@ -1044,12 +1377,48 @@ impl PluginHost {
 struct Routed {
     routes: Arc<Mutex<HashMap<String, String>>>,
     runtimes: Vec<(String, Arc<RuntimeResolver>)>,
+    added: Added,
 }
 
 impl Resolver for Routed {
     fn resolve<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<Arc<Resolved>, LoaderError>> {
         let route = self.routes.lock().unwrap().get(name).cloned();
+        // `<runtime>::<name>`: an added runtime's row, or nothing (no other
+        // row's name holds `::`).
+        let added = name.split_once(ADDED).map(|(runtime, inner)| {
+            let added = self.added.lock().unwrap();
+            let resolver = added
+                .iter()
+                .find(|(n, _)| n == runtime)
+                .map(|(_, r)| r.clone());
+            (resolver, inner)
+        });
         Box::pin(async move {
+            if let Some((resolver, inner)) = added {
+                let Some(resolver) = resolver else {
+                    return Err(LoaderError::NotFound {
+                        name: name.to_owned(),
+                    });
+                };
+                let resolved = resolver.resolve(inner).await?;
+                // What a row declares it provides is published to every
+                // runtime by name: a plugin the agent loaded must not take
+                // a service other plugins wait for.
+                let provides = resolved.meta["provides"]
+                    .as_object()
+                    .map(|p| p.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                if !provides.is_empty() {
+                    return Err(LoaderError::Resolve {
+                        name: name.to_owned(),
+                        message: format!(
+                            "it provides {}: a runtime added while running may provide no service",
+                            provides.join(", ")
+                        ),
+                    });
+                }
+                return Ok(resolved);
+            }
             if let Some(route) = route {
                 let Some((_, resolver)) = self.runtimes.iter().find(|(n, _)| *n == route) else {
                     return Err(LoaderError::NotFound {
@@ -1058,10 +1427,19 @@ impl Resolver for Routed {
                 };
                 return resolver.resolve(name).await;
             }
-            for (_, resolver) in &self.runtimes {
+            for (runtime, resolver) in &self.runtimes {
                 match resolver.resolve(name).await {
                     Err(LoaderError::NotFound { .. }) => continue,
-                    other => return other,
+                    other => {
+                        // The loader keeps this resolution: the name is that
+                        // runtime's from now on.
+                        self.routes
+                            .lock()
+                            .unwrap()
+                            .entry(name.to_owned())
+                            .or_insert_with(|| runtime.clone());
+                        return other;
+                    }
                 }
             }
             Err(LoaderError::NotFound {
@@ -1081,6 +1459,27 @@ enum Started {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An added runtime's stale rows are named as the loader has them
+    /// (`<runtime>::<name>`), so `RuntimeRowsPlugin` resolves them again.
+    #[test]
+    fn an_added_runtimes_stale_rows_are_named_as_the_loader_has_them() {
+        struct Stub;
+        impl RowsSource for Stub {
+            fn runtime_name(&self) -> &str {
+                "loaded-a"
+            }
+            fn take_stale(&self) -> std::collections::HashSet<String> {
+                ["/x/p.mjs".to_owned()].into()
+            }
+        }
+        let rows = AddedRows {
+            source: Arc::new(Stub),
+            runtime: "loaded-a".into(),
+        };
+        assert_eq!(rows.runtime_name(), "loaded-a");
+        assert_eq!(rows.take_stale(), ["loaded-a::/x/p.mjs".to_owned()].into());
+    }
 
     /// What `env -u` is given: every name not kept, never rutis's channel
     /// token, and no name `env -u` would refuse.
