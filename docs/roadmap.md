@@ -330,7 +330,8 @@ plugins"):**
     without a memory and gives the unsaved note.
 - **Tests:** `gallery_test` runs all three on the page in CI.
 
-Later: rutis plugins and remote MCP servers (§14, "Later steps").
+Next, stage 3: remote MCP servers (proposed 2026-10-28; §14, "Stage 3:
+remote MCP servers"). Later: rutis plugins (§14, "Later steps").
 
 ## Open questions (for review)
 

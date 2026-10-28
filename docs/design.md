@@ -4133,7 +4133,8 @@ one. Nothing is written by yobuild.
 
   Proposed below: "Stage 2: pi and DSH plugins".
 - **Remote MCP servers**, and a loaded server handed a credential, once
-  there is a way for the owner to grant one at the question.
+  there is a way for the owner to grant one at the question. Proposed
+  below: "Stage 3: remote MCP servers".
 
 ### Tests
 
@@ -4660,3 +4661,223 @@ question offers, and that the note is in the run's own `HOME`.
    `Loaded` holding runtimes beside servers, cancellation, the tick, the
    block, `check`, the hints;
 7. the demo, the skill, the guide, `CLAUDE.md` and the roadmap.
+
+### Stage 3: remote MCP servers (proposed 2026-10-28)
+
+So far a loaded server is a program on this machine: an npm package over
+stdio. The MCP registry also lists servers that run elsewhere and answer
+over HTTP (its entries' `remotes`). `find_plugin` counts these as "remote
+only" and leaves them out. A manifest can already name one (`[[mcp]] url =
+…`, with `headers`). This stage lets the agent find one, and lets the
+owner hand it a credential at the question.
+
+A remote server turns the risk around:
+- **Nothing runs here.** Nothing is installed, no install scripts, no
+  process with the owner's rights, no code to scan.
+- **What the agent sends leaves the machine.** Each call's arguments go
+  to another host, and what that host does with them is not seen here.
+- **Nothing is pinned.** What answers at the address can change any day.
+
+The gate already asks before each call of a loaded tool, so the owner
+sees the arguments before they leave.
+
+Surveyed on 2026-10-28:
+- **The registry's remotes** are `streamable-http` or `sse`. Some list
+  `headers`, each with a `description`, `isRequired`, `isSecret` and a
+  `value` template (`Bearer {smithery_api_key}`).
+- **Official servers that need a sign-in** list no header at all (Notion's
+  `com.notion/mcp`, Linear's `app.linear/linear`): they expect OAuth.
+- **Context7** (`io.github.upstash/context7`, published by Upstash) lists
+  an optional `Authorization`. Without one it answers `initialize` and
+  `tools/list`, offering `resolve-library-id` and `query-docs`.
+
+yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
+- **What it speaks:** `HttpTransport` covers the request/response subset
+  of streamable HTTP: no GET stream and no SSE-only servers.
+- **Headers:** fixed for its lifetime and marked sensitive.
+- **Errors:** as text (`HTTP 401 Unauthorized from server on
+  'initialize': …`).
+- **What it lacks:** no exit watch (a remote has no process here), and no
+  OAuth.
+- **Redirects:** reqwest's default, up to 10. On a redirect to another
+  host reqwest drops `Authorization` and cookies, but **a custom header
+  (`x-api-key`) follows it there**, and nothing stops a downgrade from
+  https to http.
+
+1. **A kind of its own, `"remote"`.** `[extend] kinds` takes `"remote"`
+   (label "remote MCP server"), off unless listed: whether an agent may
+   send its arguments to a host it found is the owner's choice per agent,
+   apart from whether it may run a program it found.
+   - **The search:** `find_plugin(need, kind "remote")` asks the MCP
+     registry only, since npm lists no remotes. It asks the registry even
+     when `"mcp"` is not among the kinds.
+   - **The kind first offered:** an entry with both a stdio npm package
+     and a remote is offered as the kind the search asked for.
+2. **Which remotes count.** The entry's first `remotes` item of type
+   `streamable-http` whose URL is checked by `manifest::endpoint` and,
+   since the agent picked it, more strictly:
+   - **The address:** https only, and not an IP address, `localhost`, nor
+     a `.local` or `.internal` name. A server the agent found may not reach
+     this machine or its network by name. The name is not resolved, so a
+     public name pointing inward is not caught: said as a limit.
+   - **Left out, each counted on the sources' line:**
+     - a URL with `{…}` values: "its address takes values";
+     - SSE only: "SSE only: yoagent speaks streamable HTTP";
+     - an address refused, with why;
+     - a header whose `value` yobuild cannot fill: more than one `{…}`, or
+       a literal part other than `Bearer`/`Basic`/`Token` on a header the
+       manifest's secret rule (`guard`) covers.
+   - **Several remotes:** the others are listed in the first question's
+     details.
+3. **No age and no version to take.** `min_age_days` does not apply: a
+   remote has no versions to choose between. The entry's `version` and
+   `publishedAt` are shown as the registry says them. `load_plugin`'s
+   `version` is refused for a remote: "a remote server has no version to
+   take".
+4. **The name.** `default_name` from the registry name:
+   - the part after `/`, without the `mcp`/`server` words as for a package;
+   - else the namespace's last label: `com.notion/mcp` → `notion`,
+     `io.github.upstash/context7` → `context7`, `app.linear/linear` →
+     `linear`.
+
+   Checked by `name_problem` as any server's name.
+5. **The questions.**
+   - **Question 1:** "Connect to the remote MCP server
+     io.github.upstash/context7 at mcp.context7.com as context7? (asked by
+     the agent)". Its details:
+     - the need and the full address;
+     - the entry's description, version, publish time and repository
+       ("claimed by the entry");
+     - each header it lists: name, required or optional, secret or not,
+       description;
+     - "Nothing of it runs here. Each call of its tools sends its
+       arguments to mcp.context7.com, and what comes back is that server's
+       to say: what it does with what it gets is not seen here, and it can
+       change any day. Its tools are not known until it answers."
+   - **The credential questions:** after Allow, one per header the entry
+     marks required, or optional and secret, a text answer (an optional
+     header that is not secret is left off: rare, and seldom more than
+     cosmetic; the first question's details list it): "Which environment variable holds the
+     `Authorization` header for context7? (sent to mcp.context7.com with
+     every request)". The message gives the header's description and
+     template, and "Leave it empty to send none" (optional) or "Without
+     it, it is not connected" (required).
+   - **Question 2:** "Keep the remote MCP server context7? It offers: …",
+     as stage 1's.
+   - **Block or no answer:** remembered, or not, as stage 1's.
+6. **A credential is a variable the owner names.**
+   - **The answer:** a plain name (letters, digits, `_`), set and not
+     empty in yobuild's environment (`run::key_is_set`).
+   - **Refused:** a credential yoagent reads (`key_variables()`): "`X` is
+     a credential yoagent reads: hand it in agent.toml if you mean to".
+   - **A name not set:** refused as an answer, said ("`X` is not set
+     here"). The question is asked again, at most twice; then a required
+     header is not connected (a Warning, not remembered) and an optional
+     one is left off.
+   - **The header's value:** its template with the `{…}` replaced by
+     `${X}`, else `${X}` alone, read by `Value` and checked by
+     `manifest::guard`, as a manifest's would be. It is filled when the
+     server is connected.
+   - **Never written down:** the value is never in a notice, the agent's
+     context, the log or the block. The block names the variable.
+
+   Why a variable, not the value typed on the page:
+   - an answer crosses the WebSocket (over the LAN in phone mode), sits
+     in the page's input and the frontends' history, and could be logged
+     on the way;
+   - a variable is how the manifest hands a credential (§2), and the
+     printed block names the same one.
+
+   Why the owner and never the agent: the agent picks the server. Were it
+   to name the variable, an agent misled by what it read could send any
+   credential set here to a host of its choosing. `load_plugin` has no
+   argument for it.
+7. **Connected.**
+   - **The connection:** `HttpTransport::new(url)` with the filled
+     headers, then `McpClient::from_transport`: `initialize` and
+     `tools/list` within 30 s each, as stage 1's; the call timeout
+     `DEFAULT_CALL_TIMEOUT`.
+   - **Refused:** a `401` or `403` at `initialize`: "it refused yobuild's
+     request (HTTP 401): it needs a credential, or a sign-in (OAuth) yobuild
+     cannot do yet". This is read from yoagent's text; a typed status is
+     asked of yoagent.
+   - **Redirects:** none followed. A redirect is refused, naming where it
+     pointed. Asked of yoagent (below), and this stage waits for it.
+   - **No exit watch:** `Server.exit` becomes `Option<ExitWatch>`, `None`
+     for a remote, so a remote is never seen gone between calls. A call
+     whose error says the server ended the session ("MCP session expired")
+     marks it stopped with that reason, said by the tick, since every
+     later call would fail too. It is not reconnected.
+   - **The end:** `close()` sends yoagent's `DELETE`.
+8. **The block.** `Kept` gains the address and the headers:
+
+   ```toml
+   [[mcp]]
+   name = "context7"
+   url  = "https://mcp.context7.com/mcp"
+   headers = { Authorization = "Bearer ${CONTEXT7_API_KEY}" }
+   # allow = ["resolve-library-id", "query-docs"]   # tools that would run without asking
+   ```
+
+   Read back by `Manifest::parse` in a unit test. `check` then says what
+   it says of any HTTP server, `keys_given` among it.
+9. **Counted as servers.** `max_loads`, `max_attempts`, a name in use, a
+   package blocked this session: a remote counts as a server. The gate
+   asks each call ("Run `context7__query-docs`, a tool the agent loaded
+   this session?").
+10. **First, the manifest's gap.** A manifest's `[[mcp]] url` holding a
+    reference is checked by `endpoint` as `x` when read and never again,
+    so `https://${HOST}/mcp` could become anything. It is checked again
+    once filled, in `run::launch`, before anything connects.
+11. **OAuth later.** Servers that need a sign-in refuse at `initialize`,
+    said as such. A sign-in on the page (the provider's page opened, the
+    token kept somewhere, refreshed) is its own design.
+
+**Asked of yoagent** (sent only with the owner's approval):
+`HttpTransport` follows no redirect, or takes a policy (none by default,
+or the same origin only), and an HTTP error carries its status.
+
+**The demo.** A docs helper: asked how to use a library at its current
+version, it finds Context7 (`kind "remote"`), connects without a key and
+calls `context7__resolve-library-id` and `context7__query-docs`, each
+asked. Three reply files as stage 1: allowed, not offered, blocked. CI
+runs them on the page against the live registry and Context7, a third
+party's day as npm's is.
+
+**Tests.**
+- `find_plugin_test`: the stub registry serves remotes, each refusal
+  counted.
+- `load_plugin_test`: an axum MCP server over HTTP as the remote,
+  recording the headers it gets:
+  - the credential reaching it from the named variable, and absent when
+    the answer is empty;
+  - a name not set asked again;
+  - a credential yoagent reads refused;
+  - a redirect refused, its target not reached;
+  - a 401 said;
+  - an expired session marked stopped;
+  - the block.
+- Unit tests: the header templates, the default names, the addresses
+  refused.
+
+**Decisions for review.**
+
+1. A kind of its own (`"remote"`), or remotes under `"mcp"`?
+2. A credential as a variable the owner names at the question, never a
+   value typed there, never the agent's choice?
+3. https only, with no IP address and no local names, for a remote the
+   agent found (the manifest keeps allowing http to this machine)?
+4. Wait for yoagent's redirect change, or, if it does not come, a
+   transport of yobuild's own (`McpClient::from_transport` takes any
+   `McpTransport`) over a reqwest client that follows no redirect?
+5. OAuth later?
+
+**Order of PRs.**
+
+1. this design;
+2. the manifest's URL checked once filled (point 10), and the request to
+   yoagent;
+3. `find_plugin`'s `remote` kind;
+4. `load_plugin` for a remote: the questions, the credential, `Server`
+   without an exit watch, the block, `check`, the hints;
+5. the demo, the skill, the guide, `CLAUDE.md` and the roadmap.
