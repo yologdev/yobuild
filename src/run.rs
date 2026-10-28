@@ -570,7 +570,6 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                 break match stop {
                     Ok(()) => End::Interrupted {
                         running: interrupted,
-                        at: std::time::Instant::now(),
                     },
                     Err(e) => End::NoSignal(e),
                 };
@@ -638,16 +637,12 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             }
         }
     };
-    let ctrl_c = match &end {
-        End::Interrupted { at, .. } => Some(*at),
-        _ => None,
-    };
     let (agent, interrupted, failure) = match end {
         End::Driven(joined) => match *joined {
             Ok(agent) => (Some(agent), false, None),
             Err(e) => (None, false, Some(format!("the agent's task failed: {e}"))),
         },
-        End::Interrupted { running, .. } => {
+        End::Interrupted { running } => {
             driving.abort();
             drop(driving.await);
             (None, running, None)
@@ -675,9 +670,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // written). Each was said as a notice when it was kept; the binary
     // writes this once the runtimes have stopped (the terminal UI may hold
     // the terminal until then), and on an error it is written here. A
-    // server gone since the last tick is marked stopped in it (not one
-    // first seen gone after a Ctrl+C, which reached it too).
-    for (server, why) in loaded.stopped_at_end(ctrl_c).await {
+    // server gone since the last tick is marked stopped in it (a Ctrl+C
+    // never reaches one: each runs in a process group of its own).
+    for (server, why) in loaded.stopped_at_end().await {
         tracing::error!("the loaded MCP server {server} stopped: {why}");
     }
     for stopped in loaded.packages_stopped(&*host.lock().await) {
@@ -711,11 +706,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
 enum End {
     /// The driver returned (or its task failed).
     Driven(Box<Result<Agent, tokio::task::JoinError>>),
-    /// Ctrl+C; whether a run was in progress, and when it came.
-    Interrupted {
-        running: bool,
-        at: std::time::Instant,
-    },
+    /// Ctrl+C; whether a run was in progress.
+    Interrupted { running: bool },
     /// Ctrl+C cannot be listened for.
     NoSignal(std::io::Error),
     /// The terminal UI's runtime stopped.
@@ -2625,9 +2617,16 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
             let (command, args, env) =
                 without(command, args, env, withheld).map_err(|e| failed(&e))?;
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            McpClient::connect_stdio(&command, &args, Some(env))
-                .await
-                .map_err(|e| failed(&e))?
+            // A process group of its own, as a loaded server's: closing it
+            // stops what it started too; Ctrl+C is yobuild's to handle.
+            McpClient::connect_stdio_with(
+                &command,
+                &args,
+                Some(env),
+                yoagent::mcp::StdioOptions::new().own_process_group(true),
+            )
+            .await
+            .map_err(|e| failed(&e))?
         }
         Launch::Http { url, headers } => {
             let mut transport = HttpTransport::new(url).map_err(|e| failed(&e))?;

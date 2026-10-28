@@ -230,10 +230,6 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
 /// exit text settles within 0.5 s (the last of its stderr read).
 const SETTLE: Duration = Duration::from_millis(600);
 
-/// How an exit by SIGINT reads (Rust's `ExitStatus`): a Ctrl+C typed in
-/// the terminal reaches the servers too.
-const SIGINT: &str = "signal: 2 (SIGINT)";
-
 /// A server the owner kept, running.
 struct Server {
     name: String,
@@ -543,15 +539,14 @@ impl Loaded {
     /// (the generation moved then). `run`'s tick asks every 250 ms, so a
     /// server that dies while idle is said within about a second.
     pub fn stopped(&self) -> Vec<(String, String)> {
-        self.take_stopped(|at, _| at.elapsed() >= SETTLE)
+        self.take_stopped(|at| at.elapsed() >= SETTLE)
     }
 
     /// At the session's end: every server seen gone, once the reasons of
-    /// those seen within [`SETTLE`] have settled (at most that long) — but
-    /// after `interrupted`, the owner's Ctrl+C, which reaches them too
-    /// (they share yobuild's process group), one first seen after it or
-    /// ended by its SIGINT is not said stopped: the session stopped it.
-    pub async fn stopped_at_end(&self, interrupted: Option<Instant>) -> Vec<(String, String)> {
+    /// those seen within [`SETTLE`] have settled (at most that long). Each
+    /// runs in a process group of its own (yoagent 0.25.16), so the owner's
+    /// Ctrl+C never reaches one: one gone is its own doing.
+    pub async fn stopped_at_end(&self) -> Vec<(String, String)> {
         let wait = {
             let lists = locked(&self.0.lists);
             self.look(&lists);
@@ -565,19 +560,17 @@ impl Loaded {
         if let Some(wait) = wait.filter(|w| !w.is_zero()) {
             tokio::time::sleep(wait).await;
         }
-        self.take_stopped(|at, why| {
-            interrupted.is_none_or(|ctrl_c| at < ctrl_c && !why.contains(SIGINT))
-        })
+        self.take_stopped(|_| true)
     }
 
     /// The servers seen gone whose first sighting `say` accepts, taken out
     /// and marked stopped.
-    fn take_stopped(&self, say: impl Fn(Instant, &str) -> bool) -> Vec<(String, String)> {
+    fn take_stopped(&self, say: impl Fn(Instant) -> bool) -> Vec<(String, String)> {
         let mut lists = locked(&self.0.lists);
         self.look(&lists);
         let mut out = Vec::new();
         lists.servers.retain(|s| match s.gone() {
-            Some((at, why)) if say(at, &why) => {
+            Some((at, why)) if say(at) => {
                 out.push((s.name.clone(), why));
                 false
             }
@@ -1230,7 +1223,11 @@ impl LoadPlugin {
         let (program, argv, env) =
             super::without(bin, args, &HashMap::new(), &self.withheld).map_err(|e| did_not(&e))?;
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        let inner = yoagent::mcp::StdioTransport::new(&program, &argv, Some(env))
+        // A process group of its own: the owner's Ctrl+C does not reach it
+        // (yobuild stops it at the session's end), and closing it stops what
+        // it started too (an `npx` wrapper's `node`).
+        let options = yoagent::mcp::StdioOptions::new().own_process_group(true);
+        let inner = yoagent::mcp::StdioTransport::with_options(&program, &argv, Some(env), options)
             .await
             .map_err(|e| did_not(&e))?;
         // Without a watch its death would go unseen: refused (yoagent's

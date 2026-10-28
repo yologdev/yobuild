@@ -335,11 +335,14 @@ async fn loaded_servers_are_a_tool_source_that_moves_on_each_change() {
     assert_eq!(loaded.generation(), 4, "closing moves it");
 }
 
-/// A real stdio server (`/bin/sh`) on yoagent's transport, with one tool.
+/// A real stdio server (`/bin/sh`) on yoagent's transport, with one tool,
+/// in a process group of its own as `load_plugin` starts one.
 async fn real(loaded: &Loaded, name: &str, script: &str) {
-    let inner = yoagent::mcp::StdioTransport::new("/bin/sh", &["-c", script], None)
-        .await
-        .unwrap();
+    let options = yoagent::mcp::StdioOptions::new().own_process_group(true);
+    let inner =
+        yoagent::mcp::StdioTransport::with_options("/bin/sh", &["-c", script], None, options)
+            .await
+            .unwrap();
     let exit = inner.exit_watch().expect("stdio gives a watch");
     let client = Arc::new(tokio::sync::Mutex::new(McpClient::from_transport(
         Box::new(inner),
@@ -385,6 +388,80 @@ async fn a_server_that_dies_while_idle_is_seen_without_a_call() {
     assert_eq!(loaded.generation(), 2, "added, then gone");
 }
 
+/// A server that no longer reads its input, its process still running, is
+/// gone once a call finds so (yoagent 0.25.16): its tools leave, and it is
+/// said with yoagent's words.
+#[tokio::test]
+async fn a_server_that_stops_reading_its_input_is_seen_gone() {
+    let loaded = Loaded::default();
+    real(&loaded, "deaf", "exec 0<&-; sleep 30").await;
+    let tool = loaded.tools().await.pop().expect("its tool");
+    // Its input closed first (a write before would sit in the pipe); then
+    // the first write finds it so.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let call = tool
+        .execute(json!({}), ToolContext::new("1", "deaf__echo"))
+        .await;
+    assert!(call.is_err(), "{call:?}");
+    tokio::time::sleep(SETTLE + Duration::from_millis(100)).await;
+    loaded.generation();
+    tokio::time::sleep(SETTLE).await;
+    assert_eq!(
+        loaded.stopped(),
+        [(
+            "deaf".to_owned(),
+            "it no longer reads its input (its process is still running)".to_owned()
+        )]
+    );
+    assert!(loaded.tools().await.is_empty());
+    loaded.close().await;
+}
+
+/// Closing a server stops what it started too: its process group is its
+/// own (an `npx` wrapper's `node`, here a `sleep` that ignores its input).
+#[cfg(unix)]
+#[tokio::test]
+async fn closing_a_server_stops_its_whole_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("child.pid");
+    let loaded = Loaded::default();
+    real(
+        &loaded,
+        "tree",
+        &format!("sleep 30 & echo $! > '{}'; wait", pid_file.display()),
+    )
+    .await;
+    let mut pid = String::new();
+    for _ in 0..50 {
+        pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
+        if !pid.trim().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let pid = pid.trim().to_owned();
+    assert!(!pid.is_empty(), "the child never started");
+    let alive = |pid: &str| {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        !stat.is_empty() && !stat.starts_with('Z')
+    };
+    assert!(alive(&pid));
+    loaded.close().await;
+    let mut gone = false;
+    for _ in 0..50 {
+        if !alive(&pid) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(gone, "the server's child outlived its close");
+}
+
 /// The servers yobuild closes are never said stopped.
 #[tokio::test]
 async fn a_server_yobuild_closes_is_not_said_stopped() {
@@ -393,25 +470,22 @@ async fn a_server_yobuild_closes_is_not_said_stopped() {
     loaded.close().await;
     tokio::time::sleep(SETTLE).await;
     assert!(loaded.stopped().is_empty());
-    assert!(loaded.stopped_at_end(None).await.is_empty());
+    assert!(loaded.stopped_at_end().await.is_empty());
     assert_eq!(loaded.kept()[0].stopped, None);
 }
 
-/// At the session's end a server just seen gone is waited for and marked
-/// stopped in the block; after a Ctrl+C, one first seen after it or
-/// ended by its SIGINT is not.
+/// At the session's end every server seen gone is marked stopped in the
+/// block, one just seen waited for until its reason settles (a Ctrl+C
+/// never reaches a server: each runs in a process group of its own).
 #[tokio::test]
-async fn the_end_marks_a_server_just_gone_but_not_one_the_ctrl_c_stopped() {
+async fn the_end_marks_every_server_seen_gone() {
     let loaded = Loaded::default();
     let early = add(&loaded, "early");
-    let sigint = add(&loaded, "sigint");
-    let late = add(&loaded, "late");
+    let running = add(&loaded, "running");
     *locked(&early) = Some("MCP server '/usr/bin/env' exited with exit status: 1".into());
-    *locked(&sigint) = Some("MCP server '/usr/bin/env' exited with signal: 2 (SIGINT)".into());
-    loaded.generation();
-    let ctrl_c = Instant::now();
-    *locked(&late) = Some("MCP server '/usr/bin/env' exited with exit status: 0".into());
-    let said = loaded.stopped_at_end(Some(ctrl_c)).await;
+    let start = Instant::now();
+    let said = loaded.stopped_at_end().await;
+    assert!(start.elapsed() >= SETTLE, "its reason left to settle");
     assert_eq!(
         said,
         [(
@@ -420,20 +494,8 @@ async fn the_end_marks_a_server_just_gone_but_not_one_the_ctrl_c_stopped() {
         )]
     );
     let text = kept_text(&loaded.kept(), &files());
-    assert!(
-        text.contains("stopped this session: it exited with exit status: 1"),
-        "{text}"
-    );
     assert_eq!(text.matches("stopped this session").count(), 1, "{text}");
-
-    // Without a Ctrl+C: one first seen at the end is waited for, and said.
-    let loaded = Loaded::default();
-    let gone = add(&loaded, "gone");
-    *locked(&gone) = Some("MCP server '/usr/bin/env' exited with exit status: 1".into());
-    let start = Instant::now();
-    assert_eq!(loaded.stopped_at_end(None).await.len(), 1);
-    assert!(start.elapsed() >= SETTLE, "its reason left to settle");
-    assert!(loaded.kept()[0].stopped.is_some());
+    drop(running);
 }
 
 /// The longest reason read is kept: yoagent answers without the stderr
