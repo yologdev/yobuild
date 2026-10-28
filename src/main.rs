@@ -366,7 +366,13 @@ fn check(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
     // As `run`'s: after the options are read and the log is there.
     options.layout = layout(&options.manifest, false)?;
     let runtime = tokio::runtime::Runtime::new()?;
-    let report = match runtime.block_on(check(options)) {
+    // Ctrl+C (SIGHUP, SIGTERM) from the start: the servers `check` starts
+    // run in process groups of their own, and are stopped only when
+    // dropped.
+    let report = match runtime.block_on(async {
+        let mut stops = yobuild::stops::Stops::listen()?;
+        stops.until(check(options)).await
+    }) {
         Ok(report) => report,
         // As `run`'s refusals: the fix when yobuild knows one.
         Err(e) => {

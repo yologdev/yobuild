@@ -4017,16 +4017,28 @@ refuses `[extend]` without it, as the manifest does with `gate = "off"`.
   after a death while idle. It still counts toward `max_loads`, and is
   not loaded again this session.
   - At the session's end, every server seen gone is marked stopped in
-    the block (`stopped_at_end`), those seen within 0.6 s waited for —
-    but after a Ctrl+C one first seen after it, or ended by SIGINT, is
-    not: a Ctrl+C typed in the terminal reaches the servers too (they
-    share yobuild's process group; a group of their own is asked of
-    yoagent).
+    the block (`stopped_at_end`), those seen within 0.6 s waited for.
+    Since yoagent 0.25.16 each server — a loaded one and a manifest's
+    `[[mcp]]` stdio one — runs in a process group of its own
+    (`StdioOptions::own_process_group`): a Ctrl+C typed in the terminal
+    no longer reaches it (yobuild stops it), and closing it stops what it
+    started too (`npx` → `node`). Until then a Ctrl+C reached them, and a
+    server first seen gone after one, or ended by SIGINT, was not marked.
+    The cost: a yobuild that ends without dropping its clients leaves what
+    ignores its closed input running. So `run` and `check` listen for
+    Ctrl+C, SIGHUP (the terminal closed) and SIGTERM from their start
+    (`crate::stops`): `run` races each step that waits while it starts
+    against them, and its loop ends the session on one; `check` is raced
+    whole. A SIGKILL still leaves them; and a wrapper that exited and was
+    collected (yobuild's 250 ms look at each loaded server collects it)
+    leaves its children, which yoagent then no longer kills — asked of
+    yoagent: kill the group when the exit watch first sees the wrapper
+    gone, before collecting it.
   - One that dies while the owner is asked to keep it is refused then
     (an Error notice), never announced as loaded.
-  - Not seen: a server whose process lives on but no longer reads its
-    input (every call "Write error: Broken pipe"); asked of yoagent, to
-    count a failed write as closed.
+  - A server whose process lives on but no longer reads its input is
+    gone once a call's write fails (yoagent 0.25.16): "it no longer
+    reads its input (its process is still running)".
   - Before 0.25.15 yobuild wrapped the transport and saw a death only at
     the next call.
 - A run aborted mid-load stops the load where it is: npm killed (and no

@@ -28,3 +28,5 @@ pub mod manifest;
 pub mod run;
 pub mod runtime;
 pub mod skill;
+#[doc(hidden)]
+pub mod stops;
