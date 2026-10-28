@@ -33,6 +33,8 @@ each was run live for a real task (costs with DeepSeek's `deepseek-flash`):
   an outline of the project ($0.0034).
 - **`self-extending-reviewer`**: finds the linter it lacks, asks you,
   loads it for the session and lints ($0.0054).
+- **`project-notebook`**: answers about a project and remembers your
+  decisions across sessions, in a memory it finds and loads ($0.0045).
 - **`handoff`**: hand it any task and walk away; it asks only what is
   yours to decide, without waiting, and ends with a report.
 

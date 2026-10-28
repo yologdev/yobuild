@@ -147,4 +147,34 @@ Under `--once`, every `load_plugin` call is refused alike ("not under
 
 ## A live run
 
-LIVE-RUN-PENDING
+2026-10-28, `deepseek/deepseek-flash`, on the page, in the project the
+tests use (`tiny-shop`). It ran with a throwaway `HOME` and
+`YOBUILD_HOME` set to the real cache, and every question was answered
+Allow by a script over the page's WebSocket. Two sessions shared that
+`HOME`.
+
+The first session's task was `scripts/demo.task`: which port, where
+orders are kept, and a decision to remember. It went like this:
+
+1. It read the project's six files and answered from them, naming the
+   lines (`PORT`, 3000 by default; a `Map` in `src/store.js`).
+2. `find_plugin("memory", kind "pi")` returned `pi-memory` among npm's
+   candidates. It proposed it, and pi-memory was started and kept (0.4.2,
+   the newest a week old). The second question listed its seven tools.
+3. `memory_read` found the memory empty. `memory_write` appended the note
+   (`- #tiny-shop #decision 2026-10-28 We keep orders in memory until we
+   move to Postgres.`), and a second `memory_read` read it back.
+
+That session cost `$0.0045` (39,960 tokens in, 1,194 out; 8 turns) and
+ended `Completed`. Nothing in the project changed. The note was in the
+throwaway home's `.pi/agent/memory/MEMORY.md`. After Ctrl+C yobuild
+printed the `[[plugin]]` block that would keep pi-memory, and how it
+would run there.
+
+The second session, started fresh, was asked "What did we decide about
+where tiny-shop keeps its orders, and does the code still match that
+decision?". It loaded pi-memory again (asked twice again), read the note,
+compared it with `src/store.js` and the README, and said the code still
+matches. It wrote nothing, as it had been told nothing new. That session
+cost $0.0029 (17,753 tokens in, 1,206 out; 4 turns), and also ended
+`Completed`.
