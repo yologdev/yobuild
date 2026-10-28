@@ -4414,6 +4414,18 @@ answers calls to its own tools and reaches nothing else. A plugin is more:
    bundle as one row). Packages with neither mark — DSH's own
    `dsh-tool-ask-user` has no keyword — are not found: an owner who wants
    one names it in the manifest.
+
+   Built (PR 5): `find_plugin`'s `kind`, the manifest taking `"pi"` and
+   `"dsh"` (`rutis` still refused); `load_plugin` refuses such a
+   candidate until PR 6 ("loads MCP servers only so far"), and `check`'s
+   agent note says so. Tested against the stub registries
+   (`find_plugin_test`: each kind's keyword searched, no MCP registry, a
+   package marked by its field or by the keyword alone kept, one marked
+   by neither left out and counted, npm failing said as the one source).
+   npm's answer on 2026-10-28: 250 or more packages for each keyword (a
+   search's most), many of them themes, chat bridges and model
+   providers rather than tools; which ones load with no grants, no
+   config and no host services is the survey still to make.
 9. **rutis plugins later.** rutis's SDK carries the keyword `rutis-plugin`,
    but no published plugin does yet. They come when some do.
 

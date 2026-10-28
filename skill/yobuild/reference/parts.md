@@ -153,7 +153,11 @@ keys). It gets two tools, both allowed:
 
 `[extend]` loads MCP servers only — no pi, DSH or rutis plugin: a part
 that is one (pi-lens's type checks, say) goes in the manifest, or the
-person is told the agent cannot do it.
+person is told the agent cannot do it. With `kinds = ["pi"]` or
+`["dsh"]`, `find_plugin(need, kind)` also searches npm for pi packages
+(the `pi` field or the keyword `pi-package`) or DSH packages (the `dsh`
+field or `dsh-plugin`), but `load_plugin` refuses them for now: the
+agent can name one to the person, who puts it in the manifest.
 
 Someone must be there to answer: the web page or the terminal. Under
 `--once` `load_plugin` is refused (scripted.md). In the prompt, tell the

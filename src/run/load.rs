@@ -22,7 +22,7 @@ use yoagent::{AgentTool, Content, ToolContext, ToolError, ToolResult};
 use crate::builtins::{find_plugin, Candidate, FindPlugin};
 use crate::frontend::session::UI_TIMEOUT;
 use crate::frontend::{NoticeLevel, Session, UiRequest};
-use crate::manifest::{Extend, Manifest};
+use crate::manifest::{Extend, ExtendKind, Manifest};
 use crate::run::host::clip;
 
 /// Starting the server, and listing its tools: each.
@@ -536,6 +536,15 @@ impl LoadPlugin {
                 "{package} is not among this session's candidates: only a package find_plugin returned can be loaded"
             )));
         };
+        if candidate.kind != ExtendKind::Mcp {
+            return Err(refused(format!(
+                "{package} is a {} package: load_plugin loads MCP servers only so far (loading pi and DSH packages comes in a later step); to use it, name it in the manifest as a [[plugin]] (nothing was counted)",
+                match candidate.kind {
+                    ExtendKind::Pi => "pi",
+                    _ => "DSH",
+                }
+            )));
+        }
         let version = match (&candidate.version, version) {
             (Err(why), _) => {
                 return Err(refused(format!("{package} is not loadable: {why}")))

@@ -65,7 +65,7 @@ phone    = false                      # the web page on the local network, with 
 terminal = false                      # the terminal UI instead of the web page
 
 [extend]                              # optional: the agent may search for MCP servers it lacks
-kinds        = ["mcp"]                # "mcp" only
+kinds        = ["mcp"]                # "mcp", "pi", "dsh": what find_plugin searches for
 max_loads    = 2                      # 1 to 5
 max_attempts = 4                      # 1 to 10
 min_age_days = 7                      # 0 to 365: newer versions are not taken
@@ -286,7 +286,9 @@ again with its tools; its tools are the agent's from its next step
 (`<name>__<tool>`), and each call asks. Up to `max_loads` servers and
 `max_attempts` calls a session. Nothing is written to the manifest: when
 the session ends, yobuild prints the `[[mcp]]` block that would keep
-each one. `kinds` is `["mcp"]` only. Refused with `gate = "off"`; a
+each one. `kinds` names what `find_plugin` searches for: `"mcp"` (the default),
+`"pi"` and `"dsh"` (npm only, by their marks); `load_plugin` loads MCP
+servers only so far and refuses a pi or DSH package (parts.md). Refused with `gate = "off"`; a
 plugin's `allow` may not name `find_plugin` or `load_plugin`. `check`
 lists both as allowed and says what `[extend]` lets the agent do.
 
