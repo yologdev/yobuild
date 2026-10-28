@@ -1,0 +1,18 @@
+[
+  { "tools": [
+      { "name": "list_files", "arguments": { "path": "." } },
+      { "name": "read_file", "arguments": { "path": "package.json" }, "expect": "tiny-shop" },
+      { "name": "read_file", "arguments": { "path": "README.md" } }
+  ] },
+  { "tools": [
+      { "name": "read_file", "arguments": { "path": "src/config.js" } },
+      { "name": "read_file", "arguments": { "path": "src/store.js" } },
+      { "name": "search", "arguments": { "pattern": "listen" } }
+  ] },
+  { "tools": [{ "name": "find_plugin", "arguments": { "need": "memory", "kind": "pi" }, "expect": "pi-memory" }] },
+  { "tools": [{ "name": "load_plugin", "arguments": { "package": "pi-memory" } }] },
+  { "tools": [{ "name": "pi-memory__memory_read", "arguments": { "target": "long_term" } }] },
+  { "tools": [{ "name": "pi-memory__memory_write", "arguments": { "target": "long_term", "mode": "append", "content": "#tiny-shop #decision 2026-10-28: we keep orders in memory until we move to Postgres." }, "expect": "Appended to MEMORY.md" }] },
+  { "tools": [{ "name": "pi-memory__memory_read", "arguments": { "target": "long_term" }, "expect": "#tiny-shop #decision 2026-10-28" }] },
+  { "text": "## Answers given\n- Port: tiny-shop listens on `PORT` from the environment, 3000 when it is not set (src/config.js; src/server.js calls `server.listen(config.port)`).\n- Orders: kept in memory, in a `Map` in src/store.js; they are lost when the service restarts (the README says so too).\n\n## Saved to memory\n- Loaded `pi-memory` (the version find_plugin offered) as `pi-memory`, with your approval.\n- Wrote: `#tiny-shop #decision 2026-10-28: we keep orders in memory until we move to Postgres.` (MEMORY.md, read back to confirm).\n- Earlier notes for #tiny-shop: none before this one.\n\n## Out of reach\n- none." }
+]

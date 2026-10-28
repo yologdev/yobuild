@@ -104,6 +104,12 @@ pub const BUILTIN: &[Builtin] = &[
         files: gallery!(unlocked "self-extending-reviewer", ["demo", "blocked", "not-offered"]),
     },
     Builtin {
+        name: "project-notebook",
+        kind: "gallery",
+        summary: "answers questions about a project and remembers your decisions, loading a pi memory package it finds (asks you first)",
+        files: gallery!(unlocked "project-notebook", ["demo", "blocked", "not-offered"]),
+    },
+    Builtin {
         name: "handoff",
         kind: "example",
         summary: "takes a task and works on it alone, asking without waiting, ending with a report",

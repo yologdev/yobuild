@@ -1,0 +1,42 @@
+# project-notebook: answers your questions about a project, read-only, and
+# remembers the decisions and notes you tell it from one session to the next.
+# It sets up no memory tool in advance: when it needs one it searches npm for
+# a pi memory package (find_plugin), proposes pi-memory, and loads it for the
+# session (load_plugin) — you are asked before it starts, again with its
+# tools in front of you, and before each call of them. It never changes your
+# project: tools = "read-only". pi-memory keeps its notes in
+# ~/.pi/agent/memory/MEMORY.md (your home, outside the project).
+#
+#   cd <your project>
+#   yobuild check <this folder>/agent.toml
+#   yobuild run <this folder>/agent.toml --scripted <this folder>/scripts/demo.json "$(cat <this folder>/scripts/demo.task)"          # on the page: Allow, Allow, then Allow each memory call
+#   yobuild run <this folder>/agent.toml --scripted <this folder>/scripts/not-offered.json "$(cat <this folder>/scripts/not-offered.task)"  # nothing to answer
+#   yobuild run <this folder>/agent.toml --scripted <this folder>/scripts/blocked.json "$(cat <this folder>/scripts/blocked.task)"    # on the page: Block
+#   DEEPSEEK_API_KEY=… yobuild run <this folder>/agent.toml      # live, on the web page
+#
+# It works in the folder `yobuild run` starts in: start it in the project.
+
+[agent]
+name   = "project-notebook"
+model  = "deepseek/deepseek-flash"   # needs DEEPSEEK_API_KEY
+prompt = "prompts/agent.md"
+
+[limits]
+budget_usd         = 0.25   # dollars per run
+session_budget_usd = 1.0    # dollars in all, until yobuild stops
+max_turns          = 30     # model turns per run
+
+[builtins]
+tools  = "read-only"        # read, list and search only, inside the project: it never changes your files
+report = ["Answers given", "Saved to memory", "Out of reach"]
+# gate stays "allow-list" (the default): [extend] needs it, and every
+# tool of a loaded package asks you before each call.
+
+[frontend]
+web = true                  # the web page: you answer the load questions there
+
+[extend]                    # find a pi memory package and load it, asking you twice
+kinds        = ["pi"]
+max_loads    = 1            # one memory package per session
+max_attempts = 3            # load_plugin calls per session
+min_age_days = 7            # only versions published a week ago or more

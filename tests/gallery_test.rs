@@ -15,7 +15,7 @@
 //!   stopped answering), and never a denial;
 //!   A reply file meant to show refusals: every call `✗`;
 //! - every tool `check` says asks, called with nobody there: denied;
-//! - a reply file that loads a server (`[extend]`, design §14), refused
+//! - a reply file that loads a server or package (`[extend]`, design §14), refused
 //!   under `--once`, runs on the page instead (killed after 5 min in all):
 //!   its questions answered over the WebSocket as the test says, every
 //!   answer used and no other question; `completed` with its last `text` as
@@ -23,8 +23,10 @@
 //!   the run; each call it scripts made once, every one `✓` — but, when the
 //!   owner did not allow both questions, `load_plugin` refused for the
 //!   reason the test names (and said in a Warning), and every
-//!   `<server>__<tool>` call `✗`; the `[[mcp]]` block on stderr exactly when
-//!   the server was kept, never marked stopped.
+//!   `<name>__<tool>` call `✗`; the `[[mcp]]` (or `[[plugin]]`) block on
+//!   stderr exactly when the server or package was kept, as the test says
+//!   it, never marked stopped; the second question offering the tools the
+//!   test names; the files the test names left in the run's `HOME`.
 //!
 //! A scripted run cannot tell whether the task fits the replies (the model
 //! is the script): the task is the one a reader would type. Unix (as
@@ -215,11 +217,17 @@ struct Rules<'a> {
 /// A reply file (`file`, its name) run on the page: each question's answer
 /// in order (the title's start, `Allow` or `Block`), and, when the owner
 /// does not allow both of `load_plugin`'s questions, what its refusal must
-/// say (the reason, as `load_plugin` words it).
+/// say (the reason, as `load_plugin` words it). When kept: what stderr
+/// says of it at the end (`block`, each text in it) and the tools the second
+/// question names (`offers`). After the run: files under its `HOME` and a
+/// text each holds (`home`).
 struct Page<'a> {
     file: &'a str,
     answers: &'a [(&'a str, &'a str)],
     refused: Option<&'a str>,
+    block: &'a [&'a str],
+    offers: &'a [&'a str],
+    home: &'a [(&'a str, &'a str)],
 }
 
 /// What a page showed: the questions' titles, the notices (`level: text`),
@@ -457,13 +465,11 @@ fn on_page(manifest: &str, file: &Path, task: &str, page: &Page, rules: &Rules) 
     }
     // Loaded only when allowed to start and then kept (the questions came
     // as `answers` says: checked above, in order).
-    let kept = ["Start the MCP server ", "Keep the MCP server "]
-        .iter()
-        .all(|q| {
-            page.answers
-                .iter()
-                .any(|(t, v)| t.starts_with(q) && *v == "Allow")
-        });
+    let kept = ["Start the ", "Keep the "].iter().all(|q| {
+        page.answers
+            .iter()
+            .any(|(t, v)| t.starts_with(q) && *v == "Allow")
+    });
     let refused = page.refused.filter(|_| !kept);
     assert_eq!(
         refused.is_some(),
@@ -501,6 +507,28 @@ fn on_page(manifest: &str, file: &Path, task: &str, page: &Page, rules: &Rules) 
         !stderr.contains("stopped this session"),
         "a kept server stopped: {all}"
     );
+    if kept {
+        for said in page.block {
+            assert!(stderr.contains(said), "{said:?} not in the block: {all}");
+        }
+        let second = shown.asked.iter().find(|t| t.starts_with("Keep the "));
+        for tool in page.offers {
+            assert!(
+                second.is_some_and(|t| t
+                    .split(" It offers: ")
+                    .nth(1)
+                    .is_some_and(|l| l.split(", ").any(|t| t == *tool))),
+                "the second question does not offer `{tool}`: {all}"
+            );
+        }
+    }
+    for (path, text) in page.home {
+        let held = std::fs::read_to_string(home.join(path)).unwrap_or_default();
+        assert!(
+            held.contains(text),
+            "{path} in its HOME holds no {text:?}: {held:?}\n{all}"
+        );
+    }
 }
 
 /// One reply file's run, held to the rules above.
@@ -598,8 +626,26 @@ fn holds_with(
     // And the kept environment's: this process's own variables are left
     // out of the plugins and servers (design §12 "Step 5").
     const KEPT: &str = "plugins and stdio MCP servers start with the kept environment (";
-    // `[extend]`'s, on the agent (`check`'s own words).
-    const EXTEND: &str = "[extend]: the agent may search the MCP registry and npm for MCP servers";
+    // `[extend]`'s, on the agent (`check`'s own words: its sources and
+    // kinds).
+    let extend_note = parsed.extend.as_ref().map(|e| {
+        let kinds: Vec<String> = e.kinds.iter().map(|k| format!("{}s", k.label())).collect();
+        let sources = match e.finds_mcp() {
+            true => "the MCP registry and npm",
+            false => "npm",
+        };
+        let kinds = match kinds.split_last() {
+            Some((last, [])) => last.clone(),
+            Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+            None => String::new(),
+        };
+        format!("[extend]: the agent may search {sources} for {kinds} (")
+    });
+    let is_extend = |n: &str| {
+        extend_note
+            .as_ref()
+            .is_some_and(|e| n.starts_with(e.as_str()))
+    };
     // What depends on the environment the tests run in: a variable a
     // plugin's code reads set here (`DSH_HOME`, `NODE_PATH`), a proxy
     // holding a password.
@@ -625,7 +671,7 @@ fn holds_with(
             let skills = n.starts_with("plugin ") && n.contains(" skills are not loaded (");
             // What `[extend]` lets the agent do, said whenever it is there
             // (counted below: once).
-            let extend = parsed.extend.is_some() && n.starts_with(EXTEND);
+            let extend = is_extend(n);
             assert!(
                 n == GRANTED_DSH || n.starts_with(KEPT) || here(n) || skills || extend,
                 "{report:#}"
@@ -640,7 +686,7 @@ fn holds_with(
             .as_array()
             .into_iter()
             .flatten()
-            .filter(|n| n.as_str().is_some_and(|n| n.starts_with(EXTEND)))
+            .filter(|n| n.as_str().is_some_and(is_extend))
             .count();
         assert_eq!(said, 1, "[extend]'s agent note, once: {report:#}");
     }
@@ -849,16 +895,25 @@ fn self_extending_reviewer() {
                     ),
                 ],
                 refused: None,
+                block: &["[[mcp]]\nname = \"eslint\"\nnpm  = \"@eslint/mcp@"],
+                offers: &["lint-files"],
+                home: &[],
             },
             Page {
                 file: "blocked.json",
                 answers: &[(start, "Block")],
                 refused: Some("the owner blocked it (start it)"),
+                block: &[],
+                offers: &[],
+                home: &[],
             },
             Page {
                 file: "not-offered.json",
                 answers: &[],
                 refused: Some("acme-lint-mcp is not among this session's candidates"),
+                block: &[],
+                offers: &[],
+                home: &[],
             },
         ],
         None,
@@ -903,6 +958,77 @@ fn self_extending_reviewer() {
         let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(flat.contains(ONCE), "{quoted} does not quote `{ONCE}`");
     }
+}
+
+#[test]
+fn project_notebook() {
+    let Some(dir) = agent("project-notebook") else {
+        return;
+    };
+    // The sample project its reply files read. Each reply file on the page
+    // (`load_plugin` is refused under `--once`), against the live npm
+    // (design §14 "Stage 2", PR 7): pi-memory installed, started in a
+    // runtime of its own and its tools called — the write in this test's
+    // own `HOME` (`~/.pi/agent/memory`, a temp folder each run).
+    // `not-offered.json`'s package, `brainjar-pi-notes`, must stay
+    // unpublished (were it found, its load would ask, a question not
+    // expected here).
+    let files: &[(&str, &str)] = &[
+        ("README.md", "# tiny-shop\n\nA small order service: create orders, list them, look one up.\n\n    npm start        # listens on PORT (default 3000)\n\nOrders are kept in memory (src/store.js); they are lost on restart.\n"),
+        ("package.json", "{\n  \"name\": \"tiny-shop\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"type\": \"module\",\n  \"scripts\": { \"start\": \"node src/server.js\" }\n}\n"),
+        ("src/config.js", "export const config = {\n  port: Number(process.env.PORT ?? 3000),\n  maxItemsPerOrder: 20,\n  currency: 'EUR',\n};\n"),
+        ("src/server.js", "import http from 'node:http';\nimport { config } from './config.js';\nimport { createOrder, getOrder, listOrders } from './store.js';\n\nconst server = http.createServer(async (req, res) => {\n  const url = new URL(req.url, 'http://localhost');\n  if (req.method === 'GET' && url.pathname === '/orders') {\n    return send(res, 200, listOrders());\n  }\n  const match = url.pathname.match(/^\\/orders\\/(\\d+)$/);\n  if (req.method === 'GET' && match) {\n    const order = getOrder(Number(match[1]));\n    return order ? send(res, 200, order) : send(res, 404, { error: 'not found' });\n  }\n  if (req.method === 'POST' && url.pathname === '/orders') {\n    let body = '';\n    for await (const chunk of req) body += chunk;\n    const { items } = JSON.parse(body || '{}');\n    if (!Array.isArray(items) || items.length > config.maxItemsPerOrder) {\n      return send(res, 400, { error: 'bad items' });\n    }\n    return send(res, 201, createOrder(items));\n  }\n  send(res, 404, { error: 'not found' });\n});\n\nfunction send(res, status, data) {\n  res.writeHead(status, { 'content-type': 'application/json' });\n  res.end(JSON.stringify(data));\n}\n\nserver.listen(config.port, () => console.log(`tiny-shop on ${config.port}`));\n"),
+        ("src/store.js", "const orders = new Map();\nlet nextId = 1;\n\nexport function createOrder(items) {\n  const order = { id: nextId++, items, createdAt: new Date().toISOString() };\n  orders.set(order.id, order);\n  return order;\n}\n\nexport function getOrder(id) {\n  return orders.get(id) ?? null;\n}\n\nexport function listOrders() {\n  return [...orders.values()];\n}\n"),
+    ];
+    let start = "Start the pi package pi-memory@";
+    let read = "Run `pi-memory__memory_read`, a tool the agent loaded this session?";
+    holds_with(
+        &dir,
+        files,
+        &[],
+        &[
+            Page {
+                file: "demo.json",
+                answers: &[
+                    (start, "Allow"),
+                    ("Keep the pi package pi-memory? It offers: ", "Allow"),
+                    (read, "Allow"),
+                    (
+                        "Run `pi-memory__memory_write`, a tool the agent loaded this session?",
+                        "Allow",
+                    ),
+                    (read, "Allow"),
+                ],
+                refused: None,
+                block: &[
+                    "[[plugin]]\nname = \"pi-memory\"\npi   = \"pi-memory@",
+                    "In agent.toml a pi package runs with the other pi plugins",
+                ],
+                offers: &["memory_read", "memory_write"],
+                home: &[(
+                    ".pi/agent/memory/MEMORY.md",
+                    "#tiny-shop #decision 2026-10-28",
+                )],
+            },
+            Page {
+                file: "blocked.json",
+                answers: &[(start, "Block")],
+                refused: Some("the owner blocked it (start it)"),
+                block: &[],
+                offers: &[],
+                home: &[],
+            },
+            Page {
+                file: "not-offered.json",
+                answers: &[],
+                refused: Some("brainjar-pi-notes is not among this session's candidates"),
+                block: &[],
+                offers: &[],
+                home: &[],
+            },
+        ],
+        None,
+    );
 }
 
 #[test]

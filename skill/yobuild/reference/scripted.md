@@ -154,7 +154,7 @@ found. Nobody is there to answer:
   the next run's start: a tool that refuses to overwrite fails the second
   time. Start each scripted run from the same files.
 
-## A reply file that loads a server (`[extend]`)
+## A reply file that loads a server or package (`[extend]`)
 
 `find_plugin`'s candidates come from the live sources and change: give
 its call an `expect` that holds as they do — the package's name, never a
@@ -162,14 +162,47 @@ version, a count or a position — and give `load_plugin` no `version` (it
 takes the one offered). The next reply calls the loaded tools by
 `<name>__<tool>` (parts.md: the default `name`), with arguments their
 schema takes — `check` cannot list them, as the server is not known
-before the run; parts.md has those of the servers listed there. To see
-them, and that the call and its `expect` hold, put the server in a
-throwaway copy of the manifest as an `[[mcp]]` entry at the version
-`find_plugin` offers (in a folder of its own, outside the agent's), `check`
-it and run that one call scripted; then delete the copy. Run it
+before the run; parts.md has those of the servers and packages listed
+there. To see them, and that the call and its `expect` hold, put it in a
+throwaway copy of the manifest at the version `find_plugin` offers (in a
+folder of its own, outside the agent's) — a server as an `[[mcp]]`
+entry, a pi package as a `[[plugin]]` with `pi = "<package>@<version>"`,
+a DSH package with `dsh = "<package>@<version>"` (there a package's tools
+have their own names, without the `<name>__`), the entry's `allow`
+naming the tool you call (else it asks, and under `--once` nobody
+answers: the call is denied and shows no result) — `check` it and run
+that one call scripted under `--once`; then delete the copy. Pinned
+there, a pi or DSH package also runs its hooks and gets what its grants give,
+which a loaded one does not (pi-memory recalls its memory into each
+turn): the copy shows the tool's arguments and its result text, not how
+the loaded package behaves around it. That run starts
+the package: its code runs on this machine, as in any run. Where running
+a package you have not run before needs the person's yes (a cautious
+environment may refuse it outright), ask them first; else learn its
+tools' arguments and result texts by reading what it publishes, without
+running it — `npm view <package>@<version> readme`, or its files from
+`npm pack <package>@<version>` unpacked in a folder of its own — and say
+in your report that the reply file's arguments and `expect` were read
+there, not tried; the page shows its tools at the second question. A
+package that keeps files outside the agent's folder (pi-memory's
+`~/.pi/agent/memory`) writes there in that run too: run it with a
+throwaway `HOME`, and `YOBUILD_HOME` set to the cache it would use
+otherwise (`~/.yobuild` unless set), or yobuild installs its runtimes
+and the package again under the throwaway one.
+
+A tool whose result depends on what is outside the agent's folder
+(pi-memory's `memory_read`, which reads what earlier sessions wrote)
+answers differently from one machine, or one session, to the next: give
+its call no `expect`, or expect only what this reply file's own earlier
+calls put there (a note it wrote a turn before). Run it
 without `--once`, on the page: the person answers both questions
-(start it, then keep it) and each call of its tools. Under `--once` the
+(start it, then keep it — for a package, "Start the pi package …" and
+"Keep the pi package …") and each call of its tools. Under `--once` the
 same file stops at `load_plugin`'s refusal: that run shows the search.
+
+The commands you give the person for these files — in the manifest's
+header comment, the README — run them without `--once`, on the page;
+under `--once` the loaded tools' calls name tools that are not there.
 
 Do not answer the page yourself (no script or client of your own
 playing the person): run each reply file under `--once`, then tell the
@@ -182,9 +215,11 @@ Three reply files show the shape of a run with `[extend]`:
   and allowed);
 - a package `find_plugin` did not return, refused before anything
   installs (`… is not among this session's candidates …`): the agent
-  goes on without it. The task names the package (the owner's friend
-  recommended it, say); the prompt has the agent search for a package
-  the owner names, propose it, and load nothing in its place when it is
+  goes on without it. Its `find_plugin` call, searching for that name,
+  takes no `expect` (the package is not there to find). The task names
+  the package (the owner's friend recommended it, say); the prompt has
+  the agent search for a package the owner names — by that name, in
+  place of its usual search — propose it, and load nothing in its place when it is
   refused;
 - the person says Block: the agent reports what it could not do.
 
