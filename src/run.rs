@@ -49,7 +49,8 @@ use crate::frontend::{
 };
 use crate::install;
 use crate::manifest::{
-    Gate as GateMode, Manifest, Mcp, PluginKind, Source, Tools as ToolSet, Transport, EXTEND_TOOLS,
+    ExtendKind, Gate as GateMode, Manifest, Mcp, PluginKind, Source, Tools as ToolSet, Transport,
+    EXTEND_TOOLS,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -87,10 +88,16 @@ impl Layout {
         say: &dyn Fn(&str),
     ) -> Result<Self, BoxError> {
         use crate::runtime::{installed, RuntimeSet};
+        // A pi or DSH plugin, or one the agent may load (`[extend]`).
         let adapters = manifest
             .plugins
             .iter()
-            .any(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_)));
+            .any(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_)))
+            || manifest.extend.as_ref().is_some_and(|e| {
+                e.kinds
+                    .iter()
+                    .any(|k| matches!(k, ExtendKind::Pi | ExtendKind::Dsh))
+            });
         let ui = terminal || manifest.plugins.iter().any(|p| p.builtin.is_some());
         if !adapters && !ui {
             return Ok(Self::unneeded());
@@ -342,7 +349,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     )
     .await?;
     let plan = &checked.plan;
-    let mut host = host;
+    // Shared with `load_plugin`, which adds a runtime for each package it
+    // loads; the tick looks only when no load holds it.
+    let host = Arc::new(tokio::sync::Mutex::new(host));
 
     // The tools: yoagent's (in `cwd`), `ask_owner`, each MCP server's; no
     // two of one name. (A plugin's tools come with each run; yoagent keeps
@@ -358,6 +367,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     let files = load::Files {
         manifest: crate::install::file_name(&manifest.path),
         lock: crate::install::file_name(&crate::install::lock_path(&manifest)),
+        shared: load::shared(&manifest),
     };
     if let (Some(extend), Some(sources)) = (&manifest.extend, &checked.sources) {
         // Loaded tools ask only through the gate: the manifest refuses
@@ -379,12 +389,14 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             once,
             home.clone(),
             &cwd,
+            Some(load::Plugins {
+                host: host.clone(),
+                bridge: bridge.clone(),
+                adapters: layout.adapters.clone(),
+            }),
         );
         tools.add(FindPlugin::TOOL, vec![Box::new(find)]);
-        // It loads MCP servers only so far: offered only when it can load.
-        if extend.loads() {
-            tools.add(load::LoadPlugin::TOOL, vec![Box::new(load)]);
-        }
+        tools.add(load::LoadPlugin::TOOL, vec![Box::new(load)]);
     }
     for server in &manifest.mcp {
         let found = mcp(server, &checked.servers[&server.name]).await?;
@@ -408,9 +420,14 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     .with_tool_source(loaded.clone())
     .with_execution_limits(limits(&manifest))
     .with_extension({
+        // A loaded package's runtime is restricted: its tools are named, and
+        // offered, as `Loaded` says (only a kept package's, frozen at the
+        // second question); one loaded mid-run comes through the late source,
+        // which `Loaded` offers after the servers' tools.
+        let extension = bridge.extension().with_restricted_tools(loaded.naming());
+        loaded.set_late(extension.late_tools());
         // A plugin that is the approval policy: no run goes on unguarded —
         // without a policy plugin up, every call is denied.
-        let extension = bridge.extension();
         match manifest.plugins.iter().any(|p| p.policy) {
             true => extension
                 .require_policy()
@@ -433,7 +450,17 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         let loaded = loaded.clone();
         Arc::new(move |tool: &str| loaded.asks(tool)) as crate::builtins::AskedCheck
     };
-    if let Some(gate) = judge.map(|g| agent_gate(g, &manifest, offered).with_asked(asked)) {
+    // A stopped package's tools, still offered by a run that started
+    // before it stopped: refused without asking.
+    let refused = {
+        let loaded = loaded.clone();
+        Arc::new(move |tool: &str| loaded.refused(tool)) as crate::builtins::RefusedCheck
+    };
+    if let Some(gate) = judge.map(|g| {
+        agent_gate(g, &manifest, offered)
+            .with_asked(asked)
+            .with_refused(refused)
+    }) {
         agent = agent.with_extension(gate);
         // A plugin's allowed tools, checked once its tools are offered.
         let names: Vec<(String, String)> = manifest
@@ -483,10 +510,13 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     let ui = "terminal-ui";
     let mut served = None;
     if terminal {
-        host.load([
-            Row::new(ui, layout.frontend.join("plugins/terminal-ui.ts").display()).runtime("ui"),
-        ])
-        .await?;
+        host.lock()
+            .await
+            .load([
+                Row::new(ui, layout.frontend.join("plugins/terminal-ui.ts").display())
+                    .runtime("ui"),
+            ])
+            .await?;
     } else if !once {
         let phone = manifest.frontend.phone;
         let addr = addr.unwrap_or_else(|| match phone {
@@ -556,17 +586,6 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                     let text = task.take().expect("a task");
                     session.send(ClientMessage::Prompt { text });
                 }
-                // A row that fails, stops, or loses its runtime: said once.
-                // (The terminal UI's own row is watched below.)
-                for stopped in host.stopped(&[ui]) {
-                    if reported.insert(stopped.clone()) {
-                        tracing::error!("{stopped}");
-                        session.notice(NoticeLevel::Error, format!("A plugin stopped: {stopped}"));
-                        if let Some(fix) = what_to_do_at_start(&format!("a plugin stopped: {stopped}")) {
-                            session.notice(NoticeLevel::Info, format!("What to do: {fix}."));
-                        }
-                    }
-                }
                 // A loaded server gone, its reason settled: said, and marked
                 // stopped (its tools left when it was first seen gone).
                 for (server, why) in loaded.stopped() {
@@ -576,7 +595,44 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                         format!("The loaded MCP server `{server}` stopped: {why}"),
                     );
                 }
-                if terminal && !host.is_running(ui) {
+                // The host is `load_plugin`'s while it starts a package (up
+                // to a minute or so): what needs it is looked at a later
+                // tick — the terminal UI's end among it.
+                let Ok(host_now) = host.try_lock() else { continue };
+                // A row that fails, stops, or loses its runtime: said once.
+                // (The terminal UI's own row is watched below; a loaded
+                // package's are `Loaded`'s.)
+                for stopped in host_now.stopped(&[ui]) {
+                    if reported.insert(stopped.clone()) {
+                        tracing::error!("{stopped}");
+                        session.notice(NoticeLevel::Error, format!("A plugin stopped: {stopped}"));
+                        if let Some(fix) = what_to_do_at_start(&format!("a plugin stopped: {stopped}")) {
+                            session.notice(NoticeLevel::Info, format!("What to do: {fix}."));
+                        }
+                    }
+                }
+                // A loaded package's runtime or row stopped: said, its tools
+                // gone (`Loaded::packages_stopped`), and its runtime removed
+                // — a process may be left of it — in a task of its own.
+                for stopped in loaded.packages_stopped(&host_now) {
+                    let label = stopped.kind.label();
+                    tracing::error!("the loaded {label} {} stopped: {}", stopped.name, stopped.why);
+                    session.notice(
+                        NoticeLevel::Error,
+                        format!("The loaded {label} `{}` stopped: {}", stopped.name, stopped.why),
+                    );
+                    let (host, session) = (host.clone(), session.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = host.lock().await.remove_runtime(&stopped.runtime).await {
+                            tracing::warn!("removing a stopped package's runtime: {e}");
+                            session.notice(
+                                NoticeLevel::Warning,
+                                format!("The loaded {label} `{}`'s runtime could not be stopped whole: {e}", stopped.name),
+                            );
+                        }
+                    });
+                }
+                if terminal && !host_now.is_running(ui) {
                     break End::UiGone;
                 }
             }
@@ -605,7 +661,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             // Nobody is there to quit: the session would wait for ever.
             session.send(ClientMessage::Quit);
             let agent = driving.await.ok();
-            let why = host.stopped(&[]).join("; ");
+            let why = host.lock().await.stopped(&[]).join("; ");
             (
                 agent,
                 false,
@@ -623,6 +679,14 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // first seen gone after a Ctrl+C, which reached it too).
     for (server, why) in loaded.stopped_at_end(ctrl_c).await {
         tracing::error!("the loaded MCP server {server} stopped: {why}");
+    }
+    for stopped in loaded.packages_stopped(&*host.lock().await) {
+        let label = stopped.kind.label();
+        tracing::error!(
+            "the loaded {label} {} stopped: {}",
+            stopped.name,
+            stopped.why
+        );
     }
     let kept = loaded.kept();
     loaded.close().await;
@@ -679,11 +743,8 @@ fn gate(
     if manifest.builtins.ask_owner {
         gate = gate.with_allowed_tools([AskOwner::TOOL]);
     }
-    if let Some(extend) = &manifest.extend {
-        gate = gate.with_allowed_tools([FindPlugin::TOOL]);
-        if extend.loads() {
-            gate = gate.with_allowed_tools([load::LoadPlugin::TOOL]);
-        }
+    if manifest.extend.is_some() {
+        gate = gate.with_allowed_tools([FindPlugin::TOOL, load::LoadPlugin::TOOL]);
     }
     Some(gate)
 }
@@ -1137,7 +1198,7 @@ fn prepare(
     // The MCP registry only for an agent that finds MCP servers: a bad
     // `YOBUILD_MCP_REGISTRY` refuses nothing it would not use.
     let sources = match &manifest.extend {
-        Some(extend) if extend.loads() => Some(Sources::from_env()?),
+        Some(extend) if extend.finds_mcp() => Some(Sources::from_env()?),
         Some(_) => Some(Sources::npm_only()),
         None => None,
     };
@@ -1569,7 +1630,7 @@ async fn dsh_services(
 ) -> Result<(), BoxError> {
     let mut missing = Vec::new();
     for wait in [1000, 3000] {
-        missing = probe_services(host, &plan.dsh_dir, &plan.dsh_modules, &[], wait).await?;
+        missing = probe_services(host, "dsh", &plan.dsh_dir, &plan.dsh_modules, &[], wait).await?;
         if missing.is_empty() {
             return Ok(());
         }
@@ -2025,6 +2086,7 @@ async fn dsh_host_started(host: &mut PluginHost, plan: &plugins::Plan) -> Result
     for wait in [1000, 3000] {
         missing = probe_services(
             host,
+            "dsh",
             &plan.dsh_dir,
             std::slice::from_ref(&module),
             &[DSH_HOST_SERVICE],
@@ -2123,12 +2185,14 @@ fn dsh_missing(missing: &[String], plan: &plugins::Plan, host_services: bool) ->
     .into()
 }
 
-/// One look by `adapters/dsh/probe-services.ts` after `wait_ms`: the
+/// One look by `adapters/dsh/probe-services.ts`, in the DSH runtime
+/// `runtime` (`dsh`, or one `load_plugin` added), after `wait_ms`: the
 /// services missing; an error for modules that cannot be imported, an
 /// answer not in its shape, or a probe that fails or does not answer. The
 /// probe is unloaded however it went.
-async fn probe_services(
+pub(crate) async fn probe_services(
     host: &mut PluginHost,
+    runtime: &str,
     base: &Path,
     modules: &[String],
     names: &[&str],
@@ -2136,12 +2200,22 @@ async fn probe_services(
 ) -> Result<Vec<String>, BoxError> {
     let out = tempfile::NamedTempFile::new()?.into_temp_path();
     std::fs::remove_file(&out)?;
-    let id = "yobuild:dsh-services";
+    let id = match runtime {
+        "dsh" => "yobuild:dsh-services".to_owned(),
+        added => format!("yobuild:dsh-services:{added}"),
+    };
+    let id = id.as_str();
     // What had stopped already is another's: only what stops meanwhile
-    // (the probe, or the `dsh` runtime under it) fails it.
-    let before = host.stopped(&[]);
+    // (the probe, or the runtime under it) fails it. An added runtime's
+    // rows are said apart.
+    let stopped = |host: &PluginHost| {
+        let mut all = host.stopped(&[]);
+        all.extend(host.added_stopped(runtime));
+        all
+    };
+    let before = stopped(host);
     host.load([Row::new(id, base.join("probe-services.ts").display())
-        .runtime("dsh")
+        .runtime(runtime)
         .config(serde_json::json!({
             "modules": modules,
             "names": names,
@@ -2159,8 +2233,7 @@ async fn probe_services(
                 break Ok(text);
             }
         }
-        let failures: Vec<String> = host
-            .stopped(&[])
+        let failures: Vec<String> = stopped(host)
             .into_iter()
             .filter(|f| !before.contains(f))
             .collect();
@@ -3296,7 +3369,8 @@ mod tests {
     }
 
     /// Which of yobuild's runtime sets a manifest needs (design §13): none
-    /// for no plugin (and no home looked up), `adapters` for pi or DSH, `ui`
+    /// for no plugin (and no home looked up), `adapters` for pi or DSH (or
+    /// `[extend]` finding them), `ui`
     /// for a built-in or the terminal UI, neither for a rutis plugin of
     /// one's own; and when Node and npm are needed.
     #[test]
@@ -3327,6 +3401,14 @@ mod tests {
         for (entries, terminal, want) in [
             ("[[plugin]]\npi = \"./p.ts\"\n", false, (true, false)),
             ("[[plugin]]\ndsh = \"./d.ts\"\n", false, (true, false)),
+            // A package the agent may load runs on the adapters too.
+            ("[extend]\nkinds = [\"pi\"]\n", false, (true, false)),
+            (
+                "[extend]\nkinds = [\"mcp\", \"dsh\"]\n",
+                false,
+                (true, false),
+            ),
+            ("[extend]\n", false, (false, false)),
             (
                 "[[plugin]]\nrutis = \"yobuild:todo-plan\"\n",
                 false,

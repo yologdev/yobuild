@@ -1115,6 +1115,20 @@ impl PluginHost {
         dir: impl Into<PathBuf>,
         shared: &[&str],
     ) -> Result<(), BoxError> {
+        self.add_runtime_with(name, dir, shared, |_| {}).await
+    }
+
+    /// [`add_runtime`](Self::add_runtime), `before` given the runtime's
+    /// handle before it starts: where yoagent-rutis's
+    /// `RutisBridge::restrict_runtime` marks it, so every handler it
+    /// registers is tools only (design §14 "Stage 2").
+    pub async fn add_runtime_with(
+        &mut self,
+        name: impl Into<String>,
+        dir: impl Into<PathBuf>,
+        shared: &[&str],
+        before: impl FnOnce(&RuntimeHandle),
+    ) -> Result<(), BoxError> {
         let (name, dir) = (name.into(), dir.into());
         let plain = !name.is_empty()
             && name
@@ -1148,6 +1162,7 @@ impl PluginHost {
         let runtime = LocalRuntime::launcher(name.clone(), launcher, dir.join("package.json"));
         let (handle, processes) = (runtime.handle(), runtime.processes());
         let resolver = Arc::new(RuntimeResolver::node(handle.clone()).with_catalog(&catalog));
+        before(&handle);
         // Spent until it is stopped cleanly below: a call dropped while it
         // waits leaves the name used.
         self.used.push(name.clone());
@@ -1232,6 +1247,29 @@ impl PluginHost {
         }
     }
 
+    /// Why the added runtime `name` or its rows do not run, each: the
+    /// runtime down or no longer running, else every row that failed,
+    /// stopped itself or waits (an added runtime's rows run once `load`
+    /// returned: one waiting since has lost something). Empty while all
+    /// run, while the runtime starts, and for a runtime not added.
+    pub fn added_stopped(&self, name: &str) -> Vec<String> {
+        match self.added_state(name) {
+            None | Some(RuntimeState::Starting) => return Vec::new(),
+            Some(RuntimeState::Down(why)) => return vec![format!("its runtime stopped: {why}")],
+            Some(RuntimeState::Idle) => return vec!["its runtime is no longer running".into()],
+            Some(RuntimeState::Ready(_)) => {}
+        }
+        self.rows
+            .iter()
+            .filter(|row| row.runtime_is(name))
+            .filter_map(|row| match self.state(&row.id) {
+                Started::Running => None,
+                Started::Failed(why) => Some(why),
+                Started::Waiting => Some(format!("plugin `{}` is not running (it waits)", row.id)),
+            })
+            .collect()
+    }
+
     fn is_added(&self, runtime: &str) -> bool {
         self.views.iter().any(|(n, _)| n == runtime)
     }
@@ -1280,15 +1318,16 @@ impl PluginHost {
     /// that failed or stopped itself; and, per runtime, the rows waiting —
     /// a runtime that died leaves its rows `Pending`, and nothing restarts
     /// it — said once for the runtime, without their passing states.
-    /// `except` rows are left out (one the caller watches itself).
+    /// `except` rows are left out (one the caller watches itself), and so
+    /// are the rows of an added runtime: its caller's to watch, through
+    /// [`added_stopped`](Self::added_stopped).
     pub fn stopped(&self, except: &[&str]) -> Vec<String> {
         let mut out = Vec::new();
         let mut waiting: Vec<(String, Vec<&str>)> = Vec::new();
-        for row in self
-            .rows
-            .iter()
-            .filter(|r| !except.contains(&r.id.as_str()))
-        {
+        for row in self.rows.iter().filter(|r| {
+            !except.contains(&r.id.as_str())
+                && !r.runtime.as_ref().is_some_and(|n| self.is_added(n))
+        }) {
             match self.state(&row.id) {
                 Started::Running => {}
                 Started::Failed(why) => out.push(why),

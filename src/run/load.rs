@@ -1,17 +1,20 @@
 //! `load_plugin` (`[extend]`, design §14): the agent proposes one MCP stdio
-//! server that `find_plugin` returned this session; yobuild installs it
-//! without running anything, asks the owner, starts it and lists its tools,
-//! asks again with the tools in front of them, and only then offers them —
-//! through [`Loaded`], a tool source yoagent asks again at the next turn
-//! (yoagent 0.25.14's `generation`); they leave that list once yoagent's
-//! exit watch (0.25.15) says their server has gone. Every loaded tool asks, call by call
-//! (the gate's [`Gate::with_asked`](crate::builtins::Gate::with_asked)).
-//! For the session only: nothing is written to `agent.toml` or its lock.
+//! server, pi package or DSH package that `find_plugin` returned this
+//! session; yobuild installs it without running anything, asks the owner,
+//! starts it and lists its tools, asks again with the tools in front of
+//! them, and only then offers them — through [`Loaded`], a tool source
+//! yoagent asks again at the next turn (yoagent 0.25.14's `generation`); a
+//! server's leave that list once yoagent's exit watch (0.25.15) says it has
+//! gone. A pi or DSH package runs in a Node runtime of its own, marked
+//! restricted (yoagent-rutis 0.9: tools only; `package.rs`). Every loaded
+//! tool asks, call by call (the gate's
+//! [`Gate::with_asked`](crate::builtins::Gate::with_asked)). For the session
+//! only: nothing is written to `agent.toml` or its lock.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value as Json};
@@ -20,6 +23,7 @@ use yoagent::tool_source::ToolSource;
 use yoagent::{AgentTool, Content, ToolContext, ToolError, ToolResult};
 
 use crate::builtins::{find_plugin, Candidate, FindPlugin};
+use crate::frontend::host::PluginHost;
 use crate::frontend::session::UI_TIMEOUT;
 use crate::frontend::{NoticeLevel, Session, UiRequest};
 use crate::manifest::{Extend, ExtendKind, Manifest};
@@ -33,24 +37,30 @@ const DESCRIPTION_CHARS: usize = 300;
 const SCHEMA_CHARS: usize = 400;
 const DAY: i64 = 24 * 60 * 60;
 
-/// A server the owner kept this session, as the end of the session says
-/// it. Made only by `load` once both questions were allowed: `name` passed
-/// [`name_problem`] and `tools` [`tools_problem`] (each once, each
-/// `<name>__<tool>` a tool name), which [`Loaded::asks`] relies on.
+mod package;
+pub(crate) use package::Plugins;
+
+/// A server or package the owner kept this session, as the end of the
+/// session says it. Made only by `load` once both questions were allowed:
+/// `name` passed [`name_problem`] and `tools` [`tools_problem`] (each once,
+/// each `<name>__<tool>` a tool name), which [`Loaded::asks`] relies on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Kept {
+    pub kind: ExtendKind,
     pub name: String,
     pub package: String,
     pub version: String,
+    /// A server's arguments (a package takes none).
     pub args: Vec<String>,
-    /// As the server names them (the agent sees `<name>__<tool>`).
+    /// As the server or plugin names them (the agent sees
+    /// `<name>__<tool>`).
     pub tools: Vec<String>,
     /// Why it stopped, once it was seen to.
     pub stopped: Option<String>,
 }
 
 impl Kept {
-    /// The `[[mcp]]` block that would keep it.
+    /// The `[[mcp]]` (or `[[plugin]]`) block that would keep it.
     pub fn block(&self) -> String {
         let quoted = |items: &[String]| {
             items
@@ -59,8 +69,13 @@ impl Kept {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let (table, key) = match self.kind {
+            ExtendKind::Mcp => ("mcp", "npm  "),
+            ExtendKind::Pi => ("plugin", "pi   "),
+            ExtendKind::Dsh => ("plugin", "dsh  "),
+        };
         let mut block = format!(
-            "[[mcp]]\nname = {}\nnpm  = {}\n",
+            "[[{table}]]\nname = {}\n{key}= {}\n",
             Json::String(self.name.clone()),
             Json::String(format!("{}@{}", self.package, self.version))
         );
@@ -76,16 +91,61 @@ impl Kept {
 }
 
 /// The manifest's file and its lock's, as the owner names them
-/// (`agent.toml`, `agent.lock`; `handoff.toml`, `handoff.lock`).
+/// (`agent.toml`, `agent.lock`; `handoff.toml`, `handoff.lock`), and what a
+/// pi or DSH package put in it would share with the manifest's plugins of
+/// its kind ([`shared`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Files {
     pub manifest: String,
     pub lock: String,
+    pub shared: Vec<(ExtendKind, String)>,
+}
+
+/// The grants a pi or DSH package added to `manifest` would have to share
+/// with its plugins of that kind (design §12, "One rule for both
+/// ecosystems"), said when they have any: pi's `model` and `env`, the DSH
+/// plugins' grants.
+pub(crate) fn shared(manifest: &Manifest) -> Vec<(ExtendKind, String)> {
+    use crate::manifest::PluginKind;
+    let mut out = Vec::new();
+    let pi = manifest
+        .plugins
+        .iter()
+        .find(|p| matches!(p.kind, PluginKind::Pi(_)));
+    if let Some(p) = pi {
+        let mut grants = Vec::new();
+        if p.grants.model.is_some() {
+            grants.push("`model`".to_owned());
+        }
+        if !p.grants.env.is_empty() {
+            grants.push(format!("`env` ({})", p.grants.env.join(", ")));
+        }
+        if !grants.is_empty() {
+            out.push((
+                ExtendKind::Pi,
+                format!("the pi plugins' {}", grants.join(" and ")),
+            ));
+        }
+    }
+    let dsh = manifest
+        .plugins
+        .iter()
+        .find(|p| matches!(p.kind, PluginKind::Dsh(_)));
+    if let Some(p) = dsh {
+        let said = p.grants.said();
+        if !said.is_empty() {
+            out.push((
+                ExtendKind::Dsh,
+                format!("the DSH plugins' grants ({})", said.join(", ")),
+            ));
+        }
+    }
+    out
 }
 
 /// What the session loaded, said when it ends (on stderr) and as each is
-/// kept (an Info notice): the `[[mcp]]` blocks that would keep them, a
-/// server that stopped marked so.
+/// kept (an Info notice): the `[[mcp]]` and `[[plugin]]` blocks that would
+/// keep them, one that stopped marked so.
 pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
     let mut text = String::from("Loaded this session: ");
     text.push_str(
@@ -116,8 +176,51 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
         text.push('\n');
         text.push_str(&k.block());
     }
+    for kind in [ExtendKind::Pi, ExtendKind::Dsh] {
+        if !kept.iter().any(|k| k.kind == kind) {
+            continue;
+        }
+        let (plugins, set) = match kind {
+            ExtendKind::Pi => ("pi plugins", "pi"),
+            ExtendKind::Dsh => ("DSH plugins", "dsh"),
+            ExtendKind::Mcp => continue,
+        };
+        text.push_str(&format!(
+            "\nIn {} a {} runs with the other {plugins}, in the `{set}` runtime, its hooks too, its tools under their own names",
+            files.manifest,
+            kind.label()
+        ));
+        match files.shared.iter().find(|(k, _)| *k == kind) {
+            Some((_, grants)) => {
+                text.push_str(&format!(": give it {grants}, as they share them.\n"))
+            }
+            None => text.push_str(".\n"),
+        }
+    }
+    let mut sets: Vec<&str> = Vec::new();
+    for k in kept {
+        let set = match k.kind {
+            ExtendKind::Mcp => "mcp",
+            ExtendKind::Pi => "pi",
+            ExtendKind::Dsh => "dsh",
+        };
+        if !sets.contains(&set) {
+            sets.push(set);
+        }
+    }
+    let sets = match sets.as_slice() {
+        [one] => format!("the lock's `{one}` set"),
+        [rest @ .., last] => format!(
+            "the lock's {} and `{last}` sets",
+            rest.iter()
+                .map(|s| format!("`{s}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        [] => String::new(),
+    };
     text.push_str(&format!(
-        "\nThe next run resolves {its} dependencies again (the lock's `mcp` set, without the age limit) and writes {}, which --locked needs.",
+        "\nThe next run resolves {its} dependencies again ({sets}, without the age limit) and writes {}, which --locked needs.",
         files.lock
     ));
     text
@@ -193,29 +296,76 @@ impl Server {
     }
 }
 
+/// A kept package found stopped ([`Loaded::packages_stopped`]).
+pub(crate) struct Stopped {
+    pub name: String,
+    pub kind: ExtendKind,
+    /// Its runtime, to remove.
+    pub runtime: String,
+    pub why: String,
+}
+
+/// A pi or DSH package the owner kept, running in its runtime.
+struct Running {
+    name: String,
+    /// Its added runtime (`loaded-<n>`).
+    runtime: String,
+    /// Its adapter's handler: the one whose tools it offers.
+    handler: String,
+    /// Its tools as the plugin names them, as the owner saw them.
+    tools: Vec<String>,
+}
+
 #[derive(Default)]
 struct Lists {
     /// The servers running (or found gone, until [`Loaded::stopped`]).
     servers: Vec<Server>,
-    /// Every server kept this session, stopped ones too: never shrinks,
-    /// and holds each server before its tools are offered (one lock).
+    /// The packages running (until found stopped).
+    packages: Vec<Running>,
+    /// Packages being loaded: their adapter's handler, and the name their
+    /// tools take (read for the second question).
+    loading: Vec<(String, String)>,
+    /// Every server and package kept this session, stopped ones too: never
+    /// shrinks, and holds each before its tools are offered (one lock).
     kept: Vec<Kept>,
 }
 
 #[derive(Default)]
 struct Shared {
     lists: Mutex<Lists>,
-    /// Moves on each load, each server found gone and the close; only
-    /// forward.
+    /// Moves on each load, each server or package found gone and the
+    /// close; only forward.
     generation: AtomicU64,
+    /// The bridge's source of restricted handlers registered mid-run
+    /// (yoagent-rutis 0.9's `late_tools`): a package loaded during a run.
+    late: OnceLock<yoagent_rutis::LateTools>,
 }
 
-/// The servers loaded this session, as a tool source: their tools, and a
-/// generation bumped on each load and each server found gone, so yoagent
-/// offers the change from the next turn. Clones share it. Dropped, the
-/// servers are stopped (each `kill_on_drop`).
+/// What the agent loaded this session, as a tool source: the servers'
+/// tools and, through the bridge's late source, the tools of packages kept
+/// during the run; a generation bumped on each load and each found gone, so
+/// yoagent offers the change from the next turn. A package's tools in later
+/// runs come from the bridge's extension, named by
+/// [`restricted_name`](Loaded::restricted_name). Clones share it (the
+/// naming closure the bridge keeps holds it weakly: [`naming`](Loaded::naming)).
+/// Dropped, the servers are stopped (each `kill_on_drop`); `run` closes it
+/// at the session's end in any case.
 #[derive(Clone, Default)]
 pub(crate) struct Loaded(Arc<Shared>);
+
+/// Takes a load's handler out of [`Lists::loading`] however the load ends.
+struct Loading {
+    loaded: Loaded,
+    handler: String,
+}
+
+impl Drop for Loading {
+    fn drop(&mut self) {
+        locked(&self.loaded.0.lists)
+            .loading
+            .retain(|(h, _)| *h != self.handler);
+    }
+}
 
 fn locked<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -232,9 +382,142 @@ impl Loaded {
         })
     }
 
-    /// Every server kept this session, stopped ones too.
+    /// Why `tool` is refused without asking, if it is: a tool of a package
+    /// kept and stopped since. A run that started before it stopped still
+    /// offers it (its tools came with the run's start); a server's leave
+    /// at the next turn, as `Loaded` offers them.
+    pub fn refused(&self, tool: &str) -> Option<String> {
+        locked(&self.0.lists).kept.iter().find_map(|k| {
+            let own = tool
+                .strip_prefix(&k.name)
+                .and_then(|t| t.strip_prefix("__"))
+                .is_some_and(|t| k.tools.iter().any(|own| own == t));
+            let why = k.stopped.as_ref().filter(|_| own)?;
+            match k.kind {
+                // Its tools left at the next turn (`Loaded` offers them).
+                ExtendKind::Mcp => None,
+                ExtendKind::Pi | ExtendKind::Dsh => Some(format!(
+                    "`{tool}` is a tool of the {} `{}`, which stopped this session ({why}): it is not run",
+                    k.kind.label(),
+                    k.name
+                )),
+            }
+        })
+    }
+
+    /// [`restricted_name`](Self::restricted_name) for the bridge's extension
+    /// (`with_restricted_tools`), holding `Loaded` weakly: the late source
+    /// `Loaded` holds keeps the closure, which would otherwise keep `Loaded`.
+    pub fn naming(&self) -> impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static {
+        let weak = Arc::downgrade(&self.0);
+        move |handler, tool| Loaded(weak.upgrade()?).restricted_name(handler, tool)
+    }
+
+    /// Every server and package kept this session, stopped ones too.
     pub fn kept(&self) -> Vec<Kept> {
         locked(&self.0.lists).kept.clone()
+    }
+
+    /// The bridge's late source, once: set where the agent is built.
+    pub fn set_late(&self, late: yoagent_rutis::LateTools) {
+        if self.0.late.set(late).is_err() {
+            tracing::warn!("the late tools were set twice; the first kept");
+        }
+    }
+
+    /// The name a restricted handler's tool is offered under (the bridge
+    /// extension's `with_restricted_tools`): a package being loaded,
+    /// `<name>__<tool>` for each, so its tools can be read for the second
+    /// question; a package kept and running, only the tools the owner saw;
+    /// anything else — another restricted handler, a package blocked or
+    /// stopped — `None`, left out.
+    pub fn restricted_name(&self, handler: &str, tool: &str) -> Option<String> {
+        let lists = locked(&self.0.lists);
+        let loading = lists
+            .loading
+            .iter()
+            .find(|(h, _)| h == handler)
+            .map(|(_, name)| name);
+        let running = lists
+            .packages
+            .iter()
+            .find(|p| p.handler == handler && p.tools.iter().any(|t| t == tool))
+            .map(|p| &p.name);
+        loading.or(running).map(|name| format!("{name}__{tool}"))
+    }
+
+    /// A load of the package `name`, whose adapter registers `handler`, in
+    /// progress until the guard drops.
+    fn loading(&self, handler: &str, name: &str) -> Loading {
+        locked(&self.0.lists)
+            .loading
+            .push((handler.to_owned(), name.to_owned()));
+        Loading {
+            loaded: self.clone(),
+            handler: handler.to_owned(),
+        }
+    }
+
+    /// The tools of the package being loaded as `name`, as the late source
+    /// offers them this run (it asks the handler's `tools` once a run): for
+    /// the second question. None read is said as such: the source logs a
+    /// `tools` that failed, and tells nothing else.
+    async fn read_tools(&self, name: &str) -> Result<Vec<Arc<dyn AgentTool>>, String> {
+        let Some(late) = self.0.late.get() else {
+            return Err("its tools cannot be read: the bridge's late tools are not set".into());
+        };
+        let prefix = format!("{name}__");
+        let tools: Vec<_> = late
+            .tools()
+            .await
+            .into_iter()
+            .filter(|t| t.name().starts_with(&prefix))
+            .collect();
+        match tools.is_empty() {
+            true => Err("it offered no tools as a loaded package gets them (in a runtime of its own, no grants, no config), or its adapter's `tools` failed (the log says)".into()),
+            false => Ok(tools),
+        }
+    }
+
+    fn add_package(&self, kept: Kept, running: Running) {
+        let mut lists = locked(&self.0.lists);
+        lists.kept.push(kept);
+        lists.packages.push(running);
+        self.0.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The packages whose runtime or a row has stopped: taken out and
+    /// marked stopped — the run that loaded one drops its tools at the next
+    /// turn, later runs leave them out, and a run started before it stopped
+    /// has them [`refused`](Self::refused) without asking. `run`'s tick
+    /// asks, with the host, and removes each one's runtime.
+    pub fn packages_stopped(&self, host: &PluginHost) -> Vec<Stopped> {
+        let mut lists = locked(&self.0.lists);
+        let mut out = Vec::new();
+        lists.packages.retain(|p| {
+            let why = host.added_stopped(&p.runtime);
+            if why.is_empty() {
+                return true;
+            }
+            out.push((p.name.clone(), p.runtime.clone(), why.join("; ")));
+            false
+        });
+        let mut said = Vec::new();
+        for (name, runtime, why) in out {
+            let k = lists.kept.iter_mut().find(|k| k.name == name);
+            let k = k.expect("a running package is kept");
+            k.stopped = Some(why.clone());
+            said.push(Stopped {
+                name,
+                kind: k.kind,
+                runtime,
+                why,
+            });
+        }
+        if !said.is_empty() {
+            self.0.generation.fetch_add(1, Ordering::SeqCst);
+        }
+        said
     }
 
     /// Looks at each running server's exit watch: one newly gone is marked
@@ -326,21 +609,43 @@ impl ToolSource for Loaded {
     /// The running servers' tools: one seen gone is left out at once. A
     /// server's `list_changed` is not heeded: its tools are those the
     /// owner saw at the second question.
+    ///
+    /// Then the packages' tools the late source offers this run: only a
+    /// kept, running package's (the source still holds one blocked at the
+    /// second question, or stopped since). Asked without the lists' lock:
+    /// the source names tools through [`restricted_name`](Self::restricted_name).
     async fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
-        let lists = locked(&self.0.lists);
-        self.look(&lists);
-        lists
-            .servers
-            .iter()
-            .filter(|s| !s.is_gone())
-            .flat_map(|s| s.tools.iter().cloned())
-            .collect()
+        let mut tools: Vec<Arc<dyn AgentTool>> = {
+            let lists = locked(&self.0.lists);
+            self.look(&lists);
+            lists
+                .servers
+                .iter()
+                .filter(|s| !s.is_gone())
+                .flat_map(|s| s.tools.iter().cloned())
+                .collect()
+        };
+        if let Some(late) = self.0.late.get() {
+            let late = late.tools().await;
+            let lists = locked(&self.0.lists);
+            let offered = |name: &str| {
+                lists.packages.iter().any(|p| {
+                    name.strip_prefix(&p.name)
+                        .and_then(|t| t.strip_prefix("__"))
+                        .is_some_and(|t| p.tools.iter().any(|own| own == t))
+                })
+            };
+            tools.extend(late.into_iter().filter(|t| offered(t.name())));
+        }
+        tools
     }
 
-    /// Looks first, so a server gone since moves it before yoagent reads it.
+    /// Looks first, so a server gone since moves it before yoagent reads it;
+    /// the late source's moves too (both only forward).
     fn generation(&self) -> u64 {
         self.look(&locked(&self.0.lists));
-        self.0.generation.load(Ordering::SeqCst)
+        let late = self.0.late.get().map_or(0, |l| l.generation());
+        self.0.generation.load(Ordering::SeqCst).wrapping_add(late)
     }
 }
 
@@ -427,6 +732,13 @@ struct State {
     attempts: u32,
     /// Packages the owner blocked: not proposed again this session.
     blocked: BTreeSet<String>,
+    /// Runtimes added for packages: each load's is `loaded-<n>`, a name
+    /// never used again (the loader keeps a name's resolution).
+    runtimes: u32,
+    /// Names a package load started a runtime under: not given again this
+    /// session, kept or not — the bridge's late source keeps a run's tools
+    /// by name, and would offer the earlier load's under it.
+    tried: BTreeSet<String>,
 }
 
 /// The `load_plugin` tool. Clones share the session's state.
@@ -444,6 +756,11 @@ pub(crate) struct LoadPlugin {
     cwd: PathBuf,
     /// The credentials set here, taken out of its environment.
     withheld: Arc<Vec<String>>,
+    /// The credentials yoagent reads (the helper scripts' environment).
+    keys: Arc<Vec<String>>,
+    /// What a pi or DSH package runs on; `None` in `check`, which loads
+    /// nothing.
+    plugins: Option<Plugins>,
     state: Arc<Mutex<State>>,
 }
 
@@ -489,6 +806,7 @@ impl LoadPlugin {
         once: bool,
         home: Option<PathBuf>,
         cwd: &Path,
+        plugins: Option<Plugins>,
     ) -> Self {
         let taken = manifest
             .plugins
@@ -507,6 +825,8 @@ impl LoadPlugin {
             home,
             cwd: cwd.to_path_buf(),
             withheld: Arc::new(super::withheld(manifest)),
+            keys: Arc::new(manifest.key_variables()),
+            plugins,
             state: Arc::default(),
         }
     }
@@ -531,26 +851,21 @@ impl LoadPlugin {
             ));
         }
         // A package found as several kinds is loaded as the MCP server it
-        // also is; found only as another kind, it is refused as that.
+        // also is, else as the first kind it was found as.
         let candidates = self.find.candidates();
-        let mut named = candidates.into_iter().filter(|c| c.package == package);
-        let Some(first) = named.next() else {
+        let named: Vec<Candidate> = candidates
+            .into_iter()
+            .filter(|c| c.package == package)
+            .collect();
+        let Some(first) = named.first().cloned() else {
             return Err(refused(format!(
                 "{package} is not among this session's candidates: only a package find_plugin returned can be loaded"
             )));
         };
-        let candidate = match first.kind {
-            ExtendKind::Mcp => first,
-            _ => match named.find(|c| c.kind == ExtendKind::Mcp) {
-                Some(mcp) => mcp,
-                None => {
-                    return Err(refused(format!(
-                        "{package} is a {}: load_plugin loads MCP servers only so far (loading pi and DSH packages comes in a later step); to use it, name it in the manifest as a [[plugin]] (nothing was counted)",
-                        first.kind.label()
-                    )))
-                }
-            },
-        };
+        let candidate = named
+            .into_iter()
+            .find(|c| c.kind == ExtendKind::Mcp)
+            .unwrap_or(first);
         let version = match (&candidate.version, version) {
             (Err(why), _) => {
                 return Err(refused(format!("{package} is not loadable: {why}")))
@@ -590,7 +905,7 @@ impl LoadPlugin {
         let kept = self.loaded.kept().len();
         if kept >= self.extend.max_loads as usize {
             return Err(refused(format!(
-                "this session has loaded {kept} servers, as many as it may ([extend] max_loads {})",
+                "this session has loaded {kept} plugins, as many as it may ([extend] max_loads {})",
                 self.extend.max_loads
             )));
         }
@@ -614,6 +929,11 @@ impl LoadPlugin {
         if self.taken.contains(&name) || self.loaded.kept().iter().any(|k| k.name == name) {
             return Err(pass_another(format!(
                 "the name {name:?} is in use by another plugin or server"
+            )));
+        }
+        if locked(&self.state).tried.contains(&name) {
+            return Err(pass_another(format!(
+                "the name {name:?} was used by an earlier load this session"
             )));
         }
         Ok(name)
@@ -667,6 +987,17 @@ impl LoadPlugin {
         };
         let (candidate, version, _busy) = self.limits(&package, version.as_deref())?;
         let name = self.name(&package, given.as_deref())?;
+        if candidate.kind != ExtendKind::Mcp {
+            if !args.is_empty() {
+                return Err(refused(format!(
+                    "a {} takes no `args` (they are an MCP server's)",
+                    candidate.kind.label()
+                )));
+            }
+            return self
+                .load_package(&candidate, &package, &version, &name, ctx)
+                .await;
+        }
         // 3. What it is handed.
         crate::manifest::loaded_arguments(&args).map_err(refused)?;
         if let Some(env) = candidate.required_env.as_ref().filter(|e| !e.is_empty()) {
@@ -677,21 +1008,46 @@ impl LoadPlugin {
         }
         // 4. Installed, running nothing; its program and what its code
         // reads found by reading files.
+        let withheld = self.withheld.clone();
+        let package_ = package.clone();
         let Installed {
             bin,
             scripts,
             reads,
-        } = self.install(&package, &version, ctx).await?;
+        } = self
+            .install(
+                crate::install::Set::Mcp,
+                &package,
+                &version,
+                ctx,
+                move |dir, scripts| {
+                    let code = dir.join("node_modules").join(&package_);
+                    Ok(Installed {
+                        bin: bin(&code, &package_)?,
+                        scripts,
+                        reads: reads(&code, &withheld),
+                    })
+                },
+            )
+            .await?;
         // 5. Ask: start it?
         let details = first_details(
-            &candidate, &version, &name, &args, &self.cwd, &scripts, &reads,
+            &candidate,
+            &version,
+            &name,
+            &args,
+            &self.cwd,
+            &scripts,
+            &reads,
+            &[],
         );
         let title =
             format!("Start the MCP server {package}@{version} as {name}? (asked by the agent)");
         self.ask(title, details, &package, "start it", ctx).await?;
         // 6. Started, its tools listed and judged.
         let (client, exit, listed) = self.start(&package, &bin, &args, ctx).await?;
-        let own = tools_problem(&name, &listed).map_err(|e| failed(format!("{package}: {e}")))?;
+        let names: Vec<String> = listed.iter().map(|t| t.name.clone()).collect();
+        let own = tools_problem(&name, &names).map_err(|e| failed(format!("{package}: {e}")))?;
         // 7. Ask: keep it?
         let title = format!(
             "Keep the MCP server {name}? It offers: {}",
@@ -700,7 +1056,16 @@ impl LoadPlugin {
         if let Err(no) = self
             .ask(
                 title,
-                second_details(&name, &listed),
+                second_details(
+                    "the server",
+                    listed.iter().map(|t| {
+                        (
+                            format!("{name}__{}", t.name),
+                            t.description.clone().unwrap_or_default(),
+                            t.input_schema.clone(),
+                        )
+                    }),
+                ),
                 &package,
                 "keep it",
                 ctx,
@@ -731,6 +1096,7 @@ impl LoadPlugin {
             .collect();
         let names: Vec<String> = tools.iter().map(|t| t.name().to_owned()).collect();
         let kept = Kept {
+            kind: ExtendKind::Mcp,
             name: name.clone(),
             package: package.clone(),
             version: version.clone(),
@@ -753,19 +1119,22 @@ impl LoadPlugin {
         ))
     }
 
-    /// Step 4: a one-entry `mcp` set, every package in its tree published
-    /// `min_age_days` ago, installed without its scripts; then its program
-    /// and what its code reads, by reading files — all off the async
-    /// threads. Stopped (npm killed, the partial folder removed) when the
-    /// run is: the blocking thread may outlive this call by the moment npm
-    /// takes to see `stop`, and a later load meanwhile makes its own
-    /// `.partial-` folder (`install_set`'s rename decides).
-    async fn install(
+    /// Step 4: a one-entry set of `set`, every package in its tree
+    /// published `min_age_days` ago, installed without its scripts; then
+    /// `then` with its folder and the install scripts not run — what it
+    /// finds by reading files — all off the async threads. Stopped (npm
+    /// killed, the partial folder removed) when the run is: the blocking
+    /// thread may outlive this call by the moment npm takes to see `stop`,
+    /// and a later load meanwhile makes its own `.partial-` folder
+    /// (`install_set`'s rename decides).
+    async fn install<T: Send + 'static>(
         &self,
+        set: crate::install::Set,
         package: &str,
         version: &str,
         ctx: &ToolContext,
-    ) -> Result<Installed, Refused> {
+        then: impl FnOnce(PathBuf, Vec<String>) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, Refused> {
         let before = match self.extend.min_age_days {
             0 => None,
             days => {
@@ -779,7 +1148,10 @@ impl LoadPlugin {
         let _stop = StopOnDrop(stop.clone());
         let (home, package_, version_) =
             (self.home.clone(), package.to_owned(), version.to_owned());
-        let withheld = self.withheld.clone();
+        let adapters = self
+            .plugins
+            .as_ref()
+            .map_or_else(PathBuf::new, |p| p.adapters.clone());
         let installing = tokio::task::spawn_blocking(move || {
             let how = crate::install::NpmRun {
                 limit: NPM_TIME,
@@ -787,21 +1159,15 @@ impl LoadPlugin {
             };
             let (dir, scripts) = crate::install::install_one(
                 home.as_deref(),
-                crate::install::Set::Mcp,
-                Path::new(""),
+                set,
+                &adapters,
                 &package_,
                 &version_,
                 before.as_deref(),
                 &how,
             )
             .map_err(|e| format!("{package_}@{version_} could not be installed: {e}"))?;
-            let code = dir.join("node_modules").join(&package_);
-            let bin = bin(&code, &package_)?;
-            Ok::<_, String>(Installed {
-                bin,
-                scripts,
-                reads: reads(&code, &withheld),
-            })
+            then(dir, scripts)
         });
         let out = tokio::select! {
             _ = ctx.cancel.cancelled() => return Err(refused("the run was stopped while it installed")),
@@ -962,33 +1328,32 @@ fn name_problem(name: &str) -> Option<&'static str> {
     None
 }
 
-/// The tools as the server names them, once each can be offered as
-/// `<name>__<tool>`; else why not (none listed, a name a model cannot take,
-/// one listed twice).
-fn tools_problem(name: &str, listed: &[McpToolInfo]) -> Result<Vec<String>, String> {
+/// The tools as the server or plugin names them, once each can be offered
+/// as `<name>__<tool>`; else why not (none listed, a name a model cannot
+/// take, one listed twice).
+fn tools_problem(name: &str, listed: &[String]) -> Result<Vec<String>, String> {
     if listed.is_empty() {
         return Err("it lists no tools".into());
     }
-    let mut own = Vec::new();
+    let mut own: Vec<String> = Vec::new();
     for tool in listed {
-        let full = format!("{name}__{}", tool.name);
+        let full = format!("{name}__{tool}");
         if !super::tool_name(&full) {
-            return Err(match super::tool_name(&tool.name) {
+            return Err(match super::tool_name(tool) {
                 true => format!(
-                    "with the prefix {name}__ its tool {:?} is {} characters, more than 64: load it under a shorter `name`",
-                    tool.name,
+                    "with the prefix {name}__ its tool {tool:?} is {} characters, more than 64: load it under a shorter `name`",
                     full.len()
                 ),
                 false => format!(
                     "its tool {:?} cannot be offered to a model (names take up to 64 letters, digits, _ and -)",
-                    clip(&tool.name, 80)
+                    clip(tool, 80)
                 ),
             });
         }
-        if own.contains(&tool.name) {
-            return Err(format!("it lists the tool {:?} twice", tool.name));
+        if own.contains(tool) {
+            return Err(format!("it lists the tool {tool:?} twice"));
         }
-        own.push(tool.name.clone());
+        own.push(tool.clone());
     }
     Ok(own)
 }
@@ -1072,7 +1437,8 @@ fn outside(arg: &str, cwd: &Path) -> bool {
 
 /// The first question's details: what the agent needs, what the sources
 /// say (their claims), what it is handed, what was found without running
-/// it, and the two warnings.
+/// it, `extra` (a package's), and the two warnings.
+#[allow(clippy::too_many_arguments)]
 fn first_details(
     candidate: &Candidate,
     version: &str,
@@ -1081,6 +1447,7 @@ fn first_details(
     cwd: &Path,
     scripts: &[String],
     reads: &Reads,
+    extra: &[String],
 ) -> String {
     let mut lines = vec![
         format!("The agent needs: {}", candidate.need),
@@ -1151,6 +1518,7 @@ fn first_details(
             "Its code was scanned in part for what it reads ({missed}): there may be more"
         ));
     }
+    lines.extend(extra.iter().cloned());
     lines.push(
         "Its tools are not known until it starts: you will be asked again once they are.".into(),
     );
@@ -1158,25 +1526,21 @@ fn first_details(
     lines.join("\n")
 }
 
-/// The second question's details: each tool's description (its own claim)
-/// and parameters.
-fn second_details(name: &str, listed: &[McpToolInfo]) -> String {
-    let mut lines = vec![
-        "Its tools, as the server describes them (its own claims); each call will ask you:"
-            .to_owned(),
-    ];
-    for tool in listed {
-        lines.push(format!(
-            "{name}__{}: {}",
-            tool.name,
-            clip(
-                tool.description.as_deref().unwrap_or("(no description)"),
-                DESCRIPTION_CHARS
-            )
-        ));
+/// The second question's details: each tool — as the agent gets it, its
+/// description (`who`'s own claim) and parameters.
+fn second_details(who: &str, tools: impl IntoIterator<Item = (String, String, Json)>) -> String {
+    let mut lines = vec![format!(
+        "Its tools, as {who} describes them (its own claims); each call will ask you:"
+    )];
+    for (name, description, schema) in tools {
+        let description = match description.trim() {
+            "" => "(no description)",
+            text => text,
+        };
+        lines.push(format!("{name}: {}", clip(description, DESCRIPTION_CHARS)));
         lines.push(format!(
             "  parameters: {}",
-            clip(&tool.input_schema.to_string(), SCHEMA_CHARS)
+            clip(&schema.to_string(), SCHEMA_CHARS)
         ));
     }
     lines.join("\n")
@@ -1191,7 +1555,7 @@ impl AgentTool for LoadPlugin {
         "Load a plugin"
     }
     fn description(&self) -> &str {
-        "Propose an MCP server find_plugin returned, for this session (at the version it offered). \
+        "Propose a plugin find_plugin returned, for this session (at the version it offered). \
          The owner is asked before it starts, and again with its tools before you get them; its \
          tools are yours from your next step, each call asking the owner. A refusal says why: do \
          not propose a package the owner blocked again."
@@ -1203,7 +1567,7 @@ impl AgentTool for LoadPlugin {
                 "package": { "type": "string", "description": "The npm package, as find_plugin gave it." },
                 "version": { "type": "string", "description": "The version find_plugin said could be loaded; leave it out to take that one." },
                 "name": { "type": "string", "description": "What to call it (its tools are <name>__<tool>); by default from the package's name." },
-                "args": { "type": "array", "items": { "type": "string" }, "description": "The server's own arguments, as its documentation gives them." }
+                "args": { "type": "array", "items": { "type": "string" }, "description": "An MCP server's own arguments, as its documentation gives them (a pi or DSH package takes none)." }
             },
             "required": ["package"]
         })

@@ -1,9 +1,11 @@
 //! `load_plugin` (`[extend]`, design §14) through the binary and its web
 //! page: a stub npm registry (and an empty MCP registry) on one axum
-//! server serves MCP server packages packed here with `npm pack`, so the
-//! install is the real `npm install --before` and `npm ci`, and no test
+//! server serves MCP server and pi packages packed here with `npm pack`, so
+//! the install is the real `npm install --before` and `npm ci`, and no test
 //! reaches the network. The owner's questions are answered over the
-//! page's WebSocket. Unix, as `cli_test`.
+//! page's WebSocket. A pi package runs on the checkout's pi adapter
+//! (`YOBUILD_RUNTIMES=checkout`; skipped without its `node_modules` unless
+//! `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`). Unix, as `cli_test`.
 #![cfg(unix)]
 
 mod common;
@@ -98,11 +100,16 @@ fn project(extend: &str, script: &Value) -> tempfile::TempDir {
 
 /// The servers that started (each left its pid in the home).
 fn pids(home: &Path) -> Vec<u32> {
+    pids_of(home, "echo-")
+}
+
+/// The processes that left `<prefix><pid>.pid` in the home.
+fn pids_of(home: &Path, prefix: &str) -> Vec<u32> {
     std::fs::read_dir(home)
         .unwrap()
         .filter_map(|e| {
             let name = e.unwrap().file_name().into_string().unwrap();
-            name.strip_prefix("echo-")?
+            name.strip_prefix(prefix)?
                 .strip_suffix(".pid")?
                 .parse()
                 .ok()
@@ -123,13 +130,18 @@ fn running(pid: u32) -> bool {
 
 /// Every server that started has stopped, within 5 s.
 fn all_stopped(home: &Path) {
-    for _ in 0..50 {
-        if !pids(home).into_iter().any(running) {
+    all_stopped_of(home, "echo-")
+}
+
+/// Every process that left `<prefix><pid>.pid` has stopped, within 10 s.
+fn all_stopped_of(home: &Path, prefix: &str) {
+    for _ in 0..100 {
+        if !pids_of(home, prefix).into_iter().any(running) {
             return;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    panic!("still running: {:?}", pids(home));
+    panic!("still running: {:?}", pids_of(home, prefix));
 }
 
 /// The web page's session: `yobuild run` with the stubs and a home of its
@@ -170,6 +182,9 @@ impl Page {
             .env("HOME", dir.join("home"))
             .env("YOBUILD_HOME", dir.join("home/.yobuild"))
             .env("YOBUILD_MCP_REGISTRY", format!("http://127.0.0.1:{port}"))
+            // The checkout's adapters: the cache's would be installed from
+            // the stub registry, which has none of their packages.
+            .env("YOBUILD_RUNTIMES", "checkout")
             .env("npm_config_registry", format!("http://127.0.0.1:{port}/"))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -239,6 +254,14 @@ impl Page {
                     assert!(title.starts_with(prefix), "{title:?} is not {prefix:?}");
                     seen.questions
                         .push((title, m["request"]["message"].as_str().unwrap().to_owned()));
+                    // `{ "after_ms": n, "value": v }`: answered `v`, n ms late.
+                    let value = match value.get("after_ms").and_then(Value::as_u64) {
+                        Some(ms) => {
+                            tokio::time::sleep(Duration::from_millis(ms)).await;
+                            &value["value"]
+                        }
+                        None => value,
+                    };
                     self.send(json!({ "type": "uiResponse", "id": m["id"], "value": value }))
                         .await;
                 }
@@ -349,7 +372,7 @@ async fn a_server_allowed_twice_is_offered_from_the_next_turn_each_call_asking()
     );
     let home = dir.path().join("home");
     let mut page = Page::open(dir.path(), port).await;
-    let asked = "Run `talk__echo`, a tool of a server loaded this session?";
+    let asked = "Run `talk__echo`, a tool the agent loaded this session?";
     let seen = page
         .drive(
             &[
@@ -462,7 +485,7 @@ async fn a_server_that_dies_while_idle_is_said_with_no_call_made() {
     );
     let home = dir.path().join("home");
     let mut page = Page::open(dir.path(), port).await;
-    let asked = "Run `talk__echo`, a tool of a server loaded this session?";
+    let asked = "Run `talk__echo`, a tool the agent loaded this session?";
     let died = "error: The loaded MCP server `talk` stopped: it exited with exit status: 4; last stderr: dying idle";
     let first = page
         .drive(
@@ -687,4 +710,316 @@ async fn a_run_aborted_mid_load_stops_it_where_it_is() {
         "{calls:#?}"
     );
     drop(page);
+}
+
+/// A pi package: `shout` answers its text in capitals and, for `die`,
+/// ends its runtime; its own `tool_call` policy blocks `no` — and every
+/// other tool, were it called for them — and its `tool_result` rewrites
+/// every result, were it called. As it loads it leaves `pi-<pid>.pid` in
+/// its home (its runtime's pid). `typebox` is pi's own (a peer).
+fn pi_shout(name: &str) -> (String, Vec<Packed>) {
+    pi_package(name, "")
+}
+
+/// [`pi_shout`] with `first` run as it loads, after the pid is left.
+fn pi_package(name: &str, first: &str) -> (String, Vec<Packed>) {
+    let ext = r#"import { Type } from 'typebox'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
+export default function (pi) {
+  writeFileSync(join(homedir(), 'pi-' + process.pid + '.pid'), '')
+  FIRST
+  pi.registerTool({
+    name: 'shout', label: 'Shout', description: 'Says the text in capitals.',
+    parameters: Type.Object({ text: Type.String() }),
+    async execute(_id, params) {
+      if (params.text === 'die') setTimeout(() => process.exit(7), 50)
+      return { content: [{ type: 'text', text: params.text.toUpperCase() }], details: {} }
+    },
+  })
+  pi.on('tool_call', async (event) =>
+    event.toolName !== 'shout' || event.input.text === 'no'
+      ? { block: true, reason: 'pi-shout blocks it' }
+      : undefined)
+
+  pi.on('tool_result', async () => ({ content: [{ type: 'text', text: 'rewritten by pi-shout' }] }))
+}
+"#;
+    let ext = ext.replace("FIRST", first);
+    (
+        name.to_owned(),
+        vec![registry::pack(
+            name,
+            "1.0.0",
+            60,
+            &[("ext.js", ext)],
+            json!({ "type": "module", "keywords": ["pi-package"],
+                    "pi": { "extensions": ["./ext.js"] },
+                    "peerDependencies": { "typebox": "*" } }),
+        )],
+    )
+}
+
+/// Whether the checkout's pi adapter can run (CI requires it).
+fn pi_adapter() -> bool {
+    let there = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("adapters/pi/node_modules")
+        .is_dir();
+    if !there && std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some() {
+        panic!("adapters/pi/node_modules is missing: run scripts/try-coding-agent.sh --setup-only");
+    }
+    there
+}
+
+/// A pi package loaded mid-run in a restricted runtime of its own: its
+/// tool offered from the next turn as `<name>__<tool>`, each call asking;
+/// its own policy reached for its own calls only, its `tool_result` never;
+/// offered again in the next run; its runtime dying said, its tool gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pi_package_runs_restricted_with_its_tools_only() {
+    if !pi_adapter() {
+        return;
+    }
+    let packages: Packages = Arc::new(BTreeMap::from([pi_shout("pi-shout")]));
+    let port = stub(packages, &[]).port;
+    let dir = project(
+        "kinds = [\"pi\"]\n",
+        &json!([
+            call("find_plugin", json!({ "need": "shout" })),
+            call("load_plugin", json!({ "package": "pi-shout", "name": "loud" })),
+            call("loud__shout", json!({ "text": "hi" })),
+            call("loud__shout", json!({ "text": "no" })),
+            call("list_files", json!({})),
+            { "text": "first" },
+            call("loud__shout", json!({ "text": "again" })),
+            call("loud__shout", json!({ "text": "die" })),
+            { "text": "second" },
+            call("loud__shout", json!({ "text": "gone" })),
+            { "text": "third" }
+        ]),
+    );
+    let mut page = Page::open(dir.path(), port).await;
+    let asked = "Run `loud__shout`, a tool the agent loaded this session?";
+    let first = page
+        .drive(
+            &[
+                (
+                    "Start the pi package pi-shout@1.0.0 as loud? (asked by the agent)",
+                    json!("Allow"),
+                ),
+                ("Keep the pi package loud? It offers: shout", json!("Allow")),
+                (asked, json!("Allow")),
+                (asked, json!("Allow")),
+            ],
+            &[],
+            Duration::from_millis(300),
+        )
+        .await;
+    let (_, details) = &first.questions[0];
+    assert!(
+        details.contains("It runs in a runtime of its own with its tools only: its hooks are not called, and it gets no grants, config or host services."),
+        "{details}"
+    );
+    assert!(
+        first.questions[1]
+            .1
+            .contains("loud__shout: Says the text in capitals."),
+        "{first:#?}"
+    );
+    let calls = &first.calls;
+    assert!(calls[0].starts_with("find_plugin ✓ "), "{calls:#?}");
+    assert!(
+        calls[1].starts_with("load_plugin ✓ Loaded pi-shout@1.0.0 as loud, for this session. Its tools are yours from your next step: loud__shout."),
+        "{calls:#?}"
+    );
+    // Its result as it made it: its `tool_result` is not called.
+    assert_eq!(calls[2], "loud__shout ✓ HI", "{calls:#?}");
+    // Its own policy judges its own call...
+    assert!(
+        calls[3].starts_with("loud__shout ✗ ") && calls[3].contains("pi-shout blocks it"),
+        "{calls:#?}"
+    );
+    // ...and no other.
+    assert!(calls[4].starts_with("list_files ✓ "), "{calls:#?}");
+    let notices = first.notices.join("\n");
+    assert!(
+        notices.contains("info: The agent loaded pi-shout@1.0.0 as loud, for this session. Loaded this session: pi-shout@1.0.0 as loud (tools: shout). To keep it, add to agent.toml:\n\n[[plugin]]\nname = \"loud\"\npi   = \"pi-shout@1.0.0\"\n"),
+        "{notices}"
+    );
+
+    // The next run offers it again; then its runtime dies, said.
+    page.send(json!({ "type": "prompt", "text": "again" }))
+        .await;
+    let second = page
+        .drive(
+            &[(asked, json!("Allow")), (asked, json!("Allow"))],
+            &["error: The loaded pi package `loud` stopped: "],
+            Duration::from_millis(300),
+        )
+        .await;
+    assert_eq!(second.calls[0], "loud__shout ✓ AGAIN", "{second:#?}");
+    // Said once, as the package it is: not as a plugin of the manifest.
+    let said = second.notices.join("\n");
+    assert!(!said.contains("A plugin stopped"), "{said}");
+    assert_eq!(
+        said.matches("The loaded pi package `loud` stopped").count(),
+        1,
+        "{said}"
+    );
+    let home = dir.path().join("home");
+    all_stopped_of(&home, "pi-");
+    // Refused, unasked, from then on.
+    page.send(json!({ "type": "prompt", "text": "gone" })).await;
+    let third = page.drive(&[], &[], Duration::from_millis(300)).await;
+    assert_eq!(third.calls.len(), 1, "{third:#?}");
+    assert!(
+        third.calls[0].starts_with(
+            "loud__shout ✗ Tool call denied: `loud__shout` is a tool of the pi package `loud`, which stopped this session ("
+        ),
+        "{third:#?}"
+    );
+    let (_, stderr) = page.interrupt();
+    assert!(
+        stderr.contains(
+            "Loaded this session: pi-shout@1.0.0 as loud (tools: shout, stopped this session: "
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("In agent.toml a pi package runs with the other pi plugins, in the `pi` runtime, its hooks too, its tools under their own names.\n"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("(the lock's `pi` set, without the age limit)"),
+        "{stderr}"
+    );
+    assert!(!dir.path().join("agent.lock").exists());
+}
+
+/// A pi package blocked at the second question: its runtime removed, its
+/// tool never offered (the late source holds it for the run; `Loaded`
+/// passes on only a kept package's).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pi_package_blocked_with_its_tools_in_front_of_the_owner_is_never_offered() {
+    if !pi_adapter() {
+        return;
+    }
+    let packages: Packages = Arc::new(BTreeMap::from([pi_shout("pi-shout")]));
+    let port = stub(packages, &[]).port;
+    let dir = project(
+        "kinds = [\"pi\"]\n",
+        &json!([
+            call("find_plugin", json!({ "need": "shout" })),
+            call("load_plugin", json!({ "package": "pi-shout" })),
+            call("pi-shout__shout", json!({ "text": "hi" })),
+            { "text": "done" }
+        ]),
+    );
+    let home = dir.path().join("home");
+    let mut page = Page::open(dir.path(), port).await;
+    let seen = page
+        .drive(
+            &[
+                (
+                    "Start the pi package pi-shout@1.0.0 as pi-shout?",
+                    json!("Allow"),
+                ),
+                (
+                    "Keep the pi package pi-shout? It offers: shout",
+                    json!("Block"),
+                ),
+                // Any tool asks; this one, then, is not found.
+                ("Run `pi-shout__shout`?", json!("Allow")),
+            ],
+            &[],
+            Duration::from_millis(300),
+        )
+        .await;
+    assert!(
+        seen.calls[1].contains("the owner blocked it (keep it)"),
+        "{seen:#?}"
+    );
+    assert_eq!(
+        seen.calls[2], "pi-shout__shout ✗ Tool pi-shout__shout not found",
+        "{seen:#?}"
+    );
+    // Its runtime removed.
+    assert_eq!(pids_of(&home, "pi-").len(), 1);
+    all_stopped_of(&home, "pi-");
+    let (_, stderr) = page.interrupt();
+    assert!(!stderr.contains("Loaded this session"), "{stderr}");
+}
+
+/// A pi package that throws as it loads, and one whose runtime ends while
+/// the owner is asked to keep it: each an Error refusal after the first
+/// Allow, its runtime gone; the name tried not given again this session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pi_package_that_fails_to_start_or_stops_while_asked_is_refused_and_removed() {
+    if !pi_adapter() {
+        return;
+    }
+    let packages: Packages = Arc::new(BTreeMap::from([
+        pi_package("pi-broken", "throw new Error('broken on purpose')"),
+        pi_package("pi-brief", "setTimeout(() => process.exit(5), 1500)"),
+    ]));
+    let port = stub(packages, &[]).port;
+    let dir = project(
+        "kinds = [\"pi\"]\nmax_attempts = 10\n",
+        &json!([
+            call("find_plugin", json!({ "need": "shout" })),
+            call("load_plugin", json!({ "package": "pi-broken" })),
+            call("load_plugin", json!({ "package": "pi-brief" })),
+            call("load_plugin", json!({ "package": "pi-brief" })),
+            { "text": "done" }
+        ]),
+    );
+    let home = dir.path().join("home");
+    let mut page = Page::open(dir.path(), port).await;
+    let seen = page
+        .drive(
+            &[
+                (
+                    "Start the pi package pi-broken@1.0.0 as pi-broken?",
+                    json!("Allow"),
+                ),
+                (
+                    "Start the pi package pi-brief@1.0.0 as pi-brief?",
+                    json!("Allow"),
+                ),
+                (
+                    "Keep the pi package pi-brief? It offers: shout",
+                    json!({ "after_ms": 3000, "value": "Allow" }),
+                ),
+            ],
+            &[],
+            Duration::from_millis(300),
+        )
+        .await;
+    let calls = &seen.calls;
+    assert!(
+        calls[1].starts_with("load_plugin ✗ load_plugin refused it: pi-broken"),
+        "{calls:#?}"
+    );
+    assert!(
+        calls[2].contains("pi-brief stopped while you were asked to keep it: "),
+        "{calls:#?}"
+    );
+    assert!(
+        calls[3].contains("the name \"pi-brief\" was used by an earlier load this session"),
+        "{calls:#?}"
+    );
+    let notices = seen.notices.join("\n");
+    assert!(
+        notices.contains("error: The agent's plugin `pi-broken` was refused: pi-broken"),
+        "{notices}"
+    );
+    assert!(
+        notices.contains("error: The agent's plugin `pi-brief` was refused: pi-brief stopped"),
+        "{notices}"
+    );
+    assert!(!notices.contains("could not be stopped"), "{notices}");
+    all_stopped_of(&home, "pi-");
+    let (_, stderr) = page.interrupt();
+    assert!(!stderr.contains("Loaded this session"), "{stderr}");
 }

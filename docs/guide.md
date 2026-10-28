@@ -200,6 +200,12 @@ MCP server it lacks and load it for the session. It works like this:
 - **Nothing is written:** at the session's end yobuild prints the
   `[[mcp]]` block that would keep each one, for you to add if you want.
 - **Someone must answer:** under `--once` it is refused.
+- **pi and DSH packages too:** with `kinds = ["mcp", "pi", "dsh"]` it
+  can also find a pi or DSH package on npm and load it the same way. A
+  loaded package runs in a runtime of its own with its tools only: its
+  hooks are not called, and it gets no grants, `config` or host
+  services. One that needs those belongs in the manifest as a
+  `[[plugin]]`, which the session's end prints.
 
 [§14](design.md#14-agents-that-extend-themselves-m5-decided-2026-10-25)
 is the design.

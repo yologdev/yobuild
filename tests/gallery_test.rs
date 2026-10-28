@@ -844,7 +844,7 @@ fn self_extending_reviewer() {
                     (start, "Allow"),
                     ("Keep the MCP server eslint? It offers: lint-files", "Allow"),
                     (
-                        "Run `eslint__lint-files`, a tool of a server loaded this session?",
+                        "Run `eslint__lint-files`, a tool the agent loaded this session?",
                         "Allow",
                     ),
                 ],

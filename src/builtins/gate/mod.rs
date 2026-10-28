@@ -142,8 +142,13 @@ pub struct Gate {
 pub type OfferedCheck = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
 /// Tools that always ask, by name, whatever else frees them: those of a
-/// server the agent loaded this session (design §14).
+/// server or package the agent loaded this session (design §14).
 pub type AskedCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// Tools refused without asking, by name, and why: those of a package the
+/// agent loaded that has stopped since (a run started earlier still offers
+/// them).
+pub type RefusedCheck = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 impl Gate {
     /// Asks through `session`; relative paths are against `cwd` (made
@@ -160,6 +165,7 @@ impl Gate {
                 free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
                 allowed_if: None,
                 asked: None,
+                refused: None,
                 created: Arc::default(),
             }),
             pending: Arc::default(),
@@ -201,6 +207,13 @@ impl Gate {
         self.change(|rules| rules.asked = Some(asked))
     }
 
+    /// Refuses, without asking, every tool `refused` gives a reason for,
+    /// before any other rule. Replaces an earlier check rather than adding
+    /// to it.
+    pub fn with_refused(self, refused: RefusedCheck) -> Self {
+        self.change(|rules| rules.refused = Some(refused))
+    }
+
     fn change(self, edit: impl FnOnce(&mut Rules)) -> Self {
         let mut rules = Rules {
             start: self.rules.start.clone(),
@@ -208,6 +221,7 @@ impl Gate {
             free_tools: self.rules.free_tools.clone(),
             allowed_if: self.rules.allowed_if.clone(),
             asked: self.rules.asked.clone(),
+            refused: self.rules.refused.clone(),
             created: self.rules.created.clone(),
         };
         edit(&mut rules);
@@ -313,6 +327,9 @@ impl RunHooks for Gate {
         // Each look replaces what an earlier one found (a recheck), and a
         // denied call leaves nothing behind.
         self.pending.lock().unwrap().remove(call.tool_call_id);
+        if let Some(why) = self.rules.refused.as_ref().and_then(|r| r(call.tool_name)) {
+            return ToolDecision::Deny(why);
+        }
         let creates = match self
             .rules
             .check_in(call.tool_name, call.args, self.run_id.as_deref())
@@ -376,6 +393,8 @@ struct Rules {
     allowed_if: Option<(HashSet<String>, OfferedCheck)>,
     /// Tools that always ask ([`Gate::with_asked`]).
     asked: Option<AskedCheck>,
+    /// Tools refused without asking ([`Gate::with_refused`]).
+    refused: Option<RefusedCheck>,
     /// Files the agent made this session, as the files they were
     /// ([`Identity`]): it may overwrite or delete them while they still are.
     /// Shared by every clone of the gate.
@@ -398,7 +417,7 @@ impl Rules {
         let free = |creates: Vec<PathBuf>| Check::Free { creates };
         if self.asked.as_ref().is_some_and(|asked| asked(tool)) {
             return ask(format!(
-                "Run `{tool}`, a tool of a server loaded this session?"
+                "Run `{tool}`, a tool the agent loaded this session?"
             ));
         }
         match tool {

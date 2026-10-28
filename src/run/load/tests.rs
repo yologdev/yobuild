@@ -7,7 +7,7 @@ use yoagent::{AgentTool, ToolContext, ToolError};
 
 use super::*;
 use crate::builtins::{Candidate, FindPlugin, Sources};
-use crate::frontend::{Driver, Session};
+use crate::frontend::{Driver, NoticeLevel, Session};
 use crate::manifest::{ExtendKind, Manifest};
 
 #[test]
@@ -46,10 +46,14 @@ fn info(name: &str) -> McpToolInfo {
     }
 }
 
+fn names(tools: &[&str]) -> Vec<String> {
+    tools.iter().map(|t| t.to_string()).collect()
+}
+
 #[test]
 fn the_listed_tools_are_judged_as_a_manifests_servers_are() {
     assert_eq!(
-        tools_problem("eslint", &[info("lint-files"), info("fix")]),
+        tools_problem("eslint", &names(&["lint-files", "fix"])),
         Ok(vec!["lint-files".to_owned(), "fix".to_owned()])
     );
     assert_eq!(
@@ -57,13 +61,13 @@ fn the_listed_tools_are_judged_as_a_manifests_servers_are() {
         Err("it lists no tools".to_owned())
     );
     let long = "t".repeat(60);
-    assert!(tools_problem("eslint", &[info(&long)])
+    assert!(tools_problem("eslint", &names(&[&long]))
         .unwrap_err()
         .contains("load it under a shorter `name`"));
-    assert!(tools_problem("eslint", &[info("read file")])
+    assert!(tools_problem("eslint", &names(&["read file"]))
         .unwrap_err()
         .contains("cannot be offered to a model"));
-    assert!(tools_problem("eslint", &[info("a"), info("a")])
+    assert!(tools_problem("eslint", &names(&["a", "a"]))
         .unwrap_err()
         .contains("twice"));
 }
@@ -90,6 +94,7 @@ fn an_argument_naming_a_path_outside_the_folder_is_marked() {
 
 fn kept(name: &str, args: &[&str]) -> Kept {
     Kept {
+        kind: ExtendKind::Mcp,
         name: name.into(),
         package: "@eslint/mcp".into(),
         version: "0.3.15".into(),
@@ -103,6 +108,7 @@ fn files() -> Files {
     Files {
         manifest: "handoff.toml".into(),
         lock: "handoff.lock".into(),
+        shared: Vec::new(),
     }
 }
 
@@ -136,6 +142,73 @@ fn the_end_says_each_server_and_the_block_that_keeps_it() {
     ));
     assert!(both.contains("To keep them, add"));
     assert!(both.contains("resolves their dependencies"));
+}
+
+/// A pi or DSH package's block is a `[[plugin]]`, said with how it would
+/// run in the manifest and the grants it would share; the sets named.
+#[test]
+fn the_end_says_a_package_as_a_plugin_block_and_what_it_would_share() {
+    let pi = Kept {
+        kind: ExtendKind::Pi,
+        name: "memory".into(),
+        package: "pi-memory".into(),
+        version: "0.4.2".into(),
+        args: Vec::new(),
+        tools: vec!["memory_add".into(), "scratchpad".into()],
+        stopped: None,
+    };
+    assert_eq!(
+        pi.block(),
+        "[[plugin]]\nname = \"memory\"\npi   = \"pi-memory@0.4.2\"\n# allow = [\"memory_add\", \"scratchpad\"]   # tools that would run without asking\n"
+    );
+    let dsh = Kept {
+        kind: ExtendKind::Dsh,
+        name: "office".into(),
+        package: "dsh-univer-office".into(),
+        ..pi.clone()
+    };
+    assert!(dsh
+        .block()
+        .contains("\ndsh  = \"dsh-univer-office@0.4.2\"\n"));
+    let text = kept_text(&[kept("eslint", &[]), pi.clone()], &files());
+    assert!(
+        text.contains("\nIn handoff.toml a pi package runs with the other pi plugins, in the `pi` runtime, its hooks too, its tools under their own names.\n"),
+        "{text}"
+    );
+    assert!(!text.contains("DSH package runs"), "{text}");
+    assert!(
+        text.ends_with("(the lock's `mcp` and `pi` sets, without the age limit) and writes handoff.lock, which --locked needs."),
+        "{text}"
+    );
+    let sharing = Files {
+        shared: vec![(ExtendKind::Pi, "the pi plugins' `model`".into())],
+        ..files()
+    };
+    let text = kept_text(&[pi], &sharing);
+    assert!(
+        text.contains("its tools under their own names: give it the pi plugins' `model`, as they share them.\n"),
+        "{text}"
+    );
+
+    // What a manifest's plugins would have it share.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("e.ts"), "").unwrap();
+    std::fs::write(dir.path().join("d.ts"), "").unwrap();
+    let text = "[agent]\nname = \"t\"\nmodel = \"deepseek/deepseek-flash\"\n\n[[plugin]]\npi = \"./e.ts\"\ngrants = { model = \"info\", env = [\"LANG\"] }\n\n[[plugin]]\ndsh = \"./d.ts\"\ngrants = { workspace = true }\n";
+    let m = Manifest::parse(text, &dir.path().join("agent.toml"), dir.path()).unwrap();
+    assert_eq!(
+        shared(&m),
+        [
+            (
+                ExtendKind::Pi,
+                "the pi plugins' `model` and `env` (LANG)".to_owned()
+            ),
+            (
+                ExtendKind::Dsh,
+                "the DSH plugins' grants (workspace)".to_owned()
+            ),
+        ]
+    );
 }
 
 /// The block reads back as the manifest server it says: quotes,
@@ -486,6 +559,7 @@ fn what_its_code_reads_and_what_the_scan_missed_are_said() {
             names: vec![],
             missed: Some("1 link(s) not followed".into()),
         },
+        &[],
     );
     assert!(
         details.contains("Its code was scanned in part for what it reads (1 link(s) not followed): there may be more"),
@@ -565,6 +639,7 @@ fn tool(once: bool) -> (LoadPlugin, Driver, tempfile::TempDir) {
         once,
         Some(dir.path().join("home")),
         dir.path(),
+        None,
     );
     (load, driver, dir)
 }
@@ -613,14 +688,6 @@ async fn what_the_limits_refuse_before_anything_is_installed() {
             json!({ "package": "lint-mcp", "version": "1.3.0" }),
             "lint-mcp@1.3.0 is not the version find_plugin offered: lint-mcp@1.2.0 (or give no `version`)",
         ),
-        (
-            json!({ "package": "pi-lint" }),
-            "pi-lint is a pi package: load_plugin loads MCP servers only so far",
-        ),
-        (
-            json!({ "package": "dsh-lint" }),
-            "dsh-lint is a DSH package: load_plugin loads MCP servers only so far",
-        ),
     ];
     for (args, said) in cases {
         let why = refusal(&load, args.clone()).await;
@@ -652,6 +719,25 @@ async fn what_the_limits_refuse_before_anything_is_installed() {
         "{why}"
     );
     assert!(!locked(&load.state).busy, "nothing left in progress");
+}
+
+/// A package takes no `args`; without a plugin host (`check`'s tool) it is
+/// refused before anything is installed. Both counted.
+#[tokio::test]
+async fn a_package_takes_no_arguments_and_needs_a_plugin_host() {
+    let (load, _driver, _dir) = tool(false);
+    let why = refusal(&load, json!({ "package": "pi-lint", "args": ["-v"] })).await;
+    assert!(
+        why.contains("a pi package takes no `args` (they are an MCP server's)"),
+        "{why}"
+    );
+    let why = refusal(&load, json!({ "package": "dsh-lint" })).await;
+    assert!(
+        why.contains("this session runs no plugin host to load it in"),
+        "{why}"
+    );
+    assert_eq!(locked(&load.state).attempts, 2);
+    assert!(!locked(&load.state).busy);
 }
 
 #[tokio::test]
@@ -716,7 +802,7 @@ async fn a_second_load_at_once_and_one_past_max_loads_are_refused() {
     .await;
     let why = refusal(&load, json!({ "package": "lint-mcp", "version": "1.2.0" })).await;
     assert!(
-        why.contains("this session has loaded 1 servers, as many as it may ([extend] max_loads 1)"),
+        why.contains("this session has loaded 1 plugins, as many as it may ([extend] max_loads 1)"),
         "{why}"
     );
     assert_eq!(locked(&load.state).attempts, 1, "counted before max_loads");
@@ -762,4 +848,174 @@ async fn a_package_loaded_or_stopped_is_not_loaded_again_and_its_name_is_taken()
 fn a_name_may_not_end_in_an_underscore() {
     assert!(name_problem("a_").unwrap().contains("ends in `_`"));
     assert_eq!(name_problem("_a"), None);
+}
+
+/// A DSH package's start, as `load_plugin` makes it (a fixture file for
+/// the package's row: the stub registry has none of the DSH base's
+/// packages): a restricted runtime of its own on the DSH base, the base's
+/// rows, the package's and the adapter's, its handler registered tools
+/// only; one waiting for DSH's host services refused, naming them. Needs
+/// the checkout's `adapters/dsh` (required with
+/// `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dsh_package_starts_restricted_on_the_base_and_one_lacking_services_is_refused() {
+    let dsh = Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/dsh");
+    if !dsh.join("node_modules").is_dir() {
+        assert!(
+            std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_none(),
+            "adapters/dsh/node_modules is missing"
+        );
+        return;
+    }
+    let root = rutis::Ctx::root().unwrap();
+    let bridge = yoagent_rutis::RutisBridge::install(&root).unwrap();
+    let host = crate::frontend::host::PluginHost::builder()
+        .share("yoagent")
+        .start(&root)
+        .await
+        .unwrap();
+    let on = Plugins {
+        host: Arc::new(tokio::sync::Mutex::new(host)),
+        bridge: bridge.clone(),
+        adapters: dsh.parent().unwrap().to_path_buf(),
+    };
+    let (load, _driver, _dir) = tool(false);
+    let start = |runtime: &'static str, name: &'static str, fixture: &str| {
+        let file = dsh.join(fixture).display().to_string();
+        let row =
+            crate::frontend::host::Row::new(format!("loaded:{name}:target"), &file).runtime("dsh");
+        let handler = format!("loaded-{name}-1");
+        let (load, on, dsh) = (load.clone(), on.clone(), dsh.clone());
+        async move {
+            let _loading = load.loaded.loading(&handler, name);
+            let mut remove = package::RemoveOnDrop::new(on.host.clone(), load.session.clone());
+            let found = package::Found::Dsh {
+                rows: vec![row],
+                modules: vec![file],
+            };
+            let started = load
+                .start_package(
+                    &on,
+                    runtime,
+                    &handler,
+                    &format!("loaded:{name}"),
+                    &dsh,
+                    found,
+                    name,
+                    &mut remove,
+                )
+                .await;
+            (started, remove, handler)
+        }
+    };
+    let (started, remove, handler) = start("loaded-1", "echo", "fixture-tools.ts").await;
+    assert!(started.is_ok(), "{}", started.err().unwrap().message);
+    let info = bridge
+        .registry()
+        .handlers()
+        .into_iter()
+        .find(|h| h.name() == handler)
+        .expect("its adapter's handler");
+    assert!(info.restricted());
+    assert!(
+        !info.hooks().contains(&"before_model"),
+        "{:?}",
+        info.hooks()
+    );
+    assert_eq!(info.owner(), "loaded:echo");
+    remove.now().await;
+    // Removed: its handler gone with its runtime.
+    assert!(
+        !bridge
+            .registry()
+            .handlers()
+            .iter()
+            .any(|h| h.name() == handler),
+        "its handler outlived its runtime"
+    );
+
+    let (started, _remove, handler) = start("loaded-2", "needy", "fixture-needs-services.ts").await;
+    let refusal = started.expect_err("refused");
+    assert!(matches!(refusal.level, NoticeLevel::Error));
+    // The runtime removed before the refusal returned.
+    assert!(!bridge
+        .registry()
+        .handlers()
+        .iter()
+        .any(|h| h.name() == handler));
+    let message = refusal.message;
+    assert!(
+        message.starts_with("needy did not start: it waits for services nobody provides here (")
+            && message.contains("credentials")
+            && message.ends_with("a loaded DSH package gets none of DSH's host services"),
+        "{message}"
+    );
+    root.shutdown().await.unwrap();
+}
+
+/// A name a package load started a runtime under is not given again this
+/// session (the late source keeps a run's tools by name): counted.
+#[tokio::test]
+async fn a_name_an_earlier_package_load_used_is_not_given_again() {
+    let (load, _driver, _dir) = tool(false);
+    locked(&load.state).tried.insert("lint".into());
+    let why = refusal(&load, json!({ "package": "lint-mcp" })).await;
+    assert!(
+        why.contains(
+            "the name \"lint\" was used by an earlier load this session: pass another `name`"
+        ),
+        "{why}"
+    );
+    assert_eq!(locked(&load.state).attempts, 1);
+}
+
+/// A stopped package's tools are refused without asking, naming why; a
+/// running one's and a stopped server's are not (a server's leave at the
+/// next turn). The naming the bridge keeps holds `Loaded` weakly.
+#[test]
+fn a_stopped_packages_tools_are_refused_and_the_naming_holds_loaded_weakly() {
+    let loaded = Loaded::default();
+    let package = |kind, name: &str, stopped: Option<&str>| Kept {
+        kind,
+        name: name.into(),
+        package: format!("{name}-pkg"),
+        version: "1.0.0".into(),
+        args: Vec::new(),
+        tools: vec!["shout".into()],
+        stopped: stopped.map(str::to_owned),
+    };
+    locked(&loaded.0.lists).kept.extend([
+        package(ExtendKind::Pi, "loud", Some("its runtime stopped: exit 7")),
+        package(ExtendKind::Dsh, "calm", None),
+        package(ExtendKind::Mcp, "srv", Some("it exited")),
+    ]);
+    assert_eq!(
+        loaded.refused("loud__shout").as_deref(),
+        Some("`loud__shout` is a tool of the pi package `loud`, which stopped this session (its runtime stopped: exit 7): it is not run")
+    );
+    assert_eq!(loaded.refused("loud__other"), None);
+    assert_eq!(loaded.refused("calm__shout"), None);
+    assert_eq!(loaded.refused("srv__shout"), None);
+
+    // A load in progress names its handler's tools; a kept running one
+    // only those the owner saw; anything else nothing.
+    let naming = loaded.naming();
+    let guard = loaded.loading("h-1", "fresh");
+    assert_eq!(naming("h-1", "any").as_deref(), Some("fresh__any"));
+    drop(guard);
+    assert_eq!(naming("h-1", "any"), None);
+    locked(&loaded.0.lists).packages.push(Running {
+        name: "calm".into(),
+        runtime: "loaded-2".into(),
+        handler: "h-2".into(),
+        tools: vec!["shout".into()],
+    });
+    assert_eq!(naming("h-2", "shout").as_deref(), Some("calm__shout"));
+    assert_eq!(naming("h-2", "later"), None);
+    drop(loaded);
+    assert_eq!(
+        naming("h-2", "shout"),
+        None,
+        "Loaded kept alive by its naming"
+    );
 }

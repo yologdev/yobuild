@@ -36,6 +36,8 @@ mod scratch;
 pub use ask_owner::{AskOwner, OpenQuestions, Question};
 pub use facts::Facts;
 pub use find_plugin::{Candidate, FindPlugin, Sources, MCP_REGISTRY, MCP_REGISTRY_ENV};
-pub use gate::{AskedCheck, Check, Gate, OfferedCheck, JUDGED_TOOLS, READ_ONLY_TOOLS};
+pub use gate::{
+    AskedCheck, Check, Gate, OfferedCheck, RefusedCheck, JUDGED_TOOLS, READ_ONLY_TOOLS,
+};
 pub use report::Report;
 pub use scratch::Scratch;

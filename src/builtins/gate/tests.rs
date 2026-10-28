@@ -51,6 +51,7 @@ impl Project {
             free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
             allowed_if: None,
             asked: None,
+            refused: None,
             created: Arc::default(),
         };
         Self {
@@ -963,6 +964,7 @@ fn cd_follows_the_logical_path_as_bash_does() {
         free_tools: HashSet::new(),
         allowed_if: None,
         asked: None,
+        refused: None,
         created: Arc::default(),
     };
     let asks = |c: &str| {
@@ -2108,6 +2110,7 @@ fn a_tool_allowed_by_its_offerer_runs_only_when_that_one_offers_it() {
         free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
         allowed_if: Some((["todo".to_owned(), "plan".to_owned()].into(), offered)),
         asked: None,
+        refused: None,
         created: Arc::default(),
     };
     let free =
@@ -2132,6 +2135,7 @@ fn a_tool_allowed_by_its_offerer_runs_only_when_that_one_offers_it() {
         free_tools: READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect(),
         allowed_if: Some((["todo".to_owned()].into(), yes)),
         asked: None,
+        refused: None,
         created: Arc::default(),
     };
     assert!(rules
@@ -2157,12 +2161,13 @@ fn a_tool_the_asked_check_names_asks_even_when_allowed() {
         free_tools: ["eslint__lint-files".to_owned(), "read_file".to_owned()].into(),
         allowed_if: Some((["eslint__fix".to_owned()].into(), yes)),
         asked: Some(asked),
+        refused: None,
         created: Arc::default(),
     };
     let check = |tool: &str| rules.check_in(tool, &json!({}), Some("r"));
     assert_eq!(
         check("eslint__lint-files").question(),
-        Some("Run `eslint__lint-files`, a tool of a server loaded this session?")
+        Some("Run `eslint__lint-files`, a tool the agent loaded this session?")
     );
     assert!(check("eslint__fix").question().is_some());
     assert!(
