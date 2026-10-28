@@ -4024,8 +4024,16 @@ refuses `[extend]` without it, as the manifest does with `gate = "off"`.
     no longer reaches it (yobuild stops it), and closing it stops what it
     started too (`npx` → `node`). Until then a Ctrl+C reached them, and a
     server first seen gone after one, or ended by SIGINT, was not marked.
-    The cost: a yobuild killed outright, without closing its clients,
-    leaves what ignores its closed input running.
+    The cost: a yobuild that ends without dropping its clients leaves what
+    ignores its closed input running. So `run` and `check` listen for
+    Ctrl+C, SIGHUP (the terminal closed) and SIGTERM from their start
+    (`crate::stops`): `run` races each step that waits while it starts
+    against them, and its loop ends the session on one; `check` is raced
+    whole. A SIGKILL still leaves them; and a wrapper that exited and was
+    collected (yobuild's 250 ms look at each loaded server collects it)
+    leaves its children, which yoagent then no longer kills — asked of
+    yoagent: kill the group when the exit watch first sees the wrapper
+    gone, before collecting it.
   - One that dies while the owner is asked to keep it is refused then
     (an Error notice), never announced as loaded.
   - A server whose process lives on but no longer reads its input is

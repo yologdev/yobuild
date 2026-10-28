@@ -242,6 +242,13 @@ pub struct Ended {
 /// ends (`once`).
 pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     let started = Instant::now();
+    // Ctrl+C, SIGHUP, SIGTERM from here on: each step that waits while the
+    // session starts is raced against them (`Stops::until`, dropping what
+    // it started), and the session's loop ends on one. Servers run in
+    // process groups of their own, so a terminal's signal reaches only
+    // yobuild, which must stop them.
+    let mut stops =
+        crate::stops::Stops::listen().map_err(|e| format!("cannot listen for Ctrl+C: {e}"))?;
     let cwd = std::env::current_dir()?;
     // Node and npm, before anything uses them (design §13).
     let terminal = options.manifest.frontend.terminal && !options.once;
@@ -336,18 +343,19 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         runtimes,
         gate: judge,
         dsh_home: _dsh_home,
-    } = start(
-        root,
-        &manifest,
-        &checked.plan,
-        &layout,
-        &session,
-        terminal,
-        &cwd,
-        scratch.as_ref(),
-        once,
-    )
-    .await?;
+    } = stops
+        .until(start(
+            root,
+            &manifest,
+            &checked.plan,
+            &layout,
+            &session,
+            terminal,
+            &cwd,
+            scratch.as_ref(),
+            once,
+        ))
+        .await?;
     let plan = &checked.plan;
     // Shared with `load_plugin`, which adds a runtime for each package it
     // loads; the tick looks only when no load holds it.
@@ -399,7 +407,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tools.add(load::LoadPlugin::TOOL, vec![Box::new(load)]);
     }
     for server in &manifest.mcp {
-        let found = mcp(server, &checked.servers[&server.name]).await?;
+        let found = stops
+            .until(mcp(server, &checked.servers[&server.name]))
+            .await?;
         tools.add(&format!("mcp {}", server.name), found);
     }
     tools.check()?;
@@ -510,12 +520,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     let ui = "terminal-ui";
     let mut served = None;
     if terminal {
-        host.lock()
-            .await
-            .load([
-                Row::new(ui, layout.frontend.join("plugins/terminal-ui.ts").display())
-                    .runtime("ui"),
-            ])
+        let row =
+            Row::new(ui, layout.frontend.join("plugins/terminal-ui.ts").display()).runtime("ui");
+        stops
+            .until(async { host.lock().await.load([row]).await })
             .await?;
     } else if !once {
         let phone = manifest.frontend.phone;
@@ -523,7 +531,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             true => "0.0.0.0:8787".parse().expect("an address"),
             false => "127.0.0.1:8787".parse().expect("an address"),
         });
-        let web = web::serve(session.clone(), addr).await?;
+        let web = stops.until(web::serve(session.clone(), addr)).await?;
         // Every interface: a link the phone can open.
         let url = match (web.addr().ip().is_unspecified(), lan_ip()) {
             (true, Some(ip)) => format!("http://{ip}:{}/?t={}", web.addr().port(), web.token()),
@@ -554,24 +562,20 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         }
     }
     let mut driving = tokio::spawn(driver.run(agent));
-    let ctrl_c = tokio::signal::ctrl_c();
-    tokio::pin!(ctrl_c);
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut reported = std::collections::HashSet::new();
     let mut quitting = false;
     // Until the session ends: the frontend quits (terminal), its run ends
-    // (`once`), or Ctrl+C. Meanwhile a plugin that stops is said.
+    // (`once`), or Ctrl+C (or SIGHUP, SIGTERM). Meanwhile a plugin that
+    // stops is said.
     let end = loop {
         tokio::select! {
             joined = &mut driving => break End::Driven(Box::new(joined)),
-            stop = &mut ctrl_c => {
+            by = stops.next() => {
                 // As the driver sees it: the observer's copy may lag.
-                let interrupted = session.is_running();
-                break match stop {
-                    Ok(()) => End::Interrupted {
-                        running: interrupted,
-                    },
-                    Err(e) => End::NoSignal(e),
+                break End::Interrupted {
+                    running: session.is_running(),
+                    by,
                 };
             }
             changed = ended_runs.changed(), if once && !quitting => {
@@ -639,29 +643,20 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     };
     let (agent, interrupted, failure) = match end {
         End::Driven(joined) => match *joined {
-            Ok(agent) => (Some(agent), false, None),
-            Err(e) => (None, false, Some(format!("the agent's task failed: {e}"))),
+            Ok(agent) => (Some(agent), None, None),
+            Err(e) => (None, None, Some(format!("the agent's task failed: {e}"))),
         },
-        End::Interrupted { running } => {
+        End::Interrupted { running, by } => {
             driving.abort();
             drop(driving.await);
-            (None, running, None)
-        }
-        End::NoSignal(e) => {
-            driving.abort();
-            drop(driving.await);
-            (None, false, Some(format!("cannot listen for Ctrl+C: {e}")))
+            (None, running.then_some(by), None)
         }
         End::UiGone => {
             // Nobody is there to quit: the session would wait for ever.
             session.send(ClientMessage::Quit);
             let agent = driving.await.ok();
             let why = host.lock().await.stopped(&[]).join("; ");
-            (
-                agent,
-                false,
-                Some(format!("the terminal UI stopped: {why}")),
-            )
+            (agent, None, Some(format!("the terminal UI stopped: {why}")))
         }
     };
     drop(served);
@@ -706,10 +701,11 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
 enum End {
     /// The driver returned (or its task failed).
     Driven(Box<Result<Agent, tokio::task::JoinError>>),
-    /// Ctrl+C; whether a run was in progress.
-    Interrupted { running: bool },
-    /// Ctrl+C cannot be listened for.
-    NoSignal(std::io::Error),
+    /// Ctrl+C (or SIGHUP, SIGTERM); whether a run was in progress.
+    Interrupted {
+        running: bool,
+        by: crate::stops::Stop,
+    },
     /// The terminal UI's runtime stopped.
     UiGone,
 }
@@ -1016,6 +1012,16 @@ const LOCAL: [&str; 4] = [
     plugins::PI_HOST_APPROVAL,
     "pi-host-ui",
 ];
+
+/// How every stdio MCP server starts, a manifest's and a loaded one: in a
+/// process group of its own (yoagent 0.25.16) — a terminal's Ctrl+C or
+/// hangup reaches only yobuild, which stops it (`crate::stops`), and its
+/// close stops what it started too (an `npx` wrapper's `node`), unless that
+/// wrapper exited first and was collected (yoagent then leaves its group
+/// alone).
+pub(crate) fn stdio_options() -> yoagent::mcp::StdioOptions {
+    yoagent::mcp::StdioOptions::new().own_process_group(true)
+}
 
 /// The plugins as [`start`] started them.
 struct Started {
@@ -1564,7 +1570,7 @@ async fn finish(
     watching: tokio::task::JoinHandle<()>,
     agent: Option<Agent>,
     once: bool,
-    interrupted: bool,
+    interrupted: Option<crate::stops::Stop>,
 ) -> Ended {
     // The session closes once its driver is gone; the watch then ends.
     let unsure = match tokio::time::timeout(Duration::from_secs(5), watching).await {
@@ -1581,10 +1587,10 @@ async fn finish(
         Some((outcome, error)) => (Some(outcome), error),
         None => (None, None),
     };
-    if interrupted {
+    if let Some(by) = interrupted {
         (outcome, error) = (
             Some(RunOutcome::Aborted),
-            Some("stopped with Ctrl+C".into()),
+            Some(format!("stopped {}", by.said())),
         );
     }
     if outcome.is_none() {
@@ -2617,16 +2623,9 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
             let (command, args, env) =
                 without(command, args, env, withheld).map_err(|e| failed(&e))?;
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            // A process group of its own, as a loaded server's: closing it
-            // stops what it started too; Ctrl+C is yobuild's to handle.
-            McpClient::connect_stdio_with(
-                &command,
-                &args,
-                Some(env),
-                yoagent::mcp::StdioOptions::new().own_process_group(true),
-            )
-            .await
-            .map_err(|e| failed(&e))?
+            McpClient::connect_stdio_with(&command, &args, Some(env), stdio_options())
+                .await
+                .map_err(|e| failed(&e))?
         }
         Launch::Http { url, headers } => {
             let mut transport = HttpTransport::new(url).map_err(|e| failed(&e))?;

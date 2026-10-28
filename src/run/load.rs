@@ -1223,13 +1223,15 @@ impl LoadPlugin {
         let (program, argv, env) =
             super::without(bin, args, &HashMap::new(), &self.withheld).map_err(|e| did_not(&e))?;
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
-        // A process group of its own: the owner's Ctrl+C does not reach it
-        // (yobuild stops it at the session's end), and closing it stops what
-        // it started too (an `npx` wrapper's `node`).
-        let options = yoagent::mcp::StdioOptions::new().own_process_group(true);
-        let inner = yoagent::mcp::StdioTransport::with_options(&program, &argv, Some(env), options)
-            .await
-            .map_err(|e| did_not(&e))?;
+        // `stdio_options`: a process group of its own.
+        let inner = yoagent::mcp::StdioTransport::with_options(
+            &program,
+            &argv,
+            Some(env),
+            super::stdio_options(),
+        )
+        .await
+        .map_err(|e| did_not(&e))?;
         // Without a watch its death would go unseen: refused (yoagent's
         // stdio transport always gives one).
         let Some(exit) = inner.exit_watch() else {
