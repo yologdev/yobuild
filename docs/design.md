@@ -4374,22 +4374,35 @@ answers calls to its own tools and reaches nothing else. A plugin is more:
    design. If it cannot be done, the fallback is the next run: the
    handler joins the next snapshot, and the result of `load_plugin` says
    its tools come with the next task.
-7. **Installed as its set says.** `install_one` resolves a one-entry `mcp`
-   set today. It grows per set: `pi` with `peers_of` and `pis_own` and
+7. **Installed as its set says.** `install_one` resolves a one-entry set
+   of the plugin's kind: `pi` with `peers_of` and `pis_own` and
    `legacy-peer-deps`, as `install` resolves the `pi` set; `dsh` from the
-   base's lock, a pin the base holds at another version refused ("pinned
-   by the DSH base at X": the loader then says so, and the agent sees it),
-   the DSH files in the hash. `--before` applies to what is resolved anew
-   (the base's locked packages stay as locked; tested).
+   base's lock, a pin the base holds at another version refused before npm
+   runs ("pinned by the DSH base at X": once `load_plugin` takes `dsh`, PR
+   6, the refusal says so and the agent sees it), the DSH files in the
+   hash. `--before` applies to what npm resolves anew; the base's
+   packages stay as locked, checked after resolving. For `dsh` npm's own
+   peer resolution is off and yobuild adds the pin's peers that the base
+   does not hold and that are not optional, as for `pi`: under `--before`
+   npm sees none of the base's versions published since, so a plugin
+   peering on one (its Cordis, say, the base updated within the age rule)
+   would fail ("Could not resolve dependency") though the locked base
+   satisfies it. The install scripts said are the pin's, the base's own
+   apart (said once for the agent, as `check` does).
 
    Built (PR 4, `install_one_test` against the stub npm registry): a pi
    package's peer installed at the version the age rule allows, pi's own
-   never fetched, its dependency's install script not run and said; a DSH
-   package beside the base's own, which was published a day ago and stays
-   as locked (without the base's lock as the start npm refuses it under
-   `--before`: "No matching version found … with a date before …"), the
-   adapter's files copied in; a pin of the base's at another version
-   refused before npm is asked.
+   never asked about, its dependency's install script not run and said; a
+   DSH package beside the base's own, which was published a day ago and
+   stays as locked, peered on by the pin (its install script not the
+   pin's), the pin's other peer added and its optional one never asked
+   about, the adapter's files copied in; the base's own package at its
+   version taken; a pin of the base's at another version, and a base entry
+   that is not a version, refused before npm is asked. Seen by breaking it
+   (2026-10-28): without the base's lock as the start npm refuses the
+   base's package under `--before` ("No matching version found … with a
+   date before …"), and with npm's own peer resolution the pin's peer on
+   it fails as above.
 8. **Found by npm.** `find_plugin` with `kind = "pi"` searches npm for
    `keywords:pi-package <need>`, and with `"dsh"` for `keywords:dsh-plugin
    <need>`; the MCP registry is not asked. A pi package is kept when `npm

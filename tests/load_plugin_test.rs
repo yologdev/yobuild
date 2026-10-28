@@ -333,7 +333,7 @@ async fn a_server_allowed_twice_is_offered_from_the_next_turn_each_call_asking()
             ],
         ),
     ]));
-    let (port, _) = stub(packages, &[]);
+    let port = stub(packages, &[]).port;
     let dir = project(
         "",
         &json!([
@@ -448,7 +448,7 @@ async fn a_server_that_dies_while_idle_is_said_with_no_call_made() {
         "echo-mcp".to_owned(),
         vec![pack("echo-mcp", "1.0.0", 60, Some(echo_tools()), json!({}))],
     )]));
-    let (port, _) = stub(packages, &[]);
+    let port = stub(packages, &[]).port;
     let dir = project(
         "",
         &json!([
@@ -503,7 +503,7 @@ async fn unanswered_is_not_remembered_block_is_at_either_question_and_no_tools_n
         server("echo-mcp", echo_tools()),
         server("empty-mcp", json!([])),
     ]));
-    let (port, _) = stub(packages, &[]);
+    let port = stub(packages, &[]).port;
     let echo = json!({ "package": "echo-mcp", "version": "1.0.0" });
     let dir = project(
         "max_attempts = 10\n",
@@ -595,7 +595,8 @@ async fn a_run_aborted_mid_load_stops_it_where_it_is() {
         server("echo-mcp", echo_tools()),
         server("slow-mcp", echo_tools()),
     ]));
-    let (port, fetched) = stub(packages, &["slow-mcp"]);
+    let stub = stub(packages, &["slow-mcp"]);
+    let (port, fetched) = (stub.port, stub.tarballs);
     let echo = json!({ "package": "echo-mcp", "version": "1.0.0" });
     let dir = project(
         "",

@@ -116,16 +116,28 @@ pub fn pack(
 /// latest.
 pub type Packages = Arc<BTreeMap<String, Vec<Packed>>>;
 
-/// The tarballs the stub was asked for, by package.
+/// What the stub was asked for, by package, in order.
 pub type Fetched = Arc<Mutex<Vec<String>>>;
 
-/// The stub registries on a port of their own, serving until the process
-/// ends; the tarballs of `slow` packages answer only after a minute.
-pub fn stub(packages: Packages, slow: &[&str]) -> (u16, Fetched) {
+/// The stub registries, serving until the process ends.
+pub struct Stub {
+    pub port: u16,
+    /// The packages whose tarball was fetched.
+    pub tarballs: Fetched,
+    /// The packages whose packument (`npm view`, a resolve) was asked for,
+    /// served or not.
+    pub packuments: Fetched,
+}
+
+/// The stub registries on a port of their own; the tarballs of `slow`
+/// packages answer only after a minute.
+pub fn stub(packages: Packages, slow: &[&str]) -> Stub {
     let slow: Arc<BTreeSet<String>> = Arc::new(slow.iter().map(|s| s.to_string()).collect());
     let fetched = Fetched::default();
+    let packuments = Fetched::default();
     let (tx, rx) = std::sync::mpsc::channel();
     let asked = fetched.clone();
+    let viewed = packuments.clone();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async move {
@@ -148,6 +160,7 @@ pub fn stub(packages: Packages, slow: &[&str]) -> (u16, Fetched) {
             let port = Arc::new(std::sync::OnceLock::<u16>::new());
             let (at, served) = (port.clone(), packages.clone());
             let package = move |UrlPath(name): UrlPath<String>| async move {
+                viewed.lock().unwrap().push(name.clone());
                 let Some(all) = served.get(&name) else {
                     return StatusCode::NOT_FOUND.into_response();
                 };
@@ -203,5 +216,9 @@ pub fn stub(packages: Packages, slow: &[&str]) -> (u16, Fetched) {
             axum::serve(listener, app).await.unwrap();
         });
     });
-    (rx.recv().unwrap(), fetched)
+    Stub {
+        port: rx.recv().unwrap(),
+        tarballs: fetched,
+        packuments,
+    }
 }
