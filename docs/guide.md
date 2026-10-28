@@ -205,7 +205,8 @@ MCP server it lacks and load it for the session. It works like this:
   loaded package runs in a runtime of its own with its tools only: its
   hooks are not called, and it gets no grants, `config` or host
   services. One that needs those belongs in the manifest as a
-  `[[plugin]]`, which the session's end prints.
+  `[[plugin]]`, which the session's end prints. The gallery's
+  `project-notebook` loads the `pi-memory` package this way.
 
 [§14](design.md#14-agents-that-extend-themselves-m5-decided-2026-10-25)
 is the design.

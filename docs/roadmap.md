@@ -315,9 +315,22 @@ never loading, and a denied approval leaves the agent without the plugin.
 sources. The no-tools refusal is tested against a stub registry
 (`load_plugin_test`).
 
-Next, stage 2: pi and DSH plugins (proposed 2026-10-27; §14, "Stage 2:
-pi and DSH plugins"). Later: rutis plugins and remote MCP servers (§14,
-"Later steps").
+**Done (stage 2, pi and DSH packages; §14, "Stage 2: pi and DSH
+plugins"):**
+- **What it does:** `find_plugin` searches npm for pi and DSH packages,
+  and `load_plugin` starts each in a runtime of its own, with its tools
+  only.
+- **The demo:** the gallery's `project-notebook` finds and loads
+  `pi-memory`.
+  - **Live:** on 2026-10-28 one session remembered a decision ($0.0045)
+    and a second recalled it ($0.0029).
+  - **A refused plugin:** its `not-offered` reply file is refused before
+    anything installs.
+  - **A denied approval:** in its `blocked` reply file the agent answers
+    without a memory and gives the unsaved note.
+- **Tests:** `gallery_test` runs all three on the page in CI.
+
+Later: rutis plugins and remote MCP servers (§14, "Later steps").
 
 ## Open questions (for review)
 

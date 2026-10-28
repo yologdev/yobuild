@@ -4597,6 +4597,43 @@ with no grants, no config and no host services). Not pi-lens (it needs
 7-day rule takes a 0.9 version, which the base refuses). Three reply
 files, as stage 1: allowed, not offered, blocked.
 
+**The demo, built (2026-10-28).** The gallery's `project-notebook`: a
+read-only notebook for a project that remembers the owner's decisions,
+`[extend] kinds = ["pi"]`, `max_loads` 1. It finds `pi-memory` on npm,
+loads it with the owner's yes, and calls `memory_read` / `memory_write`
+as `pi-memory__…`. Loaded, pi-memory's hooks are not called, so the
+prompt has the agent read its memory before relying on it. pi-memory
+keeps one `MEMORY.md` under `HOME` for every project, so notes are
+tagged with the project's name. A coding agent built it through the skill
+four times:
+1. The first build's throwaway pinned copy, meant to try the tools'
+   arguments, was refused by the builder's environment: it would run a
+   package's code on the machine. The skill now says to ask first, or
+   else to read what the package publishes (`npm view … readme`,
+   `npm pack`) and say so.
+2. The second build read the source only. It named a report section
+   `Remembered`, which the lenient check finds in "not remembered". The
+   skill now gives pi-memory's arguments, result texts and where it keeps
+   its notes (one memory for every project: tag each note). It also gives
+   which `[extend] kinds` to list, that a tool whose result depends on
+   outside state is expected only on what the reply file wrote, and that
+   a gallery agent's `new --from` copy brings a README to rewrite.
+3. The third build used `Could not do`, which "I could not do it" holds.
+   Its manifest's header ran the reply files under `--once`, where the
+   loaded tools are not there. The review also found that the throwaway
+   copy needs `allow` naming the tool, or its call is denied under
+   `--once`, and that pi-memory's end-of-session summary is never written
+   under yobuild (no key is given).
+4. The fourth is in the gallery: `Answers given` / `Saved to memory` /
+   `Out of reach`, its header running the reply files on the page.
+
+Live on 2026-10-28, two sessions shared a throwaway `HOME`. The first
+loaded pi-memory 0.4.2, wrote the decision and read it back ($0.0045).
+The second, a new session, loaded it again, recalled the note and checked
+the code against it ($0.0029). `gallery_test` runs the three reply files
+on the page in CI. It checks the `[[plugin]]` block, the tools the second
+question offers, and that the note is in the run's own `HOME`.
+
 **Decisions for review.**
 
 1. A runtime of its own per loaded plugin, or the shared `pi`/`dsh`

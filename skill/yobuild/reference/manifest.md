@@ -312,9 +312,12 @@ lists both as allowed and says what `[extend]` lets the agent do.
 - what it must never do without asking;
 - how to end: with `report`, yobuild appends its instruction (the
   sections) itself; say what goes in each. The check is lenient: each
-  section name must appear anywhere in the last answer, in any case — so
-  choose names that appear only as headings (`Sources cited`, not
-  `Brief`).
+  section name must appear anywhere in the last answer, in any case, even
+  inside another word — so choose names that appear only as headings
+  (`Sources cited`, not `Brief`), and that no sentence of the answer
+  would hold: `Remembered` is in "not remembered", `Done` in "abandoned",
+  `Could not do` in "I could not do it"; `Notes kept`, `Saved to memory`
+  or `Unfinished items` are not.
 
 `yobuild new x --from handoff` writes a whole one (`x/prompts/handoff.md`).
 

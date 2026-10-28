@@ -1,0 +1,1 @@
+Which port does tiny-shop listen on, and where are orders kept? Also remember this decision for tiny-shop, dated 2026-10-28: we keep orders in memory until we move to Postgres.

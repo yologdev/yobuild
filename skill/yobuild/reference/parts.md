@@ -164,13 +164,57 @@ goes in the manifest, where it runs with its hooks and grants; so does a
 rutis plugin, which `[extend]` does not find. Of the pi packages checked
 on 2026-10-28, `pi-web-access`, `pi-memory`, `@juicesharp/rpiv-todo` and
 `@hypabolic/pi-hypa` load this way; one that asks through pi's dialogs
-(`rpiv-ask-user-question`) gets no one to ask.
+(`rpiv-ask-user-question`) gets no one to ask. Its tools are
+`<name>__<tool>` as a server's, the default `name` made as a server's
+(without the scope: `@juicesharp/rpiv-todo` loads as `rpiv-todo`;
+`pi-memory` as `pi-memory`, its tools `pi-memory__memory_write` …), and the questions name it: "Start the pi package …", "Keep the pi
+package …".
+
+- `pi-memory` (checked 2026-10-28, 0.4.2): `memory_write`,
+  `memory_read`, `memory_forget`, `memory_restore`, `memory_status`,
+  `scratchpad` and `memory_search`. It keeps plain Markdown in
+  `~/.pi/agent/memory/` — the person's home, outside the agent's folder,
+  shared with pi itself if they use it — so what one session writes the
+  next can read. Loaded, its recall at the start of each turn (a hook)
+  does not happen: the prompt has the agent call `memory_read` (or
+  `memory_status`) before it relies on what it remembered.
+  `memory_search` needs `qmd` installed (else it says so); `memory_read`
+  works without it. Its arguments, from its published code:
+  `memory_write {"target": "long_term" | "daily", "content": "<Markdown>",
+  "mode": "append" | "overwrite"}` (`mode` for `long_term`, `append` by
+  default; the result begins `Appended to MEMORY.md`, or `Appended to
+  daily log: …`), `memory_read {"target": "long_term" | "scratchpad" |
+  "daily" | "list", "date": "YYYY-MM-DD"}` (the file's text). One memory
+  serves every project the person uses it in (one `MEMORY.md`; its folder
+  is `PI_MEMORY_DIR` when that is set — a loaded package does not get it
+  — else `.pi/agent/memory` under `HOME`): a
+  notebook for several projects tags each note with the project (`#tags`
+  in `content`, which pi-memory suggests) and reads back only its own. Its writes ask, as every loaded tool's call does.
+  Put in the manifest instead (the `[[plugin]]` block yobuild prints at
+  the end), it runs with its hooks: what it remembers is added to each
+  turn (with today's and yesterday's daily log), and at the session's
+  end it tries to write a summary to the daily log with the session's
+  model (on by default in pi-memory). Under yobuild that summary is not
+  written: a pi extension is told which model runs only with `model =
+  "info"`, and never given a key to call it with (pi-memory logs that it
+  could not resolve one). `PI_MEMORY_EXIT_SUMMARY=0`, passed by an `env`
+  grant, turns the attempt off. Its writes then run without asking only if
+  `allow` names them.
+- Which kinds to list in `[extend] kinds`: the one this list documents
+  for the need (a memory: `"pi"`, pi-memory). A kind with no documented package for it
+  widens the search to packages you cannot script against before the
+  page run; add it only when the person wants that choice.
 
 Someone must be there to answer: the web page or the terminal. Under
 `--once` `load_plugin` is refused (scripted.md). In the prompt, tell the
 agent when to look for a tool (what it lacks, in the owner's words), to
 search by the tool's name, to load at most what the task needs, and to
 say in its report what it loaded and what it could not do when the person
-said Block. When the session ends yobuild prints the `[[mcp]]` or
+said Block. Name the package the agent should prefer when this list
+documents one for the need (`pi-memory` for a memory: its tools' names
+and arguments are known, so the prompt and reply files can use them);
+let it judge the candidates on what they claim only where none is
+documented — and then the prompt cannot name their tools, so it says to
+read them from `load_plugin`'s result. When the session ends yobuild prints the `[[mcp]]` or
 `[[plugin]]` block that would keep each one loaded: the person decides
 whether to add it to `agent.toml`.
