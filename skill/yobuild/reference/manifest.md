@@ -284,14 +284,15 @@ nothing. Then `load_plugin(package, name?, args?)` (a `version` may be given: it
 them for the session: installed without running anything (every package
 in its tree `min_age_days` old), the person asked before it starts and
 again with its tools; its tools are the agent's from its next step
-(`<name>__<tool>`), and each call asks. Up to `max_loads` servers and
+(`<name>__<tool>`), and each call asks. Up to `max_loads` loaded and
 `max_attempts` calls a session. Nothing is written to the manifest: when
-the session ends, yobuild prints the `[[mcp]]` block that would keep
-each one. `kinds` names what `find_plugin` searches for — `"mcp"`, `"pi"`,
-`"dsh"`; `["mcp"]` when left out — and its `kind` argument defaults to
-the first listed. pi and DSH packages are searched on npm only, by their
-marks, and not loaded: `load_plugin` loads MCP servers only so far, and
-is not there at all without `"mcp"` (parts.md). Refused with `gate = "off"`; a
+the session ends, yobuild prints the `[[mcp]]` or `[[plugin]]` block
+that would keep each one. `kinds` names what `find_plugin` searches for
+and `load_plugin` loads — `"mcp"`, `"pi"`, `"dsh"`; `["mcp"]` when left
+out — and its `kind` argument defaults to the first listed. pi and DSH
+packages are searched on npm only, by their marks, and run loaded in a
+runtime of their own with their tools only: no hooks, grants, `config`
+or host services (parts.md). Refused with `gate = "off"`; a
 plugin's `allow` may not name `find_plugin` or `load_plugin`. `check`
 lists both as allowed and says what `[extend]` lets the agent do.
 

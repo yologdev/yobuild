@@ -145,7 +145,7 @@ pub(crate) const HINTS: &[Hint] = &[
         id: "load-max-loads",
         scope: Scope::Call,
         pattern: "as many as it may ([extend] max_loads",
-        fix: "raise [extend] max_loads (up to 5) and restart, or add the server you need to agent.toml as an [[mcp]] entry",
+        fix: "raise [extend] max_loads (up to 5) and restart, or add the one you need to agent.toml (the [[mcp]] or [[plugin]] block the session printed)",
     },
     Hint {
         id: "load-max-attempts",
@@ -389,7 +389,7 @@ mod tests {
             ),
             (
                 Scope::Call,
-                "load_plugin refused it: this session has loaded 2 servers, as many as it may ([extend] max_loads 2)".into(),
+                "load_plugin refused it: this session has loaded 2 plugins, as many as it may ([extend] max_loads 2)".into(),
                 "load-max-loads",
             ),
             (

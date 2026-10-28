@@ -151,20 +151,26 @@ keys). It gets two tools, both allowed:
   before anything installs. The version taken is the one offered that
   day, which can be newer than a pin listed above.
 
-`[extend]` loads MCP servers only — no pi, DSH or rutis plugin: a part
-that is one (pi-lens's type checks, say) goes in the manifest, or the
-person is told the agent cannot do it. When `kinds` lists `"pi"` or
-`"dsh"` (alone or beside `"mcp"`), `find_plugin(need, kind)` searches npm
-for pi packages (the `pi` field or the keyword `pi-package`) or DSH
-packages (the `dsh` field or `dsh-plugin`), but `load_plugin` refuses
-them for now — and without `"mcp"` there is no `load_plugin` at all: the
-agent can name one to the person, who puts it in the manifest.
+When `kinds` lists `"pi"` or `"dsh"` (alone or beside `"mcp"`),
+`find_plugin(need, kind)` searches npm for pi packages (the `pi` field or
+the keyword `pi-package`) or DSH packages (the `dsh` field or
+`dsh-plugin`), and `load_plugin` loads one as it loads a server, with no
+`args`. A loaded package runs in a runtime of its own with its tools
+only: its hooks are not called (a pi extension's own `tool_call` policy
+still judges its own tools' calls), and it gets no grants, no `config`
+and no host services. So a package that needs one — pi-lens's `trust`,
+a DSH package's `workspace` or DSH's host services (most DSH packages) —
+goes in the manifest, where it runs with its hooks and grants; so does a
+rutis plugin, which `[extend]` does not find. Of the pi packages checked
+on 2026-10-28, `pi-web-access`, `pi-memory`, `@juicesharp/rpiv-todo` and
+`@hypabolic/pi-hypa` load this way; one that asks through pi's dialogs
+(`rpiv-ask-user-question`) gets no one to ask.
 
 Someone must be there to answer: the web page or the terminal. Under
 `--once` `load_plugin` is refused (scripted.md). In the prompt, tell the
 agent when to look for a tool (what it lacks, in the owner's words), to
 search by the tool's name, to load at most what the task needs, and to
 say in its report what it loaded and what it could not do when the person
-said Block. When the session ends yobuild prints the `[[mcp]]` block that
-would keep each loaded server: the person decides whether to add it to
-`agent.toml`.
+said Block. When the session ends yobuild prints the `[[mcp]]` or
+`[[plugin]]` block that would keep each one loaded: the person decides
+whether to add it to `agent.toml`.

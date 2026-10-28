@@ -278,6 +278,9 @@ fn run_with(dir: &Path, registry: &str, port: u16) -> Output {
         .env("YOBUILD_HOME", dir.join("home/.yobuild"))
         .env("YOBUILD_MCP_REGISTRY", registry)
         .env("npm_config_registry", format!("http://127.0.0.1:{port}/"))
+        // The checkout's adapters (a pi or DSH kind needs them): the
+        // cache's would be installed from the stub, which has none.
+        .env("YOBUILD_RUNTIMES", "checkout")
         .output()
         .unwrap()
 }
@@ -316,7 +319,7 @@ fn find_plugin_returns_candidates_from_both_sources_with_the_version_old_enough(
 }
 
 #[test]
-fn pi_and_dsh_packages_are_found_on_npm_by_their_mark_and_not_loaded() {
+fn pi_and_dsh_packages_are_found_on_npm_by_their_mark() {
     let (port, asked) = stub(Broken::default());
     let dir = project_with(
         "kinds = [\"pi\", \"dsh\"]\n",
@@ -532,7 +535,7 @@ fn check_lists_both_tools_as_allowed_and_says_what_extend_lets_the_agent_do() {
 }
 
 #[test]
-fn check_of_a_pi_and_dsh_agent_lists_find_plugin_alone_and_a_bad_registry_refuses_nothing() {
+fn check_of_a_pi_and_dsh_agent_lists_both_tools_and_a_bad_registry_refuses_nothing() {
     let dir = project_with("kinds = [\"pi\", \"dsh\"]\n", "[]");
     let out = Command::new(env!("CARGO_BIN_EXE_yobuild"))
         .args(["check", "agent.toml", "--json"])
@@ -541,6 +544,7 @@ fn check_of_a_pi_and_dsh_agent_lists_find_plugin_alone_and_a_bad_registry_refuse
         .env("YOBUILD_HOME", dir.path().join("home/.yobuild"))
         // The MCP registry is never asked by this agent: not read.
         .env("YOBUILD_MCP_REGISTRY", "http://example.com")
+        .env("YOBUILD_RUNTIMES", "checkout")
         .output()
         .unwrap();
     let report: Value = serde_json::from_slice(&out.stdout)
@@ -555,7 +559,7 @@ fn check_of_a_pi_and_dsh_agent_lists_find_plugin_alone_and_a_bad_registry_refuse
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"find_plugin"), "{names:?}");
-    assert!(!names.contains(&"load_plugin"), "{names:?}");
+    assert!(names.contains(&"load_plugin"), "{names:?}");
     let find = agent["tools"]
         .as_array()
         .unwrap()
@@ -570,7 +574,7 @@ fn check_of_a_pi_and_dsh_agent_lists_find_plugin_alone_and_a_bad_registry_refuse
         agent["notes"].as_array().unwrap().iter().any(|n| n
             .as_str()
             .unwrap()
-            .ends_with("with no \"mcp\" among `kinds`, it has no `load_plugin`")),
+            .ends_with("a pi or DSH package loaded runs in a runtime of its own with its tools only: no hooks, grants, config or host services")),
         "{agent:#}"
     );
 }

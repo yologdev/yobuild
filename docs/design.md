@@ -4460,6 +4460,69 @@ answers calls to its own tools and reaches nothing else. A plugin is more:
 9. **rutis plugins later.** rutis's SDK carries the keyword `rutis-plugin`,
    but no published plugin does yet. They come when some do.
 
+**Taken from yoagent-rutis 0.9 (PR 6, 2026-10-28).** yoagent-rutis 0.9.0
+(yoagent PR #381) brings points 2 and 6; point 3's second half did not
+come:
+
+- **Restricted** (point 2): `RutisBridge::restrict_runtime(handle)`,
+  called by `PluginHost::add_runtime_with` before the runtime starts. A
+  handler registered over that runtime's connections — any row's, or
+  none's, after a restart too — gets `tools`, its tool calls, `before_tool`
+  for its own tools only (called inside the tool when it runs, after every
+  policy, the gate included; with the call alone, no conversation) and
+  `finish`; it is no policy for `require_policy`, and a failing `tools`
+  offers nothing and fails no run.
+- **Named by yobuild** (point 5): `with_restricted_tools(handler, tool)`
+  on the bridge's extension asks `Loaded`: a handler of a load in progress
+  gets `<name>__<tool>` for each tool; once kept, only the tools the owner
+  saw at the second question; any other restricted handler (one a DSH
+  plugin's Cordis child registers under a name of its own, a load blocked
+  or stopped) nothing. Only the adapter's handler is the plugin's: its
+  name, `loaded-<name>-<uuid>`, is the one yobuild gave the adapter row.
+- **Mid-run** (point 6): `extension.late_tools()`, a source yoagent asks
+  each turn, offers a restricted handler that registered during the run
+  from the next turn; later runs take it in their snapshot. `Loaded` wraps
+  it, after the servers' tools, and passes on only kept, running plugins'
+  tools — so one blocked at the second question, whose tools the late
+  source already holds for the run, is not offered. The tools are read for
+  the second question through the same source (it calls the handler's
+  `tools` once a run): their names, descriptions and parameters as the
+  model would get them.
+- **Its runtime's provides** (point 3, second half): rutis-loader
+  publishes what a row provides to every runtime, so it belongs in rutis;
+  nothing changed. The gap stays as `add_runtime` has it: a row declaring
+  a service is refused, one an SDK plugin provides undeclared is not seen.
+- **What yobuild does around it**: the host shared under a lock (the tick
+  skips a look while a load holds it); a loaded runtime `loaded-<n>`, a
+  number per load, never reused (the loader keeps a name's resolution);
+  its rows `loaded:<name>` (the adapter) and `loaded:<name>:<row>` (a DSH
+  package's), so no grant and no `pi-host-…`/`dsh-host` row matches them;
+  `PluginHost::stopped` leaves out added runtimes' rows, which
+  `added_stopped(runtime)` reports for `Loaded`, said as "The loaded pi
+  package `x` stopped: …"; the adapters' runtime set installed when
+  `[extend]` names `pi` or `dsh`; `load_plugin` offered whenever `[extend]`
+  is (each kind loads).
+- **pi**: `install_one(Set::Pi)`, the extensions found by
+  `resolve-package.mjs` (none refused before the first question; skills,
+  prompts and themes said), the adapter row on `adapters/pi` with
+  `extensions`, `cwd`, its handler's name and `nestedCalls:
+  "own-extension"` — no `execFor`, `projectTrustedFor`, `wakeFor`, `model`
+  — and no `pi-host-ui` (print mode).
+- **DSH**: `install_one(Set::Dsh)`, its runtime in that set's folder; the
+  package's rows by `inspect-package.mjs` and `rows_of_bundle` (refused
+  before the first question as the manifest's are), the base's
+  `dsh-web`/`dsh-system-prompt`/`dsh-tools` rows and the adapter row
+  (`name`: its handler), no `dsh-host-dialogs`, no host services, no DSH
+  host, no `DSH_HOME`; `probe_services` on the loaded runtime before the
+  handler is waited for: a service missing after two looks refuses it,
+  named.
+- **The block**: `[[plugin]]` with `pi = "<package>@<version>"` (or
+  `dsh`), `name`, the tools' own names commented in `allow`; a line says
+  in the manifest it runs with the other pi (DSH) plugins, with its hooks,
+  its tools under their own names, and names the grants it would have to
+  share (`model`, `env`; the DSH plugins' grants) when the manifest's
+  plugins of that kind have any.
+
 **The questions.** Question 1 names the kind: `Start the pi package
 <package>@<version> as <name>? (asked by the agent)`, with what stage 1
 shows, plus "it runs in a runtime of its own, with only its tools used".

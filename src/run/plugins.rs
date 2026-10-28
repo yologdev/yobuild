@@ -609,9 +609,9 @@ fn exists(path: &Path) -> Result<(), BoxError> {
 }
 
 /// A pi plugin's extensions, and what it ships that yobuild does not load.
-struct PiFound {
-    extensions: Vec<Json>,
-    notes: Vec<String>,
+pub(crate) struct PiFound {
+    pub extensions: Vec<Json>,
+    pub notes: Vec<String>,
 }
 
 fn pi_extensions(
@@ -637,12 +637,24 @@ fn pi_extensions(
             notes: Vec::new(),
         });
     }
-    // What pi's package manager finds in it.
-    let found = node_json(
-        &layout.adapters.join("pi/resolve-package.mjs"),
-        &[&dir],
+    pi_package(
+        &layout.adapters,
+        &dir,
+        &format!("plugin {}", plugin.name),
         keys,
-    )?;
+    )
+}
+
+/// The extensions pi's package manager finds in the package folder `dir`
+/// (`resolve-package.mjs`), refused when none; what it ships besides that
+/// yobuild does not load, a note on `who`.
+pub(crate) fn pi_package(
+    adapters: &Path,
+    dir: &Path,
+    who: &str,
+    keys: &[String],
+) -> Result<PiFound, BoxError> {
+    let found = node_json(&adapters.join("pi/resolve-package.mjs"), &[dir], keys)?;
     let extensions = found.list("extensions")?.clone();
     if extensions.is_empty() {
         return Err(format!("no pi extension in {}", dir.display()).into());
@@ -658,8 +670,7 @@ fn pi_extensions(
     let notes = match skipped.is_empty() {
         true => Vec::new(),
         false => vec![format!(
-            "plugin {}: its {} are not loaded (yobuild loads pi extensions only)",
-            plugin.name,
+            "{who}: its {} are not loaded (yobuild loads pi extensions only)",
             skipped.join(", ")
         )],
     };
@@ -727,12 +738,29 @@ fn dsh_rows_of(
         base.display()
     );
     let dir = installed(p, &modules, &fix)?;
+    dsh_package(&layout.adapters, base, p.name(), &dir, &id, config, keys)
+}
+
+/// The rows of the DSH package `name`, installed at `dir` in the runtime
+/// folder `base` (as DSH would install it: `inspect-package.mjs`), each
+/// `<id>:<row id>` in runtime `dsh`, `config` replacing the first's; and its
+/// peers.
+pub(crate) fn dsh_package(
+    adapters: &Path,
+    base: &Path,
+    name: &str,
+    dir: &Path,
+    id: &str,
+    config: Option<serde_json::Map<String, Json>>,
+    keys: &[String],
+) -> Result<(Vec<Row>, Vec<String>), BoxError> {
     let inspected = node_json(
-        &layout.adapters.join("dsh/inspect-package.mjs"),
-        &[base, Path::new(p.name())],
+        &adapters.join("dsh/inspect-package.mjs"),
+        &[base, Path::new(name)],
         keys,
     )?;
-    rows_of_bundle(&id, &inspected, config, &modules, &optional_peers(&dir)?)
+    let modules = base.join("node_modules");
+    rows_of_bundle(id, &inspected, config, &modules, &optional_peers(dir)?)
 }
 
 /// The peers a package marks optional (`peerDependenciesMeta`): it works

@@ -721,8 +721,8 @@ impl Default for Builtins {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Extend {
-    /// What may be found: MCP stdio servers, pi and DSH packages (loaded:
-    /// MCP servers only so far, design §14 "Stage 2").
+    /// What may be found and loaded: MCP stdio servers, pi and DSH packages
+    /// (design §14 "Stage 2").
     pub kinds: Vec<ExtendKind>,
     /// Servers kept per session (1 to 5).
     pub max_loads: u32,
@@ -765,9 +765,8 @@ impl ExtendKind {
 }
 
 impl Extend {
-    /// Whether `load_plugin` is offered: it loads MCP servers only so far
-    /// (design §14 "Stage 2").
-    pub fn loads(&self) -> bool {
+    /// Whether it finds MCP servers: the MCP registry is asked only then.
+    pub fn finds_mcp(&self) -> bool {
         self.kinds.contains(&ExtendKind::Mcp)
     }
 }
