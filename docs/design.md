@@ -4755,7 +4755,9 @@ yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
        to say: what it does with what it gets is not seen here, and it can
        change any day. Its tools are not known until it answers."
    - **The credential questions:** after Allow, one per header the entry
-     lists, a text answer: "Which environment variable holds the
+     marks required, or optional and secret, a text answer (an optional
+     header that is not secret is left off: rare, and seldom more than
+     cosmetic; the first question's details list it): "Which environment variable holds the
      `Authorization` header for context7? (sent to mcp.context7.com with
      every request)". The message gives the header's description and
      template, and "Leave it empty to send none" (optional) or "Without
