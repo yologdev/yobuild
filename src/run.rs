@@ -381,7 +381,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             &cwd,
         );
         tools.add(FindPlugin::TOOL, vec![Box::new(find)]);
-        tools.add(load::LoadPlugin::TOOL, vec![Box::new(load)]);
+        // It loads MCP servers only so far: offered only when it can load.
+        if extend.loads() {
+            tools.add(load::LoadPlugin::TOOL, vec![Box::new(load)]);
+        }
     }
     for server in &manifest.mcp {
         let found = mcp(server, &checked.servers[&server.name]).await?;
@@ -676,8 +679,11 @@ fn gate(
     if manifest.builtins.ask_owner {
         gate = gate.with_allowed_tools([AskOwner::TOOL]);
     }
-    if manifest.extend.is_some() {
-        gate = gate.with_allowed_tools([FindPlugin::TOOL, load::LoadPlugin::TOOL]);
+    if let Some(extend) = &manifest.extend {
+        gate = gate.with_allowed_tools([FindPlugin::TOOL]);
+        if extend.loads() {
+            gate = gate.with_allowed_tools([load::LoadPlugin::TOOL]);
+        }
     }
     Some(gate)
 }
@@ -1128,8 +1134,11 @@ fn prepare(
     cwd: &Path,
 ) -> Result<Prepared, BoxError> {
     let lookup = |name: &str| std::env::var(name).ok();
-    let sources = match manifest.extend {
-        Some(_) => Some(Sources::from_env()?),
+    // The MCP registry only for an agent that finds MCP servers: a bad
+    // `YOBUILD_MCP_REGISTRY` refuses nothing it would not use.
+    let sources = match &manifest.extend {
+        Some(extend) if extend.loads() => Some(Sources::from_env()?),
+        Some(_) => Some(Sources::npm_only()),
         None => None,
     };
     let mut notes = Vec::new();

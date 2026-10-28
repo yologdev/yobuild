@@ -8,7 +8,7 @@ use yoagent::{AgentTool, ToolContext, ToolError};
 use super::*;
 use crate::builtins::{Candidate, FindPlugin, Sources};
 use crate::frontend::{Driver, Session};
-use crate::manifest::Manifest;
+use crate::manifest::{ExtendKind, Manifest};
 
 #[test]
 fn a_package_is_named_without_its_scope_and_mcp_words() {
@@ -513,6 +513,7 @@ max_attempts = 2
 fn candidate(package: &str, version: Result<&str, &str>) -> Candidate {
     Candidate {
         need: "lint".into(),
+        kind: ExtendKind::Mcp,
         package: package.into(),
         version: version.map(String::from).map_err(String::from),
         registry_name: None,
@@ -537,7 +538,18 @@ fn tool(once: bool) -> (LoadPlugin, Driver, tempfile::TempDir) {
     let find = FindPlugin::new(session.clone(), extend.clone(), sources);
     let mut needs = candidate("needs-env", Ok("1.0.0"));
     needs.required_env = Some(vec!["API_TOKEN".into()]);
+    let mut pi = candidate("pi-lint", Ok("1.0.0"));
+    pi.kind = ExtendKind::Pi;
+    // Found as a pi package first, then as the MCP server it also is:
+    // loaded as the server (its version, 1.2.0, below).
+    let mut lint_as_pi = candidate("lint-mcp", Ok("9.9.9"));
+    lint_as_pi.kind = ExtendKind::Pi;
+    let mut dsh = candidate("dsh-lint", Ok("1.0.0"));
+    dsh.kind = ExtendKind::Dsh;
+    find.remember(&[lint_as_pi]);
     find.remember(&[
+        pi,
+        dsh,
         candidate("lint-mcp", Ok("1.2.0")),
         candidate("young", Err("no version was published 7 or more days ago")),
         candidate("taken-mcp", Ok("1.0.0")),
@@ -600,6 +612,14 @@ async fn what_the_limits_refuse_before_anything_is_installed() {
         (
             json!({ "package": "lint-mcp", "version": "1.3.0" }),
             "lint-mcp@1.3.0 is not the version find_plugin offered: lint-mcp@1.2.0 (or give no `version`)",
+        ),
+        (
+            json!({ "package": "pi-lint" }),
+            "pi-lint is a pi package: load_plugin loads MCP servers only so far",
+        ),
+        (
+            json!({ "package": "dsh-lint" }),
+            "dsh-lint is a DSH package: load_plugin loads MCP servers only so far",
         ),
     ];
     for (args, said) in cases {

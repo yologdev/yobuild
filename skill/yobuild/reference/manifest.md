@@ -64,8 +64,8 @@ web      = true
 phone    = false                      # the web page on the local network, with a link
 terminal = false                      # the terminal UI instead of the web page
 
-[extend]                              # optional: the agent may search for MCP servers it lacks
-kinds        = ["mcp"]                # "mcp" only
+[extend]                              # optional: the agent may search for plugins it lacks
+kinds        = ["mcp"]                # "mcp", "pi", "dsh": what find_plugin searches for
 max_loads    = 2                      # 1 to 5
 max_attempts = 4                      # 1 to 10
 min_age_days = 7                      # 0 to 365: newer versions are not taken
@@ -274,8 +274,9 @@ inside the agent's folder).
 listens.
 
 **`[extend]`**: off unless the table is there (empty, it takes the
-defaults). The agent gets `find_plugin(need)`, which the gate allows: it
-searches the MCP registry and npm for MCP servers over stdio and returns
+defaults). The agent gets `find_plugin(need, kind?)`, which the gate
+allows: for MCP (`kinds` below) it searches the MCP registry and npm for
+MCP servers over stdio and returns
 candidates — each with the version that could be taken (the newest
 release published `min_age_days` or more days ago, default 7) and what
 the packages say of themselves, unverified. It installs and starts
@@ -286,7 +287,11 @@ again with its tools; its tools are the agent's from its next step
 (`<name>__<tool>`), and each call asks. Up to `max_loads` servers and
 `max_attempts` calls a session. Nothing is written to the manifest: when
 the session ends, yobuild prints the `[[mcp]]` block that would keep
-each one. `kinds` is `["mcp"]` only. Refused with `gate = "off"`; a
+each one. `kinds` names what `find_plugin` searches for — `"mcp"`, `"pi"`,
+`"dsh"`; `["mcp"]` when left out — and its `kind` argument defaults to
+the first listed. pi and DSH packages are searched on npm only, by their
+marks, and not loaded: `load_plugin` loads MCP servers only so far, and
+is not there at all without `"mcp"` (parts.md). Refused with `gate = "off"`; a
 plugin's `allow` may not name `find_plugin` or `load_plugin`. `check`
 lists both as allowed and says what `[extend]` lets the agent do.
 

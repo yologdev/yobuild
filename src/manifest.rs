@@ -721,7 +721,8 @@ impl Default for Builtins {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Extend {
-    /// What may be found and loaded: step 1 is MCP stdio servers only.
+    /// What may be found: MCP stdio servers, pi and DSH packages (loaded:
+    /// MCP servers only so far, design §14 "Stage 2").
     pub kinds: Vec<ExtendKind>,
     /// Servers kept per session (1 to 5).
     pub max_loads: u32,
@@ -737,6 +738,10 @@ pub struct Extend {
 pub enum ExtendKind {
     /// An MCP server over stdio, from npm.
     Mcp,
+    /// A pi package, from npm.
+    Pi,
+    /// A DSH package, from npm.
+    Dsh,
 }
 
 impl ExtendKind {
@@ -744,7 +749,26 @@ impl ExtendKind {
     pub fn name(self) -> &'static str {
         match self {
             ExtendKind::Mcp => "mcp",
+            ExtendKind::Pi => "pi",
+            ExtendKind::Dsh => "dsh",
         }
+    }
+
+    /// What one of its plugins is called, in what yobuild says.
+    pub fn label(self) -> &'static str {
+        match self {
+            ExtendKind::Mcp => "MCP server",
+            ExtendKind::Pi => "pi package",
+            ExtendKind::Dsh => "DSH package",
+        }
+    }
+}
+
+impl Extend {
+    /// Whether `load_plugin` is offered: it loads MCP servers only so far
+    /// (design §14 "Stage 2").
+    pub fn loads(&self) -> bool {
+        self.kinds.contains(&ExtendKind::Mcp)
     }
 }
 
@@ -2154,19 +2178,21 @@ fn extend(raw: RawExtend) -> Result<Extend, Located> {
     if let Some(kinds) = raw.kinds {
         if kinds.get_ref().is_empty() {
             let m =
-                "[extend] kinds is empty: name what may be found (\"mcp\"), or leave out [extend]";
+                "[extend] kinds is empty: name what may be found (\"mcp\", \"pi\", \"dsh\"), or leave out [extend]";
             return Err((kinds.span(), m.into()));
         }
         let mut seen = Vec::new();
         for kind in kinds.into_inner() {
             let made = match kind.get_ref().as_str() {
                 "mcp" => ExtendKind::Mcp,
-                other @ ("pi" | "dsh" | "rutis") => {
-                    let m = format!("[extend] kinds {other:?}: only \"mcp\" so far; {other} plugins come in a later step (design §14)");
-                    return Err((kind.span(), m));
+                "pi" => ExtendKind::Pi,
+                "dsh" => ExtendKind::Dsh,
+                "rutis" => {
+                    let m = "[extend] kinds \"rutis\": \"mcp\", \"pi\" or \"dsh\" so far; rutis plugins come in a later step (design §14)";
+                    return Err((kind.span(), m.into()));
                 }
                 other => {
-                    let m = format!("[extend] kinds {other:?}: only \"mcp\" so far");
+                    let m = format!("[extend] kinds {other:?}: \"mcp\", \"pi\" or \"dsh\"");
                     return Err((kind.span(), m));
                 }
             };

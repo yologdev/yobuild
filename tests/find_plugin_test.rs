@@ -129,9 +129,26 @@ fn stub(broken: Broken) -> (u16, Asked) {
             };
             let at = seen.clone();
             let search = move |uri: Uri| async move {
-                at.lock().unwrap().push(format!("npm {}", query(&uri, "text")));
+                let text = query(&uri, "text");
+                at.lock().unwrap().push(format!("npm {text}"));
                 if broken.search {
                     return StatusCode::NOT_FOUND.into_response();
+                }
+                // pi and DSH searches: each kind's packages, marked or not
+                // (npm's `keywords:` ranks; `npm view` decides).
+                let plain = |name: &str| {
+                    json!({ "package": { "name": name, "version": "1.0.0",
+                        "description": format!("{name} lints"), "date": ago(1),
+                        "links": {}, "maintainers": [] }, "score": { "final": 1.0 }, "searchScore": 1.0 })
+                };
+                if text.starts_with("keywords:pi-package") {
+                    return Json(json!({ "objects": [plain("pi-lint"), plain("pi-kw"), plain("pi-none"),
+                            plain("pi-late"), plain("pi-dropped"), plain("pi-odd")],
+                        "total": 6, "time": ago(0) }));
+                }
+                if text.starts_with("keywords:dsh-plugin") {
+                    return Json(json!({ "objects": [plain("dsh-lint"), plain("dsh-none")],
+                        "total": 2, "time": ago(0) }));
                 }
                 let object = |name: &str| {
                     let keywords = match name {
@@ -170,6 +187,39 @@ fn stub(broken: Broken) -> (u16, Asked) {
                         p["versions"]["1.0.0"].as_object_mut().unwrap().remove("bin");
                         Json(p)
                     }
+                    // pi: marked by its `pi` field, by the keyword alone,
+                    // or not at all; DSH: by its `dsh` field, or not.
+                    "pi-lint" | "pi-kw" | "pi-none" | "dsh-lint" | "dsh-none" => {
+                        let mut p = packument(&name, &[("1.0.0", 30)]);
+                        let v = p["versions"]["1.0.0"].as_object_mut().unwrap();
+                        v.remove("bin");
+                        match name.as_str() {
+                            "pi-lint" => { v.insert("pi".into(), json!({ "extensions": ["./x.ts"] })); }
+                            "pi-kw" => { v.insert("keywords".into(), json!(["pi-package"])); }
+                            "dsh-lint" => { v.insert("dsh".into(), json!({ "rows": [] })); }
+                            _ => {}
+                        }
+                        Json(p)
+                    }
+                    // Marked only since a version too new to take; marked
+                    // only until then; a `pi` field of another shape.
+                    "pi-late" | "pi-dropped" => {
+                        let mut p = packument(&name, &[("1.0.0", 30), ("2.0.0", 1)]);
+                        let marked = if name == "pi-late" { "2.0.0" } else { "1.0.0" };
+                        for v in ["1.0.0", "2.0.0"] {
+                            let v_ = p["versions"][v].as_object_mut().unwrap();
+                            v_.remove("bin");
+                            if v == marked {
+                                v_.insert("pi".into(), json!({ "extensions": ["./x.ts"] }));
+                            }
+                        }
+                        Json(p)
+                    }
+                    "pi-odd" => {
+                        let mut p = packument(&name, &[("1.0.0", 30)]);
+                        p["versions"]["1.0.0"]["pi"] = json!("./x.ts");
+                        Json(p)
+                    }
                     // A server at the version old enough; a library since.
                     "renamed-mcp" => {
                         let mut p = packument("renamed-mcp", &[("1.0.0", 30), ("2.0.0", 1)]);
@@ -192,10 +242,15 @@ fn stub(broken: Broken) -> (u16, Asked) {
 }
 
 fn project(script: &str) -> tempfile::TempDir {
+    project_with("", script)
+}
+
+/// A project whose `[extend]` table holds `extend`.
+fn project_with(extend: &str, script: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("agent.toml"),
-        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\n[extend]\n",
+        format!("[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\n[extend]\n{extend}"),
     )
     .unwrap();
     std::fs::write(dir.path().join("script.json"), script).unwrap();
@@ -261,6 +316,48 @@ fn find_plugin_returns_candidates_from_both_sources_with_the_version_old_enough(
 }
 
 #[test]
+fn pi_and_dsh_packages_are_found_on_npm_by_their_mark_and_not_loaded() {
+    let (port, asked) = stub(Broken::default());
+    let dir = project_with(
+        "kinds = [\"pi\", \"dsh\"]\n",
+        r#"[{ "tools": [
+              { "name": "find_plugin", "arguments": { "need": "lint" }, "expect": [
+                "find_plugin(\"lint\", kind \"pi\"): pi packages, as the sources say.",
+                "Sources: npm: 6 found; 1 left out once npm was asked: not marked as a pi package (no `pi` field, no keyword `pi-package`).",
+                "1. pi-lint 1.0.0 (published ",
+                "2. pi-kw 1.0.0 (published ",
+                "3. pi-late (found in npm's search): not loadable: 1.0.0 is not marked as a pi package (no `pi` field, no keyword `pi-package`), though the latest is marked",
+                "4. pi-dropped 1.0.0 (published ",
+                "5. pi-odd (found in npm's search): not loadable: npm view's `pi` is a text, not an object"
+              ] },
+              { "name": "find_plugin", "arguments": { "need": "lint", "kind": "dsh" }, "expect": [
+                "Sources: npm: 2 found; 1 left out once npm was asked: not marked as a DSH package (no `dsh` field, no keyword `dsh-plugin`).",
+                "1. dsh-lint 1.0.0 (published "
+              ] },
+              { "name": "find_plugin", "arguments": { "need": "lint", "kind": "mcp" } }
+            ] },
+            { "text": "done" }]"#,
+    );
+    let out = run(dir.path(), port);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    // The calls run together: their lines in any order.
+    let passed = stderr.lines().filter(|l| *l == "  find_plugin ✓").count();
+    assert_eq!(passed, 2, "{stderr}");
+    assert!(
+        stderr.contains("  find_plugin ✗ Invalid arguments: kind \"mcp\": this agent may find \"pi\", \"dsh\"\n"),
+        "{stderr}"
+    );
+    // No MCP registry for these kinds; npm searched by each kind's keyword.
+    let mut asked = asked.lock().unwrap().clone();
+    asked.sort();
+    assert_eq!(
+        asked,
+        ["npm keywords:dsh-plugin lint", "npm keywords:pi-package lint"]
+    );
+}
+
+#[test]
 fn one_source_failing_is_said_and_the_other_still_gives_candidates() {
     for (broken, line, said) in [
         (
@@ -307,11 +404,28 @@ fn find_plugin_with_both_sources_failing_is_an_error_and_said_to_the_owner() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert!(
-        stderr.contains("\n  find_plugin ✗ find_plugin(\"lint\")"),
+        stderr.contains("\n  find_plugin ✗ find_plugin(\"lint\", kind \"mcp\")"),
         "{stderr}"
     );
     assert!(
         stderr.contains("\n  Warning: find_plugin could not search: MCP registry: HTTP 503 Service Unavailable; npm: "),
+        "{stderr}"
+    );
+
+    // A pi package's one source is npm: its failing is the error.
+    let dir = project_with(
+        "kinds = [\"pi\"]\n",
+        r#"[{ "tools": [{ "name": "find_plugin", "arguments": { "need": "lint" }, "expect": [
+              "Sources: npm: failed (",
+              "npm, the one source for this kind, failed: this is not \"nothing found\"."
+            ] }] },
+            { "text": "done" }]"#,
+    );
+    let out = run(dir.path(), port);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("\n  Warning: find_plugin could not search: npm: "),
         "{stderr}"
     );
 }
@@ -413,6 +527,50 @@ fn check_lists_both_tools_as_allowed_and_says_what_extend_lets_the_agent_do() {
             .any(|n| n.as_str().unwrap().starts_with(
                 "[extend]: the agent may search the MCP registry and npm for MCP servers"
             )),
+        "{agent:#}"
+    );
+}
+
+#[test]
+fn check_of_a_pi_and_dsh_agent_lists_find_plugin_alone_and_a_bad_registry_refuses_nothing() {
+    let dir = project_with("kinds = [\"pi\", \"dsh\"]\n", "[]");
+    let out = Command::new(env!("CARGO_BIN_EXE_yobuild"))
+        .args(["check", "agent.toml", "--json"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path().join("home"))
+        .env("YOBUILD_HOME", dir.path().join("home/.yobuild"))
+        // The MCP registry is never asked by this agent: not read.
+        .env("YOBUILD_MCP_REGISTRY", "http://example.com")
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
+    assert_eq!(report["ok"], true, "{report:#}");
+    let agent = &report["agent"];
+    assert_eq!(agent["extend"]["kinds"], json!(["pi", "dsh"]));
+    let names: Vec<&str> = agent["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"find_plugin"), "{names:?}");
+    assert!(!names.contains(&"load_plugin"), "{names:?}");
+    let find = agent["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "find_plugin")
+        .unwrap();
+    assert_eq!(
+        find["parameters"]["properties"]["kind"]["enum"],
+        json!(["pi", "dsh"])
+    );
+    assert!(
+        agent["notes"].as_array().unwrap().iter().any(|n| n
+            .as_str()
+            .unwrap()
+            .ends_with("with no \"mcp\" among `kinds`, it has no `load_plugin`")),
         "{agent:#}"
     );
 }

@@ -1,6 +1,8 @@
 //! `find_plugin` (`[extend]`, design §14): the agent searches for a plugin
-//! it lacks. Only the first kind so far, MCP stdio servers, from the MCP
-//! registry and npm's search. It starts, loads and installs nothing; what
+//! it lacks, of a kind the manifest's `[extend] kinds` names: an MCP stdio
+//! server, from the MCP registry and npm's search, or a pi or DSH package,
+//! from npm's search by its keyword (design §14 "Stage 2", point 8). It
+//! starts, loads and installs nothing; what
 //! it returns is the packages' own words, each made one line and cut. The
 //! session keeps each candidate it returned, for `load_plugin` (design
 //! §14, `run/load.rs`) to take only those.
@@ -16,7 +18,7 @@ use serde_json::{json, Value as Json};
 use yoagent::{AgentTool, Content, ToolContext, ToolError, ToolResult};
 
 use crate::frontend::{NoticeLevel, Session};
-use crate::manifest::{Extend, Package};
+use crate::manifest::{Extend, ExtendKind, Package};
 use crate::run::host::clip;
 
 /// The MCP registry's time, each `npm view`'s, and `npm config get
@@ -26,8 +28,9 @@ const SOURCE_TIME: Duration = Duration::from_secs(15);
 /// than 15 s.
 const SEARCH_TIME: Duration = Duration::from_secs(30);
 /// The hits npm is asked about at most: in rounds, until
-/// [`MAX_CANDIDATES`] are kept; a library (no program) is left out only
-/// once npm says so, making room for the next.
+/// [`MAX_CANDIDATES`] are kept; one not of the kind (an MCP library, an
+/// unmarked pi or DSH package) is left out only once npm says so, making
+/// room for the next.
 const VIEWED_AT_MOST: usize = 20;
 /// Unscoped packages asked for at once in npm's downloads API (its bulk
 /// form; a scoped package is asked for alone).
@@ -58,13 +61,18 @@ const PLAIN_WORDS: [&str; 8] = ["mcp", "server", "the", "and", "for", "with", "f
 /// What may follow a word for a registry find to name it (`linting`).
 const ENDINGS: [&str; 6] = ["", "s", "er", "ers", "ing", "ed"];
 const DAY: i64 = 24 * 60 * 60;
+/// The keyword that marks a pi package (pi's own `pi install` convention).
+const PI_KEYWORD: &str = "pi-package";
+/// The keyword that marks a DSH package.
+const DSH_KEYWORD: &str = "dsh-plugin";
 
-/// Where `find_plugin` searches: the MCP registry (its URL), and npm's
-/// search through the `npm` CLI, with the npm settings `install` keeps
-/// (the registry and its login), so a mirror or a private registry holds.
+/// Where `find_plugin` searches: the MCP registry (its URL; none when
+/// `[extend] kinds` names no MCP), and npm's search through the `npm` CLI,
+/// with the npm settings `install` keeps (the registry and its login), so
+/// a mirror or a private registry holds.
 #[derive(Debug, Clone)]
 pub struct Sources {
-    registry: url::Url,
+    registry: Option<url::Url>,
 }
 
 impl Sources {
@@ -87,16 +95,27 @@ impl Sources {
             let path = format!("{}/", registry.path());
             registry.set_path(&path);
         }
-        Ok(Sources { registry })
+        Ok(Sources {
+            registry: Some(registry),
+        })
+    }
+
+    /// npm alone: for an agent that finds no MCP server, so a
+    /// [`MCP_REGISTRY_ENV`] it would never use refuses nothing.
+    pub fn npm_only() -> Sources {
+        Sources { registry: None }
     }
 }
 
-/// A server `find_plugin` returned, as the session keeps it.
+/// A plugin `find_plugin` returned — an MCP server, a pi or a DSH package,
+/// as `kind` says — as the session keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Candidate {
     /// What the agent said it needs, in the search that found it.
     pub need: String,
+    /// What it was searched for as.
+    pub kind: ExtendKind,
     pub package: String,
     /// The version `load_plugin` would take — the newest release, not
     /// past `latest`, published at least `min_age_days` ago — or why none.
@@ -151,23 +170,34 @@ impl FindPlugin {
         self.found.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    async fn find(&self, need: &str) -> Found {
+    async fn find(&self, need: &str, kind: ExtendKind) -> Found {
+        // The MCP registry lists MCP servers only.
+        let mcp = kind == ExtendKind::Mcp;
         let (registry, npm, npm_registry) = tokio::join!(
-            registry(&self.sources.registry, need),
-            npm_search(need),
+            async {
+                match (mcp, &self.sources.registry) {
+                    (true, Some(at)) => Some(registry(at, need).await),
+                    (true, None) => Some(Err("no MCP registry was set up for this agent".into())),
+                    (false, _) => None,
+                }
+            },
+            npm_search(need, kind),
             blocking(
                 vec!["config".into(), "get".into(), "registry".into()],
                 SOURCE_TIME
             ),
         );
+        // The searches made: npm's, and the registry's when asked.
+        let sources = 1 + usize::from(registry.is_some());
         let mut lines = Vec::new();
         let mut failed = Vec::new();
         let registry = match registry {
-            Ok(found) => {
+            None => Vec::new(),
+            Some(Ok(found)) => {
                 lines.push(found.line());
                 found.hits
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 lines.push(format!("MCP registry: failed ({e})"));
                 failed.push(format!("MCP registry: {e}"));
                 Vec::new()
@@ -205,7 +235,7 @@ impl FindPlugin {
                     let counted = counts.remove(&hit.package).unwrap_or_else(|| {
                         Err("npm's downloads API failed (its answer left this package out)".into())
                     });
-                    candidate(need, hit, &self.extend, now, counted)
+                    candidate(need, kind, hit, &self.extend, now, counted)
                 })
                 .buffered(VIEWS_AT_ONCE)
                 .collect()
@@ -213,10 +243,11 @@ impl FindPlugin {
             viewed.extend(this);
         }
         let not_viewed = pending.len();
-        let (candidates, libraries, unviewed) = cut(viewed);
-        if libraries > 0 {
+        let (candidates, unfit_count, unviewed) = cut(viewed);
+        if unfit_count > 0 {
             lines.push(format!(
-                "{libraries} left out once npm was asked: no program to start (a library, not a server)"
+                "{unfit_count} left out once npm was asked: {}",
+                unfit(kind)
             ));
         }
         if not_viewed > 0 {
@@ -225,6 +256,8 @@ impl FindPlugin {
             ));
         }
         Found {
+            kind,
+            sources,
             lines,
             failed,
             candidates,
@@ -240,7 +273,9 @@ impl FindPlugin {
     pub(crate) fn remember(&self, candidates: &[Candidate]) {
         let mut found = self.found.lock().unwrap_or_else(|e| e.into_inner());
         for candidate in candidates {
-            match found.iter_mut().find(|c| c.package == candidate.package) {
+            let same =
+                |c: &&mut Candidate| c.package == candidate.package && c.kind == candidate.kind;
+            match found.iter_mut().find(same) {
                 Some(old) if old.version.is_ok() && candidate.version.is_err() => {}
                 Some(old) => *old = candidate.clone(),
                 None => found.push(candidate.clone()),
@@ -252,6 +287,9 @@ impl FindPlugin {
 /// One search's results: a line per source, the sources that failed, the
 /// candidates.
 struct Found {
+    kind: ExtendKind,
+    /// The sources searched: the MCP registry and npm, or npm alone.
+    sources: usize,
     lines: Vec<String>,
     /// Each source that failed, with why.
     failed: Vec<String>,
@@ -397,12 +435,14 @@ fn next_round(viewed: usize, kept: usize) -> usize {
 }
 
 /// A hit npm was asked about: the candidate, why npm could not be asked
-/// at all, and whether the version it would take (else its latest) has a
-/// program to start (`None`: not known).
+/// at all, and whether the version it would take (else its latest) is of
+/// the kind searched for — an MCP server's has a program to start, a pi
+/// or DSH package is marked as one ([`Viewed::fits`]; `None`: not known).
 type Viewing = (Candidate, Option<String>, Option<bool>);
 
-/// The viewed hits made the result: libraries (npm says no program) left
-/// out. With the candidates: the libraries left out, and why npm could be
+/// The viewed hits made the result: those npm says are not of the kind
+/// (an MCP library: no program; an unmarked pi or DSH package) left out.
+/// With the candidates: how many were left out so, and why npm could be
 /// asked about none of them, when it could not.
 fn cut(viewed: Vec<Viewing>) -> (Vec<Candidate>, usize, Option<String>) {
     let unviewed = match !viewed.is_empty() && viewed.iter().all(|(_, e, _)| e.is_some()) {
@@ -412,12 +452,12 @@ fn cut(viewed: Vec<Viewing>) -> (Vec<Candidate>, usize, Option<String>) {
     let before = viewed.len();
     let mut kept: Vec<Candidate> = viewed
         .into_iter()
-        .filter(|(_, _, program)| *program != Some(false))
+        .filter(|(_, _, fits)| *fits != Some(false))
         .map(|(c, _, _)| c)
         .collect();
-    let libraries = before - kept.len();
+    let unfit = before - kept.len();
     kept.truncate(MAX_CANDIDATES);
-    (kept, libraries, unviewed)
+    (kept, unfit, unviewed)
 }
 
 /// Whether `text` (a server's name, package and description) names `word`
@@ -728,16 +768,39 @@ fn marked(p: &Json) -> bool {
         || mentions(&description, "model context protocol")
 }
 
-async fn npm_search(need: &str) -> Result<NpmFound, String> {
-    let mut args: Vec<String> = ["search", "--json", "--searchlimit=20", "--", "keywords:mcp"]
+/// The keyword npm's search ranks a kind's packages by (`keywords:` ranks;
+/// it does not filter).
+fn search_keyword(kind: ExtendKind) -> &'static str {
+    match kind {
+        ExtendKind::Mcp => "mcp",
+        ExtendKind::Pi => PI_KEYWORD,
+        ExtendKind::Dsh => DSH_KEYWORD,
+    }
+}
+
+/// Why a package npm was asked about is not of `kind`.
+fn unfit(kind: ExtendKind) -> &'static str {
+    match kind {
+        ExtendKind::Mcp => "no program to start (a library, not a server)",
+        ExtendKind::Pi => "not marked as a pi package (no `pi` field, no keyword `pi-package`)",
+        ExtendKind::Dsh => "not marked as a DSH package (no `dsh` field, no keyword `dsh-plugin`)",
+    }
+}
+
+async fn npm_search(need: &str, kind: ExtendKind) -> Result<NpmFound, String> {
+    let keyword = format!("keywords:{}", search_keyword(kind));
+    let mut args: Vec<String> = ["search", "--json", "--searchlimit=20", "--", &keyword]
         .map(String::from)
         .into();
     args.extend(need.split_whitespace().map(String::from));
-    npm_hits(&blocking(args, SEARCH_TIME).await?)
+    npm_hits(&blocking(args, SEARCH_TIME).await?, kind)
 }
 
 /// `npm search --json`'s answer: a list of packages, each with its name.
-fn npm_hits(stdout: &str) -> Result<NpmFound, String> {
+/// An MCP server's must be marked as MCP ([`marked`]); a pi or DSH
+/// package is judged once npm is asked about it (its `pi` or `dsh` field
+/// is not in the search's answer).
+fn npm_hits(stdout: &str, kind: ExtendKind) -> Result<NpmFound, String> {
     if stdout.trim().is_empty() {
         return Err("npm search answered nothing".into());
     }
@@ -759,7 +822,7 @@ fn npm_hits(stdout: &str) -> Result<NpmFound, String> {
             found.unnamed += 1;
             continue;
         }
-        if !marked(p) {
+        if kind == ExtendKind::Mcp && !marked(p) {
             found.unmarked += 1;
             continue;
         }
@@ -812,6 +875,76 @@ struct Viewed {
     provenance: Option<bool>,
     /// It names a program to start (`bin`): a server, not a library.
     program: bool,
+    /// Its `pi` field (pi's manifest of extensions, skills, …).
+    pi: Field,
+    /// Its `dsh` field (a DSH bundle's rows).
+    dsh: Field,
+    keywords: Vec<String>,
+    /// `keywords` of another shape than a list of texts (or one text):
+    /// what it is.
+    keywords_shape: Option<String>,
+}
+
+/// A package field that marks its kind: absent, an object, or of another
+/// shape (said, never taken for absent).
+#[derive(Debug, Default, PartialEq, Eq)]
+enum Field {
+    #[default]
+    Absent,
+    Object,
+    Other(String),
+}
+
+impl Field {
+    fn of(value: &Json) -> Field {
+        match value {
+            Json::Null => Field::Absent,
+            Json::Object(_) => Field::Object,
+            other => Field::Other(shape(other).into()),
+        }
+    }
+}
+
+/// What kind of JSON value `value` is, as a message says it.
+fn shape(value: &Json) -> &'static str {
+    match value {
+        Json::Null => "null",
+        Json::Bool(_) => "a boolean",
+        Json::Number(_) => "a number",
+        Json::String(_) => "a text",
+        Json::Array(_) => "a list",
+        Json::Object(_) => "an object",
+    }
+}
+
+impl Viewed {
+    /// Whether it is of `kind`: an MCP server names a program; a pi
+    /// package has a `pi` field or the keyword `pi-package`, a DSH package
+    /// a `dsh` field or the keyword `dsh-plugin` (keywords in any case).
+    fn fits(&self, kind: ExtendKind) -> bool {
+        let keyword = |k: &str| self.keywords.iter().any(|w| w.eq_ignore_ascii_case(k));
+        match kind {
+            ExtendKind::Mcp => self.program,
+            ExtendKind::Pi => self.pi == Field::Object || keyword(PI_KEYWORD),
+            ExtendKind::Dsh => self.dsh == Field::Object || keyword(DSH_KEYWORD),
+        }
+    }
+
+    /// Why npm's answer cannot say whether it is of `kind`: a marking
+    /// field or its keywords of another shape.
+    fn misshapen(&self, kind: ExtendKind) -> Option<String> {
+        let (field, name) = match kind {
+            ExtendKind::Mcp => return None,
+            ExtendKind::Pi => (&self.pi, "pi"),
+            ExtendKind::Dsh => (&self.dsh, "dsh"),
+        };
+        if let Field::Other(what) = field {
+            return Some(format!("npm view's `{name}` is {what}, not an object"));
+        }
+        self.keywords_shape
+            .as_ref()
+            .map(|what| format!("npm view's `keywords` is {what}, not a list of texts"))
+    }
 }
 
 fn viewed(stdout: &str) -> Result<Viewed, String> {
@@ -842,6 +975,18 @@ fn viewed(stdout: &str) -> Result<Viewed, String> {
         Json::Null => BTreeMap::new(),
         _ => return Err("npm view's `time` is not an object".into()),
     };
+    let (keywords, keywords_shape) = match &view["keywords"] {
+        Json::Null => (Vec::new(), None),
+        Json::String(one) => (vec![one.clone()], None),
+        Json::Array(all) => match all.iter().map(Json::as_str).collect::<Option<Vec<_>>>() {
+            Some(all) => (all.into_iter().map(String::from).collect(), None),
+            None => (
+                Vec::new(),
+                Some("a list holding what is not text".to_owned()),
+            ),
+        },
+        other => (Vec::new(), Some(shape(other).to_owned())),
+    };
     let licence = licence(&view["license"]).or_else(|| licence(&view["licenses"]));
     let repository = match &view["repository"] {
         Json::String(r) => Some(r.clone()),
@@ -868,6 +1013,10 @@ fn viewed(stdout: &str) -> Result<Viewed, String> {
             Json::Object(bins) => !bins.is_empty(),
             _ => false,
         },
+        pi: Field::of(&view["pi"]),
+        dsh: Field::of(&view["dsh"]),
+        keywords,
+        keywords_shape,
     })
 }
 
@@ -1027,10 +1176,13 @@ pub(crate) fn now() -> Option<i64> {
 /// A hit made a candidate: npm asked about its versions, and about the one
 /// it would take when that is not the latest; `downloads` its count, or
 /// why none. Beside it, why npm could not be asked about it at all, and
-/// whether it has a program to start: the version it would take, else
-/// (none to take) its latest; not known when npm could not say.
+/// whether it is of `kind` ([`Viewed::fits`]): the version it would take,
+/// else (none to take) its latest; not known when npm could not say. One
+/// whose marks npm gives in another shape is kept, not loadable, saying
+/// so.
 async fn candidate(
     need: &str,
+    kind: ExtendKind,
     hit: Hit,
     extend: &Extend,
     now: Option<i64>,
@@ -1038,6 +1190,7 @@ async fn candidate(
 ) -> Viewing {
     let mut candidate = Candidate {
         need: need.to_owned(),
+        kind,
         package: hit.package.clone(),
         version: Err(String::new()),
         registry_name: hit.registry_name,
@@ -1062,8 +1215,12 @@ async fn candidate(
             return (candidate, Some(e), None);
         }
     };
-    // Whether it is a server: by the version it would take, once known.
-    let mut program = Some(latest.program);
+    // Whether it is of the kind: by the version it would take, once known.
+    if let Some(why) = latest.misshapen(kind) {
+        candidate.version = Err(why);
+        return (candidate, None, Some(true));
+    }
+    let mut fits = Some(latest.fits(kind));
     if candidate.description.is_empty() {
         candidate.description = clip(&latest.description, DESCRIPTION_CHARS);
     }
@@ -1076,34 +1233,46 @@ async fn candidate(
         }
     };
     let Ok(version) = candidate.version.clone() else {
-        return (candidate, None, program);
+        return (candidate, None, fits);
     };
     candidate.published = latest.time.get(&version).and_then(|t| seconds(t)).map(day);
-    let latest_program = latest.program;
+    let latest_fits = latest.fits(kind);
     let this = match latest.version.as_deref() == Some(version.as_str()) {
         true => Ok(latest),
         false => view(format!("{}@{version}", hit.package)).await,
     };
     match this {
-        Ok(this) if !this.program => {
-            // A library, unless the latest is a server (then said).
-            program = Some(latest_program);
+        Ok(this) if this.misshapen(kind).is_some() => {
+            fits = Some(true);
             candidate.version = Err(format!(
-                "{version} names no program to start (`bin`), though the latest does"
+                "{version}: {}",
+                this.misshapen(kind).unwrap_or_default()
             ))
         }
+        Ok(this) if !this.fits(kind) => {
+            // Not of the kind, unless the latest is (then said).
+            fits = Some(latest_fits);
+            candidate.version = Err(match kind {
+                ExtendKind::Mcp => {
+                    format!("{version} names no program to start (`bin`), though the latest does")
+                }
+                ExtendKind::Pi | ExtendKind::Dsh => {
+                    format!("{version} is {}, though the latest is marked", unfit(kind))
+                }
+            })
+        }
         Ok(this) => {
-            program = Some(true);
+            fits = Some(true);
             candidate.licence = this.licence.map(|l| clip(&l, FIELD_CHARS));
             candidate.repository = this.repository.map(|r| clip(&r, FIELD_CHARS));
             candidate.provenance = this.provenance;
         }
         Err(e) => {
-            program = None;
+            fits = None;
             candidate.version = Err(format!("npm could not say what {version} is: {e}"))
         }
     }
-    (candidate, None, program)
+    (candidate, None, fits)
 }
 
 /// Last week's downloads of each of `names`, or why not: npm's downloads
@@ -1224,8 +1393,10 @@ fn counts(body: &Json, names: &[String]) -> Vec<(String, Result<u64, String>)> {
 
 /// The result's text: the sources' lines, then each candidate.
 fn said_to_agent(need: &str, found: &Found, extend: &Extend) -> String {
+    let what = format!("{}s", found.kind.label());
     let mut text = format!(
-        "find_plugin({need:?}): what the sources say. Nothing was installed or started.\nSources: {}.\n",
+        "find_plugin({need:?}, kind {:?}): {what}, as the sources say. Nothing was installed or started.\nSources: {}.\n",
+        found.kind.name(),
         found.lines.join("; ")
     );
     if found.candidates.is_empty() {
@@ -1283,6 +1454,9 @@ fn said_to_agent(need: &str, found: &Found, extend: &Extend) -> String {
                 None => "unknown (npm gave no `dist`)",
             }
         ));
+        if c.kind != ExtendKind::Mcp {
+            continue;
+        }
         let listed = |what: &Option<Vec<String>>| match what {
             None => "not listed".to_owned(),
             Some(names) if names.is_empty() => "none".to_owned(),
@@ -1321,6 +1495,7 @@ fn details(found: &Found) -> Json {
         })
         .collect();
     json!({
+        "kind": found.kind.name(),
         "sources": found.lines,
         "found": found.found,
         "notLookedAt": found.not_viewed,
@@ -1337,17 +1512,27 @@ impl AgentTool for FindPlugin {
         "Find a plugin"
     }
     fn description(&self) -> &str {
-        "Search for an MCP server that gives a capability you lack (a linter, a file format): \
-         the MCP registry and npm. It installs and starts nothing; it returns candidates, the \
-         version of each that could be loaded, and what the sources say of them, which is the \
-         packages' own claims."
+        "Search for a plugin that gives a capability you lack (a linter, a file format): an MCP \
+         server (the MCP registry and npm), or a pi or DSH package (npm), as `kind` allows. It \
+         installs and starts nothing; it returns candidates, the version of each that could be \
+         loaded, and what the sources say of them, which is the packages' own claims."
     }
     fn parameters_schema(&self) -> Json {
+        let kinds: Vec<&str> = self.extend.kinds.iter().map(|k| k.name()).collect();
+        let kind = format!(
+            "What to find: {} (the default: the first).",
+            self.extend
+                .kinds
+                .iter()
+                .map(|k| format!("{:?} ({})", k.name(), k.label()))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
         json!({
             "type": "object",
             "properties": {
                 "need": { "type": "string", "description": "The capability, in a few words, naming the tool when you know one: \"eslint\", \"read xlsx files\"." },
-                "kind": { "type": "string", "enum": ["mcp"], "description": "What to find: \"mcp\" (the default)." }
+                "kind": { "type": "string", "enum": kinds, "description": kind }
             },
             "required": ["need"]
         })
@@ -1385,30 +1570,37 @@ impl AgentTool for FindPlugin {
                 "`need` holds no word to search for".into(),
             ));
         }
-        match &params["kind"] {
-            Json::Null => {}
-            Json::String(kind) if self.extend.kinds.iter().any(|k| k.name() == kind) => {}
-            other => {
-                return Err(ToolError::InvalidArgs(format!(
-                    "kind {other}: this agent may find {}",
-                    self.extend
-                        .kinds
-                        .iter()
-                        .map(|k| format!("{:?}", k.name()))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )))
-            }
+        let refused = |given: &Json| {
+            ToolError::InvalidArgs(format!(
+                "kind {given}: this agent may find {}",
+                self.extend
+                    .kinds
+                    .iter()
+                    .map(|k| format!("{:?}", k.name()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        };
+        let kind = match &params["kind"] {
+            // The first kind the manifest lists (it refuses an empty list).
+            Json::Null => self.extend.kinds.first().copied(),
+            Json::String(name) => self.extend.kinds.iter().copied().find(|k| k.name() == name),
+            _ => None,
         }
-        let found = self.find(&need).await;
+        .ok_or_else(|| refused(&params["kind"]))?;
+        let found = self.find(&need, kind).await;
         let text = said_to_agent(&need, &found, &self.extend);
-        if found.failed.len() == 2 {
+        if found.failed.len() == found.sources {
             self.session.notice(
                 NoticeLevel::Warning,
                 format!("find_plugin could not search: {}.", found.failed.join("; ")),
             );
+            let which = match found.sources {
+                1 => "npm, the one source for this kind, failed",
+                _ => "Both sources failed",
+            };
             return Err(ToolError::Failed(format!(
-                "{text}\nBoth sources failed: this is not \"nothing found\"."
+                "{text}\n{which}: this is not \"nothing found\"."
             )));
         }
         if let Some(why) = &found.unviewed {

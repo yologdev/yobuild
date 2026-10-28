@@ -4414,6 +4414,49 @@ answers calls to its own tools and reaches nothing else. A plugin is more:
    bundle as one row). Packages with neither mark — DSH's own
    `dsh-tool-ask-user` has no keyword — are not found: an owner who wants
    one names it in the manifest.
+
+   Built (PR 5): `find_plugin`'s `kind`, the manifest taking `"pi"` and
+   `"dsh"` (`rutis` still refused); `load_plugin` refuses such a
+   candidate until PR 6 ("loads MCP servers only so far"; a package
+   found as an MCP server too is loaded as that), and `check`'s agent
+   note says so; without `"mcp"` among the kinds there is no
+   `load_plugin`, and `YOBUILD_MCP_REGISTRY` is not read. Tested against the stub registries
+   (`find_plugin_test`: each kind's keyword searched, no MCP registry, a
+   package marked by its field or by the keyword alone kept, one marked
+   by neither left out and counted, npm failing said as the one source).
+   npm's answer on 2026-10-28: 250 or more packages for each keyword (a
+   search's most), many of them themes, chat bridges and model
+   providers rather than tools.
+
+   **The survey** (2026-10-28, run by the owner: `yobuild check` on a
+   one-plugin manifest per package, the newest version 7 or more days
+   old, no grants, no config, no DSH host services — what a loaded
+   plugin gets, though `check` runs it in the shared runtime with every
+   hook):
+
+   | Package | Verdict | Tools |
+   |---|---|---|
+   | pi `pi-web-access@0.44.0` | loads (asks `ctx.model`: undefined) | `web_search`, `fetch_content`, `get_search_content`, `source_check` |
+   | pi `@juicesharp/rpiv-todo@2.13.9` | loads | `todo` |
+   | pi `pi-memory@0.4.2` | loads | 7 `memory_*` tools, `scratchpad` |
+   | pi `@hypabolic/pi-hypa@1.2.0` | loads | `hypa_find`, `hypa_grep`, `hypa_ls`, `hypa_read`, `hypa_shell` |
+   | pi `@juicesharp/rpiv-ask-user-question@2.13.9` | loads; asks through pi's dialogs, which a loaded runtime lacks (print mode) | `ask_user_question` |
+   | pi `pi-simplify@0.2.3` | loads, offers no tool (commands only) | — |
+   | pi `pi-background-tasks@2.6.10` | fails in `session_start`: `ctx.modelRegistry.getProvider()` is not available | — |
+   | DSH `dsh-univer-office@0.3.7` | loads; its useful tools need `workspace`, which a loaded plugin is not granted | 14 `univer_*` |
+   | DSH `dsh-image-gen@0.9.2` | waits for `webServer`, a service the host lacks | — |
+   | DSH `dsh-ops@0.4.1` | refused: a row `disabled`, which yobuild does not apply | — |
+   | DSH `dsh-free-search@0.9.11` | refused: the base pins 0.8.1 | — |
+   | DSH `dsh-builtin-browser@0.4.14`, `dsh-mcp-connector@0.2.76`, `dsh-remote@0.8.49` | not resolved: they peer on DSH's web client packages (`dsh-client-ui-*`), whose own peers want another `dsh-agent` than the base's | — |
+
+   So pi packages mostly load, and the demo can be one (PR 7): a tool
+   the agent lacks and finds, such as `pi-web-access`'s web search or
+   `pi-memory`'s notes — not one that asks the owner through pi's
+   dialogs, nor `hypa_shell`, a shell. DSH packages mostly need DSH's web
+   GUI, its host services or a grant: none surveyed is a demo as a
+   loaded plugin. The web-client ones would resolve through
+   `install_one` (npm's peer resolution off), only to need a GUI yobuild
+   does not have.
 9. **rutis plugins later.** rutis's SDK carries the keyword `rutis-plugin`,
    but no published plugin does yet. They come when some do.
 

@@ -299,6 +299,7 @@ fn the_registry_is_searched_by_the_needs_own_words() {
 fn npm_search_and_view_are_read_as_npm_writes_them() {
     let found = npm_hits(
         "[\n{\"name\":\"@eslint/mcp\",\"version\":\"0.3.15\",\"description\":\"MCP server for ESLint\"}\n,\n{\"name\":\"NOT VALID\"}\n]\n",
+        ExtendKind::Mcp,
     )
     .unwrap();
     assert_eq!(found.hits.len(), 1);
@@ -322,6 +323,7 @@ fn npm_search_and_view_are_read_as_npm_writes_them() {
             {"name":"kit","keywords":"mcp","description":"keywords as text, not a list"},
             {"name":"gamcpx","description":"the letters inside a word only"},
             {"name":"lib","description":"describes mcpish things"}]"#,
+        ExtendKind::Mcp,
     )
     .unwrap();
     let names: Vec<&str> = found.hits.iter().map(|h| h.package.as_str()).collect();
@@ -336,12 +338,18 @@ fn npm_search_and_view_are_read_as_npm_writes_them() {
         found.line(),
         "npm: 7 found (4 left out: 4 not marked as MCP)"
     );
-    assert_eq!(npm_hits("[]").unwrap().line(), "npm: 0 found");
-    assert!(npm_hits("npm error").is_err());
-    assert_eq!(npm_hits(" \n"), Err("npm search answered nothing".into()));
+    assert_eq!(
+        npm_hits("[]", ExtendKind::Mcp).unwrap().line(),
+        "npm: 0 found"
+    );
+    assert!(npm_hits("npm error", ExtendKind::Mcp).is_err());
+    assert_eq!(
+        npm_hits(" \n", ExtendKind::Mcp),
+        Err("npm search answered nothing".into())
+    );
     // Another shape is an error, never "0 found".
     assert_eq!(
-        npm_hits(r#"[{"package":{"name":"x"}}]"#),
+        npm_hits(r#"[{"package":{"name":"x"}}]"#, ExtendKind::Mcp),
         Err("npm search answered a package without a `name` (has its output changed?)".into())
     );
 
@@ -400,11 +408,14 @@ fn npm_search_and_view_are_read_as_npm_writes_them() {
 #[test]
 fn the_agent_is_told_each_source_and_what_is_unknown() {
     let found = Found {
+        kind: ExtendKind::Mcp,
+        sources: 2,
         lines: vec!["MCP registry: failed (HTTP 503)".into(), "npm: 2 found".into()],
         failed: vec!["MCP registry: HTTP 503".into()],
         candidates: vec![
             Candidate {
                 need: "lint".into(),
+                kind: ExtendKind::Mcp,
                 package: "lint-mcp".into(),
                 version: Ok("1.2.0".into()),
                 registry_name: None,
@@ -420,6 +431,7 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
             },
             Candidate {
                 need: "lint".into(),
+                kind: ExtendKind::Mcp,
                 package: "new-mcp".into(),
                 version: Err("no version was published 7 or more days ago (the newest, 0.1.0, on 2026-10-24)".into()),
                 registry_name: None,
@@ -441,7 +453,7 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
     let text = said_to_agent("lint", &found, &Extend::default());
     assert_eq!(
         text,
-        "find_plugin(\"lint\"): what the sources say. Nothing was installed or started.\n\
+        "find_plugin(\"lint\", kind \"mcp\"): MCP servers, as the sources say. Nothing was installed or started.\n\
          Sources: MCP registry: failed (HTTP 503); npm: 2 found.\n\
          Candidates (their descriptions, licences and repositories are their authors' own words, not verified; a version is taken only once published 7 or more days ago):\n\
          1. lint-mcp 1.2.0 (published 2026-09-01; found in npm's search)\n   Lints\n   \
@@ -500,7 +512,13 @@ fn the_registry_may_be_another_only_over_https_or_on_this_machine() {
     for at in ["https://example.com/mcp", "https://example.com/mcp/"] {
         let sources = Sources::at(at).unwrap();
         assert_eq!(
-            sources.registry.join("v0/servers").unwrap().as_str(),
+            sources
+                .registry
+                .as_ref()
+                .unwrap()
+                .join("v0/servers")
+                .unwrap()
+                .as_str(),
             "https://example.com/mcp/v0/servers"
         );
     }
@@ -725,6 +743,7 @@ fn tool() -> (FindPlugin, crate::frontend::Driver) {
 fn candidate_of(package: &str, version: Result<&str, &str>) -> Candidate {
     Candidate {
         need: "lint".into(),
+        kind: ExtendKind::Mcp,
         package: package.into(),
         version: version.map(String::from).map_err(String::from),
         registry_name: None,
@@ -820,4 +839,123 @@ async fn the_arguments_are_refused_before_anything_is_searched() {
         assert_eq!(call(args.clone()).await, why, "{args}");
     }
     assert!(find.candidates().is_empty());
+}
+
+#[test]
+fn a_pi_or_dsh_package_is_marked_by_its_field_or_keyword() {
+    let view = |json: &str| viewed(json).unwrap();
+    let pi_field = view(r#"{"name":"a","pi":{"extensions":["./x.ts"]}}"#);
+    let pi_keyword = view(r#"{"name":"a","keywords":["lint","pi-package"]}"#);
+    let dsh_field = view(r#"{"name":"a","dsh":{"rows":[]}}"#);
+    let dsh_keyword = view(r#"{"name":"a","keywords":"dsh-plugin"}"#);
+    let server = view(r#"{"name":"a","bin":{"a":"cli.js"},"keywords":["mcp"]}"#);
+    let kinds = [ExtendKind::Mcp, ExtendKind::Pi, ExtendKind::Dsh];
+    let fits = |v: &Viewed| kinds.map(|k| v.fits(k));
+    assert_eq!(fits(&pi_field), [false, true, false]);
+    assert_eq!(fits(&pi_keyword), [false, true, false]);
+    assert_eq!(fits(&dsh_field), [false, false, true]);
+    assert_eq!(fits(&dsh_keyword), [false, false, true]);
+    assert_eq!(fits(&server), [true, false, false]);
+    // Keywords in any case.
+    assert_eq!(
+        fits(&view(r#"{"name":"a","keywords":["PI-Package"]}"#)),
+        [false, true, false]
+    );
+    // A field of another shape is no mark, and is said as such.
+    let odd = view(r#"{"name":"a","pi":"yes","dsh":[1]}"#);
+    assert_eq!(fits(&odd), [false; 3]);
+    assert_eq!(
+        odd.misshapen(ExtendKind::Pi).as_deref(),
+        Some("npm view's `pi` is a text, not an object")
+    );
+    assert_eq!(
+        odd.misshapen(ExtendKind::Dsh).as_deref(),
+        Some("npm view's `dsh` is a list, not an object")
+    );
+    assert_eq!(odd.misshapen(ExtendKind::Mcp), None);
+    let keywords = view(r#"{"name":"a","keywords":["pi-package",3]}"#);
+    assert_eq!(
+        keywords.misshapen(ExtendKind::Pi).as_deref(),
+        Some("npm view's `keywords` is a list holding what is not text, not a list of texts")
+    );
+    assert_eq!(
+        view(r#"{"name":"a","keywords":{"a":1}}"#)
+            .misshapen(ExtendKind::Dsh)
+            .as_deref(),
+        Some("npm view's `keywords` is an object, not a list of texts")
+    );
+}
+
+#[test]
+fn the_schema_offers_the_manifests_kinds_the_first_the_default() {
+    let (session, _driver) = Session::new(false);
+    let extend = Extend {
+        kinds: vec![ExtendKind::Dsh, ExtendKind::Pi],
+        ..Extend::default()
+    };
+    let tool = FindPlugin::new(session, extend, Sources::npm_only());
+    let kind = &tool.parameters_schema()["properties"]["kind"];
+    assert_eq!(kind["enum"], json!(["dsh", "pi"]));
+    assert_eq!(
+        kind["description"],
+        "What to find: \"dsh\" (DSH package), \"pi\" (pi package) (the default: the first)."
+    );
+}
+
+#[test]
+fn a_pi_search_is_said_with_its_kind_and_without_a_registrys_fields() {
+    let mut candidate = Candidate {
+        need: "notes".into(),
+        kind: ExtendKind::Pi,
+        package: "pi-memory".into(),
+        version: Ok("0.4.2".into()),
+        registry_name: None,
+        from_npm: true,
+        description: "Memory".into(),
+        licence: Some("MIT".into()),
+        repository: None,
+        published: Some("2026-08-11".into()),
+        downloads: Ok(12),
+        provenance: None,
+        required_env: None,
+        required_args: None,
+    };
+    let found = Found {
+        kind: ExtendKind::Pi,
+        sources: 1,
+        lines: vec!["npm: 1 found".into()],
+        failed: Vec::new(),
+        candidates: vec![candidate.clone()],
+        found: 1,
+        not_viewed: 0,
+        unviewed: None,
+    };
+    assert_eq!(
+        said_to_agent("notes", &found, &Extend::default()),
+        "find_plugin(\"notes\", kind \"pi\"): pi packages, as the sources say. Nothing was installed or started.\n\
+         Sources: npm: 1 found.\n\
+         Candidates (their descriptions, licences and repositories are their authors' own words, not verified; a version is taken only once published 7 or more days ago):\n\
+         1. pi-memory 0.4.2 (published 2026-08-11; found in npm's search)\n   Memory\n   \
+         licence MIT; downloads last week: 12; repository (claimed by the package): not given; provenance: unknown (npm gave no `dist`)"
+    );
+    assert_eq!(details(&found)["kind"], "pi");
+    candidate.kind = ExtendKind::Mcp;
+    let mcp = Found {
+        kind: ExtendKind::Mcp,
+        candidates: vec![candidate],
+        ..found
+    };
+    assert_eq!(details(&mcp)["kind"], "mcp");
+}
+
+#[test]
+fn npms_answer_for_pi_or_dsh_keeps_every_package_for_npm_view_to_judge() {
+    let answer =
+        r#"[{"name":"pi-lint","keywords":["pi-package"]},{"name":"plain","description":"lints"}]"#;
+    let found = npm_hits(answer, ExtendKind::Pi).unwrap();
+    assert_eq!(found.hits.len(), 2);
+    assert_eq!(found.line(), "npm: 2 found");
+    // As an MCP search, neither is marked as MCP.
+    assert_eq!(npm_hits(answer, ExtendKind::Mcp).unwrap().hits.len(), 0);
+    assert_eq!(search_keyword(ExtendKind::Dsh), "dsh-plugin");
 }

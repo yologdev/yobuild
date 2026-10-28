@@ -1600,6 +1600,11 @@ fn extend_is_off_unless_its_table_is_there_and_alone_takes_the_defaults() {
     .unwrap();
     let e = m.extend.unwrap();
     assert_eq!((e.max_loads, e.max_attempts, e.min_age_days), (5, 10, 0));
+    let e = read(&with("[extend]\nkinds = [\"dsh\", \"pi\"]\n"))
+        .unwrap()
+        .extend
+        .unwrap();
+    assert_eq!(e.kinds, vec![ExtendKind::Dsh, ExtendKind::Pi]);
 }
 
 #[test]
@@ -1612,13 +1617,13 @@ fn extend_is_refused_out_of_bounds_with_other_kinds_or_with_the_gate_off() {
         ("[extend]\nmin_age_days = 366\n", "5:16: [extend] min_age_days 366: 0 to 365"),
         (
             "[extend]\nkinds = []\n",
-            "5:9: [extend] kinds is empty: name what may be found (\"mcp\"), or leave out [extend]",
+            "5:9: [extend] kinds is empty: name what may be found (\"mcp\", \"pi\", \"dsh\"), or leave out [extend]",
         ),
         (
-            "[extend]\nkinds = [\"mcp\", \"pi\"]\n",
-            "5:17: [extend] kinds \"pi\": only \"mcp\" so far; pi plugins come in a later step (design §14)",
+            "[extend]\nkinds = [\"mcp\", \"rutis\"]\n",
+            "5:17: [extend] kinds \"rutis\": \"mcp\", \"pi\" or \"dsh\" so far; rutis plugins come in a later step (design §14)",
         ),
-        ("[extend]\nkinds = [\"npm\"]\n", "5:10: [extend] kinds \"npm\": only \"mcp\" so far"),
+        ("[extend]\nkinds = [\"npm\"]\n", "5:10: [extend] kinds \"npm\": \"mcp\", \"pi\" or \"dsh\""),
         ("[extend]\nkinds = [\"mcp\", \"mcp\"]\n", "5:17: [extend] kinds \"mcp\": named twice"),
         (
             "[builtins]\ngate = \"off\"\n[extend]\n",
