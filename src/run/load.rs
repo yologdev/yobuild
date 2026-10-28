@@ -772,6 +772,8 @@ impl LoadPlugin {
             };
             let (dir, scripts) = crate::install::install_one(
                 home.as_deref(),
+                crate::install::Set::Mcp,
+                Path::new(""),
                 &package_,
                 &version_,
                 before.as_deref(),

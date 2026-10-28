@@ -234,7 +234,7 @@ fn pins(
                 Some(base) => base,
                 None => base.insert(base_dependencies(adapters)?),
             };
-            if let Some(at) = base.get(package.name()).and_then(Json::as_str) {
+            if let Some(at) = base_pin(base, package.name(), adapters)? {
                 if at != package.version() {
                     return Err(format!(
                         "plugin {}: {} is pinned by the DSH base at {at}",
@@ -286,6 +286,24 @@ fn base_dependencies(adapters: &Path) -> Result<Map<String, Json>, BoxError> {
         None => Ok(Map::new()),
         Some(_) => Err(format!(
             "{}: dependencies is not an object",
+            adapters.join("dsh/package.json").display()
+        )
+        .into()),
+    }
+}
+
+/// The version the DSH base pins `name` at, if it pins it; one that is not
+/// text is an error naming the file (never taken for "not pinned").
+fn base_pin<'a>(
+    base: &'a Map<String, Json>,
+    name: &str,
+    adapters: &Path,
+) -> Result<Option<&'a str>, BoxError> {
+    match base.get(name) {
+        None => Ok(None),
+        Some(Json::String(version)) => Ok(Some(version)),
+        Some(other) => Err(format!(
+            "{}: its dependency {name} is {other}, not a version",
             adapters.join("dsh/package.json").display()
         )
         .into()),
@@ -431,7 +449,8 @@ pub(crate) fn npm_within(dir: &Path, args: &[String], limit: Duration) -> Result
 
 /// How npm runs: killed after `limit`, or as soon as `stop` is set (a run
 /// aborted while `load_plugin` installs).
-pub(crate) struct NpmRun<'a> {
+#[doc(hidden)]
+pub struct NpmRun<'a> {
     pub limit: Duration,
     pub stop: Option<&'a AtomicBool>,
 }
@@ -551,16 +570,19 @@ fn intersect(a: &str, b: &str) -> String {
     out.join(" || ")
 }
 
-/// The `pi` set's dependencies: the pins, and each pin's peers that are not
-/// pi's own (a pinned peer keeps its pin; two ranges intersected).
-fn pi_dependencies(
+/// The pins and each pin's peers `skip` leaves (given the peer and the
+/// pin's `npm view`), as dependencies: a pinned peer keeps its pin, two
+/// ranges intersected.
+fn with_peers(
     dir: &Path,
     pins: &BTreeMap<String, String>,
+    skip: &dyn Fn(&str, &Json) -> bool,
+    how: &NpmRun,
 ) -> Result<Map<String, Json>, BoxError> {
     let mut peers: BTreeMap<String, String> = BTreeMap::new();
     for (name, version) in pins {
         let spec = format!("{name}@{version}");
-        let view = npm(dir, &["view".into(), spec.clone(), "--json".into()])?;
+        let view = npm_as(dir, &["view".into(), spec.clone(), "--json".into()], how)?;
         // npm says nothing, and succeeds, for a version it does not have.
         if view.trim().is_empty() {
             return Err(
@@ -569,7 +591,7 @@ fn pi_dependencies(
         }
         let view: Json =
             serde_json::from_str(&view).map_err(|e| format!("npm view {spec}: {e}"))?;
-        peers_of(&spec, &view, pins, &mut peers)?;
+        peers_of(&spec, &view, &|peer| skip(peer, &view), &mut peers)?;
     }
     let mut deps = Map::new();
     for (name, version) in pins.iter().chain(peers.iter()) {
@@ -578,12 +600,33 @@ fn pi_dependencies(
     Ok(deps)
 }
 
+/// The `pi` set's dependencies: the pins, and each pin's peers that are not
+/// pi's own.
+fn pi_dependencies(
+    dir: &Path,
+    pins: &BTreeMap<String, String>,
+    how: &NpmRun,
+) -> Result<Map<String, Json>, BoxError> {
+    with_peers(
+        dir,
+        pins,
+        &|peer, _| pis_own(peer) || pins.contains_key(peer),
+        how,
+    )
+}
+
+/// Whether `view` (`npm view`) marks `peer` optional
+/// (`peerDependenciesMeta`).
+fn optional_peer(view: &Json, peer: &str) -> bool {
+    view["peerDependenciesMeta"][peer]["optional"] == Json::Bool(true)
+}
+
 /// Adds to `peers` the peers `view` (`npm view <spec> --json`) declares
-/// that are neither pi's own nor pinned, a range already there intersected.
+/// that `skip` leaves, a range already there intersected.
 fn peers_of(
     spec: &str,
     view: &Json,
-    pins: &BTreeMap<String, String>,
+    skip: &dyn Fn(&str) -> bool,
     peers: &mut BTreeMap<String, String>,
 ) -> Result<(), BoxError> {
     let declared = match &view["peerDependencies"] {
@@ -595,7 +638,7 @@ fn peers_of(
         let range = range
             .as_str()
             .ok_or_else(|| format!("npm view {spec}: peer {peer}'s range is {range}"))?;
-        if pis_own(peer) || pins.contains_key(peer) {
+        if skip(peer) {
             continue;
         }
         let joined = match peers.get(peer) {
@@ -635,18 +678,24 @@ fn write_json(path: &Path, value: &Json) -> Result<(), BoxError> {
 }
 
 /// Resolves a set anew in a temp folder: its lock entry (nothing unpacked).
-/// `extra`: more of npm's options (`--before`).
+/// `extra`: more of npm's options (`--before`). `own_peers`, for `dsh`: the
+/// pins' peers that the base does not hold and that are not optional added
+/// as dependencies, and npm's own peer resolution off — under `--before`
+/// npm sees none of the base's versions published since, so a peer on one
+/// of them fails ("Could not resolve dependency"), while the locked base
+/// satisfies it.
 fn resolve(
     set: Set,
     pins: &BTreeMap<String, String>,
     adapters: &Path,
     extra: &[String],
+    own_peers: bool,
     how: &NpmRun,
 ) -> Result<SetLock, BoxError> {
     let dir = tempfile::tempdir().map_err(|e| format!("a temp folder to resolve in: {e}"))?;
     write(&dir.path().join(".npmrc"), npmrc(set))?;
     let (dependencies, base) = match set {
-        Set::Pi => (pi_dependencies(dir.path(), pins)?, None),
+        Set::Pi => (pi_dependencies(dir.path(), pins, how)?, None),
         Set::Mcp => (
             pins.iter().map(|(n, v)| (n.clone(), json!(v))).collect(),
             None,
@@ -657,20 +706,48 @@ fn resolve(
             std::fs::copy(&lock, dir.path().join("package-lock.json"))
                 .map_err(|e| format!("{}: {e}", lock.display()))?;
             let mut deps = base_dependencies(adapters)?;
-            for (name, version) in pins {
-                deps.insert(name.clone(), json!(version));
-            }
+            let pinned = match own_peers {
+                true => {
+                    let base = deps.clone();
+                    let skip = |peer: &str, view: &Json| {
+                        base.contains_key(peer)
+                            || pins.contains_key(peer)
+                            || optional_peer(view, peer)
+                    };
+                    with_peers(dir.path(), pins, &skip, how)?
+                }
+                false => pins.iter().map(|(n, v)| (n.clone(), json!(v))).collect(),
+            };
+            deps.extend(pinned);
             (deps, Some(base_checksum(adapters)?))
         }
     };
+    // What yobuild added beside the pins (their peers), named when npm
+    // fails: the owner never asked for them.
+    let base_names = match set {
+        Set::Dsh => base_dependencies(adapters)?,
+        _ => Map::new(),
+    };
+    let added: Vec<String> = dependencies
+        .iter()
+        .filter(|(name, _)| !pins.contains_key(*name) && !base_names.contains_key(*name))
+        .map(|(name, range)| format!("{name} {}", range.as_str().unwrap_or("?")))
+        .collect();
+    let legacy = own_peers && set == Set::Dsh;
     write_json(
         &dir.path().join("package.json"),
         &package_json(set, adapters, dependencies)?,
     )?;
     let mut args = vec!["install".to_owned(), "--package-lock-only".to_owned()];
     args.extend(npm_flags(set));
+    if legacy {
+        args.push("--legacy-peer-deps=true".into());
+    }
     args.extend(extra.iter().cloned());
-    npm_as(dir.path(), &args, how)?;
+    npm_as(dir.path(), &args, how).map_err(|e| match added.is_empty() {
+        true => e,
+        false => format!("{e} (yobuild added the pins' peers: {})", added.join(", ")).into(),
+    })?;
     let path = dir.path().join("package-lock.json");
     let lock: Json = serde_json::from_slice(&read(&path)?)
         .map_err(|e| format!("npm's lock for {}: {e}", set.name()))?;
@@ -680,7 +757,7 @@ fn resolve(
     };
     let missing = missing(&packages);
     if !missing.is_empty() {
-        let version = match npm(dir.path(), &["--version".to_owned()]) {
+        let version = match npm_as(dir.path(), &["--version".to_owned()], how) {
             Ok(version) => version.trim().to_owned(),
             Err(e) => format!("(version unknown: {e})"),
         };
@@ -801,47 +878,75 @@ pub(crate) fn install_scripts(
     let Some(lock) = Lock::read(&lock_path(manifest))? else {
         return Ok(out);
     };
-    let name_of = |path: &str| path.rsplit_once("node_modules/").map(|(_, n)| n.to_owned());
-    let scripted = |packages: &Map<String, Json>, path: &str| {
-        packages
-            .get(path)
-            .is_some_and(|p| p["hasInstallScript"] == Json::Bool(true))
-    };
-    // The base's packages: those the adapter's own lock has, at the same
-    // place and version.
     let mut base = BTreeSet::new();
     if let Some(set) = lock.sets.get(&Set::Dsh) {
-        let path = adapters.join("dsh/package-lock.json");
-        let adapter: Json = serde_json::from_slice(&read(&path)?)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        for (at, entry) in adapter["packages"].as_object().into_iter().flatten() {
-            if !at.is_empty()
-                && set.packages.get(at).map(|p| &p["version"]) == Some(&entry["version"])
-            {
-                base.insert(at.clone());
-            }
-        }
+        base = base_paths(adapters, &set.packages)?;
         out.base = base
             .iter()
             .filter(|at| scripted(&set.packages, at))
             .filter_map(|at| name_of(at))
             .collect();
     }
+    let none = BTreeSet::new();
     for (set, entry) in &lock.sets {
+        // The base is the `dsh` set's: each set is its own project.
+        let base = if *set == Set::Dsh { &base } else { &none };
         for pin in entry.requested.keys() {
-            let mut names: Vec<String> = brought(&entry.packages, &format!("node_modules/{pin}"))
-                .into_iter()
-                // The base is the `dsh` set's: each set is its own project.
-                .filter(|at| !(*set == Set::Dsh && base.contains(at)))
-                .filter(|at| scripted(&entry.packages, at))
-                .filter_map(|at| name_of(&at))
-                .collect();
-            names.sort();
-            names.dedup();
-            out.by_pin.insert((*set, pin.clone()), names);
+            out.by_pin.insert(
+                (*set, pin.clone()),
+                scripts_brought(&entry.packages, pin, base),
+            );
         }
     }
     Ok(out)
+}
+
+/// A lock path's package name.
+fn name_of(path: &str) -> Option<String> {
+    path.rsplit_once("node_modules/").map(|(_, n)| n.to_owned())
+}
+
+/// Whether the package at `path` has install scripts (npm's
+/// `hasInstallScript`).
+fn scripted(packages: &Map<String, Json>, path: &str) -> bool {
+    packages
+        .get(path)
+        .is_some_and(|p| p["hasInstallScript"] == Json::Bool(true))
+}
+
+/// The DSH base's packages among a `dsh` set's: those the adapter's own
+/// lock has, at the same place and version.
+fn base_paths(adapters: &Path, packages: &Map<String, Json>) -> Result<BTreeSet<String>, BoxError> {
+    let path = adapters.join("dsh/package-lock.json");
+    let adapter: Json =
+        serde_json::from_slice(&read(&path)?).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(adapter["packages"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(at, entry)| {
+            !at.is_empty() && packages.get(*at).map(|p| &p["version"]) == Some(&entry["version"])
+        })
+        .map(|(at, _)| at.clone())
+        .collect())
+}
+
+/// The packages with install scripts `pin` brings, by name, sorted; those
+/// at `leave_out` (the DSH base's) apart.
+fn scripts_brought(
+    packages: &Map<String, Json>,
+    pin: &str,
+    leave_out: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut names: Vec<String> = brought(packages, &format!("node_modules/{pin}"))
+        .into_iter()
+        .filter(|at| !leave_out.contains(at))
+        .filter(|at| scripted(packages, at))
+        .filter_map(|at| name_of(&at))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// What is wrong with a lock entry read from a file, if anything: each pin
@@ -1150,7 +1255,7 @@ pub fn install(
             )
             .into());
         }
-        let entry = resolve(*set, wanted, adapters, &[], &NpmRun::default())
+        let entry = resolve(*set, wanted, adapters, &[], false, &NpmRun::default())
             .map_err(|e| format!("resolving the `{}` set: {e}", set.name()))?;
         let verb = match previous {
             Some(_) => "resolved again",
@@ -1175,19 +1280,38 @@ pub fn install(
     Ok(installed)
 }
 
-/// One stdio MCP server for this session only (`load_plugin`, design
-/// §14): `package@version` resolved alone as an `mcp` set — with `before`
-/// (an ISO time), every package in its tree published by then — and
-/// installed as [`install`] installs a set, in the same cache. Its lock
-/// is the session's, not beside a manifest. The folder, and the packages
-/// it brings with install scripts (not run).
-pub(crate) fn install_one(
+/// One package for this session only (`load_plugin`, design §14): a stdio
+/// MCP server, a pi package or a DSH package, `package@version` resolved
+/// alone as its set — `pi` with its peers that are not pi's own, `dsh` from
+/// the DSH base's lock (a pin the base holds at another version refused
+/// before npm runs) — with `before` (an ISO time), every package npm
+/// resolves anew published by then (the pin is exact; the base's packages,
+/// locked, are checked to stay at their versions), and installed as
+/// [`install`] installs a set, in the same cache. Its lock is written
+/// nowhere: resolved for this call only. `adapters`: the folder holding
+/// `dsh/`, the DSH base (read for `dsh` only). The folder, and the
+/// packages with install scripts (not run) the pin brings — for `dsh`, the
+/// base's own apart, which every DSH plugin gets. Public for its tests
+/// only.
+#[doc(hidden)]
+pub fn install_one(
     home: Option<&Path>,
+    set: Set,
+    adapters: &Path,
     package: &str,
     version: &str,
     before: Option<&str>,
     how: &NpmRun,
 ) -> Result<(PathBuf, Vec<String>), BoxError> {
+    let base = match set {
+        Set::Dsh => base_dependencies(adapters)?,
+        _ => Map::new(),
+    };
+    if let Some(at) = base_pin(&base, package, adapters)? {
+        if at != version {
+            return Err(format!("{package}@{version} is pinned by the DSH base at {at}").into());
+        }
+    }
     let home = match home {
         Some(home) => home.to_path_buf(),
         None => self::home()?,
@@ -1197,24 +1321,38 @@ pub(crate) fn install_one(
         .map(|b| format!("--before={b}"))
         .into_iter()
         .collect();
-    let entry = resolve(Set::Mcp, &pins, Path::new(""), &extra, how)?;
+    let entry = resolve(set, &pins, adapters, &extra, true, how).map_err(|e| {
+        format!(
+            "resolving the `{}` set for {package}@{version}: {e}",
+            set.name()
+        )
+    })?;
     if let Some(why) = unsound(&entry) {
         return Err(format!("npm's lock for {package}@{version}: {why}").into());
     }
-    let dir = install_set(&home, Set::Mcp, &entry, Path::new(""), how)?;
-    let mut scripts: Vec<String> = brought(&entry.packages, &format!("node_modules/{package}"))
-        .into_iter()
-        .filter(|at| {
-            entry
-                .packages
-                .get(at)
-                .is_some_and(|p| p["hasInstallScript"] == Json::Bool(true))
-        })
-        .filter_map(|at| at.rsplit_once("node_modules/").map(|(_, n)| n.to_owned()))
-        .collect();
-    scripts.sort();
-    scripts.dedup();
-    Ok((dir, scripts))
+    // The base as its lock has it: npm keeps a locked package it can, and
+    // this says so if it ever did not.
+    for name in base.keys() {
+        let wanted = base_pin(&base, name, adapters)?;
+        let got = entry
+            .packages
+            .get(&format!("node_modules/{name}"))
+            .and_then(|p| p["version"].as_str());
+        if got != wanted {
+            return Err(format!(
+                "resolving {package}@{version} moved the DSH base's {name} from {} to {}",
+                wanted.unwrap_or("?"),
+                got.unwrap_or("nothing")
+            )
+            .into());
+        }
+    }
+    let dir = install_set(&home, set, &entry, adapters, how)?;
+    let base_paths = match set {
+        Set::Dsh => base_paths(adapters, &entry.packages)?,
+        _ => BTreeSet::new(),
+    };
+    Ok((dir, scripts_brought(&entry.packages, package, &base_paths)))
 }
 
 /// For tests: a set installed by hand, with a lock beside `manifest_file`
@@ -1805,11 +1943,12 @@ mod tests {
         .into();
         let mut peers = BTreeMap::new();
         let view = json!({ "peerDependencies": { "@earendil-works/pi-tui": "*", "typebox": "*", "b": "^1", "c": "^1 || ^2" } });
-        peers_of("a@1.0.0", &view, &pins, &mut peers).unwrap();
+        let skip = |peer: &str| pis_own(peer) || pins.contains_key(peer);
+        peers_of("a@1.0.0", &view, &skip, &mut peers).unwrap();
         peers_of(
             "b@2.0.0",
             &json!({ "peerDependencies": { "c": "^2.1.0" } }),
-            &pins,
+            &skip,
             &mut peers,
         )
         .unwrap();
@@ -1820,7 +1959,7 @@ mod tests {
         assert!(peers_of(
             "x@1.0.0",
             &json!({ "peerDependencies": [] }),
-            &pins,
+            &skip,
             &mut peers
         )
         .is_err());
