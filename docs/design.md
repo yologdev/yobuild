@@ -4381,6 +4381,15 @@ answers calls to its own tools and reaches nothing else. A plugin is more:
    by the DSH base at X": the loader then says so, and the agent sees it),
    the DSH files in the hash. `--before` applies to what is resolved anew
    (the base's locked packages stay as locked; tested).
+
+   Built (PR 4, `install_one_test` against the stub npm registry): a pi
+   package's peer installed at the version the age rule allows, pi's own
+   never fetched, its dependency's install script not run and said; a DSH
+   package beside the base's own, which was published a day ago and stays
+   as locked (without the base's lock as the start npm refuses it under
+   `--before`: "No matching version found … with a date before …"), the
+   adapter's files copied in; a pin of the base's at another version
+   refused before npm is asked.
 8. **Found by npm.** `find_plugin` with `kind = "pi"` searches npm for
    `keywords:pi-package <need>`, and with `"dsh"` for `keywords:dsh-plugin
    <need>`; the MCP registry is not asked. A pi package is kept when `npm

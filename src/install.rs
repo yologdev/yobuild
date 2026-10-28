@@ -431,7 +431,8 @@ pub(crate) fn npm_within(dir: &Path, args: &[String], limit: Duration) -> Result
 
 /// How npm runs: killed after `limit`, or as soon as `stop` is set (a run
 /// aborted while `load_plugin` installs).
-pub(crate) struct NpmRun<'a> {
+#[doc(hidden)]
+pub struct NpmRun<'a> {
     pub limit: Duration,
     pub stop: Option<&'a AtomicBool>,
 }
@@ -556,11 +557,12 @@ fn intersect(a: &str, b: &str) -> String {
 fn pi_dependencies(
     dir: &Path,
     pins: &BTreeMap<String, String>,
+    how: &NpmRun,
 ) -> Result<Map<String, Json>, BoxError> {
     let mut peers: BTreeMap<String, String> = BTreeMap::new();
     for (name, version) in pins {
         let spec = format!("{name}@{version}");
-        let view = npm(dir, &["view".into(), spec.clone(), "--json".into()])?;
+        let view = npm_as(dir, &["view".into(), spec.clone(), "--json".into()], how)?;
         // npm says nothing, and succeeds, for a version it does not have.
         if view.trim().is_empty() {
             return Err(
@@ -646,7 +648,7 @@ fn resolve(
     let dir = tempfile::tempdir().map_err(|e| format!("a temp folder to resolve in: {e}"))?;
     write(&dir.path().join(".npmrc"), npmrc(set))?;
     let (dependencies, base) = match set {
-        Set::Pi => (pi_dependencies(dir.path(), pins)?, None),
+        Set::Pi => (pi_dependencies(dir.path(), pins, how)?, None),
         Set::Mcp => (
             pins.iter().map(|(n, v)| (n.clone(), json!(v))).collect(),
             None,
@@ -1175,19 +1177,37 @@ pub fn install(
     Ok(installed)
 }
 
-/// One stdio MCP server for this session only (`load_plugin`, design
-/// §14): `package@version` resolved alone as an `mcp` set — with `before`
-/// (an ISO time), every package in its tree published by then — and
-/// installed as [`install`] installs a set, in the same cache. Its lock
-/// is the session's, not beside a manifest. The folder, and the packages
-/// it brings with install scripts (not run).
-pub(crate) fn install_one(
+/// One package for this session only (`load_plugin`, design §14): a stdio
+/// MCP server, a pi package or a DSH package, `package@version` resolved
+/// alone as its set — `pi` with its peers that are not pi's own, `dsh` from
+/// the DSH base's lock (a pin the base holds at another version refused) —
+/// with `before` (an ISO time), every package resolved anew published by
+/// then (the base's locked packages stay as locked), and installed as
+/// [`install`] installs a set, in the same cache. Its lock is the
+/// session's, not beside a manifest. The folder, and the packages the pin
+/// brings with install scripts (not run). Public for its tests only.
+#[doc(hidden)]
+pub fn install_one(
     home: Option<&Path>,
+    set: Set,
+    adapters: &Path,
     package: &str,
     version: &str,
     before: Option<&str>,
     how: &NpmRun,
 ) -> Result<(PathBuf, Vec<String>), BoxError> {
+    if set == Set::Dsh {
+        if let Some(at) = base_dependencies(adapters)?
+            .get(package)
+            .and_then(Json::as_str)
+        {
+            if at != version {
+                return Err(
+                    format!("{package}@{version} is pinned by the DSH base at {at}").into(),
+                );
+            }
+        }
+    }
     let home = match home {
         Some(home) => home.to_path_buf(),
         None => self::home()?,
@@ -1197,11 +1217,11 @@ pub(crate) fn install_one(
         .map(|b| format!("--before={b}"))
         .into_iter()
         .collect();
-    let entry = resolve(Set::Mcp, &pins, Path::new(""), &extra, how)?;
+    let entry = resolve(set, &pins, adapters, &extra, how)?;
     if let Some(why) = unsound(&entry) {
         return Err(format!("npm's lock for {package}@{version}: {why}").into());
     }
-    let dir = install_set(&home, Set::Mcp, &entry, Path::new(""), how)?;
+    let dir = install_set(&home, set, &entry, adapters, how)?;
     let mut scripts: Vec<String> = brought(&entry.packages, &format!("node_modules/{package}"))
         .into_iter()
         .filter(|at| {
