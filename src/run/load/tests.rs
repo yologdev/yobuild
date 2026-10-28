@@ -540,8 +540,13 @@ fn tool(once: bool) -> (LoadPlugin, Driver, tempfile::TempDir) {
     needs.required_env = Some(vec!["API_TOKEN".into()]);
     let mut pi = candidate("pi-lint", Ok("1.0.0"));
     pi.kind = ExtendKind::Pi;
+    // Found as a pi package first, then as the MCP server it also is:
+    // loaded as the server (its version, 1.2.0, below).
+    let mut lint_as_pi = candidate("lint-mcp", Ok("9.9.9"));
+    lint_as_pi.kind = ExtendKind::Pi;
     let mut dsh = candidate("dsh-lint", Ok("1.0.0"));
     dsh.kind = ExtendKind::Dsh;
+    find.remember(&[lint_as_pi]);
     find.remember(&[
         pi,
         dsh,

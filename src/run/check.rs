@@ -281,29 +281,32 @@ pub struct Agent {
 /// What `[extend]` lets the agent do, as `check`'s agent note says it.
 fn extend_note(extend: &crate::manifest::Extend) -> String {
     use crate::manifest::ExtendKind;
-    let packages: Vec<&str> = extend
+    let others: Vec<ExtendKind> = extend
         .kinds
         .iter()
-        .filter_map(|k| match k {
-            ExtendKind::Pi => Some("pi"),
-            ExtendKind::Dsh => Some("DSH"),
-            _ => None,
+        .copied()
+        .filter(|k| match k {
+            ExtendKind::Mcp => false,
+            ExtendKind::Pi | ExtendKind::Dsh => true,
         })
         .collect();
-    let packages = (!packages.is_empty()).then(|| {
+    let packages = (!others.is_empty()).then(|| {
         format!(
-            "{} packages (`find_plugin`, kind {}), which `load_plugin` cannot load yet: name one in the manifest as a [[plugin]] to use it",
-            packages.join(" and "),
-            extend
-                .kinds
+            "{}s (`find_plugin`, kind {}), which `load_plugin` cannot load yet: name one in the manifest as a [[plugin]] to use it",
+            others
                 .iter()
-                .filter(|k| **k != ExtendKind::Mcp)
+                .map(|k| k.label().trim_end_matches(" package").to_owned())
+                .collect::<Vec<_>>()
+                .join(" and ")
+                + " package",
+            others
+                .iter()
                 .map(|k| format!("{:?}", k.name()))
                 .collect::<Vec<_>>()
                 .join(" or ")
         )
     });
-    match (extend.kinds.contains(&ExtendKind::Mcp), packages) {
+    match (extend.loads(), packages) {
         (true, packages) => {
             let mut note = format!(
                 "[extend]: the agent may search the MCP registry and npm for MCP servers (`find_plugin`, versions published {} or more days ago) and load up to {} a session (`load_plugin`, in {} calls): each with the owner's approval before it starts and again with its tools, which all ask, call by call; nothing is written to the manifest",
@@ -315,7 +318,7 @@ fn extend_note(extend: &crate::manifest::Extend) -> String {
             note
         }
         (false, packages) => format!(
-            "[extend]: the agent may search npm for {} (versions published {} or more days ago)",
+            "[extend]: the agent may search npm for {} (versions published {} or more days ago); with no \"mcp\" among `kinds`, it has no `load_plugin`",
             packages.unwrap_or_default(),
             extend.min_age_days
         ),
@@ -1376,7 +1379,10 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
                 None,
                 cwd,
             );
-            seen.extend([schema_of(&find), schema_of(&load)]);
+            seen.extend([schema_of(&find)]);
+            if extend.loads() {
+                seen.extend([schema_of(&load)]);
+            }
         }
         seen.extend(offered.iter().map(|o| (o.name.clone(), (o.description.clone(), o.parameters.clone()))));
         schemas.lock().unwrap().extend(seen);
@@ -1384,9 +1390,11 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         if manifest.builtins.ask_owner {
             own.insert(AskOwner::TOOL.to_owned());
         }
-        if manifest.extend.is_some() {
+        if let Some(extend) = &manifest.extend {
             own.insert(FindPlugin::TOOL.to_owned());
-            own.insert(super::load::LoadPlugin::TOOL.to_owned());
+            if extend.loads() {
+                own.insert(super::load::LoadPlugin::TOOL.to_owned());
+            }
         }
         own.extend(server_tools.iter().map(|t| t.name.clone()));
         let adapters = Adapters {
@@ -1419,9 +1427,11 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
                 kind_of(gate_off, AskOwner::TOOL, ToolKind::Allowed),
             ));
         }
-        if manifest.extend.is_some() {
+        if let Some(extend) = &manifest.extend {
             tools.push(Tool::new(FindPlugin::TOOL, ToolKind::Allowed));
-            tools.push(Tool::new(super::load::LoadPlugin::TOOL, ToolKind::Allowed));
+            if extend.loads() {
+                tools.push(Tool::new(super::load::LoadPlugin::TOOL, ToolKind::Allowed));
+            }
         }
         tools.extend(server_tools.iter().cloned());
         for Offer { name, owner, .. } in &offered {
@@ -1506,7 +1516,7 @@ mod tests {
         );
         assert_eq!(
             with(vec![ExtendKind::Dsh, ExtendKind::Pi]),
-            "[extend]: the agent may search npm for DSH and pi packages (`find_plugin`, kind \"dsh\" or \"pi\"), which `load_plugin` cannot load yet: name one in the manifest as a [[plugin]] to use it (versions published 7 or more days ago)"
+            "[extend]: the agent may search npm for DSH and pi packages (`find_plugin`, kind \"dsh\" or \"pi\"), which `load_plugin` cannot load yet: name one in the manifest as a [[plugin]] to use it (versions published 7 or more days ago); with no \"mcp\" among `kinds`, it has no `load_plugin`"
         );
     }
 

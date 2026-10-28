@@ -1617,7 +1617,7 @@ fn extend_is_refused_out_of_bounds_with_other_kinds_or_with_the_gate_off() {
         ("[extend]\nmin_age_days = 366\n", "5:16: [extend] min_age_days 366: 0 to 365"),
         (
             "[extend]\nkinds = []\n",
-            "5:9: [extend] kinds is empty: name what may be found (\"mcp\"), or leave out [extend]",
+            "5:9: [extend] kinds is empty: name what may be found (\"mcp\", \"pi\", \"dsh\"), or leave out [extend]",
         ),
         (
             "[extend]\nkinds = [\"mcp\", \"rutis\"]\n",

@@ -142,8 +142,9 @@ fn stub(broken: Broken) -> (u16, Asked) {
                         "links": {}, "maintainers": [] }, "score": { "final": 1.0 }, "searchScore": 1.0 })
                 };
                 if text.starts_with("keywords:pi-package") {
-                    return Json(json!({ "objects": [plain("pi-lint"), plain("pi-kw"), plain("pi-none")],
-                        "total": 3, "time": ago(0) }));
+                    return Json(json!({ "objects": [plain("pi-lint"), plain("pi-kw"), plain("pi-none"),
+                            plain("pi-late"), plain("pi-dropped"), plain("pi-odd")],
+                        "total": 6, "time": ago(0) }));
                 }
                 if text.starts_with("keywords:dsh-plugin") {
                     return Json(json!({ "objects": [plain("dsh-lint"), plain("dsh-none")],
@@ -198,6 +199,25 @@ fn stub(broken: Broken) -> (u16, Asked) {
                             "dsh-lint" => { v.insert("dsh".into(), json!({ "rows": [] })); }
                             _ => {}
                         }
+                        Json(p)
+                    }
+                    // Marked only since a version too new to take; marked
+                    // only until then; a `pi` field of another shape.
+                    "pi-late" | "pi-dropped" => {
+                        let mut p = packument(&name, &[("1.0.0", 30), ("2.0.0", 1)]);
+                        let marked = if name == "pi-late" { "2.0.0" } else { "1.0.0" };
+                        for v in ["1.0.0", "2.0.0"] {
+                            let v_ = p["versions"][v].as_object_mut().unwrap();
+                            v_.remove("bin");
+                            if v == marked {
+                                v_.insert("pi".into(), json!({ "extensions": ["./x.ts"] }));
+                            }
+                        }
+                        Json(p)
+                    }
+                    "pi-odd" => {
+                        let mut p = packument(&name, &[("1.0.0", 30)]);
+                        p["versions"]["1.0.0"]["pi"] = json!("./x.ts");
                         Json(p)
                     }
                     // A server at the version old enough; a library since.
@@ -303,9 +323,12 @@ fn pi_and_dsh_packages_are_found_on_npm_by_their_mark_and_not_loaded() {
         r#"[{ "tools": [
               { "name": "find_plugin", "arguments": { "need": "lint" }, "expect": [
                 "find_plugin(\"lint\", kind \"pi\"): pi packages, as the sources say.",
-                "Sources: npm: 3 found; 1 left out once npm was asked: not marked as a pi package (no `pi` field, no keyword `pi-package`).",
+                "Sources: npm: 6 found; 1 left out once npm was asked: not marked as a pi package (no `pi` field, no keyword `pi-package`).",
                 "1. pi-lint 1.0.0 (published ",
-                "2. pi-kw 1.0.0 (published "
+                "2. pi-kw 1.0.0 (published ",
+                "3. pi-late (found in npm's search): not loadable: 1.0.0 is not marked as a pi package (no `pi` field, no keyword `pi-package`), though the latest is marked",
+                "4. pi-dropped 1.0.0 (published ",
+                "5. pi-odd (found in npm's search): not loadable: npm view's `pi` is a text, not an object"
               ] },
               { "name": "find_plugin", "arguments": { "need": "lint", "kind": "dsh" }, "expect": [
                 "Sources: npm: 2 found; 1 left out once npm was asked: not marked as a DSH package (no `dsh` field, no keyword `dsh-plugin`).",
@@ -504,6 +527,50 @@ fn check_lists_both_tools_as_allowed_and_says_what_extend_lets_the_agent_do() {
             .any(|n| n.as_str().unwrap().starts_with(
                 "[extend]: the agent may search the MCP registry and npm for MCP servers"
             )),
+        "{agent:#}"
+    );
+}
+
+#[test]
+fn check_of_a_pi_and_dsh_agent_lists_find_plugin_alone_and_a_bad_registry_refuses_nothing() {
+    let dir = project_with("kinds = [\"pi\", \"dsh\"]\n", "[]");
+    let out = Command::new(env!("CARGO_BIN_EXE_yobuild"))
+        .args(["check", "agent.toml", "--json"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path().join("home"))
+        .env("YOBUILD_HOME", dir.path().join("home/.yobuild"))
+        // The MCP registry is never asked by this agent: not read.
+        .env("YOBUILD_MCP_REGISTRY", "http://example.com")
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
+    assert_eq!(report["ok"], true, "{report:#}");
+    let agent = &report["agent"];
+    assert_eq!(agent["extend"]["kinds"], json!(["pi", "dsh"]));
+    let names: Vec<&str> = agent["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"find_plugin"), "{names:?}");
+    assert!(!names.contains(&"load_plugin"), "{names:?}");
+    let find = agent["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "find_plugin")
+        .unwrap();
+    assert_eq!(
+        find["parameters"]["properties"]["kind"]["enum"],
+        json!(["pi", "dsh"])
+    );
+    assert!(
+        agent["notes"].as_array().unwrap().iter().any(|n| n
+            .as_str()
+            .unwrap()
+            .ends_with("with no \"mcp\" among `kinds`, it has no `load_plugin`")),
         "{agent:#}"
     );
 }

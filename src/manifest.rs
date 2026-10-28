@@ -753,6 +753,23 @@ impl ExtendKind {
             ExtendKind::Dsh => "dsh",
         }
     }
+
+    /// What one of its plugins is called, in what yobuild says.
+    pub fn label(self) -> &'static str {
+        match self {
+            ExtendKind::Mcp => "MCP server",
+            ExtendKind::Pi => "pi package",
+            ExtendKind::Dsh => "DSH package",
+        }
+    }
+}
+
+impl Extend {
+    /// Whether `load_plugin` is offered: it loads MCP servers only so far
+    /// (design §14 "Stage 2").
+    pub fn loads(&self) -> bool {
+        self.kinds.contains(&ExtendKind::Mcp)
+    }
 }
 
 impl Default for Extend {
@@ -2161,7 +2178,7 @@ fn extend(raw: RawExtend) -> Result<Extend, Located> {
     if let Some(kinds) = raw.kinds {
         if kinds.get_ref().is_empty() {
             let m =
-                "[extend] kinds is empty: name what may be found (\"mcp\"), or leave out [extend]";
+                "[extend] kinds is empty: name what may be found (\"mcp\", \"pi\", \"dsh\"), or leave out [extend]";
             return Err((kinds.span(), m.into()));
         }
         let mut seen = Vec::new();

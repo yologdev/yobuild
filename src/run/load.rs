@@ -530,21 +530,27 @@ impl LoadPlugin {
                 "another load is in progress: wait for its result, then call again",
             ));
         }
+        // A package found as several kinds is loaded as the MCP server it
+        // also is; found only as another kind, it is refused as that.
         let candidates = self.find.candidates();
-        let Some(candidate) = candidates.into_iter().find(|c| c.package == package) else {
+        let mut named = candidates.into_iter().filter(|c| c.package == package);
+        let Some(first) = named.next() else {
             return Err(refused(format!(
                 "{package} is not among this session's candidates: only a package find_plugin returned can be loaded"
             )));
         };
-        if candidate.kind != ExtendKind::Mcp {
-            return Err(refused(format!(
-                "{package} is a {} package: load_plugin loads MCP servers only so far (loading pi and DSH packages comes in a later step); to use it, name it in the manifest as a [[plugin]] (nothing was counted)",
-                match candidate.kind {
-                    ExtendKind::Pi => "pi",
-                    _ => "DSH",
+        let candidate = match first.kind {
+            ExtendKind::Mcp => first,
+            _ => match named.find(|c| c.kind == ExtendKind::Mcp) {
+                Some(mcp) => mcp,
+                None => {
+                    return Err(refused(format!(
+                        "{package} is a {}: load_plugin loads MCP servers only so far (loading pi and DSH packages comes in a later step); to use it, name it in the manifest as a [[plugin]] (nothing was counted)",
+                        first.kind.label()
+                    )))
                 }
-            )));
-        }
+            },
+        };
         let version = match (&candidate.version, version) {
             (Err(why), _) => {
                 return Err(refused(format!("{package} is not loadable: {why}")))

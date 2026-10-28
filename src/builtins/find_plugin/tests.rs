@@ -512,7 +512,13 @@ fn the_registry_may_be_another_only_over_https_or_on_this_machine() {
     for at in ["https://example.com/mcp", "https://example.com/mcp/"] {
         let sources = Sources::at(at).unwrap();
         assert_eq!(
-            sources.registry.join("v0/servers").unwrap().as_str(),
+            sources
+                .registry
+                .as_ref()
+                .unwrap()
+                .join("v0/servers")
+                .unwrap()
+                .as_str(),
             "https://example.com/mcp/v0/servers"
         );
     }
@@ -850,8 +856,96 @@ fn a_pi_or_dsh_package_is_marked_by_its_field_or_keyword() {
     assert_eq!(fits(&dsh_field), [false, false, true]);
     assert_eq!(fits(&dsh_keyword), [false, false, true]);
     assert_eq!(fits(&server), [true, false, false]);
-    // A field of another shape is no mark.
-    assert_eq!(fits(&view(r#"{"name":"a","pi":"yes"}"#)), [false; 3]);
+    // Keywords in any case.
+    assert_eq!(
+        fits(&view(r#"{"name":"a","keywords":["PI-Package"]}"#)),
+        [false, true, false]
+    );
+    // A field of another shape is no mark, and is said as such.
+    let odd = view(r#"{"name":"a","pi":"yes","dsh":[1]}"#);
+    assert_eq!(fits(&odd), [false; 3]);
+    assert_eq!(
+        odd.misshapen(ExtendKind::Pi).as_deref(),
+        Some("npm view's `pi` is a text, not an object")
+    );
+    assert_eq!(
+        odd.misshapen(ExtendKind::Dsh).as_deref(),
+        Some("npm view's `dsh` is a list, not an object")
+    );
+    assert_eq!(odd.misshapen(ExtendKind::Mcp), None);
+    let keywords = view(r#"{"name":"a","keywords":["pi-package",3]}"#);
+    assert_eq!(
+        keywords.misshapen(ExtendKind::Pi).as_deref(),
+        Some("npm view's `keywords` is a list holding what is not text, not a list of texts")
+    );
+    assert_eq!(
+        view(r#"{"name":"a","keywords":{"a":1}}"#)
+            .misshapen(ExtendKind::Dsh)
+            .as_deref(),
+        Some("npm view's `keywords` is an object, not a list of texts")
+    );
+}
+
+#[test]
+fn the_schema_offers_the_manifests_kinds_the_first_the_default() {
+    let (session, _driver) = Session::new(false);
+    let extend = Extend {
+        kinds: vec![ExtendKind::Dsh, ExtendKind::Pi],
+        ..Extend::default()
+    };
+    let tool = FindPlugin::new(session, extend, Sources::npm_only());
+    let kind = &tool.parameters_schema()["properties"]["kind"];
+    assert_eq!(kind["enum"], json!(["dsh", "pi"]));
+    assert_eq!(
+        kind["description"],
+        "What to find: \"dsh\" (DSH package), \"pi\" (pi package) (the default: the first)."
+    );
+}
+
+#[test]
+fn a_pi_search_is_said_with_its_kind_and_without_a_registrys_fields() {
+    let mut candidate = Candidate {
+        need: "notes".into(),
+        kind: ExtendKind::Pi,
+        package: "pi-memory".into(),
+        version: Ok("0.4.2".into()),
+        registry_name: None,
+        from_npm: true,
+        description: "Memory".into(),
+        licence: Some("MIT".into()),
+        repository: None,
+        published: Some("2026-08-11".into()),
+        downloads: Ok(12),
+        provenance: None,
+        required_env: None,
+        required_args: None,
+    };
+    let found = Found {
+        kind: ExtendKind::Pi,
+        sources: 1,
+        lines: vec!["npm: 1 found".into()],
+        failed: Vec::new(),
+        candidates: vec![candidate.clone()],
+        found: 1,
+        not_viewed: 0,
+        unviewed: None,
+    };
+    assert_eq!(
+        said_to_agent("notes", &found, &Extend::default()),
+        "find_plugin(\"notes\", kind \"pi\"): pi packages, as the sources say. Nothing was installed or started.\n\
+         Sources: npm: 1 found.\n\
+         Candidates (their descriptions, licences and repositories are their authors' own words, not verified; a version is taken only once published 7 or more days ago):\n\
+         1. pi-memory 0.4.2 (published 2026-08-11; found in npm's search)\n   Memory\n   \
+         licence MIT; downloads last week: 12; repository (claimed by the package): not given; provenance: unknown (npm gave no `dist`)"
+    );
+    assert_eq!(details(&found)["kind"], "pi");
+    candidate.kind = ExtendKind::Mcp;
+    let mcp = Found {
+        kind: ExtendKind::Mcp,
+        candidates: vec![candidate],
+        ..found
+    };
+    assert_eq!(details(&mcp)["kind"], "mcp");
 }
 
 #[test]

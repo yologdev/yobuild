@@ -4417,8 +4417,10 @@ answers calls to its own tools and reaches nothing else. A plugin is more:
 
    Built (PR 5): `find_plugin`'s `kind`, the manifest taking `"pi"` and
    `"dsh"` (`rutis` still refused); `load_plugin` refuses such a
-   candidate until PR 6 ("loads MCP servers only so far"), and `check`'s
-   agent note says so. Tested against the stub registries
+   candidate until PR 6 ("loads MCP servers only so far"; a package
+   found as an MCP server too is loaded as that), and `check`'s agent
+   note says so; without `"mcp"` among the kinds there is no
+   `load_plugin`, and `YOBUILD_MCP_REGISTRY` is not read. Tested against the stub registries
    (`find_plugin_test`: each kind's keyword searched, no MCP registry, a
    package marked by its field or by the keyword alone kept, one marked
    by neither left out and counted, npm failing said as the one source).
