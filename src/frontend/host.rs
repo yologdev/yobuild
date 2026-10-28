@@ -1105,7 +1105,7 @@ impl PluginHost {
     /// provide them. A row that declares a service it provides is refused
     /// (it would be published to every runtime); one that provides without
     /// declaring (an SDK plugin's `ctx.provide`) is not seen here. Rows
-    /// naming it go to it only, as `<runtime>::<name>` ([`ADDED`]), so a
+    /// naming it go to it only, as `<runtime>::<name>` (`ADDED`), so a
     /// file another runtime loads is loaded again here; a row naming no
     /// runtime never comes to it. A name is used once: a runtime removed is
     /// not added again under its name.
