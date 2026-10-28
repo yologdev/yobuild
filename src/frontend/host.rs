@@ -1247,21 +1247,27 @@ impl PluginHost {
         }
     }
 
-    /// Why the added runtime `name` or one of its rows does not run, if
-    /// one does not: the runtime down (or not running), else the first row
-    /// that failed or stopped itself; `None` while all run, or wait for it
-    /// to start, and for a runtime not added.
-    pub fn added_stopped(&self, name: &str) -> Option<String> {
-        if let RuntimeState::Down(why) = self.added_state(name)? {
-            return Some(format!("its runtime stopped: {why}"));
+    /// Why the added runtime `name` or its rows do not run, each: the
+    /// runtime down or no longer running, else every row that failed,
+    /// stopped itself or waits (an added runtime's rows run once `load`
+    /// returned: one waiting since has lost something). Empty while all
+    /// run, while the runtime starts, and for a runtime not added.
+    pub fn added_stopped(&self, name: &str) -> Vec<String> {
+        match self.added_state(name) {
+            None | Some(RuntimeState::Starting) => return Vec::new(),
+            Some(RuntimeState::Down(why)) => return vec![format!("its runtime stopped: {why}")],
+            Some(RuntimeState::Idle) => return vec!["its runtime is no longer running".into()],
+            Some(RuntimeState::Ready(_)) => {}
         }
         self.rows
             .iter()
             .filter(|row| row.runtime_is(name))
-            .find_map(|row| match self.state(&row.id) {
+            .filter_map(|row| match self.state(&row.id) {
+                Started::Running => None,
                 Started::Failed(why) => Some(why),
-                _ => None,
+                Started::Waiting => Some(format!("plugin `{}` is not running (it waits)", row.id)),
             })
+            .collect()
     }
 
     fn is_added(&self, runtime: &str) -> bool {

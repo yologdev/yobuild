@@ -182,7 +182,8 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
         }
         let (plugins, set) = match kind {
             ExtendKind::Pi => ("pi plugins", "pi"),
-            _ => ("DSH plugins", "dsh"),
+            ExtendKind::Dsh => ("DSH plugins", "dsh"),
+            ExtendKind::Mcp => continue,
         };
         text.push_str(&format!(
             "\nIn {} a {} runs with the other {plugins}, in the `{set}` runtime, its hooks too, its tools under their own names",
@@ -295,6 +296,15 @@ impl Server {
     }
 }
 
+/// A kept package found stopped ([`Loaded::packages_stopped`]).
+pub(crate) struct Stopped {
+    pub name: String,
+    pub kind: ExtendKind,
+    /// Its runtime, to remove.
+    pub runtime: String,
+    pub why: String,
+}
+
 /// A pi or DSH package the owner kept, running in its runtime.
 struct Running {
     name: String,
@@ -336,8 +346,10 @@ struct Shared {
 /// during the run; a generation bumped on each load and each found gone, so
 /// yoagent offers the change from the next turn. A package's tools in later
 /// runs come from the bridge's extension, named by
-/// [`restricted_name`](Loaded::restricted_name). Clones share it. Dropped,
-/// the servers are stopped (each `kill_on_drop`).
+/// [`restricted_name`](Loaded::restricted_name). Clones share it (the
+/// naming closure the bridge keeps holds it weakly: [`naming`](Loaded::naming)).
+/// Dropped, the servers are stopped (each `kill_on_drop`); `run` closes it
+/// at the session's end in any case.
 #[derive(Clone, Default)]
 pub(crate) struct Loaded(Arc<Shared>);
 
@@ -368,6 +380,37 @@ impl Loaded {
                 .and_then(|t| t.strip_prefix("__"))
                 .is_some_and(|t| k.tools.iter().any(|own| own == t))
         })
+    }
+
+    /// Why `tool` is refused without asking, if it is: a tool of a package
+    /// kept and stopped since. A run that started before it stopped still
+    /// offers it (its tools came with the run's start); a server's leave
+    /// at the next turn, as `Loaded` offers them.
+    pub fn refused(&self, tool: &str) -> Option<String> {
+        locked(&self.0.lists).kept.iter().find_map(|k| {
+            let own = tool
+                .strip_prefix(&k.name)
+                .and_then(|t| t.strip_prefix("__"))
+                .is_some_and(|t| k.tools.iter().any(|own| own == t));
+            let why = k.stopped.as_ref().filter(|_| own)?;
+            match k.kind {
+                // Its tools left at the next turn (`Loaded` offers them).
+                ExtendKind::Mcp => None,
+                ExtendKind::Pi | ExtendKind::Dsh => Some(format!(
+                    "`{tool}` is a tool of the {} `{}`, which stopped this session ({why}): it is not run",
+                    k.kind.label(),
+                    k.name
+                )),
+            }
+        })
+    }
+
+    /// [`restricted_name`](Self::restricted_name) for the bridge's extension
+    /// (`with_restricted_tools`), holding `Loaded` weakly: the late source
+    /// `Loaded` holds keeps the closure, which would otherwise keep `Loaded`.
+    pub fn naming(&self) -> impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static {
+        let weak = Arc::downgrade(&self.0);
+        move |handler, tool| Loaded(weak.upgrade()?).restricted_name(handler, tool)
     }
 
     /// Every server and package kept this session, stopped ones too.
@@ -417,17 +460,23 @@ impl Loaded {
 
     /// The tools of the package being loaded as `name`, as the late source
     /// offers them this run (it asks the handler's `tools` once a run): for
-    /// the second question.
-    async fn read_tools(&self, name: &str) -> Vec<Arc<dyn AgentTool>> {
+    /// the second question. None read is said as such: the source logs a
+    /// `tools` that failed, and tells nothing else.
+    async fn read_tools(&self, name: &str) -> Result<Vec<Arc<dyn AgentTool>>, String> {
         let Some(late) = self.0.late.get() else {
-            return Vec::new();
+            return Err("its tools cannot be read: the bridge's late tools are not set".into());
         };
         let prefix = format!("{name}__");
-        late.tools()
+        let tools: Vec<_> = late
+            .tools()
             .await
             .into_iter()
             .filter(|t| t.name().starts_with(&prefix))
-            .collect()
+            .collect();
+        match tools.is_empty() {
+            true => Err("it offered no tools as a loaded package gets them (in a runtime of its own, no grants, no config), or its adapter's `tools` failed (the log says)".into()),
+            false => Ok(tools),
+        }
     }
 
     fn add_package(&self, kept: Kept, running: Running) {
@@ -437,28 +486,33 @@ impl Loaded {
         self.0.generation.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// The packages whose runtime or a row has stopped, each with its kind
-    /// and why: taken out (their tools leave at the next turn, and later
-    /// runs leave them out) and marked stopped. `run`'s tick asks, with the
-    /// host.
-    pub fn packages_stopped(&self, host: &PluginHost) -> Vec<(String, ExtendKind, String)> {
+    /// The packages whose runtime or a row has stopped: taken out and
+    /// marked stopped — the run that loaded one drops its tools at the next
+    /// turn, later runs leave them out, and a run started before it stopped
+    /// has them [`refused`](Self::refused) without asking. `run`'s tick
+    /// asks, with the host, and removes each one's runtime.
+    pub fn packages_stopped(&self, host: &PluginHost) -> Vec<Stopped> {
         let mut lists = locked(&self.0.lists);
         let mut out = Vec::new();
-        lists
-            .packages
-            .retain(|p| match host.added_stopped(&p.runtime) {
-                Some(why) => {
-                    out.push((p.name.clone(), why));
-                    false
-                }
-                None => true,
-            });
-        let mut said = Vec::new();
-        for (name, why) in out {
-            if let Some(k) = lists.kept.iter_mut().find(|k| k.name == name) {
-                k.stopped = Some(why.clone());
-                said.push((name, k.kind, why));
+        lists.packages.retain(|p| {
+            let why = host.added_stopped(&p.runtime);
+            if why.is_empty() {
+                return true;
             }
+            out.push((p.name.clone(), p.runtime.clone(), why.join("; ")));
+            false
+        });
+        let mut said = Vec::new();
+        for (name, runtime, why) in out {
+            let k = lists.kept.iter_mut().find(|k| k.name == name);
+            let k = k.expect("a running package is kept");
+            k.stopped = Some(why.clone());
+            said.push(Stopped {
+                name,
+                kind: k.kind,
+                runtime,
+                why,
+            });
         }
         if !said.is_empty() {
             self.0.generation.fetch_add(1, Ordering::SeqCst);
@@ -681,6 +735,10 @@ struct State {
     /// Runtimes added for packages: each load's is `loaded-<n>`, a name
     /// never used again (the loader keeps a name's resolution).
     runtimes: u32,
+    /// Names a package load started a runtime under: not given again this
+    /// session, kept or not — the bridge's late source keeps a run's tools
+    /// by name, and would offer the earlier load's under it.
+    tried: BTreeSet<String>,
 }
 
 /// The `load_plugin` tool. Clones share the session's state.
@@ -871,6 +929,11 @@ impl LoadPlugin {
         if self.taken.contains(&name) || self.loaded.kept().iter().any(|k| k.name == name) {
             return Err(pass_another(format!(
                 "the name {name:?} is in use by another plugin or server"
+            )));
+        }
+        if locked(&self.state).tried.contains(&name) {
+            return Err(pass_another(format!(
+                "the name {name:?} was used by an earlier load this session"
             )));
         }
         Ok(name)

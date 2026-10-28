@@ -7,7 +7,7 @@ use yoagent::{AgentTool, ToolContext, ToolError};
 
 use super::*;
 use crate::builtins::{Candidate, FindPlugin, Sources};
-use crate::frontend::{Driver, Session};
+use crate::frontend::{Driver, NoticeLevel, Session};
 use crate::manifest::{ExtendKind, Manifest};
 
 #[test]
@@ -888,7 +888,7 @@ async fn a_dsh_package_starts_restricted_on_the_base_and_one_lacking_services_is
         let (load, on, dsh) = (load.clone(), on.clone(), dsh.clone());
         async move {
             let _loading = load.loaded.loading(&handler, name);
-            let mut remove = package::RemoveOnDrop::new(on.host.clone());
+            let mut remove = package::RemoveOnDrop::new(on.host.clone(), load.session.clone());
             let found = package::Found::Dsh {
                 rows: vec![row],
                 modules: vec![file],
@@ -924,15 +924,98 @@ async fn a_dsh_package_starts_restricted_on_the_base_and_one_lacking_services_is
     );
     assert_eq!(info.owner(), "loaded:echo");
     remove.now().await;
+    // Removed: its handler gone with its runtime.
+    assert!(
+        !bridge
+            .registry()
+            .handlers()
+            .iter()
+            .any(|h| h.name() == handler),
+        "its handler outlived its runtime"
+    );
 
-    let (started, _remove, _) = start("loaded-2", "needy", "fixture-needs-services.ts").await;
-    let message = started.expect_err("refused").message;
+    let (started, _remove, handler) = start("loaded-2", "needy", "fixture-needs-services.ts").await;
+    let refusal = started.expect_err("refused");
+    assert!(matches!(refusal.level, NoticeLevel::Error));
+    // The runtime removed before the refusal returned.
+    assert!(!bridge
+        .registry()
+        .handlers()
+        .iter()
+        .any(|h| h.name() == handler));
+    let message = refusal.message;
     assert!(
         message.starts_with("needy did not start: it waits for services nobody provides here (")
             && message.contains("credentials")
             && message.ends_with("a loaded DSH package gets none of DSH's host services"),
         "{message}"
     );
-    drop(_remove);
     root.shutdown().await.unwrap();
+}
+
+/// A name a package load started a runtime under is not given again this
+/// session (the late source keeps a run's tools by name): counted.
+#[tokio::test]
+async fn a_name_an_earlier_package_load_used_is_not_given_again() {
+    let (load, _driver, _dir) = tool(false);
+    locked(&load.state).tried.insert("lint".into());
+    let why = refusal(&load, json!({ "package": "lint-mcp" })).await;
+    assert!(
+        why.contains(
+            "the name \"lint\" was used by an earlier load this session: pass another `name`"
+        ),
+        "{why}"
+    );
+    assert_eq!(locked(&load.state).attempts, 1);
+}
+
+/// A stopped package's tools are refused without asking, naming why; a
+/// running one's and a stopped server's are not (a server's leave at the
+/// next turn). The naming the bridge keeps holds `Loaded` weakly.
+#[test]
+fn a_stopped_packages_tools_are_refused_and_the_naming_holds_loaded_weakly() {
+    let loaded = Loaded::default();
+    let package = |kind, name: &str, stopped: Option<&str>| Kept {
+        kind,
+        name: name.into(),
+        package: format!("{name}-pkg"),
+        version: "1.0.0".into(),
+        args: Vec::new(),
+        tools: vec!["shout".into()],
+        stopped: stopped.map(str::to_owned),
+    };
+    locked(&loaded.0.lists).kept.extend([
+        package(ExtendKind::Pi, "loud", Some("its runtime stopped: exit 7")),
+        package(ExtendKind::Dsh, "calm", None),
+        package(ExtendKind::Mcp, "srv", Some("it exited")),
+    ]);
+    assert_eq!(
+        loaded.refused("loud__shout").as_deref(),
+        Some("`loud__shout` is a tool of the pi package `loud`, which stopped this session (its runtime stopped: exit 7): it is not run")
+    );
+    assert_eq!(loaded.refused("loud__other"), None);
+    assert_eq!(loaded.refused("calm__shout"), None);
+    assert_eq!(loaded.refused("srv__shout"), None);
+
+    // A load in progress names its handler's tools; a kept running one
+    // only those the owner saw; anything else nothing.
+    let naming = loaded.naming();
+    let guard = loaded.loading("h-1", "fresh");
+    assert_eq!(naming("h-1", "any").as_deref(), Some("fresh__any"));
+    drop(guard);
+    assert_eq!(naming("h-1", "any"), None);
+    locked(&loaded.0.lists).packages.push(Running {
+        name: "calm".into(),
+        runtime: "loaded-2".into(),
+        handler: "h-2".into(),
+        tools: vec!["shout".into()],
+    });
+    assert_eq!(naming("h-2", "shout").as_deref(), Some("calm__shout"));
+    assert_eq!(naming("h-2", "later"), None);
+    drop(loaded);
+    assert_eq!(
+        naming("h-2", "shout"),
+        None,
+        "Loaded kept alive by its naming"
+    );
 }

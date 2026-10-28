@@ -21,7 +21,7 @@ use super::{
 };
 use crate::builtins::Candidate;
 use crate::frontend::host::{PluginHost, Row};
-use crate::frontend::NoticeLevel;
+use crate::frontend::{NoticeLevel, Session};
 use crate::install::Set;
 use crate::manifest::ExtendKind;
 use crate::run::plugins;
@@ -63,16 +63,20 @@ struct Installed {
 
 /// Removes an added runtime when dropped armed (a refusal, a run stopped,
 /// the call dropped), in a task of its own: it waits for the host's lock.
+/// A removal that fails is said to the owner: code they did not keep may
+/// still run.
 pub(super) struct RemoveOnDrop {
     host: Arc<tokio::sync::Mutex<PluginHost>>,
+    session: Session,
     runtime: Option<String>,
 }
 
 impl RemoveOnDrop {
     /// Armed by [`LoadPlugin::start_package`] once the runtime runs.
-    pub(super) fn new(host: Arc<tokio::sync::Mutex<PluginHost>>) -> Self {
+    pub(super) fn new(host: Arc<tokio::sync::Mutex<PluginHost>>, session: Session) -> Self {
         Self {
             host,
+            session,
             runtime: None,
         }
     }
@@ -80,7 +84,17 @@ impl RemoveOnDrop {
     /// Removed now, waited for (the owner's Block).
     pub(super) async fn now(mut self) {
         if let Some(runtime) = self.runtime.take() {
-            remove(&self.host, &runtime).await;
+            let result = self.host.lock().await.remove_runtime(&runtime).await;
+            said(&self.session, &runtime, result);
+        }
+    }
+
+    /// Removed now with the host's lock held by the caller (a start that
+    /// failed: nothing else may run in it meanwhile).
+    async fn now_in(mut self, host: &mut PluginHost) {
+        if let Some(runtime) = self.runtime.take() {
+            let result = host.remove_runtime(&runtime).await;
+            said(&self.session, &runtime, result);
         }
     }
 
@@ -93,17 +107,27 @@ impl RemoveOnDrop {
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
-            let host = self.host.clone();
-            tokio::spawn(async move { remove(&host, &runtime).await });
+            let (host, session) = (self.host.clone(), self.session.clone());
+            tokio::spawn(async move {
+                let result = host.lock().await.remove_runtime(&runtime).await;
+                said(&session, &runtime, result);
+            });
         }
     }
 }
 
-async fn remove(host: &tokio::sync::Mutex<PluginHost>, runtime: &str) {
-    if let Err(e) = host.lock().await.remove_runtime(runtime).await {
-        tracing::warn!("removing a loaded plugin's runtime: {e}");
+/// A runtime's removal that failed, said: a Warning notice.
+fn said(session: &Session, runtime: &str, result: Result<(), BoxError>) {
+    if let Err(e) = result {
+        tracing::warn!("removing a loaded package's runtime: {e}");
+        session.notice(
+            NoticeLevel::Warning,
+            format!("A loaded package's runtime `{runtime}` could not be stopped whole: {e}"),
+        );
     }
 }
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 impl LoadPlugin {
     /// Steps 4 to 7 for a pi or DSH package (`candidate`), named `name`.
@@ -122,7 +146,8 @@ impl LoadPlugin {
         // 4. Installed, running nothing; what it holds read from its files.
         let set = match kind {
             ExtendKind::Pi => Set::Pi,
-            _ => Set::Dsh,
+            ExtendKind::Dsh => Set::Dsh,
+            ExtendKind::Mcp => return Err(refused("an MCP server is not loaded as a package")),
         };
         let (adapters, keys, withheld) = (
             on.adapters.clone(),
@@ -138,8 +163,8 @@ impl LoadPlugin {
         } = self
             .install(set, package, version, ctx, move |dir, scripts| {
                 let code = dir.join("node_modules").join(&package_);
-                let found = match kind {
-                    ExtendKind::Pi => {
+                let found = match set {
+                    Set::Pi => {
                         let found = plugins::pi_package(&adapters, &code, &package_, &keys);
                         let found = found.map_err(|e| format!("{package_}: {e}"))?;
                         Found::Pi {
@@ -147,7 +172,8 @@ impl LoadPlugin {
                             notes: found.notes,
                         }
                     }
-                    _ => {
+                    Set::Mcp => return Err("an MCP server is not loaded as a package".into()),
+                    Set::Dsh => {
                         let rows = plugins::dsh_package(
                             &adapters, &dir, &package_, &code, &id, None, &keys,
                         );
@@ -190,11 +216,13 @@ impl LoadPlugin {
         let runtime = {
             let mut state = super::locked(&self.state);
             state.runtimes += 1;
+            // Never given again this session (`LoadPlugin::name`).
+            state.tried.insert(name.to_owned());
             format!("loaded-{}", state.runtimes)
         };
         let handler = format!("loaded-{name}-{}", uuid::Uuid::new_v4().simple());
         let _loading = self.loaded.loading(&handler, name);
-        let mut remove = RemoveOnDrop::new(on.host.clone());
+        let mut remove = RemoveOnDrop::new(on.host.clone(), self.session.clone());
         let id = format!("loaded:{name}");
         let started = self.start_package(
             &on, &runtime, &handler, &id, &dir, found, package, &mut remove,
@@ -203,7 +231,11 @@ impl LoadPlugin {
             _ = ctx.cancel.cancelled() => return Err(refused("the run was stopped while it started")),
             started = started => started?,
         }
-        let tools = self.loaded.read_tools(name).await;
+        let tools = self
+            .loaded
+            .read_tools(name)
+            .await
+            .map_err(|e| failed(format!("{package}: {e}")))?;
         let prefix = format!("{name}__");
         let own: Vec<String> = tools
             .iter()
@@ -233,10 +265,13 @@ impl LoadPlugin {
             remove.now().await;
             return Err(no);
         }
-        // Gone while the owner was asked: not announced as loaded.
-        if let Some(why) = on.host.lock().await.added_stopped(&runtime) {
+        // Gone while the owner was asked: not announced as loaded (its
+        // runtime removed as `remove` drops).
+        let gone = on.host.lock().await.added_stopped(&runtime);
+        if !gone.is_empty() {
             return Err(failed(format!(
-                "{package} stopped while you were asked to keep it: {why}"
+                "{package} stopped while you were asked to keep it: {}",
+                gone.join("; ")
             )));
         }
         let names: Vec<String> = own.iter().map(|t| format!("{name}__{t}")).collect();
@@ -276,7 +311,9 @@ impl LoadPlugin {
     /// it runs), its rows loaded — the adapter's as `id`, `loaded:<name>`,
     /// so no grant and no host row matches it — a DSH package's services
     /// checked, and its adapter's handler waited for, all under the host's
-    /// lock.
+    /// lock. A step that fails removes the runtime before the lock is let
+    /// go: a handler it registered (one registered unrestricted, say) never
+    /// meets a run.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn start_package(
         &self,
@@ -291,9 +328,8 @@ impl LoadPlugin {
     ) -> Result<(), Refused> {
         let did_not = |why: String| failed(format!("{package} did not start: {why}"));
         let mut host = on.host.lock().await;
-        let pi = on.adapters.join("pi");
         let folder = match found {
-            Found::Pi { .. } => pi.clone(),
+            Found::Pi { .. } => on.adapters.join("pi"),
             Found::Dsh { .. } => dir.to_path_buf(),
         };
         let bridge = on.bridge.clone();
@@ -303,6 +339,34 @@ impl LoadPlugin {
         .await
         .map_err(|e| did_not(e.to_string()))?;
         remove.runtime = Some(runtime.to_owned());
+        let started = self
+            .fill(&mut host, on, runtime, handler, id, dir, found)
+            .await
+            .map_err(did_not);
+        if started.is_err() {
+            std::mem::replace(
+                remove,
+                RemoveOnDrop::new(on.host.clone(), self.session.clone()),
+            )
+            .now_in(&mut host)
+            .await;
+        }
+        started
+    }
+
+    /// [`start_package`](Self::start_package)'s steps once its runtime runs.
+    #[allow(clippy::too_many_arguments)]
+    async fn fill(
+        &self,
+        host: &mut PluginHost,
+        on: &Plugins,
+        runtime: &str,
+        handler: &str,
+        id: &str,
+        dir: &Path,
+        found: Found,
+    ) -> Result<(), String> {
+        let pi = on.adapters.join("pi");
         let (rows, modules) = match found {
             Found::Pi { extensions, .. } => {
                 // No grant (`execFor`, `projectTrustedFor`, `wakeFor`, the
@@ -339,29 +403,40 @@ impl LoadPlugin {
                 (all, modules)
             }
         };
-        host.load(rows).await.map_err(|e| did_not(e.to_string()))?;
+        host.load(rows).await.map_err(|e| e.to_string())?;
         if !modules.is_empty() {
             let mut missing = Vec::new();
             for wait in [1000, 3000] {
-                missing = crate::run::probe_services(&mut host, runtime, dir, &modules, &[], wait)
+                missing = crate::run::probe_services(host, runtime, dir, &modules, &[], wait)
                     .await
-                    .map_err(|e| did_not(e.to_string()))?;
+                    .map_err(|e| e.to_string())?;
                 if missing.is_empty() {
                     break;
                 }
             }
             if !missing.is_empty() {
-                return Err(did_not(format!(
+                return Err(format!(
                     "it waits for services nobody provides here ({}): a loaded DSH package gets none of DSH's host services",
                     missing.join(", ")
-                )));
+                ));
             }
         }
-        registered(&on.bridge, handler, &host, runtime)
-            .await
-            .map_err(did_not)
+        registered(&on.bridge, handler, host, runtime).await?;
+        // The DSH adapter offers what DSH's tools service holds when asked,
+        // and the late source asks once a run: a moment for a package's
+        // rows whose `apply` is still registering (a row is Active before
+        // an async `apply` ends). pi's adapter registers after its
+        // extensions loaded.
+        if !modules.is_empty() {
+            tokio::time::sleep(DSH_SETTLE).await;
+        }
+        Ok(())
     }
 }
+
+/// How long a DSH package's tools are given to register once its adapter
+/// has (see `fill`).
+const DSH_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Waits until the adapter's handler, `handler`, is registered and
 /// restricted ([`START_TIME`]); a runtime or row that stops meanwhile fails
@@ -386,8 +461,9 @@ async fn registered(
                 false => Err("its handler was not registered as restricted".into()),
             };
         }
-        if let Some(why) = host.added_stopped(runtime) {
-            return Err(why);
+        let stopped = host.added_stopped(runtime);
+        if !stopped.is_empty() {
+            return Err(stopped.join("; "));
         }
         if Instant::now() >= deadline {
             return Err(format!(

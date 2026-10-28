@@ -424,10 +424,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         // offered, as `Loaded` says (only a kept package's, frozen at the
         // second question); one loaded mid-run comes through the late source,
         // which `Loaded` offers after the servers' tools.
-        let extension = bridge.extension().with_restricted_tools({
-            let loaded = loaded.clone();
-            move |handler, tool| loaded.restricted_name(handler, tool)
-        });
+        let extension = bridge.extension().with_restricted_tools(loaded.naming());
         loaded.set_late(extension.late_tools());
         // A plugin that is the approval policy: no run goes on unguarded —
         // without a policy plugin up, every call is denied.
@@ -453,7 +450,17 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         let loaded = loaded.clone();
         Arc::new(move |tool: &str| loaded.asks(tool)) as crate::builtins::AskedCheck
     };
-    if let Some(gate) = judge.map(|g| agent_gate(g, &manifest, offered).with_asked(asked)) {
+    // A stopped package's tools, still offered by a run that started
+    // before it stopped: refused without asking.
+    let refused = {
+        let loaded = loaded.clone();
+        Arc::new(move |tool: &str| loaded.refused(tool)) as crate::builtins::RefusedCheck
+    };
+    if let Some(gate) = judge.map(|g| {
+        agent_gate(g, &manifest, offered)
+            .with_asked(asked)
+            .with_refused(refused)
+    }) {
         agent = agent.with_extension(gate);
         // A plugin's allowed tools, checked once its tools are offered.
         let names: Vec<(String, String)> = manifest
@@ -579,21 +586,6 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                     let text = task.take().expect("a task");
                     session.send(ClientMessage::Prompt { text });
                 }
-                // The host is `load_plugin`'s while it loads: looked at the
-                // next tick.
-                let Ok(host) = host.try_lock() else { continue };
-                // A row that fails, stops, or loses its runtime: said once.
-                // (The terminal UI's own row is watched below; a loaded
-                // package's are `Loaded`'s.)
-                for stopped in host.stopped(&[ui]) {
-                    if reported.insert(stopped.clone()) {
-                        tracing::error!("{stopped}");
-                        session.notice(NoticeLevel::Error, format!("A plugin stopped: {stopped}"));
-                        if let Some(fix) = what_to_do_at_start(&format!("a plugin stopped: {stopped}")) {
-                            session.notice(NoticeLevel::Info, format!("What to do: {fix}."));
-                        }
-                    }
-                }
                 // A loaded server gone, its reason settled: said, and marked
                 // stopped (its tools left when it was first seen gone).
                 for (server, why) in loaded.stopped() {
@@ -603,16 +595,44 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                         format!("The loaded MCP server `{server}` stopped: {why}"),
                     );
                 }
+                // The host is `load_plugin`'s while it starts a package (up
+                // to a minute or so): what needs it is looked at a later
+                // tick — the terminal UI's end among it.
+                let Ok(host_now) = host.try_lock() else { continue };
+                // A row that fails, stops, or loses its runtime: said once.
+                // (The terminal UI's own row is watched below; a loaded
+                // package's are `Loaded`'s.)
+                for stopped in host_now.stopped(&[ui]) {
+                    if reported.insert(stopped.clone()) {
+                        tracing::error!("{stopped}");
+                        session.notice(NoticeLevel::Error, format!("A plugin stopped: {stopped}"));
+                        if let Some(fix) = what_to_do_at_start(&format!("a plugin stopped: {stopped}")) {
+                            session.notice(NoticeLevel::Info, format!("What to do: {fix}."));
+                        }
+                    }
+                }
                 // A loaded package's runtime or row stopped: said, its tools
-                // gone at the next turn.
-                for (name, kind, why) in loaded.packages_stopped(&host) {
-                    tracing::error!("the loaded {} {name} stopped: {why}", kind.label());
+                // gone (`Loaded::packages_stopped`), and its runtime removed
+                // — a process may be left of it — in a task of its own.
+                for stopped in loaded.packages_stopped(&host_now) {
+                    let label = stopped.kind.label();
+                    tracing::error!("the loaded {label} {} stopped: {}", stopped.name, stopped.why);
                     session.notice(
                         NoticeLevel::Error,
-                        format!("The loaded {} `{name}` stopped: {why}", kind.label()),
+                        format!("The loaded {label} `{}` stopped: {}", stopped.name, stopped.why),
                     );
+                    let (host, session) = (host.clone(), session.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = host.lock().await.remove_runtime(&stopped.runtime).await {
+                            tracing::warn!("removing a stopped package's runtime: {e}");
+                            session.notice(
+                                NoticeLevel::Warning,
+                                format!("The loaded {label} `{}`'s runtime could not be stopped whole: {e}", stopped.name),
+                            );
+                        }
+                    });
                 }
-                if terminal && !host.is_running(ui) {
+                if terminal && !host_now.is_running(ui) {
                     break End::UiGone;
                 }
             }
@@ -660,8 +680,13 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     for (server, why) in loaded.stopped_at_end(ctrl_c).await {
         tracing::error!("the loaded MCP server {server} stopped: {why}");
     }
-    for (name, kind, why) in loaded.packages_stopped(&*host.lock().await) {
-        tracing::error!("the loaded {} {name} stopped: {why}", kind.label());
+    for stopped in loaded.packages_stopped(&*host.lock().await) {
+        let label = stopped.kind.label();
+        tracing::error!(
+            "the loaded {label} {} stopped: {}",
+            stopped.name,
+            stopped.why
+        );
     }
     let kept = loaded.kept();
     loaded.close().await;
@@ -3344,7 +3369,8 @@ mod tests {
     }
 
     /// Which of yobuild's runtime sets a manifest needs (design §13): none
-    /// for no plugin (and no home looked up), `adapters` for pi or DSH, `ui`
+    /// for no plugin (and no home looked up), `adapters` for pi or DSH (or
+    /// `[extend]` finding them), `ui`
     /// for a built-in or the terminal UI, neither for a rutis plugin of
     /// one's own; and when Node and npm are needed.
     #[test]
@@ -3375,6 +3401,14 @@ mod tests {
         for (entries, terminal, want) in [
             ("[[plugin]]\npi = \"./p.ts\"\n", false, (true, false)),
             ("[[plugin]]\ndsh = \"./d.ts\"\n", false, (true, false)),
+            // A package the agent may load runs on the adapters too.
+            ("[extend]\nkinds = [\"pi\"]\n", false, (true, false)),
+            (
+                "[extend]\nkinds = [\"mcp\", \"dsh\"]\n",
+                false,
+                (true, false),
+            ),
+            ("[extend]\n", false, (false, false)),
             (
                 "[[plugin]]\nrutis = \"yobuild:todo-plan\"\n",
                 false,
