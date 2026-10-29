@@ -4828,7 +4828,9 @@ yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
 10. **First, the manifest's gap.** A manifest's `[[mcp]] url` holding a
     reference is checked by `endpoint` as `x` when read and never again,
     so `https://${HOST}/mcp` could become anything. It is checked again
-    once filled, in `run::launch`, before anything connects.
+    once filled, in `run::launch`, before anything connects. Done
+    (`run::filled_url`): a refusal quotes the URL as written, never as
+    filled, since a value may be a secret.
 11. **OAuth later.** Servers that need a sign-in refuse at `initialize`,
     said as such. A sign-in on the page (the provider's page opened, the
     token kept somewhere, refreshed) is its own design.

@@ -2407,7 +2407,7 @@ fn launch(
             }
         }
         Transport::Http { url, headers } => Launch::Http {
-            url: url.resolve_with(lookup).map_err(|e| failed(&e))?,
+            url: filled_url(url, lookup).map_err(|e| failed(&e))?,
             headers: headers
                 .iter()
                 .map(|(name, value)| Ok((name.clone(), value.resolve_with(lookup)?)))
@@ -2415,6 +2415,26 @@ fn launch(
                 .map_err(|e| failed(&e))?,
         },
     })
+}
+
+/// A server's URL filled in, checked again as an endpoint (design §14,
+/// "Stage 3", point 10): when read, each reference stood in as `x`, so
+/// `https://${HOST}/mcp` could become anything. What is wrong is said with
+/// the URL as written, never as filled (a value may be a secret).
+fn filled_url(
+    url: &crate::manifest::Value,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    let filled = url
+        .resolve_with(lookup)
+        .map_err(|e: crate::manifest::Unset| e.to_string())?;
+    let written = url.as_str();
+    let parsed = url::Url::parse(&filled)
+        .map_err(|e| format!("url {written:?}, filled in, is not a URL: {e}"))?;
+    match crate::manifest::endpoint_problem(&parsed) {
+        None => Ok(filled),
+        Some(why) => Err(format!("url {written:?}, filled in, {why}")),
+    }
 }
 
 /// The credentials yoagent reads that are set in this process (design §12,
@@ -3239,6 +3259,44 @@ mod tests {
         assert_eq!(bin(None).unwrap_err(), "@s/srv: its bin is not a path");
         write("null");
         assert_eq!(bin(None).unwrap_err(), "@s/srv has no bin");
+    }
+
+    /// An HTTP server's URL is checked again once filled in: a reference
+    /// stood in as `x` when read could bring a user, or no URL at all. The
+    /// refusal quotes the URL as written, never the value filled in.
+    #[test]
+    fn an_http_servers_url_is_checked_again_once_filled_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = Manifest::parse(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
+             [[mcp]]\nname = \"s\"\nurl = \"https://${HOST}/mcp\"\n",
+            &dir.path().join("a.toml"),
+            dir.path(),
+        )
+        .unwrap();
+        let launch = |host: &'static str| {
+            super::launch(
+                &m.mcp[0],
+                &install::Installed::default(),
+                &move |_: &str| Some(host.to_owned()),
+                &[],
+            )
+        };
+        let Launch::Http { url, .. } = launch("docs.example").unwrap() else {
+            panic!("http")
+        };
+        assert_eq!(url, "https://docs.example/mcp");
+        let user = launch("me:s3cret@evil.example").err().unwrap().to_string();
+        assert_eq!(
+            user,
+            "mcp s: url \"https://${HOST}/mcp\", filled in, has a user in it: give credentials as a header"
+        );
+        let bad = launch("a b").err().unwrap().to_string();
+        assert!(
+            bad.starts_with("mcp s: url \"https://${HOST}/mcp\", filled in, is not a URL: "),
+            "{bad}"
+        );
+        assert!(!bad.contains("a b"), "{bad}");
     }
 
     /// A stdio server has the credentials set here taken out but those its
