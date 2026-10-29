@@ -4031,9 +4031,9 @@ refuses `[extend]` without it, as the manifest does with `gate = "off"`.
     against them, and its loop ends the session on one; `check` is raced
     whole. A SIGKILL still leaves them; and a wrapper that exited and was
     collected (yobuild's 250 ms look at each loaded server collects it)
-    leaves its children, which yoagent then no longer kills — asked of
-    yoagent: kill the group when the exit watch first sees the wrapper
-    gone, before collecting it.
+    left its children, which yoagent then no longer killed — asked of
+    yoagent, and since yoagent 0.26.0 the group is killed as soon as the
+    wrapper's exit is seen, before it is collected.
   - One that dies while the owner is asked to keep it is refused then
     (an Error notice), never announced as loaded.
   - A server whose process lives on but no longer reads its input is
@@ -4704,6 +4704,13 @@ yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
   (`x-api-key`) follows it there**, and nothing stops a downgrade from
   https to http.
 
+yoagent 0.26.0 (asked for below) changes the last two: an HTTP error is
+`McpError::Http { status, .. }` (`http_status()`), and redirects stay
+within the URL's own scheme, host and port by default
+(`HttpTransport::with_redirects(Redirects::None | SameOrigin | Any)`), a
+redirect elsewhere an error naming where it pointed. A manifest's
+`[[mcp]] url` gets that default.
+
 1. **A kind of its own, `"remote"`.** `[extend] kinds` takes `"remote"`
    (label "remote MCP server"), off unless listed: whether an agent may
    send its arguments to a host it found is the owner's choice per agent,
@@ -4799,10 +4806,10 @@ yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
      `DEFAULT_CALL_TIMEOUT`.
    - **Refused:** a `401` or `403` at `initialize`: "it refused yobuild's
      request (HTTP 401): it needs a credential, or a sign-in (OAuth) yobuild
-     cannot do yet". This is read from yoagent's text; a typed status is
-     asked of yoagent.
-   - **Redirects:** none followed. A redirect is refused, naming where it
-     pointed. Asked of yoagent (below), and this stage waits for it.
+     cannot do yet", read from `McpError::http_status()` (yoagent
+     0.26.0).
+   - **Redirects:** none followed (`Redirects::None`, yoagent 0.26.0). A
+     redirect is refused, naming where it pointed.
    - **No exit watch:** `Server.exit` becomes `Option<ExitWatch>`, `None`
      for a remote, so a remote is never seen gone between calls. A call
      whose error says the server ended the session ("MCP session expired")
@@ -4833,9 +4840,11 @@ yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
     said as such. A sign-in on the page (the provider's page opened, the
     token kept somewhere, refreshed) is its own design.
 
-**Asked of yoagent** (sent only with the owner's approval):
+**Asked of yoagent** (sent with the owner's approval, 2026-10-29):
 `HttpTransport` follows no redirect, or takes a policy (none by default,
-or the same origin only), and an HTTP error carries its status.
+or the same origin only), and an HTTP error carries its status. Given in
+yoagent 0.26.0 (same origin by default, `Redirects::None` to follow
+none; `McpError::Http`), which yobuild takes in its own PR.
 
 **The demo.** A docs helper: asked how to use a library at its current
 version, it finds Context7 (`kind "remote"`), connects without a key and
