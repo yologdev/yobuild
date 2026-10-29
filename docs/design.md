@@ -4691,7 +4691,7 @@ Surveyed on 2026-10-28:
   an optional `Authorization`. Without one it answers `initialize` and
   `tools/list`, offering `resolve-library-id` and `query-docs`.
 
-yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
+yoagent 0.25.16's HTTP transport, as `[[mcp]] url` used it before 0.26.0:
 - **What it speaks:** `HttpTransport` covers the request/response subset
   of streamable HTTP: no GET stream and no SSE-only servers.
 - **Headers:** fixed for its lifetime and marked sensitive.
@@ -4704,9 +4704,9 @@ yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
   (`x-api-key`) follows it there**, and nothing stops a downgrade from
   https to http.
 
-yoagent 0.26.0 (asked for below) changes the last two: an HTTP error is
-`McpError::Http { status, .. }` (`http_status()`), and redirects stay
-within the URL's own scheme, host and port by default
+yoagent 0.26.0 (asked for below) changes the errors and the redirects:
+an HTTP error is `McpError::Http { status, .. }` (`http_status()`), and
+redirects stay within the URL's own scheme, host and port by default
 (`HttpTransport::with_redirects(Redirects::None | SameOrigin | Any)`), a
 redirect elsewhere an error naming where it pointed. A manifest's
 `[[mcp]] url` gets that default.
@@ -4879,13 +4879,14 @@ party's day as npm's is.
 4. Wait for yoagent's redirect change, or, if it does not come, a
    transport of yobuild's own (`McpClient::from_transport` takes any
    `McpTransport`) over a reqwest client that follows no redirect?
+   Settled: yoagent 0.26.0 gives `Redirects::None`.
 5. OAuth later?
 
 **Order of PRs.**
 
 1. this design;
-2. the manifest's URL checked once filled (point 10), and the request to
-   yoagent;
+2. the manifest's URL checked once filled (point 10); yoagent 0.26.0
+   taken in its own PR;
 3. `find_plugin`'s `remote` kind;
 4. `load_plugin` for a remote: the questions, the credential, `Server`
    without an exit watch, the block, `check`, the hints;

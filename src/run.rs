@@ -1016,9 +1016,9 @@ const LOCAL: [&str; 4] = [
 /// How every stdio MCP server starts, a manifest's and a loaded one: in a
 /// process group of its own (yoagent 0.25.16) — a terminal's Ctrl+C or
 /// hangup reaches only yobuild, which stops it (`crate::stops`), and its
-/// close stops what it started too (an `npx` wrapper's `node`), unless that
-/// wrapper exited first and was collected (yoagent then leaves its group
-/// alone).
+/// close stops what it started too (an `npx` wrapper's `node`); a wrapper
+/// that exits on its own takes its group with it as its exit is seen
+/// (yoagent 0.26.0).
 pub(crate) fn stdio_options() -> yoagent::mcp::StdioOptions {
     yoagent::mcp::StdioOptions::new().own_process_group(true)
 }
