@@ -291,10 +291,7 @@ fn extend_note(extend: &crate::manifest::Extend) -> String {
         [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
         [] => String::new(),
     };
-    let sources = match extend.finds_mcp() {
-        true => "the MCP registry and npm",
-        false => "npm",
-    };
+    let sources = extend.sources();
     let mut note = format!(
         "[extend]: the agent may search {sources} for {kinds} (`find_plugin`, versions published {} or more days ago) and load up to {} a session (`load_plugin`, in {} calls): each with the owner's approval before it starts and again with its tools, which all ask, call by call; nothing is written to the manifest",
         extend.min_age_days, extend.max_loads, extend.max_attempts
@@ -305,6 +302,9 @@ fn extend_note(extend: &crate::manifest::Extend) -> String {
         .any(|k| matches!(k, ExtendKind::Pi | ExtendKind::Dsh));
     if packages {
         note.push_str("; a pi or DSH package loaded runs in a runtime of its own with its tools only: no hooks, grants, config or host services");
+    }
+    if extend.kinds.contains(&ExtendKind::Remote) {
+        note.push_str("; a remote MCP server is connected over https, nothing of it running here: each call sends its arguments to its host, and the owner names the environment variable of any credential it takes");
     }
     note
 }
@@ -1511,6 +1511,17 @@ mod tests {
                 mcp.replace(
                     "the MCP registry and npm for MCP servers",
                     "npm for pi packages"
+                )
+            )
+        );
+        let remote = "; a remote MCP server is connected over https, nothing of it running here: each call sends its arguments to its host, and the owner names the environment variable of any credential it takes";
+        assert_eq!(
+            with(vec![ExtendKind::Remote]),
+            format!(
+                "{}{remote}",
+                mcp.replace(
+                    "the MCP registry and npm for MCP servers",
+                    "the MCP registry for remote MCP servers"
                 )
             )
         );

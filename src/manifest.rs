@@ -722,7 +722,7 @@ impl Default for Builtins {
 #[non_exhaustive]
 pub struct Extend {
     /// What may be found and loaded: MCP stdio servers, pi and DSH packages
-    /// (design §14 "Stage 2").
+    /// (design §14 "Stage 2"), remote MCP servers ("Stage 3").
     pub kinds: Vec<ExtendKind>,
     /// Servers kept per session (1 to 5).
     pub max_loads: u32,
@@ -742,6 +742,9 @@ pub enum ExtendKind {
     Pi,
     /// A DSH package, from npm.
     Dsh,
+    /// An MCP server over streamable HTTP, from the MCP registry's
+    /// `remotes`: nothing of it runs here.
+    Remote,
 }
 
 impl ExtendKind {
@@ -751,6 +754,7 @@ impl ExtendKind {
             ExtendKind::Mcp => "mcp",
             ExtendKind::Pi => "pi",
             ExtendKind::Dsh => "dsh",
+            ExtendKind::Remote => "remote",
         }
     }
 
@@ -760,14 +764,33 @@ impl ExtendKind {
             ExtendKind::Mcp => "MCP server",
             ExtendKind::Pi => "pi package",
             ExtendKind::Dsh => "DSH package",
+            ExtendKind::Remote => "remote MCP server",
         }
     }
 }
 
 impl Extend {
-    /// Whether it finds MCP servers: the MCP registry is asked only then.
-    pub fn finds_mcp(&self) -> bool {
-        self.kinds.contains(&ExtendKind::Mcp)
+    /// Whether `find_plugin` asks the MCP registry: only for MCP servers,
+    /// stdio or remote.
+    pub fn asks_registry(&self) -> bool {
+        self.kinds
+            .iter()
+            .any(|k| matches!(k, ExtendKind::Mcp | ExtendKind::Remote))
+    }
+
+    /// Whether `find_plugin` asks npm: for every kind but remote servers,
+    /// which npm does not list.
+    pub fn asks_npm(&self) -> bool {
+        self.kinds.iter().any(|k| *k != ExtendKind::Remote)
+    }
+
+    /// The sources `find_plugin` asks, in what yobuild says.
+    pub fn sources(&self) -> &'static str {
+        match (self.asks_registry(), self.asks_npm()) {
+            (true, true) => "the MCP registry and npm",
+            (true, false) => "the MCP registry",
+            (false, _) => "npm",
+        }
     }
 }
 
@@ -1835,7 +1858,7 @@ pub(crate) fn secret(name: &str) -> bool {
 /// secret (`name`) is only `${NAME}` references, with at most a scheme word
 /// (`Bearer ${TOKEN}`); a URL in any value (`scheme://user:password@host`)
 /// has its password as a reference.
-fn guard(name: &str, value: &Value) -> Result<(), String> {
+pub(crate) fn guard(name: &str, value: &Value) -> Result<(), String> {
     if secret(name) {
         let literal = value.literal().to_ascii_lowercase();
         let scheme = ["", "bearer", "basic", "token"].contains(&literal.as_str());
@@ -2177,7 +2200,7 @@ fn extend(raw: RawExtend) -> Result<Extend, Located> {
     if let Some(kinds) = raw.kinds {
         if kinds.get_ref().is_empty() {
             let m =
-                "[extend] kinds is empty: name what may be found (\"mcp\", \"pi\", \"dsh\"), or leave out [extend]";
+                "[extend] kinds is empty: name what may be found (\"mcp\", \"pi\", \"dsh\", \"remote\"), or leave out [extend]";
             return Err((kinds.span(), m.into()));
         }
         let mut seen = Vec::new();
@@ -2186,12 +2209,14 @@ fn extend(raw: RawExtend) -> Result<Extend, Located> {
                 "mcp" => ExtendKind::Mcp,
                 "pi" => ExtendKind::Pi,
                 "dsh" => ExtendKind::Dsh,
+                "remote" => ExtendKind::Remote,
                 "rutis" => {
-                    let m = "[extend] kinds \"rutis\": \"mcp\", \"pi\" or \"dsh\" so far; rutis plugins come in a later step (design §14)";
+                    let m = "[extend] kinds \"rutis\": \"mcp\", \"pi\", \"dsh\" or \"remote\" so far; rutis plugins come in a later step (design §14)";
                     return Err((kind.span(), m.into()));
                 }
                 other => {
-                    let m = format!("[extend] kinds {other:?}: \"mcp\", \"pi\" or \"dsh\"");
+                    let m =
+                        format!("[extend] kinds {other:?}: \"mcp\", \"pi\", \"dsh\" or \"remote\"");
                     return Err((kind.span(), m));
                 }
             };

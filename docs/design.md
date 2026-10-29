@@ -4877,7 +4877,9 @@ party's day as npm's is.
 1. this design;
 2. the manifest's URL checked once filled (point 10), and the request to
    yoagent;
-3. `find_plugin`'s `remote` kind;
+3. `find_plugin`'s `remote` kind (done: `load_plugin` refuses a remote,
+   uncounted, until 4; a name of one label is refused too, as a machine
+   on this network);
 4. `load_plugin` for a remote: the questions, the credential, `Server`
    without an exit watch, the block, `check`, the hints;
 5. the demo, the skill, the guide, `CLAUDE.md` and the roadmap.

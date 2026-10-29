@@ -184,6 +184,7 @@ fn the_registry_gives_npm_servers_over_stdio_and_lists_the_rest() {
             description: "ESLint\nover MCP".into(),
             required_env: Some(vec!["TOKEN".into()]),
             required_args: Some(vec!["--root".into(), "<dir>".into()]),
+            remote: None,
         })
     );
     let rest: Vec<(&str, bool, bool)> = page.servers[1..]
@@ -209,6 +210,9 @@ fn listed(key: &str, text: &str, hit: Option<Hit>, remote: bool) -> Listed {
         text: text.into(),
         hit,
         remote,
+        remote_hit: None,
+        description: String::new(),
+        published: None,
     }
 }
 
@@ -253,7 +257,7 @@ fn the_registrys_searches_are_ranked_and_each_server_counted_once() {
         }),
         Err("HTTP 503 Service Unavailable".into()),
     ];
-    let found = ranked(&words, pages).unwrap();
+    let found = ranked(&words, pages, ExtendKind::Mcp).unwrap();
     let names: Vec<&str> = found.hits.iter().map(|h| h.package.as_str()).collect();
     assert_eq!(names, ["ts-lint", "lint-mcp"]);
     assert_eq!((found.remote, found.other, found.unrelated), (1, 1, 1));
@@ -267,7 +271,7 @@ fn the_registrys_searches_are_ranked_and_each_server_counted_once() {
         Err("timed out".into()),
     ];
     assert_eq!(
-        ranked(&words, failing),
+        ranked(&words, failing, ExtendKind::Mcp),
         Err("HTTP 503 Service Unavailable; timed out".into())
     );
 }
@@ -428,6 +432,7 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
                 provenance: Some(false),
                 required_env: None,
                 required_args: None,
+                remote: None,
             },
             Candidate {
                 need: "lint".into(),
@@ -444,6 +449,7 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
                 provenance: None,
                 required_env: None,
                 required_args: None,
+                remote: None,
             },
         ],
         found: 2,
@@ -474,7 +480,8 @@ fn the_agent_is_told_each_source_and_what_is_unknown() {
             "licence": null, "repository": "https://example.com/r",
             "published": "2026-09-01", "downloads": null,
             "downloadsUnknown": "not asked: npm's registry here is http://x, not npmjs's",
-            "provenance": false, "requiredEnv": null, "requiredArgs": null
+            "provenance": false, "requiredEnv": null, "requiredArgs": null,
+            "remote": null
         })
     );
     assert_eq!(json["candidates"][1]["version"], Json::Null);
@@ -549,6 +556,7 @@ fn hit(package: &str, registry: bool, npm: bool) -> Hit {
         description: String::new(),
         required_env: registry.then(Vec::new),
         required_args: registry.then(Vec::new),
+        remote: None,
     }
 }
 
@@ -756,6 +764,7 @@ fn candidate_of(package: &str, version: Result<&str, &str>) -> Candidate {
         provenance: None,
         required_env: None,
         required_args: None,
+        remote: None,
     }
 }
 
@@ -919,6 +928,7 @@ fn a_pi_search_is_said_with_its_kind_and_without_a_registrys_fields() {
         provenance: None,
         required_env: None,
         required_args: None,
+        remote: None,
     };
     let found = Found {
         kind: ExtendKind::Pi,
@@ -958,4 +968,239 @@ fn npms_answer_for_pi_or_dsh_keeps_every_package_for_npm_view_to_judge() {
     // As an MCP search, neither is marked as MCP.
     assert_eq!(npm_hits(answer, ExtendKind::Mcp).unwrap().hits.len(), 0);
     assert_eq!(search_keyword(ExtendKind::Dsh), "dsh-plugin");
+}
+
+#[test]
+fn a_remote_found_is_reached_over_https_by_a_public_name_only() {
+    assert_eq!(
+        remote_address("https://mcp.context7.com/mcp")
+            .unwrap()
+            .as_str(),
+        "https://mcp.context7.com/mcp"
+    );
+    let refused = |url: &str| remote_address(url).unwrap_err();
+    assert_eq!(
+        refused("https://{tenant}.x.com/mcp"),
+        "its address takes values"
+    );
+    assert_eq!(
+        refused("http://mcp.example.com/mcp"),
+        "an address refused (http: a server the agent found is reached over https only)"
+    );
+    for local in [
+        "https://localhost/mcp", "https://LOCALHOST./mcp", "https://a.localhost/mcp",
+        "https://printer.local/mcp", "https://db.internal/mcp", "https://intranet/mcp",
+    ] {
+        assert_eq!(
+            refused(local),
+            "an address refused (a name on this machine or its network)",
+            "{local}"
+        );
+    }
+    for ip in [
+        "https://10.0.0.1/mcp", "https://[::1]/mcp", "https://127.0.0.1/mcp",
+    ] {
+        assert_eq!(refused(ip), "an address refused (an IP address)", "{ip}");
+    }
+    assert_eq!(
+        refused("https://me:pw@mcp.example.com/"),
+        "an address refused (a user in it)"
+    );
+    assert_eq!(refused("mcp.example.com"), "an address refused (not a URL)");
+    assert_eq!(
+        refused("ftp://mcp.example.com/"),
+        "an address refused (http: a server the agent found is reached over https only)"
+    );
+}
+
+fn header(name: &str, template: Option<&str>) -> RemoteHeader {
+    RemoteHeader {
+        name: name.into(),
+        required: true,
+        secret: true,
+        description: String::new(),
+        template: template.map(String::from),
+    }
+}
+
+#[test]
+fn a_remote_header_is_filled_with_a_variable_where_its_template_says() {
+    let value = |name: &str, template: Option<&str>| {
+        header(name, template)
+            .value("CTX_KEY")
+            .map(|v| v.as_str().to_owned())
+    };
+    assert_eq!(value("Authorization", None).as_deref(), Some("${CTX_KEY}"));
+    assert_eq!(
+        value("Authorization", Some("Bearer {api_key}")).as_deref(),
+        Some("Bearer ${CTX_KEY}")
+    );
+    assert_eq!(
+        value("X-Region", Some("eu-{id}-1")).as_deref(),
+        Some("eu-${CTX_KEY}-1")
+    );
+    // Refused: two places, none, a `$`, a literal beside a secret, a name
+    // a header cannot have.
+    assert_eq!(value("Authorization", Some("{a}:{b}")), None);
+    assert_eq!(value("Authorization", Some("fixed")), None);
+    assert_eq!(value("Authorization", Some("Bearer ${X}")), None);
+    assert_eq!(value("X-Api-Key", Some("key={k}")), None);
+    assert_eq!(value("Bad Header", None), None);
+    // Asked: required, or optional and secret.
+    let mut h = header("X-Trace", None);
+    (h.required, h.secret) = (false, false);
+    assert!(!h.asked());
+    h.secret = true;
+    assert!(h.asked());
+}
+
+#[test]
+fn a_remote_search_keeps_the_servers_it_could_reach_and_counts_the_rest() {
+    let remote = |name: &str, remotes: serde_json::Value| {
+        let about = match name.contains("weather") {
+            true => "Forecasts".to_owned(),
+            false => format!("{name} docs"),
+        };
+        serde_json::json!({ "server": { "name": name, "description": about,
+            "version": "1.0.2", "repository": { "url": "https://github.com/x/docs" },
+            "remotes": remotes },
+          "_meta": { "io.modelcontextprotocol.registry/official": {
+            "publishedAt": "2026-09-30T08:00:00Z" } } })
+    };
+    let body = serde_json::json!({ "servers": [
+        remote("io.github.upstash/context7", serde_json::json!([
+            { "type": "sse", "url": "https://mcp.context7.com/sse" },
+            { "type": "streamable-http", "url": "https://mcp.context7.com/mcp",
+              "headers": [
+                { "name": "Authorization", "value": "Bearer {key}", "isSecret": true,
+                  "description": "Your key" },
+                { "name": "X-Theme", "description": "Colours" } ] } ])),
+        remote("io.x/sse-docs", serde_json::json!([{ "type": "sse", "url": "https://x.com/sse" }])),
+        remote("io.x/tenant-docs", serde_json::json!([
+            { "type": "streamable-http", "url": "https://{tenant}.x.com/mcp" }])),
+        remote("io.x/plain-docs", serde_json::json!([
+            { "type": "streamable-http", "url": "http://docs.x.com/mcp" }])),
+        remote("io.x/keyed-docs", serde_json::json!([
+            { "type": "streamable-http", "url": "https://docs.y.com/mcp",
+              "headers": [{ "name": "X-Api-Key", "value": "key={k}", "isRequired": true }] }])),
+        { "server": { "name": "io.x/local-docs", "description": "docs",
+            "packages": [{ "registryType": "npm", "identifier": "local-docs",
+              "transport": { "type": "stdio" } }] } },
+        remote("io.x/weather", serde_json::json!([
+            { "type": "streamable-http", "url": "https://weather.example.com/mcp" }]))
+    ] });
+    let words = registry_words("docs");
+    let found = ranked(
+        &words,
+        vec![
+            Ok(registry_page(&body).unwrap()),
+            Ok(registry_page(&body).unwrap()),
+        ],
+        ExtendKind::Remote,
+    )
+    .unwrap();
+    assert_eq!(
+        found.line(),
+        "MCP registry: 1 found (6 left out: 1 SSE only: yoagent speaks streamable HTTP, 1 its address takes values, 1 an address refused (http: a server the agent found is reached over https only), 1 a header yobuild cannot fill, 1 not a remote server, 1 naming none of the need's words)"
+    );
+    let [hit] = found.hits.as_slice() else {
+        panic!("{:?}", found.hits)
+    };
+    assert_eq!(hit.package, "io.github.upstash/context7");
+    let (taken, published) = hit.remote.clone().unwrap();
+    assert_eq!(published.as_deref(), Some("2026-09-30"));
+    assert_eq!(taken.version.as_deref(), Some("1.0.2"));
+    assert_eq!(taken.remote.url, "https://mcp.context7.com/mcp");
+    assert_eq!(taken.remote.host, "mcp.context7.com");
+    assert_eq!(taken.remote.others, ["sse https://mcp.context7.com/sse"]);
+    assert_eq!(
+        taken
+            .remote
+            .headers
+            .iter()
+            .map(|h| (h.name.as_str(), h.asked()))
+            .collect::<Vec<_>>(),
+        [("Authorization", true), ("X-Theme", false)]
+    );
+    // The same page searched for MCP servers counts the remotes as before.
+    let mcp = ranked(
+        &words,
+        vec![Ok(registry_page(&body).unwrap())],
+        ExtendKind::Mcp,
+    )
+    .unwrap();
+    assert_eq!(mcp.hits.len(), 1);
+    assert_eq!((mcp.remote, mcp.unrelated), (5, 1));
+}
+
+#[test]
+fn a_remote_candidate_is_said_with_its_address_and_the_headers_asked() {
+    let candidate = Candidate {
+        need: "library docs".into(),
+        kind: ExtendKind::Remote,
+        package: "io.github.upstash/context7".into(),
+        version: Ok("1.0.2".into()),
+        registry_name: Some("io.github.upstash/context7".into()),
+        from_npm: false,
+        description: "Up-to-date docs".into(),
+        licence: None,
+        repository: Some("https://github.com/upstash/context7".into()),
+        published: Some("2026-09-30".into()),
+        downloads: Err("a remote server has no npm downloads".into()),
+        provenance: None,
+        required_env: None,
+        required_args: None,
+        remote: Some(Remote {
+            url: "https://mcp.context7.com/mcp".into(),
+            host: "mcp.context7.com".into(),
+            headers: vec![
+                RemoteHeader {
+                    required: false,
+                    ..header("Authorization", Some("Bearer {key}"))
+                },
+                RemoteHeader {
+                    required: false,
+                    secret: false,
+                    ..header("X-Theme", None)
+                },
+            ],
+            others: vec!["sse https://mcp.context7.com/sse".into()],
+        }),
+    };
+    let found = Found {
+        kind: ExtendKind::Remote,
+        sources: 1,
+        lines: vec!["MCP registry: 1 found".into()],
+        failed: Vec::new(),
+        candidates: vec![candidate],
+        found: 1,
+        not_viewed: 0,
+        unviewed: None,
+    };
+    let extend = Extend {
+        kinds: vec![ExtendKind::Remote],
+        ..Extend::default()
+    };
+    assert_eq!(
+        said_to_agent("library docs", &found, &extend),
+        "find_plugin(\"library docs\", kind \"remote\"): remote MCP servers, as the sources say. Nothing was installed or started.\n\
+         Sources: MCP registry: 1 found.\n\
+         Candidates (their descriptions and repositories are their authors' own words, not verified; nothing of them runs here: each call of their tools sends its arguments to the server's host, which may change what it does any day; load one by its MCP registry name):\n\
+         1. io.github.upstash/context7 at mcp.context7.com (version 1.0.2, published 2026-09-30; found in the MCP registry)\n   Up-to-date docs\n   \
+         address: https://mcp.context7.com/mcp; headers: Authorization (optional, secret), X-Theme (optional, left off) (the owner names the environment variable of each one asked; you never do); repository (claimed by the entry): https://github.com/upstash/context7"
+    );
+    let json = details(&found);
+    assert_eq!(
+        json["candidates"][0]["remote"],
+        serde_json::json!({
+            "url": "https://mcp.context7.com/mcp", "host": "mcp.context7.com",
+            "headers": [
+                { "name": "Authorization", "required": false, "secret": true,
+                  "description": "", "value": "Bearer {key}" },
+                { "name": "X-Theme", "required": false, "secret": false,
+                  "description": "", "value": null }
+            ],
+            "others": ["sse https://mcp.context7.com/sse"]
+        })
+    );
 }
