@@ -142,3 +142,15 @@ The run cost `$0.0046` (34,167 tokens in, 1,690 out; 8 turns) and ended
 `Completed`. Nothing in the project changed. After Ctrl+C yobuild
 printed the `[[mcp]]` block that would keep Context7 (`url =
 "https://mcp.context7.com/mcp"`, no headers).
+
+### On Claude
+
+2026-10-30, the same task, sample and answers with `model =
+"anthropic/claude-haiku-5-5"` and `ANTHROPIC_API_KEY` (nothing else
+changed), on the page: it looked for a lockfile and `node_modules` (none),
+found and connected Context7 as above, and called
+`context7__resolve-library-id` and `context7__query-docs` with
+`/expressjs/express/v5.1.0`. Its answer: Express 5 passes a rejected
+handler's error to `next(err)`, and the app lacks an error middleware
+(with one to add). It named the range as the one thing left unverified.
+`$0.0028` (6 turns), `Completed`.

@@ -385,8 +385,11 @@ remote servers that need one.
    - any OpenAI-compatible endpoint (`base_url` + `api_key_env`);
    - local models (`ollama`, `local`).
 
-   Only DeepSeek has been run live: the gallery and the examples use
-   `deepseek/deepseek-flash`. Claude has not been run live with yobuild
-   yet. A local model has not been run at all, and it gets no dollar
-   budget, because it has no price. DeepSeek pricing: done (yoagent
-   0.25.6).
+   The gallery and the examples use `deepseek/deepseek-flash`. Claude
+   was run live on 2026-10-30: `anthropic/claude-haiku-5-5` ran
+   web-research, code-reviewer and docs-helper (on the page, a remote
+   server loaded) unchanged but for `model`, each `Completed` with its
+   report, $0.010 in all (their READMEs, "On Claude"). A local model has
+   not been run at all (not yet tried: it needs a runner and a model that
+   calls tools), and it gets no dollar budget, because it has no price.
+   DeepSeek pricing: done (yoagent 0.25.6).
