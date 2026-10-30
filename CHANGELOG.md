@@ -5,6 +5,61 @@ base changed**, because a lock with DSH plugins records it: when it
 changed, `--locked` refuses such a lock, and one run without `--locked`
 locks it again (commit the new lock).
 
+## 0.2.0 — 2026-10-30
+
+Agents that extend themselves: an agent can find a tool it lacks and
+load it for the session, with the person's yes each time.
+
+- **`[extend]` in the manifest** gives the agent two tools:
+  - `find_plugin(need, kind?)` searches live, with no list built in:
+    - MCP servers over stdio: the MCP registry and npm;
+    - pi and DSH packages: npm, by their marks;
+    - remote MCP servers: the MCP registry.
+
+    It returns up to 10 candidates with what they claim of themselves,
+    unverified, and runs nothing.
+  - `load_plugin(package, name?)` loads one of them for the session:
+    - It installs without running install scripts, taking only versions
+      `min_age_days` old (7 by default).
+    - The person is asked before anything of it runs, then again with its
+      tools in front of them. Each call of its tools asks too.
+    - At the session's end yobuild prints the `[[mcp]]` or `[[plugin]]`
+      block that would keep it; nothing is written to the manifest.
+  - **Limits:** `max_loads` and `max_attempts` per session, and `kinds`
+    says what may be found (`"mcp"`, `"pi"`, `"dsh"`, `"remote"`).
+  - Refused under `--once` (nobody to ask) and with `gate = "off"`.
+- **What a loaded plugin gets:**
+  - **A pi or DSH package:** it runs in a runtime of its own with its
+    tools only. It gets no hooks, grants, `config` or host services.
+  - **A remote MCP server:** it is reached over https only, never at an
+    IP address or a local name.
+    - The person names the environment variable that holds a
+      credential; its value is never shown, logged or given to the
+      agent.
+    - A server that needs a sign-in (OAuth) is refused: yobuild cannot
+      sign in yet.
+  - **Stopping:** a loaded server or package that stops is said, and its
+    tools go.
+- **MCP servers:**
+  - **Stdio:** each one runs in a process group of its own, so Ctrl+C is
+    yobuild's, and closing a server stops what it started.
+  - **Ctrl+C, SIGHUP and SIGTERM** are heard from the start of `run` and
+    `check`, so a stop while starting stops what was started.
+  - **An HTTP server's URL** is checked again once its `${…}` values are
+    filled in. What its errors say shows each filled value as its
+    `${NAME}`, in tool calls too.
+- **Three new gallery agents** (`yobuild new --from <name>`):
+  - `self-extending-reviewer` finds and loads ESLint's MCP server;
+  - `project-notebook` loads the `pi-memory` pi package and remembers
+    your decisions across sessions;
+  - `docs-helper` connects to Context7, a remote MCP server, and answers
+    from a library's docs at your project's version.
+- **The skill** covers `[extend]`: which kinds to allow, how to script
+  the search, and why the load is tried on the page.
+- **yoagent 0.26.1 and yoagent-rutis 0.10.0.**
+- **The DSH base:** unchanged since 0.1.0, so 0.1.0's locks still hold
+  under `--locked`.
+
 ## 0.1.0 — 2026-10-25
 
 The first release: build an agent from its parts and run it, without the
