@@ -1,0 +1,6 @@
+[
+  { "tools": [{ "name": "release_commits", "arguments": {},
+      "expect": ["after the tag v0.2.0", "Tags left out, not named like v1.2.3: 1.0", "Version tags left out, not in HEAD's history: v0.3.0", "Commits: 3."] }] },
+  { "tools": [{ "name": "release_commits", "arguments": { "since": "v0.3.0" }, "expect": "The tag v0.3.0 is not in HEAD's history" }] },
+  { "text": "## Range covered\nThe commits after v0.2.0 up to HEAD (5daf951): 3 commits. Left out: the tag `1.0` (not named like v1.2.3) and v0.3.0 (on another branch, not in HEAD's history).\n\n## Release notes draft\n### Features\n- A `shout` command. (601002b)\n\n### Fixes\n- The greeting ends with punctuation. (8d999d8)\n\n### Other changes\n- The README describes the command-line tool. (5daf951)\n\n## Grouping unsure\nnone" }
+]

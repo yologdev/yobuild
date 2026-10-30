@@ -73,29 +73,155 @@ attachments, credentials, storage, sessions, skills): set
 
 ### rutis (`[[plugin]] rutis = "…"`)
 
-Your own plugin, in TypeScript, written with the rutis SDK
-(`@arcships/rutis`), in an npm package of its own (`"type": "module"`,
-`@arcships/rutis-runtime` 0.12.0 installed):
+A tool of your own, in TypeScript with the rutis SDK: for the one thing no
+listed part does (reading git history in a read-only agent, an exact
+calculation, a private API). Keep it small: one plugin, a few tools.
+
+**Where it lives.** In the agent's folder, in an npm package of its own,
+say `plugins/`:
+- `plugins/package.json`: `"type": "module"`, `"private": true`, and
+  dependencies `@arcships/rutis` (the SDK the plugin imports) and
+  `@arcships/rutis-runtime` (the runtime yobuild starts it in), both at
+  exactly `0.12.0`;
+- `plugins/package-lock.json`, from `npm install --ignore-scripts` there.
+  The runtime brings `tsx`, `typescript` and `esbuild`; all of them work
+  without install scripts.
+- the plugin file, `plugins/<name>.ts`.
+
+Keep `package.json` and the lock with the agent, not `node_modules` (a
+`.gitignore` beside `agent.toml` holding `plugins/node_modules/`). This
+package is the one install yobuild does not do: the person runs `npm ci
+--ignore-scripts` in `plugins/` once, and again after `yobuild new --from`
+copies the agent (it prints the command). Until then `run` and `check`
+refuse, naming the command. Say it in the
+README's "What it needs". (The rule "never install plugin packages by
+hand" is about pinned plugins, which yobuild installs.)
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+
+const run = promisify(execFile)
+// Read-only by construction: no pager, no lock file, and the repository's
+// (and the person's) config kept from running programs or changing output.
+const GIT = ['--no-pager', '--no-optional-locks', '-c', 'log.showSignature=false', '-c', 'column.ui=never']
 
 export default definePlugin({
-  inject: ['yoagent'],              // required: its tools are its own only through it
+  inject: ['yoagent', 'host_workspace'],   // `yoagent`: required; the rest: services its grants allow
   apply(ctx: any) {
-    ctx.effect(ctx.use('yoagent').register('my-tools', {
+    // register(name, handler) returns a disposer; ctx.effect calls it when the plugin unloads.
+    ctx.effect(ctx.use('yoagent').register('git-history', {
       async tools() {
-        return [{ name: 'shout', description: 'Say it loudly', parameters: { type: 'object', properties: { text: { type: 'string' } } } }]
+        return [{
+          name: 'git_log',
+          description: 'Commits since a tag, newest first',
+          parameters: { type: 'object', properties: { since: { type: 'string' } }, additionalProperties: false },
+        }]
       },
-      async call_tool(call: any) {            // call.tool, call.args, call.signal
-        return { text: String(call.args.text).toUpperCase() }   // or a string; is_error: true for a failure
+      async call_tool(call: any) {               // call.tool: the name; call.args: its arguments
+        const since = (call.args ?? {}).since
+        if (since !== undefined && (typeof since !== 'string' || !/^v\d+\.\d+\.\d+$/.test(since))) {
+          return { text: `not a version tag (vX.Y.Z): ${JSON.stringify(since)}`, is_error: true }
+        }
+        const cwd = await ctx.use('host_workspace').cwd()   // the agent's folder; needs `workspace`
+        const range = since ? [`refs/tags/${since}..HEAD`] : ['HEAD']
+        const { stdout } = await run('git', [...GIT, 'log', '--format=%h %s', ...range, '--'],
+          { cwd, signal: call.signal, maxBuffer: 1 << 20 })   // a stopped run aborts it; a throw is a failed call
+        return { text: stdout || 'no commits' }
       },
     }))
   },
 })
 ```
 
-`[[plugin]] rutis = "plugins/shout.ts"`, `runtime = "node"`.
+```toml
+[[plugin]]
+rutis   = "plugins/git-history.ts"
+runtime = "node"
+grants  = { workspace = true }     # host_workspace.cwd(); see manifest.md's grants
+allow   = ["git_log"]              # it only reads: let it run without asking
+```
+
+**The contract.**
+- `tools()` returns `{ name, description, parameters }` per tool,
+  `parameters` a JSON Schema object. It is asked at each run.
+- `call_tool(call)`:
+  - `call.tool` is the tool's name.
+  - `call.args` holds the arguments as they reach the plugin: the
+    model's, perhaps rewritten by an earlier handler. Read them as
+    `call.args ?? {}`, and check each.
+  - `call.signal` aborts when the run is stopped. Pass it on (`execFile`
+    and `fetch` take a `signal`); a tool that ignores it runs to the end,
+    side effects included.
+
+  It returns one of:
+  - a string;
+  - `{ text }`, or `{ content: [blocks] }` (not both);
+  - with `is_error: true`, the text becomes the error the model sees
+    (`✗`);
+  - `details`, optional: data for the page, not for the model.
+
+  Any other key or shape is refused as "`call_tool` returned an
+  unexpected value". A throw is a failed call too.
+- **Its arguments come from the model.** Check each one's type and shape
+  before you use it. Never pass one to a shell. Give a program fixed
+  arguments, with a value never in an option's place: a `since` of
+  `--output=/tmp/x` must be refused, not handed to `git`.
+- **Host services through grants.** Add the service to `inject` and call
+  it through `ctx.use(…)`, with its grant on the `[[plugin]]`:
+  - `host_workspace`: `cwd()`, the agent's folder (`workspace = true`).
+    The plugin's own `process.cwd()` is not the agent's folder. The rest
+    of the grants are in `manifest.md`.
+- **It is the person's code.** The gate does not judge what the plugin
+  runs. Its `process.env` is the kept environment (`PATH` and `HOME`
+  among it), plus what its `env` grant passes. Read-only, as in the
+  example, is a property of the code you write.
+- **A failure must not look like an answer.** Say what was cut or left
+  out, never "none":
+  - **Errors:** report the error's own line. For git, that is its
+    `fatal:` or `error:` line, not its first, which is often a
+    `warning:`.
+  - **Exit codes:** read an exit code with the output it comes with.
+    `git rev-parse --verify -q HEAD` means "no commit yet" only when it
+    exits 1 with nothing on stderr.
+  - **Size:** cap what a call returns (say 50 KB, and so many files per
+    item), and say when it was cut.
+  - **Parsing:** check each record has the fields you expect. A commit
+    message can hold any byte but NUL, so a separator you chose may
+    appear in it. Count the records you could not read, and say so.
+- **A tool that reads git**, in particular:
+  - **Flags:** `--no-pager` and `--no-optional-locks` (git then writes
+    no lock file, and no refreshed index). Use no subcommand that writes.
+  - **Config:** the repository's config and the person's (`HOME` is
+    kept) apply, and can run programs or change the output. Turn off
+    what the command reads:
+    - `-c log.showSignature=false` (gpg);
+    - `-c column.ui=never` (several names on a line);
+    - `-c core.fsmonitor=false`;
+    - `--no-ext-diff --no-textconv` on `log -p` and `diff`;
+    - `GIT_NO_LAZY_FETCH=1` in the environment the plugin gives git
+      (`execFile`'s `env`: `{ ...process.env, GIT_NO_LAZY_FETCH: '1' }`),
+      since a partial clone would fetch;
+    - and whatever else the commands you run read: these are the usual
+      ones, not all.
+  - **Shallow clones:** a shallow clone has part of the history and
+    tags. Check `git rev-parse --is-shallow-repository`, and say so.
+  - **Refs outside HEAD:** a ref the model names may not be in HEAD's
+    history. Check it with `git merge-base --is-ancestor <ref> HEAD`
+    before reading `<ref>..HEAD`.
+  - **Names you filter out:** a tag that does not match your pattern
+    (`1.2.3`, `v2.0.0-rc.1`) is not "no tag". List those left out.
+- **Trying it:**
+  - `check --json` lists its tools and their kinds.
+  - A scripted reply file `expect`s its results (`scripted.md`).
+  - For a state the sample project is not in (no tag yet, an empty
+    file), make a copy of the sample (`cp -R`), change the copy into that
+    state, and write a reply file of its own for it. A reply file's
+    `expect`s hold for its own sample only.
+  - **A reply file for refusals:** calls meant to fail, such as a bad
+    argument (`--output=/tmp/x` where a name goes) or a name that does
+    not exist. It `expect`s each error, to show the refusals hold.
 
 yobuild's own plugins are named, not given a path:
 - `rutis = "yobuild:todo-plan"` draws a pi to-do plan (`rpiv-todo`'s

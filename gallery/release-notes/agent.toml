@@ -1,0 +1,37 @@
+# release-notes: drafts release notes for a project from its git history —
+# everything since the last version tag (v1.2.3), grouped into features,
+# fixes and other changes, in plain words for the people who use it. It only
+# reads: `tools = "read-only"`, and its one tool of its own (plugins/) runs
+# only git commands that read.
+#
+# Once, before anything else (the plugin's package; see README.md):
+#   (cd plugins && npm ci --ignore-scripts)
+#
+# From the project's folder (the agent works in the folder `yobuild run` starts in):
+#   yobuild check path/to/release-notes/agent.toml
+#   yobuild run path/to/release-notes/agent.toml --scripted path/to/release-notes/scripts/demo.json --once "$(cat path/to/release-notes/scripts/demo.task)"
+#   DEEPSEEK_API_KEY=… yobuild run path/to/release-notes/agent.toml        # live: the web page
+
+[agent]
+name   = "release-notes"
+model  = "deepseek/deepseek-flash"   # needs DEEPSEEK_API_KEY
+prompt = "prompts/agent.md"
+
+[limits]
+budget_usd         = 0.25   # dollars per run
+session_budget_usd = 1.0    # dollars in all, until yobuild stops
+max_turns          = 20     # model turns per run
+
+[[plugin]]
+rutis   = "plugins/git-history.ts"
+runtime = "node"
+grants  = { workspace = true }   # host_workspace.cwd(): the repository it reads
+allow   = ["release_commits"]    # it only reads git: runs without asking
+
+[builtins]
+tools  = "read-only"        # read, list and search, inside the project; nothing that writes
+report = ["Range covered", "Release notes draft", "Grouping unsure"]
+# no `facts`: it may add unreferenced objects to .git, and the owner wants nothing changed
+
+[frontend]
+web = true                  # the web page, at 127.0.0.1:8787
