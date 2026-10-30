@@ -31,7 +31,7 @@ your browser, in your terminal, or on your phone on the same Wi-Fi.
 Each of these is built into yobuild. `yobuild new my-agent --from <name>`
 makes a copy you can run.
 
-The first five are the gallery. A coding agent built each one with the
+The rows before `handoff` are the gallery. A coding agent built each one with the
 yobuild skill, from a request a person would make. Each copy has a README
 that quotes the request and says what the agent needs and does.
 
@@ -47,6 +47,7 @@ each README). Another model costs what its provider charges.
 | `code-health` | "Check this TypeScript project." It lists the type errors a real TypeScript server finds, and an outline of what is where. | the `pi-lens` pi package | $0.0034 |
 | `self-extending-reviewer` | "Review this project and tell me what to fix, most important first." It starts with no linter: it finds the one the project's config names, asks you before loading it and before each call, and changes nothing. | `[extend]`: ESLint's MCP server, found and loaded while it runs | $0.0054 |
 | `project-notebook` | "Which port does tiny-shop listen on? Also remember this decision: …" It answers from the project, read-only, and keeps your decisions in a memory it reads back next session. It finds the memory itself and asks you before loading it and before each call. | `[extend]`: the `pi-memory` pi package, found and loaded while it runs | $0.0045 |
+| `docs-helper` | "How do I handle errors thrown in async route handlers with the Express version this project uses?" It reads the version your project depends on and answers from that version's documentation, read-only. It connects to the docs server itself and asks you before connecting and before each call. | `[extend]`: Context7, a remote MCP server found and connected to while it runs, with no key | $0.0046 |
 | `handoff` | Any task (research, writing, planning, code): you hand it over and walk away. It plans, asks only what is yours to decide without waiting for the answer, and ends with a report. | a to-do plan (a pi package) and the web search | depends on the task; at most $2 a session |
 | `coding` | A coding agent in your terminal. A safety policy asks before commands known to be dangerous (`rm -rf` and the like); everything else runs. | a pi safety policy, web search, questions | depends on the task; no spending limit set |
 
@@ -159,7 +160,7 @@ Within that:
   - Settings can cap dollars per run and per session, and turns, tokens
     and time per run.
   - Unless set, a run stops at 50 turns, 1M tokens or 10 minutes.
-  - The five gallery agents each cap dollars per run and per session.
+  - The gallery agents each cap dollars per run and per session.
     Their runs above cost under two cents each.
 - **Plugins don't get your keys from the environment.** Plugins and
   servers start without your environment variables, keys included,

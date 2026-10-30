@@ -330,8 +330,26 @@ plugins"):**
     without a memory and gives the unsaved note.
 - **Tests:** `gallery_test` runs all three on the page in CI.
 
-Next, stage 3: remote MCP servers (proposed 2026-10-28; §14, "Stage 3:
-remote MCP servers"). Later: rutis plugins (§14, "Later steps").
+**Done (stage 3, remote MCP servers; §14, "Stage 3: remote MCP
+servers"):**
+- **What it does:** `find_plugin` searches the MCP registry for servers
+  reached over https, and `load_plugin` connects to one. Nothing of it
+  runs here. The owner names a credential's environment variable at the
+  question; its value is never asked for, shown or given to the agent; a server that needs a sign-in (OAuth)
+  is refused.
+- **The demo:** the gallery's `docs-helper` connects to Context7 with no
+  key and answers from a library's docs at the project's version.
+  - **Live:** on 2026-10-30 it answered an Express 5 question from
+    Context7's docs ($0.0046).
+  - **A refused plugin:** its `not-offered` reply file names a server the
+    registry does not return, refused before anything connects.
+  - **A denied approval:** in its `blocked` reply file the agent answers
+    without the docs and marks the answer from memory.
+- **Tests:** `gallery_test` runs all three on the page in CI, against
+  the live registry and Context7.
+
+Later: rutis plugins (§14, "Later steps"), and a sign-in (OAuth) for
+remote servers that need one.
 
 ## Open questions (for review)
 

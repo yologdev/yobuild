@@ -1,0 +1,42 @@
+# docs-helper: answers "how do I … with <library>?" for the owner's projects
+# from the library's current documentation, at the version the project
+# depends on — not from memory. It sets up no docs tool in advance: when it
+# needs one it searches the MCP registry for a remote docs server
+# (find_plugin; Context7 is the one it prefers) and connects to it for the
+# session (load_plugin) — you are asked before it connects, which variable
+# holds a key (answer with nothing: Context7 needs none), again with its
+# tools in front of you, and before each call of them. It never changes
+# your project: tools = "read-only", and every loaded tool asks.
+#
+#   cd <your project>
+#   yobuild check <this folder>/agent.toml
+#   yobuild run <this folder>/agent.toml --scripted <this folder>/scripts/demo.json "$(cat <this folder>/scripts/demo.task)"
+#       # no key needed: open the page and answer (README.md says what);
+#       # under --once, load_plugin is always refused (nobody to ask)
+#   DEEPSEEK_API_KEY=… yobuild run <this folder>/agent.toml      # live, on the web page
+#
+# It works in the folder `yobuild run` starts in: start it in the project.
+
+[agent]
+name   = "docs-helper"
+model  = "deepseek/deepseek-flash"   # needs DEEPSEEK_API_KEY
+prompt = "prompts/agent.md"
+
+[limits]
+budget_usd         = 0.25   # dollars per run
+session_budget_usd = 1.0    # dollars in all, until yobuild stops
+max_turns          = 30     # model turns per run
+
+[builtins]
+tools  = "read-only"        # read, list and search only, inside the project: it never changes your files
+report = ["Short answer", "Sources used", "Left unverified"]
+# gate stays "allow-list" (the default): [extend] needs it, and every
+# tool of a loaded server asks you before each call.
+
+[frontend]
+web = true                  # the web page: you answer the connect questions there
+
+[extend]                    # find a remote docs server and connect to it, asking you twice
+kinds        = ["remote"]   # remote MCP servers from the MCP registry: nothing installs or runs here
+max_loads    = 1            # one docs server per session
+max_attempts = 3            # load_plugin calls per session

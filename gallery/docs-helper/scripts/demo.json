@@ -1,0 +1,82 @@
+[
+  {
+    "tools": [
+      {
+        "name": "list_files",
+        "arguments": {
+          "path": "."
+        }
+      },
+      {
+        "name": "read_file",
+        "arguments": {
+          "path": "package.json"
+        },
+        "expect": "\"express\": \"^5.1.0\""
+      },
+      {
+        "name": "read_file",
+        "arguments": {
+          "path": "src/app.js"
+        },
+        "expect": "app.get('/orders/:id', async"
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "find_plugin",
+        "arguments": {
+          "need": "context7",
+          "kind": "remote"
+        },
+        "expect": "io.github.upstash/context7"
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "load_plugin",
+        "arguments": {
+          "package": "io.github.upstash/context7"
+        }
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "context7__resolve-library-id",
+        "arguments": {
+          "libraryName": "Express",
+          "query": "handle errors thrown in async route handlers"
+        },
+        "expect": [
+          "/expressjs/express",
+          "v5.1.0"
+        ]
+      }
+    ]
+  },
+  {
+    "tools": [
+      {
+        "name": "context7__query-docs",
+        "arguments": {
+          "libraryId": "/expressjs/express/v5.1.0",
+          "query": "Errors thrown in async route handlers and rejected promises",
+          "language": "JavaScript"
+        },
+        "expect": [
+          "Promise",
+          "next("
+        ]
+      }
+    ]
+  },
+  {
+    "text": "## Short answer\nIn Express 5 you need no wrapper: when an async route handler throws or its promise rejects, Express calls `next(err)` for you. So the `throw` in `findOrder` (src/app.js:8), awaited in `GET /orders/:id` (src/app.js:13), already reaches Express's error handling. Add one error-handling middleware after your routes, before `app.listen` (src/app.js:18), to answer it your way instead of Express's default 500 page:\n\n```js\napp.use((err, req, res, next) => {\n  const status = err.message.startsWith('bad order id') ? 400 : 500;\n  res.status(status).json({ error: err.message });\n});\n```\n\n## Sources used\n- Context7 (`io.github.upstash/context7`, connected for this session with your approval), library `/expressjs/express/v5.1.0`: the Router's promise support — a rejected promise or thrown error in a handler is passed to `next(err)`.\n- package.json: `\"express\": \"^5.1.0\"`; src/app.js for the route and `findOrder`.\n\n## Left unverified\n- The exact Express version: there is no `node_modules` or `package-lock.json`, so only the range `^5.1.0` is known; the docs queried are 5.1.0's.\n- Nothing was run: the middleware above is not tested."
+  }
+]

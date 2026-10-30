@@ -15,7 +15,7 @@ a plugin listed here can still need a setting this list does not know.
 | a place to work freely | `scratch = true` | a fresh temp folder (`{scratch}` in the prompt) the gate leaves alone |
 | reading only | `tools = "read-only"` | yoagent's read, list and search, confined to the agent's folder |
 | a spending cap | `[limits] budget_usd`, `session_budget_usd` | stops a run (or the session) at that many dollars |
-| tools found while it runs | `[extend]` | `find_plugin` and `load_plugin`: the agent searches for an MCP server it lacks and loads it for the session, the owner asked twice (below) |
+| tools found while it runs | `[extend]` | `find_plugin` and `load_plugin`: the agent searches for an MCP server (or a pi or DSH package, or a remote server) it lacks and loads it for the session, the owner asked twice (below) |
 
 ## Plugins that load
 
@@ -200,8 +200,59 @@ package …".
   could not resolve one). `PI_MEMORY_EXIT_SUMMARY=0`, passed by an `env`
   grant, turns the attempt off. Its writes then run without asking only if
   `allow` names them.
+
+When `kinds` lists `"remote"`, `find_plugin(need, kind "remote")`
+searches the MCP registry only, for servers that run elsewhere and are
+reached over https (streamable HTTP; SSE-only ones are left out, and so
+are addresses that take values or name this machine or its network).
+Nothing of a remote runs here: each call sends its arguments to the
+server's host, which answers as it likes that day. `load_plugin` takes
+the registry's name (`io.github.upstash/context7`), no `version` and no
+`args`; the default `name` is the name's own part without its
+`mcp`/`server` words (`context7`) — the namespace's last label when
+nothing else is left (`com.notion/mcp` → `notion`), a `.` made `-` —
+its tools `context7__<tool>`. The
+person is asked "Connect to the remote MCP server … at <host> as …?",
+then, for each header the server takes a credential in (required, or
+optional and secret), which environment variable holds it — never the
+value: the variable is set where yobuild runs, and its value is sent to
+that host only, said nowhere. A variable yoagent reads for a model's key
+(`DEEPSEEK_API_KEY` …) is refused there, as is one not set; each header
+is asked up to 3 times. An empty answer leaves an optional header off
+and refuses a server whose header is required; an optional header still
+without a usable variable after 3 answers is not sent (a Warning). Then "Keep the remote MCP server …? It
+offers: …". A server that needs a sign-in (OAuth) is refused at the
+connection (HTTP 401 or 403): yobuild cannot sign in yet. The block printed at
+the end is an `[[mcp]]` with `url` and, for a credential, `headers`
+naming its variable.
+
+- Context7 (`io.github.upstash/context7` at
+  `https://mcp.context7.com/mcp`, checked 2026-10-30): up-to-date
+  documentation for libraries, without a key
+  (its `Authorization` header is optional: answer the variable question
+  with nothing; with a key, more requests a day). Search it as
+  `find_plugin("context7", kind "remote")`: the registry also returns
+  others' servers with "context7" in their names (forks, paid ones that
+  need a key) — the prompt names `io.github.upstash/context7` as the one
+  to take. Its tools: `resolve-library-id {"libraryName": "<name, as the
+  library spells it: Next.js>", "query": "<what the person asks>"}`
+  (both required; its result lists libraries as `Context7-compatible
+  library ID: /org/project`, best match first, each with a line
+  `Versions: v5.1.0, …` — Express is `/expressjs/express`), then
+  `query-docs {"libraryId": "/org/project" or "/org/project/<version>"
+  (the version as that line spells it: `/expressjs/express/v5.1.0`),
+  "query": "<one concept>", "language": "<optional: TypeScript, Python,
+  …>"}` (the docs' text and code snippets; for Express 5's async errors
+  it begins `### Express Router Promise Support`). Call
+  `resolve-library-id` first: the id comes from its result, unless the
+  person gives one. A library's id is the same from run to run, so a
+  reply file may write it; Context7 can still change what it lists any
+  day, as a third party's server may. Each call sends the query to
+  Context7: the prompt keeps the person's private code and secrets out
+  of it.
 - Which kinds to list in `[extend] kinds`: the one this list documents
-  for the need (a memory: `"pi"`, pi-memory). A kind with no documented package for it
+  for the need (a memory: `"pi"`, pi-memory; a library's docs:
+  `"remote"`, Context7). A kind with no documented package for it
   widens the search to packages you cannot script against before the
   page run; add it only when the person wants that choice.
 

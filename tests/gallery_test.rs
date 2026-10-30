@@ -215,7 +215,8 @@ struct Rules<'a> {
 }
 
 /// A reply file (`file`, its name) run on the page: each question's answer
-/// in order (the title's start, `Allow` or `Block`), and, when the owner
+/// in order (the title's start, then `Allow` or `Block` — or, for a
+/// remote's credential, the variable's name, empty for none), and, when the owner
 /// does not allow both of `load_plugin`'s questions, what its refusal must
 /// say (the reason, as `load_plugin` words it). When kept: what stderr
 /// says of it at the end (`block`, each text in it) and the tools the second
@@ -465,11 +466,12 @@ fn on_page(manifest: &str, file: &Path, task: &str, page: &Page, rules: &Rules) 
     }
     // Loaded only when allowed to start and then kept (the questions came
     // as `answers` says: checked above, in order).
-    let kept = ["Start the ", "Keep the "].iter().all(|q| {
+    let allowed = |q: &str| {
         page.answers
             .iter()
             .any(|(t, v)| t.starts_with(q) && *v == "Allow")
-    });
+    };
+    let kept = (allowed("Start the ") || allowed("Connect to the ")) && allowed("Keep the ");
     let refused = page.refused.filter(|_| !kept);
     assert_eq!(
         refused.is_some(),
@@ -508,6 +510,14 @@ fn on_page(manifest: &str, file: &Path, task: &str, page: &Page, rules: &Rules) 
         "a kept server stopped: {all}"
     );
     if kept {
+        // Kept as asked: no load Warning (a header not sent, a refusal).
+        assert!(
+            !shown
+                .notices
+                .iter()
+                .any(|n| n.starts_with("warning: The agent's plugin `")),
+            "a load Warning though kept: {all}"
+        );
         for said in page.block {
             assert!(stderr.contains(said), "{said:?} not in the block: {all}");
         }
@@ -1019,6 +1029,77 @@ fn project_notebook() {
                 file: "not-offered.json",
                 answers: &[],
                 refused: Some("brainjar-pi-notes is not among this session's candidates"),
+                block: &[],
+                offers: &[],
+                home: &[],
+            },
+        ],
+        None,
+    );
+}
+
+#[test]
+fn docs_helper() {
+    let Some(dir) = agent("docs-helper") else {
+        return;
+    };
+    // The sample project its reply files read: Express 5, an async route
+    // whose helper throws. Each reply file on the page (`load_plugin` is
+    // refused under `--once`), against the live MCP registry and Context7
+    // (design §14 "Stage 3", the demo): either one down fails it.
+    // `not-offered.json`'s server, `io.github.acme/express-docs`, must
+    // stay unlisted (were it found, its load would ask, a question not
+    // expected here).
+    let files: &[(&str, &str)] = &[
+        ("package.json", "{\n  \"name\": \"orders-service\",\n  \"version\": \"0.1.0\",\n  \"private\": true,\n  \"type\": \"commonjs\",\n  \"main\": \"src/app.js\",\n  \"scripts\": {\n    \"start\": \"node src/app.js\"\n  },\n  \"dependencies\": {\n    \"express\": \"^5.1.0\"\n  }\n}\n"),
+        ("src/app.js", "const express = require('express');\n\nconst app = express();\napp.use(express.json());\n\nasync function findOrder(id) {\n  if (!/^\\d+$/.test(id)) {\n    throw new Error(`bad order id: ${id}`);\n  }\n  return { id, total: 42 };\n}\n\napp.get('/orders/:id', async (req, res) => {\n  const order = await findOrder(req.params.id);\n  res.json(order);\n});\n\napp.listen(3000, () => {\n  console.log('listening on 3000');\n});\n"),
+    ];
+    let start = "Connect to the remote MCP server io.github.upstash/context7 at mcp.context7.com as context7?";
+    holds_with(
+        &dir,
+        files,
+        &[],
+        &[
+            Page {
+                file: "demo.json",
+                answers: &[
+                    (start, "Allow"),
+                    // Context7 takes no key: its optional header left off.
+                    (
+                        "Which environment variable holds the `Authorization` header for context7?",
+                        "",
+                    ),
+                    ("Keep the remote MCP server context7? It offers: ", "Allow"),
+                    (
+                        "Run `context7__resolve-library-id`, a tool the agent loaded this session?",
+                        "Allow",
+                    ),
+                    (
+                        "Run `context7__query-docs`, a tool the agent loaded this session?",
+                        "Allow",
+                    ),
+                ],
+                refused: None,
+                block: &[
+                    // No `headers` line: nothing was sent.
+                    "[[mcp]]\nname = \"context7\"\nurl  = \"https://mcp.context7.com/mcp\"\n# allow = [",
+                    "io.github.upstash/context7 at mcp.context7.com",
+                ],
+                offers: &["resolve-library-id", "query-docs"],
+                home: &[],
+            },
+            Page {
+                file: "blocked.json",
+                answers: &[(start, "Block")],
+                refused: Some("the owner blocked it (connect to it)"),
+                block: &[],
+                offers: &[],
+                home: &[],
+            },
+            Page {
+                file: "not-offered.json",
+                answers: &[],
+                refused: Some("io.github.acme/express-docs is not among this session's candidates"),
                 block: &[],
                 offers: &[],
                 home: &[],

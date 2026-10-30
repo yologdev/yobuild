@@ -110,6 +110,12 @@ pub const BUILTIN: &[Builtin] = &[
         files: gallery!(unlocked "project-notebook", ["demo", "blocked", "not-offered"]),
     },
     Builtin {
+        name: "docs-helper",
+        kind: "gallery",
+        summary: "answers how to use a library at the version a project depends on, from docs it connects to when you allow it (Context7, remote)",
+        files: gallery!(unlocked "docs-helper", ["demo", "blocked", "not-offered"]),
+    },
+    Builtin {
         name: "handoff",
         kind: "example",
         summary: "takes a task and works on it alone, asking without waiting, ending with a report",

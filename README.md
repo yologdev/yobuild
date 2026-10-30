@@ -35,6 +35,8 @@ each was run live for a real task (costs with DeepSeek's `deepseek-flash`):
   loads it for the session and lints ($0.0054).
 - **`project-notebook`**: answers about a project and remembers your
   decisions across sessions, in a memory it finds and loads ($0.0045).
+- **`docs-helper`**: answers from a library's docs at your project's
+  version, connecting to them when you allow it ($0.0046).
 - **`handoff`**: hand it any task and walk away; it asks only what is
   yours to decide, without waiting, and ends with a report.
 
