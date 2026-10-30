@@ -1818,7 +1818,7 @@ invalid rather than asked.
    **CI** mark, the CI workflow's `rm`, and the skill fixes its build
    finds.
 
-#### A tool of its own: release notes (proposed 2026-10-30)
+#### A tool of its own: release notes (proposed and built 2026-10-30)
 
 A ninth gallery agent, for the vision's first measure of success: "a
 useful agent from a manifest and at most one small custom tool, in an
@@ -1846,7 +1846,7 @@ in the agent's folder (`grants = { workspace = true }`, for
 - It needs `@arcships/rutis-runtime` 0.12.0 installed beside it, in an npm
   package of its own. `yobuild new --from` copies files, not
   `node_modules`. So who installs it, the person (`npm ci` in the folder,
-  said by the README and by `check`'s problem) or yobuild (as it installs
+  said by the README and by `run`'s and `check`'s refusal) or yobuild (as it installs
   a pi set), is decided after the build. The evidence is what the coding
   agent and the test run into.
 
@@ -1855,10 +1855,17 @@ in the agent's folder (`grants = { workspace = true }`, for
   person's code's own, like a project's dependencies. And yobuild
   installing it would mean a fourth kind of set, for one command.
   Instead, yobuild says the command where the person meets it:
-  - `yobuild new --from` prints `(cd …/plugins && npm ci)` first;
-  - `run` and `check` refuse with `npm ci in <folder>` when the package
-    has its lock (else `npm install @arcships/rutis-runtime@0.12.0`);
+  - `yobuild new --from` prints `(cd …/plugins && npm ci
+    --ignore-scripts)` first, for each package it copies with its lock;
+  - `run` and `check` refuse with `npm ci --ignore-scripts in <folder>`
+    when the package's lock pins the runtime at 0.12.0. Otherwise they
+    say `npm install --ignore-scripts @arcships/rutis-runtime@0.12.0`
+    and what the lock pins, so the advice never repeats what failed;
   - the README says it under "What it needs".
+
+  Install scripts are left out throughout: both rutis packages run
+  without them (esbuild's checks its binary), as yobuild's installs of
+  plugins run none.
 
 **What the builds found.** The first build (2026-10-30) worked, but only
 because the coding agent wrote the SDK's object by hand. `parts.md`
@@ -1872,16 +1879,35 @@ service. The skill now has:
   repository's own config;
 - making a sample's other states as copies.
 
-The second build guessed nothing that mattered. It went into the gallery
-as built.
-- The gallery test makes a small git repository with two version tags
-  and commits after the last one. It installs the plugin's package, then
-  runs `check` and the reply files, as for every gallery agent.
+The second build guessed nothing that mattered. The review of its PR
+(#98) found that its tool, and the skill's example, made some failures
+look like answers:
+- a shallow clone read as a whole history;
+- a tag outside HEAD's history used as a start;
+- tags of another shape dropped unsaid;
+- `warning:` lines reported in place of git's `fatal:`;
+- no cap on what a call returns;
+- records split by a byte a commit message may hold.
 
-Like every gallery agent, it is built once through the skill. What the
-build gets wrong goes into the skill, and it is built again; the agent is
-never edited by hand. The design, the agent, its test and the skill's
-fixes come in one PR.
+The example also left out the git flags its own text prescribes, and
+`call.signal`. So `parts.md` gained "A failure must not look like an
+answer", "A tool that reads git" and a reply file for refusals.
+
+The third build has all of it: one tool, `release_commits`, and four
+reply files (`demo`, `notag`, `offhead`, `refusals`). It went into the
+gallery as built.
+
+**The test.** It makes a copy with `yobuild new --from release-notes`.
+The `npm ci --ignore-scripts` line it prints is checked, and then run.
+Each run's folder is a git repository with fixed dates, in the state its
+reply file is for. The `Sample` hook makes it, then checks that its refs,
+HEAD, status and every file under `.git` (size and modification time)
+are the same after the run.
+
+Like every gallery agent, it is built through the skill. What a build
+gets wrong goes into the skill, and the agent is built again; it is never
+edited by hand. The design, the agent, its test and the skill's fixes
+come in one PR.
 
 ## 12. The host layer: what a plugin's own app gives it (proposed 2026-10-19)
 

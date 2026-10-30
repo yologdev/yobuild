@@ -169,11 +169,12 @@ the compatibility matrix for the plugins it uses.
 a coding agent, not by hand, and each is checked and run scripted in CI.
 
 Since 2026-10-30 the gallery also holds `release-notes`, its first agent
-with a tool of its own: a rutis plugin the coding agent wrote (design §11
-"A tool of its own"). That is the vision's "a manifest and at most one
-small custom tool", walked end to end. Its first build found that the
-skill named only rutis's runtime and not its SDK, and said nothing of the
-tool contract or of grants in code. The skill was fixed and the agent
+with a tool of its own: one small rutis plugin the coding agent wrote
+(design §11 "A tool of its own"). That is the vision's "a manifest and at
+most one small custom tool", walked end to end. Its first build found
+that the skill imported rutis's SDK but named only its runtime to
+install. The skill also sketched the tool contract and grants in code
+too thinly to go without guessing. The skill was fixed and the agent
 built again.
 
 ## M3b — The host layer (design §12; proposed 2026-10-19, steps 1–3 built 2026-10-20, step 4 2026-10-21)

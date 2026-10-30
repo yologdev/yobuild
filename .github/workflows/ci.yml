@@ -35,6 +35,7 @@ jobs:
           # The adapters' locks come with the yoagent-rutis version Cargo.lock pins.
           cache-dependency-path: |
             frontend/plugins/package-lock.json
+            gallery/*/plugins/package-lock.json
             Cargo.lock
       - name: Node and npm versions
         run: node --version && npm --version

@@ -273,13 +273,14 @@ fn new(args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
         println!("  changed: {change}");
     }
     // A rutis plugin of its own runs in its package, which yobuild does not
-    // install: `npm ci` there first.
-    let plugins = dir.join("plugins");
-    if plugins.join("package-lock.json").is_file() {
-        println!(
-            "first, install its plugin's package (once):\n  (cd {} && npm ci)",
-            plugins.display()
-        );
+    // install: `npm ci` in each one copied with its lock, first.
+    for file in &made.files {
+        if let Some(package) = file.strip_suffix("package-lock.json") {
+            println!(
+                "first, install its plugin's package (once):\n  (cd {} && npm ci --ignore-scripts)",
+                dir.join(package.trim_end_matches('/')).display()
+            );
+        }
     }
     let manifest = dir.join("agent.toml");
     let demo = dir.join("scripts/demo.json");

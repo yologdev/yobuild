@@ -46,7 +46,8 @@ my-agent/
   scripts/demo.json   the scripted replies
   scripts/demo.task   the task each reply file was written for
   plugins/            only with a tool of your own: its npm package (parts.md, rutis)
-  README.md           what it does and needs, when the person must do something first (`npm ci`)
+  .gitignore          with a tool of your own: `plugins/node_modules/`
+  README.md           what it does and needs, any step the person takes first (`npm ci`) among it
 ```
 
 ## The method

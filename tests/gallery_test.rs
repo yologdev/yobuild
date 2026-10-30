@@ -242,7 +242,8 @@ fn fill(rules: &Rules, work: &Path, name: &str) -> Option<String> {
 /// The run's folder as [`fill`] left it: its files and its sample's state.
 fn unchanged(rules: &Rules, work: &Path, before: Option<String>, all: &str) {
     for (path, contents) in rules.files {
-        let now = std::fs::read_to_string(work.join(path)).unwrap_or_default();
+        let now = std::fs::read_to_string(work.join(path))
+            .unwrap_or_else(|e| panic!("{path}: {e}: {all}"));
         assert_eq!(&now, contents, "{path} changed: {all}");
     }
     if let (Some(sample), Some(before)) = (rules.sample, before) {
@@ -1212,28 +1213,18 @@ fn code_health() {
     );
 }
 
-/// `from`'s files copied into `to`, as `yobuild new --from` would copy
-/// them (no `node_modules`).
-fn copy_agent(from: &Path, to: &Path) {
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let (path, name) = (entry.path(), entry.file_name());
-        if name == "node_modules" {
-            continue;
-        }
-        if path.is_dir() {
-            std::fs::create_dir_all(to.join(&name)).unwrap();
-            copy_agent(&path, &to.join(&name));
-        } else {
-            std::fs::copy(&path, to.join(&name)).unwrap();
-        }
-    }
-}
-
-/// `git` in `dir`, fixed dates and author, nobody's config: the commits
-/// are the same each time.
+/// `git` in `dir`, fixed dates and author, nobody's config and none of a
+/// hook's `GIT_*` (a test run from a git hook would otherwise write to
+/// yobuild's own repository): the commits are the same each time.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+    let mut command = Command::new("git");
+    for name in [
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+    ] {
+        command.env_remove(name);
+    }
+    let out = command
         .args(["-c", "user.name=Ana", "-c", "user.email=ana@example.com"])
         .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
         .args(["--no-optional-locks"])
@@ -1253,21 +1244,64 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
+/// Every file under `dir` with its size and modification time, sorted: what
+/// a writer leaves behind (an index refreshed, a `.lock`, a config edited,
+/// an object added) shows here.
+fn listing(dir: &Path) -> String {
+    let mut out = vec![];
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(at) = todo.pop() {
+        for entry in std::fs::read_dir(&at).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                todo.push(path);
+            } else {
+                let at = path.strip_prefix(dir).unwrap().display().to_string();
+                out.push(format!(
+                    "{at} {} {:?}",
+                    meta.len(),
+                    meta.modified().unwrap()
+                ));
+            }
+        }
+    }
+    out.sort();
+    out.join("\n")
+}
+
 #[test]
 fn release_notes() {
-    let Some(dir) = agent("release-notes") else {
+    if agent("release-notes").is_none() {
         return;
-    };
-    // Its tool is the person's own rutis plugin, in its own package: copied
-    // as `yobuild new --from` copies it, then `npm ci` there, as its README
-    // says.
-    let copy = tempfile::tempdir().unwrap();
-    copy_agent(&dir, copy.path());
+    }
+    // Its tool is the person's own rutis plugin, in its own package: made
+    // by `yobuild new --from`, which says to `npm ci` there, then that.
+    let (copies, home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let made = yobuild(
+        &["new", "release-notes", "--from", "release-notes"],
+        copies.path(),
+        home.path(),
+    );
+    let copy = copies.path().join("release-notes");
+    let plugins = copy.join("plugins");
+    assert!(
+        made.stdout.contains(&format!(
+            "first, install its plugin's package (once):\n  (cd {} && npm ci --ignore-scripts)",
+            plugins.canonicalize().unwrap().display()
+        )),
+        "{}{}",
+        made.stdout,
+        made.stderr
+    );
+    // As said, with the deciding settings on the command line: a person's
+    // `omit=optional` would drop esbuild's platform package.
     let ci = Command::new("npm")
         .args([
-            "ci", "--ignore-scripts", "--prefer-offline", "--no-audit", "--no-fund",
+            "ci", "--ignore-scripts", "--include=optional", "--prefer-offline",
         ])
-        .current_dir(copy.path().join("plugins"))
+        .args(["--no-audit", "--no-fund"])
+        .current_dir(&plugins)
         .output()
         .unwrap();
     assert!(
@@ -1276,28 +1310,30 @@ fn release_notes() {
         String::from_utf8_lossy(&ci.stderr)
     );
     // A tiny CLI's history: v0.1.0, v0.2.0, then a fix, a feature and docs.
-    // `no-tag.json` is the same history before any tag.
+    // `notag.json`'s has no version tag, only `beta`; `offhead.json`'s has
+    // `1.0` on HEAD too, and `v0.3.0` on a commit outside HEAD's history.
     let make = |work: &Path, reply: &str| {
         git(work, &["init", "-q", "-b", "main"]);
         let commit = |file: &str, text: &str, message: &str, tag: Option<&str>| {
             std::fs::write(work.join(file), text).unwrap();
             git(work, &["add", "-A"]);
             git(work, &["commit", "-q", "-m", message]);
-            if let Some(tag) = tag.filter(|_| reply != "no-tag.json") {
+            if let Some(tag) = tag {
                 git(work, &["tag", tag]);
             }
         };
+        let notag = reply == "notag.json";
         commit(
             "README.md",
             "# tiny-cli\n",
             "Initial commit",
-            Some("v0.1.0"),
+            (!notag).then_some("v0.1.0"),
         );
         commit(
             "greet.js",
             "export function greet(n) { return `Hi ${n}` }\n",
             "feat: add greet",
-            Some("v0.2.0"),
+            Some(if notag { "beta" } else { "v0.2.0" }),
         );
         commit(
             "greet.js",
@@ -1314,16 +1350,29 @@ fn release_notes() {
         commit(
             "README.md", "# tiny-cli\n\nA small CLI.\n", "docs: describe the CLI", None,
         );
+        if reply == "offhead.json" {
+            git(work, &["tag", "1.0"]);
+            git(work, &["switch", "-q", "-c", "side"]);
+            commit(
+                "CHANGES.md",
+                "# 0.3.0\n",
+                "release prep on a side branch",
+                Some("v0.3.0"),
+            );
+            git(work, &["switch", "-q", "main"]);
+            git(work, &["branch", "-q", "-D", "side"]);
+        }
     };
-    // Read-only: no ref, HEAD or file of the repository moves.
+    // Read-only: no ref, HEAD, file of the work tree or file inside `.git`
+    // moves.
     let state = |work: &Path| {
         let refs = git(work, &["for-each-ref", "--format=%(refname) %(objectname)"]);
         let head = git(work, &["rev-parse", "HEAD"]);
         let status = git(work, &["status", "--porcelain", "--ignored"]);
-        format!("{refs}{head}{status}")
+        format!("{refs}{head}{status}{}", listing(&work.join(".git")))
     };
     holds_in(
-        copy.path(),
+        &copy,
         &[],
         &Sample {
             make: &make,

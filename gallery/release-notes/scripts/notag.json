@@ -1,0 +1,5 @@
+[
+  { "tools": [{ "name": "release_commits", "arguments": {},
+      "expect": ["NO VERSION TAG", "Version tags in HEAD's history: none.", "Tags left out, not named like v1.2.3: beta", "Commits: 5.", "Initial commit"] }] },
+  { "text": "## Range covered\nNo version tag yet: every commit, from the first up to HEAD (5daf951), 5 commits. The tag `beta` was left out: it is not named like v1.2.3.\n\n## Release notes draft\nFirst release.\n\n### Features\n- A `greet` function that says hello. (3cf1ae6)\n- A `shout` command. (601002b)\n\n### Fixes\n- The greeting ends with punctuation. (8d999d8)\n\n### Other changes\n- The README describes the command-line tool. (5daf951)\n- The project's first commit. (47d62b0)\n\n## Grouping unsure\n- 47d62b0 \"Initial commit\": no prefix and no description; put under Other changes." }
+]

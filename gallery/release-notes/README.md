@@ -22,19 +22,26 @@ whole of its custom code.
 
 ## What it is made of
 
-- **Its tool:** `plugins/release-history.ts`, a rutis plugin in its own
-  npm package (`plugins/package.json`, with `@arcships/rutis` and
-  `@arcships/rutis-runtime` 0.12.0). It offers two tools, both allowed:
-  - `version_tags`: the `vX.Y.Z` tags in HEAD's history, newest first;
-  - `commits_since`: each commit since a tag (or in all of history when
-    there is none), with its message and the files it changed.
-
-  It runs `git` with fixed arguments (`--no-pager`, `--no-optional-locks`,
-  no signature checks) and refuses an argument that is not a version tag.
-  It is granted `workspace`, which gives it the folder yobuild runs in.
+- **Its tool:** `plugins/git-history.ts`, a rutis plugin in its own npm
+  package (`plugins/package.json`, with `@arcships/rutis` and
+  `@arcships/rutis-runtime` 0.12.0). It offers one tool, allowed:
+  `release_commits`. It returns the commits after the highest `vX.Y.Z`
+  tag in HEAD's history, or after the tag you name, newest first, each
+  with its subject, body and changed files.
+  - **What it says, not just what it found:** a tag that does not exist,
+    or is not in HEAD's history, is an error. It lists the tags it left
+    out (`1.0`, `beta`, a tag on another branch). It warns on a shallow
+    clone. It says when it cut the list: 300 commits, 20 files a commit,
+    50 KB in all.
+  - **How it runs git:** with fixed arguments and only commands that read.
+    It uses no lock file, and the repository's own config is kept from
+    running programs (signatures, fsmonitor, external diffs) or changing
+    the output.
+  - **Its grant:** `workspace`, which gives it the folder yobuild runs in.
 - **Reading:** `tools = "read-only"`: read, list and search only, inside
   the project. It has no `bash` and no tool that writes.
-- **The report:** "Release notes draft" and "Unsure how to group".
+- **The report:** "Range covered", "Release notes draft" and "Grouping
+  unsure".
 - **Limits:** $0.25 and 20 model turns per run; $1 in all until yobuild
   stops.
 
@@ -46,8 +53,8 @@ whole of its custom code.
   message and the files it touched, and the files as they are now.
 - **Its plugin is your code, not a sandbox.** yobuild's gate judges the
   agent's tool calls, not what a plugin runs. This one runs only the git
-  commands written in it. Read `plugins/release-history.ts` before you
-  change it.
+  commands written in it. Read `plugins/git-history.ts` before you change
+  it.
 
 ## What it needs
 
@@ -56,10 +63,11 @@ whole of its custom code.
 - `yobuild` installed (see yobuild's README), with Node 22.19+ and npm
   11.19+ on PATH, and `git`.
 - **Once, before the first run:** its plugin's package installed. yobuild
-  installs the plugins an agent pins, but not a plugin of the agent's own:
+  installs the plugins an agent pins, but not a plugin of the agent's own.
+  `yobuild new --from` prints the command for your copy:
 
   ```sh
-  cd my-release-notes/plugins && npm ci
+  cd <your copy>/plugins && npm ci --ignore-scripts
   ```
 
   Until then `yobuild check` and `run` refuse, naming that command.
@@ -78,9 +86,9 @@ DEEPSEEK_API_KEY=… yobuild run path/to/gallery/release-notes/agent.toml
 Open the URL it prints and ask it to draft the release notes.
 
 Try it without a model or a key, in a repository like the one `scripts/`
-expects: a tiny CLI tagged `v0.1.0` and `v0.2.0`, then a fix, a feature
-and a docs change (`tests/gallery_test.rs` makes it). Only the model is
-scripted; git really runs.
+expects (`tests/gallery_test.rs` makes it with fixed dates, so its hashes
+are the reply files'): a tiny CLI tagged `v0.1.0` and `v0.2.0`, then a fix,
+a feature and a docs change. Only the model is scripted; git really runs.
 
 ```sh
 yobuild run path/to/gallery/release-notes/agent.toml \
@@ -88,23 +96,36 @@ yobuild run path/to/gallery/release-notes/agent.toml \
   --once "$(cat path/to/gallery/release-notes/scripts/demo.task)"
 ```
 
-`scripts/no-tag.json` is the same history before any tag: the notes then
-cover every commit, as a first release.
+The other reply files show the rest, each on that history changed a
+little:
+- `notag.json`: no version tag yet (only `beta`). The notes cover every
+  commit, as a first release.
+- `offhead.json`: a `1.0` tag and a `v0.3.0` on another branch, each left
+  out and said. Asking for `v0.3.0` is refused.
+- `refusals.json`: a `since` of `--output=/tmp/x` and an unknown argument
+  are refused, and so is a tag that does not exist; then `v0.1.0` works.
 
 ## A live run
 
 2026-10-30, `deepseek/deepseek-flash`, `--once`, in the sample repository
 the tests make, from a copy made with `yobuild new --from release-notes`
-(its plugin's package installed with `npm ci`). The task was
-`scripts/demo.task`:
-- **Calls:** `version_tags`, `list_files`, `commits_since` with `v0.2.0`,
-  and three `read_file`s (the files the commits touched). Plugin time
-  was 189 ms; its runtime took 66 MB.
-- **Cost:** `Cost: $0.0013 (7016 tokens in, 563 out; 4 turns)`.
-- **The draft:** the shout helper under Features, the greeting's
-  punctuation under Fixes, and the README under Other changes, in plain
-  words with no hashes.
-- **Unsure how to group:** `601002b` "feat: add shout command". It is
-  only a helper, so it may not be wired into the CLI yet.
+(its plugin's package installed with `npm ci --ignore-scripts`). The task
+was `scripts/demo.task`:
+- **Calls:** one `release_commits` and two `read_file`s. Plugin time was
+  471 ms; its runtime took 63 MB.
+- **Cost:** `Cost: $0.0010 (5214 tokens in, 337 out; 3 turns)`.
+- **The draft:**
+  - Features: the `shout` helper and the README's usage instructions;
+  - Fixes: the greeting's punctuation;
+  - Other changes: none.
 
-`Completed`. The repository's HEAD, tags and files were as before.
+  Each entry is in plain words, with its hash.
+- **Grouping unsure:** `5daf951` "docs: describe the CLI". It put it under
+  Features, since users get instructions they did not have, but says it
+  could be Other changes.
+
+`Completed`. Every file under `.git` was as before, compared by size and
+modification time.
+
+An earlier build, whose tool had none of the checks above, drafted the
+same notes for $0.0013.

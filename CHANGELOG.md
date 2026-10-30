@@ -56,14 +56,16 @@ load it for the session, with the person's yes each time.
     from a library's docs at your project's version;
   - `release-notes` drafts release notes from git history. It is the
     first with a tool of its own, a small rutis plugin that the coding
-    agent wrote. `yobuild new` says to run `npm ci` in its `plugins/`.
+    agent wrote. `yobuild new` says to run `npm ci --ignore-scripts` in its
+    `plugins/`.
 - **A tool of your own:** the skill now covers writing a rutis plugin:
   - its package, with both `@arcships/rutis` and its runtime;
   - the tool contract;
   - host services through grants;
   - arguments from the model, checked before use.
 
-  A missing runtime in a package with its lock is now told `npm ci`.
+  A missing runtime is now told `npm ci --ignore-scripts` when the
+  package's lock pins it, and otherwise what the lock pins.
 - **The skill** covers `[extend]`: which kinds to allow, how to script
   the search, and why the load is tried on the page.
 - **yoagent 0.26.1 and yoagent-rutis 0.10.0.**

@@ -889,22 +889,46 @@ fn package_of(path: &Path) -> Result<PathBuf, BoxError> {
 }
 
 /// A rutis plugin's Node runtime: `@arcships/rutis-runtime` installed in its
-/// package (`dir`), at the version yobuild's own runtimes use. A package
-/// with its lock (a gallery agent copied by `yobuild new --from`) is told
-/// `npm ci`, which installs what the lock holds.
+/// package (`dir`), at the version yobuild's own runtimes use.
 fn rutis_runtime(dir: &Path) -> Result<(), BoxError> {
     let package = Package::new(RUTIS_RUNTIME, RUTIS_RUNTIME_VERSION)?;
-    let command = if dir.join("package-lock.json").is_file() {
-        String::from("npm ci")
-    } else {
-        format!("npm install {}", package.spec())
-    };
     let install = format!(
-        "a rutis plugin runs in a Node runtime in its package: {command} in {}",
-        dir.display()
+        "a rutis plugin runs in a Node runtime in its package: {}",
+        runtime_install(dir, &package)
     );
     installed(&package, &dir.join("node_modules"), &install)?;
     Ok(())
+}
+
+/// What installs the runtime in `dir`: `npm ci` when its lock pins the
+/// version wanted (a gallery agent copied by `yobuild new --from`), else
+/// `npm install` of it, saying what the lock pins instead. Install scripts
+/// are not needed (both rutis packages run without them).
+fn runtime_install(dir: &Path, package: &Package) -> String {
+    let lock = dir.join("package-lock.json");
+    let install = format!(
+        "npm install --ignore-scripts {} in {}",
+        package.spec(),
+        dir.display()
+    );
+    let text = match std::fs::read_to_string(&lock) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return install,
+        Err(e) => return format!("{install} (its package-lock.json cannot be read: {e})"),
+    };
+    let pinned = serde_json::from_str::<Json>(&text).map(|lock| {
+        lock["packages"][format!("node_modules/{}", package.name())]["version"]
+            .as_str()
+            .map(str::to_owned)
+    });
+    match pinned {
+        Ok(Some(v)) if v == package.version() => {
+            format!("npm ci --ignore-scripts in {}", dir.display())
+        }
+        Ok(Some(v)) => format!("{install} (its package-lock.json pins {v})"),
+        Ok(None) => format!("{install} (its package-lock.json holds none)"),
+        Err(e) => format!("{install} (its package-lock.json cannot be read: {e})"),
+    }
 }
 
 #[cfg(test)]
@@ -1032,7 +1056,7 @@ mod tests {
             ),
             (
                 "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\n".into(),
-                "a rutis plugin runs in a Node runtime in its package: npm install @arcships/rutis-runtime@",
+                "a rutis plugin runs in a Node runtime in its package: npm install --ignore-scripts @arcships/rutis-runtime@",
             ),
         ];
         for (text, expected) in cases {
@@ -1044,15 +1068,42 @@ mod tests {
         assert!(plan_of(dir.path(), "[[plugin]]\npi = \"./gone.ts\"\n")
             .unwrap_err()
             .ends_with("gone.ts does not exist"));
-        // A package with its lock (a copied gallery agent) is told `npm ci`.
-        std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
-        let e = plan_of(
-            dir.path(),
-            "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\n",
-        )
-        .unwrap_err();
+        // `npm ci` only when the lock pins the version wanted (a copied
+        // gallery agent); else `npm install` and what the lock holds.
+        let refused = |lock: &str| {
+            std::fs::write(dir.path().join("package-lock.json"), lock).unwrap();
+            plan_of(
+                dir.path(),
+                "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\n",
+            )
+            .unwrap_err()
+        };
+        let pins = |v: &str| {
+            format!(
+                r#"{{"packages":{{"node_modules/@arcships/rutis-runtime":{{"version":"{v}"}}}}}}"#
+            )
+        };
+        let e = refused(&pins(RUTIS_RUNTIME_VERSION));
         assert!(
-            e.contains("in its package: npm ci in ") && !e.contains("npm install"),
+            e.contains("in its package: npm ci --ignore-scripts in "),
+            "{e}"
+        );
+        let install = format!(
+            "npm install --ignore-scripts @arcships/rutis-runtime@{RUTIS_RUNTIME_VERSION} in "
+        );
+        let e = refused(&pins("0.11.0"));
+        assert!(
+            e.contains(&install) && e.contains("(its package-lock.json pins 0.11.0)"),
+            "{e}"
+        );
+        let e = refused("{}");
+        assert!(
+            e.contains(&install) && e.contains("(its package-lock.json holds none)"),
+            "{e}"
+        );
+        let e = refused("{");
+        assert!(
+            e.contains(&install) && e.contains("(its package-lock.json cannot be read: "),
             "{e}"
         );
     }
@@ -1306,8 +1357,22 @@ mod tests {
         let pins = Layout::default().frontend.join("plugins/package.json");
         let pins: Json = serde_json::from_str(&std::fs::read_to_string(pins).unwrap()).unwrap();
         let version = pins["dependencies"][RUTIS_RUNTIME].as_str().unwrap();
-        // The constant is the frontend's own pin.
+        // The constant is the frontend's own pin, and every gallery agent's
+        // own plugin package pins it and the SDK alike, as the skill says.
         assert_eq!(version, RUTIS_RUNTIME_VERSION);
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for agent in std::fs::read_dir(repo.join("gallery")).unwrap() {
+            let own = agent.unwrap().path().join("plugins/package.json");
+            if !own.is_file() {
+                continue;
+            }
+            let own: Json = serde_json::from_str(&std::fs::read_to_string(&own).unwrap()).unwrap();
+            for name in [RUTIS_RUNTIME, "@arcships/rutis"] {
+                assert_eq!(own["dependencies"][name], RUTIS_RUNTIME_VERSION, "{name}");
+            }
+        }
+        let parts = std::fs::read_to_string(repo.join("skill/yobuild/reference/parts.md")).unwrap();
+        assert!(parts.contains(&format!("exactly `{RUTIS_RUNTIME_VERSION}`")));
         let runtime = dir.path().join("node_modules").join(RUTIS_RUNTIME);
         std::fs::create_dir_all(&runtime).unwrap();
         std::fs::write(

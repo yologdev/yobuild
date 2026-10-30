@@ -167,8 +167,9 @@ web = true
   - with `@arcships/rutis-runtime` installed there at the version
     yobuild's runtimes use, 0.12.0, and the SDK it imports,
     `@arcships/rutis`, at the same version (`npm install
-    @arcships/rutis@0.12.0 @arcships/rutis-runtime@0.12.0`; `npm ci` where
-    the package has its lock, as an agent copied by `yobuild new --from`
+    @arcships/rutis@0.12.0 @arcships/rutis-runtime@0.12.0`, with
+    `--ignore-scripts` if you like; `npm ci --ignore-scripts` where the
+    package has its lock, as an agent copied by `yobuild new --from`
     does). Without the runtime, `run` and `check` refuse before anything
     starts, naming the command.
 - **yobuild's own plugins** are named, not given a path:

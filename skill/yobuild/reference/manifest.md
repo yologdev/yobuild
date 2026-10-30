@@ -351,10 +351,12 @@ lists both as allowed and says what `[extend]` lets the agent do.
 - **Not in a git repository**: leave `facts` off — it only says "not a
   git repository".
 - **`facts` and "never change my files"**: `facts` changes no file, ref
-  or index of the project. It does add unreferenced objects to `.git`
-  (`git stash create`, to snapshot the start), which `git gc` removes.
-  Say so to a person who forbids every change, and leave it off if they
-  mind.
+  or index of the project. To snapshot the start, it may add
+  unreferenced objects to `.git`: `git stash create` writes them when
+  there are uncommitted changes, and `git write-tree` in a repository
+  with no commit yet. `git gc` removes them once they are older than its
+  prune age (two weeks by default). Say so to a person who forbids every
+  change, and leave it off if they mind.
 - **A budget**: start small (`budget_usd = 0.5` for a short task) and
   raise it once a live run shows the cost (yobuild says each run's tokens
   with `facts`). `budget_usd` is per run, and an answered question starts

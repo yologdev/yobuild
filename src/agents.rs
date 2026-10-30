@@ -137,8 +137,8 @@ pub const BUILTIN: &[Builtin] = &[
         summary: "drafts release notes from the commits since the last version tag, reading git through a small tool of its own (a rutis plugin)",
         files: gallery!(
             unlocked "release-notes",
-            ["demo", "no-tag"],
-            [".gitignore", "plugins/package.json", "plugins/package-lock.json", "plugins/release-history.ts"]
+            ["demo", "notag", "offhead", "refusals"],
+            [".gitignore", "plugins/package.json", "plugins/package-lock.json", "plugins/git-history.ts"]
         ),
     },
     Builtin {
