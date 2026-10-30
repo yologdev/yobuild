@@ -2302,8 +2302,8 @@ fn check_says_what_a_plugins_code_reads_and_what_it_is_given() {
 }
 
 /// An HTTP server's URL holding a secret: what `check` and `run` say when
-/// it cannot be reached names the URL as written, never as filled (reqwest
-/// names the URL it failed to reach); and a value bringing a user is
+/// it cannot be reached names the URL as written (`check`'s source), never
+/// as filled; and a value bringing a user is
 /// refused before anything connects, the value unsaid.
 #[test]
 fn an_http_servers_filled_url_is_never_said() {
@@ -2341,7 +2341,7 @@ fn an_http_servers_filled_url_is_never_said() {
         }
         said
     };
-    // Nothing listens: refused at connect, in reqwest's words.
+    // Nothing listens: refused at connect.
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = closed.local_addr().unwrap().port();
     drop(closed);

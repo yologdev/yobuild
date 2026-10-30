@@ -4708,8 +4708,9 @@ yoagent 0.26.0 (asked for below) changes the errors and the redirects:
 an HTTP error is `McpError::Http { status, .. }` (`http_status()`), and
 redirects stay within the URL's own scheme, host and port by default
 (`HttpTransport::with_redirects(Redirects::None | SameOrigin | Any)`), a
-redirect elsewhere an error naming where it pointed. A manifest's
-`[[mcp]] url` gets that default.
+redirect elsewhere an error naming the origin it pointed to. A manifest's
+`[[mcp]] url` gets that default. yoagent 0.26.1 (below) takes the URL out
+of its errors.
 
 1. **A kind of its own, `"remote"`.** `[extend] kinds` takes `"remote"`
    (label "remote MCP server"), off unless listed: whether an agent may
@@ -4820,7 +4821,7 @@ redirect elsewhere an error naming where it pointed. A manifest's
      cannot do yet", read from `McpError::http_status()` (yoagent
      0.26.0).
    - **Redirects:** none followed (`Redirects::None`, yoagent 0.26.0). A
-     redirect is refused, naming where it pointed.
+     redirect is refused, naming the origin it pointed to.
    - **No exit watch:** `Server.exit` becomes `Option<ExitWatch>`, `None`
      for a remote, so a remote is never seen gone between calls. A call
      whose error says the server ended the session ("MCP session expired")
@@ -4861,13 +4862,21 @@ redirect elsewhere an error naming where it pointed. A manifest's
     - the URL connected to is the one checked, as `url` writes it;
     - a refusal quotes the URL as written, never as filled, since a value
       may be a secret; and what connecting or listing its tools says
-      (reqwest names the URL: "… for url (https://…?api_key=…)") has the
-      filled URL shown as written and each value of 8 characters or more
-      filled into the URL or headers as its `${NAME}` (`run::hide`).
-    - Not covered: a tool call's error once connected reaches the model
-      and the log as yoagent's `McpToolAdapter` words it, the URL filled
-      — for yoagent (`reqwest::Error::without_url`), asked only with the
-      owner's approval.
+      has the filled URL shown as written and each value of 8 characters
+      or more filled into the URL or headers as its `${NAME}`
+      (`run::hide`).
+    - A tool call's error once connected: since yoagent 0.26.1 (asked
+      with the owner's approval, 2026-10-30) its HTTP errors name the
+      server by scheme, host and port only — no path, query or user — and
+      a body or JSON-RPC message it quotes has the URL's key-like parts
+      (8 characters or more, and the whole path or query holding one)
+      replaced with `[redacted]`. yoagent never redacts header values,
+      so yobuild shows each value of 8 characters or more filled into
+      the URL or headers as its `${NAME}` in a call's error too
+      (`run::Hiding` around a manifest server's tools; a loaded remote's
+      `remote::Ending` likewise). Left: a host or port filled from a
+      shorter value, which the origin names, and a value shorter than 8
+      characters that the server echoes in its own words.
 11. **OAuth later.** Servers that need a sign-in refuse at `initialize`,
     said as such. A sign-in on the page (the provider's page opened, the
     token kept somewhere, refreshed) is its own design.
@@ -4877,6 +4886,12 @@ redirect elsewhere an error naming where it pointed. A manifest's
 or the same origin only), and an HTTP error carries its status. Given in
 yoagent 0.26.0 (same origin by default, `Redirects::None` to follow
 none; `McpError::Http`), which yobuild takes in its own PR.
+Asked next (sent with the owner's approval, 2026-10-30): no URL in its
+HTTP errors.
+Given in yoagent 0.26.1: the server named by origin only, quoted
+server text with the URL's key-like parts redacted, session ids no
+longer logged, and a notification's 404 clearing an expired session
+as a call's does; taken in its own PR.
 
 **The demo.** A docs helper: asked how to use a library at its current
 version, it finds Context7 (`kind "remote"`), connects without a key and
