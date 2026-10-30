@@ -147,7 +147,9 @@ impl LoadPlugin {
         let set = match kind {
             ExtendKind::Pi => Set::Pi,
             ExtendKind::Dsh => Set::Dsh,
-            ExtendKind::Mcp => return Err(refused("an MCP server is not loaded as a package")),
+            ExtendKind::Mcp | ExtendKind::Remote => {
+                return Err(refused("an MCP server is not loaded as a package"))
+            }
         };
         let (adapters, keys, withheld) = (
             on.adapters.clone(),

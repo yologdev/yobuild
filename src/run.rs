@@ -138,11 +138,12 @@ impl Default for Layout {
 
 /// Whether running `manifest` needs Node and npm: a plugin (each runs in a
 /// Node runtime, or has its package installed), a pinned MCP server (npm
-/// installs it), `[extend]` (`find_plugin` searches with npm), or the
+/// installs it), `[extend]` finding what npm lists (`find_plugin` searches
+/// with npm; remote servers are the MCP registry's only), or the
 /// terminal UI (`terminal`).
 pub(crate) fn needs_node(manifest: &Manifest, terminal: bool) -> bool {
     terminal
-        || manifest.extend.is_some()
+        || manifest.extend.as_ref().is_some_and(|e| e.asks_npm())
         || !manifest.plugins.is_empty()
         || manifest.mcp.iter().any(|s| {
             matches!(
@@ -1193,10 +1194,11 @@ fn prepare(
     cwd: &Path,
 ) -> Result<Prepared, BoxError> {
     let lookup = |name: &str| std::env::var(name).ok();
-    // The MCP registry only for an agent that finds MCP servers: a bad
-    // `YOBUILD_MCP_REGISTRY` refuses nothing it would not use.
+    // The MCP registry only for an agent that finds MCP servers, stdio or
+    // remote: a bad `YOBUILD_MCP_REGISTRY` refuses nothing it would not
+    // use.
     let sources = match &manifest.extend {
-        Some(extend) if extend.finds_mcp() => Some(Sources::from_env()?),
+        Some(extend) if extend.asks_registry() => Some(Sources::from_env()?),
         Some(_) => Some(Sources::npm_only()),
         None => None,
     };
@@ -3653,6 +3655,12 @@ mod tests {
             needs_node(&m("[extend]\n"), false),
             "find_plugin searches with npm"
         );
+        // Remote servers are the MCP registry's: npm is not asked.
+        assert!(!needs_node(&m("[extend]\nkinds = [\"remote\"]\n"), false));
+        assert!(needs_node(
+            &m("[extend]\nkinds = [\"remote\", \"pi\"]\n"),
+            false
+        ));
         assert!(needs_node(
             &m("[[plugin]]\nrutis = \"./r.ts\"\nruntime = \"node\"\n"),
             false

@@ -1605,6 +1605,24 @@ fn extend_is_off_unless_its_table_is_there_and_alone_takes_the_defaults() {
         .extend
         .unwrap();
     assert_eq!(e.kinds, vec![ExtendKind::Dsh, ExtendKind::Pi]);
+    assert_eq!(e.sources(), "npm");
+    // Remote servers: the MCP registry only, which the other kinds join.
+    let sources = |kinds: &str| {
+        let e = read(&with(&format!("[extend]\nkinds = {kinds}\n")))
+            .unwrap()
+            .extend
+            .unwrap();
+        (e.asks_registry(), e.asks_npm(), e.sources())
+    };
+    assert_eq!(sources("[\"remote\"]"), (true, false, "the MCP registry"));
+    assert_eq!(
+        sources("[\"pi\", \"remote\"]"),
+        (true, true, "the MCP registry and npm")
+    );
+    assert_eq!(
+        sources("[\"mcp\"]"),
+        (true, true, "the MCP registry and npm")
+    );
 }
 
 #[test]
@@ -1617,13 +1635,16 @@ fn extend_is_refused_out_of_bounds_with_other_kinds_or_with_the_gate_off() {
         ("[extend]\nmin_age_days = 366\n", "5:16: [extend] min_age_days 366: 0 to 365"),
         (
             "[extend]\nkinds = []\n",
-            "5:9: [extend] kinds is empty: name what may be found (\"mcp\", \"pi\", \"dsh\"), or leave out [extend]",
+            "5:9: [extend] kinds is empty: name what may be found (\"mcp\", \"pi\", \"dsh\", \"remote\"), or leave out [extend]",
         ),
         (
             "[extend]\nkinds = [\"mcp\", \"rutis\"]\n",
-            "5:17: [extend] kinds \"rutis\": \"mcp\", \"pi\" or \"dsh\" so far; rutis plugins come in a later step (design §14)",
+            "5:17: [extend] kinds \"rutis\": \"mcp\", \"pi\", \"dsh\" or \"remote\" so far; rutis plugins come in a later step (design §14)",
         ),
-        ("[extend]\nkinds = [\"npm\"]\n", "5:10: [extend] kinds \"npm\": \"mcp\", \"pi\" or \"dsh\""),
+        (
+            "[extend]\nkinds = [\"npm\"]\n",
+            "5:10: [extend] kinds \"npm\": \"mcp\", \"pi\", \"dsh\" or \"remote\"",
+        ),
         ("[extend]\nkinds = [\"mcp\", \"mcp\"]\n", "5:17: [extend] kinds \"mcp\": named twice"),
         (
             "[builtins]\ngate = \"off\"\n[extend]\n",

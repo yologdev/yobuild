@@ -59,6 +59,10 @@ pub(crate) struct Kept {
     pub stopped: Option<String>,
 }
 
+/// A remote is refused before anything is kept, until its load comes
+/// (design §14 "Stage 3", PR 4): a `Kept` is never one.
+const REMOTE_NOT_KEPT: &str = "a remote MCP server is refused before it is kept";
+
 impl Kept {
     /// The `[[mcp]]` (or `[[plugin]]`) block that would keep it.
     pub fn block(&self) -> String {
@@ -71,6 +75,7 @@ impl Kept {
         };
         let (table, key) = match self.kind {
             ExtendKind::Mcp => ("mcp", "npm  "),
+            ExtendKind::Remote => unreachable!("{REMOTE_NOT_KEPT}"),
             ExtendKind::Pi => ("plugin", "pi   "),
             ExtendKind::Dsh => ("plugin", "dsh  "),
         };
@@ -183,7 +188,7 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
         let (plugins, set) = match kind {
             ExtendKind::Pi => ("pi plugins", "pi"),
             ExtendKind::Dsh => ("DSH plugins", "dsh"),
-            ExtendKind::Mcp => continue,
+            ExtendKind::Mcp | ExtendKind::Remote => continue,
         };
         text.push_str(&format!(
             "\nIn {} a {} runs with the other {plugins}, in the `{set}` runtime, its hooks too, its tools under their own names",
@@ -201,6 +206,7 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
     for k in kept {
         let set = match k.kind {
             ExtendKind::Mcp => "mcp",
+            ExtendKind::Remote => unreachable!("{REMOTE_NOT_KEPT}"),
             ExtendKind::Pi => "pi",
             ExtendKind::Dsh => "dsh",
         };
@@ -391,7 +397,7 @@ impl Loaded {
             let why = k.stopped.as_ref().filter(|_| own)?;
             match k.kind {
                 // Its tools left at the next turn (`Loaded` offers them).
-                ExtendKind::Mcp => None,
+                ExtendKind::Mcp | ExtendKind::Remote => None,
                 ExtendKind::Pi | ExtendKind::Dsh => Some(format!(
                     "`{tool}` is a tool of the {} `{}`, which stopped this session ({why}): it is not run",
                     k.kind.label(),
@@ -859,6 +865,13 @@ impl LoadPlugin {
             .into_iter()
             .find(|c| c.kind == ExtendKind::Mcp)
             .unwrap_or(first);
+        // Found, not yet loadable: nothing counted (design §14 "Stage 3",
+        // whose load is its next step).
+        if candidate.kind == ExtendKind::Remote {
+            return Err(refused(format!(
+                "{package} is a remote MCP server: yobuild does not connect to one the agent found yet (nothing was counted)"
+            )));
+        }
         let version = match (&candidate.version, version) {
             (Err(why), _) => {
                 return Err(refused(format!("{package} is not loadable: {why}")))

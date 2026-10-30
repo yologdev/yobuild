@@ -630,10 +630,7 @@ fn holds_with(
     // kinds).
     let extend_note = parsed.extend.as_ref().map(|e| {
         let kinds: Vec<String> = e.kinds.iter().map(|k| format!("{}s", k.label())).collect();
-        let sources = match e.finds_mcp() {
-            true => "the MCP registry and npm",
-            false => "npm",
-        };
+        let sources = e.sources();
         let kinds = match kinds.split_last() {
             Some((last, [])) => last.clone(),
             Some((last, rest)) => format!("{} and {last}", rest.join(", ")),

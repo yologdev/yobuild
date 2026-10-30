@@ -122,7 +122,14 @@ fn stub(broken: Broken) -> (u16, Asked) {
                             "version": "1.0.0", "transport": { "type": "stdio" },
                             "environmentVariables": [{ "name": "LINT_TOKEN", "isRequired": true }] }] } },
                     { "server": { "name": "io.example/remote", "description": "lints remotely",
-                        "remotes": [{ "type": "streamable-http", "url": "https://x" }] } },
+                        "version": "2.1.0",
+                        "remotes": [
+                            { "type": "sse", "url": "https://lint.example.com/sse" },
+                            { "type": "streamable-http", "url": "https://lint.example.com/mcp",
+                              "headers": [{ "name": "Authorization", "value": "Bearer {token}",
+                                "isRequired": true, "isSecret": true }] }] },
+                      "_meta": { "io.modelcontextprotocol.registry/official": {
+                        "publishedAt": "2026-09-30T08:00:00Z" } } },
                     { "server": { "name": "io.example/maxwellintl", "packages": [{ "registryType": "npm",
                         "identifier": "maxwellintl", "transport": { "type": "stdio" } }] } }
                 ], "metadata": { "count": 3 } }))
@@ -458,6 +465,16 @@ fn npm_failing_for_every_candidate_is_an_error_not_ten_unloadable_ones() {
 
 #[test]
 fn a_registry_that_is_not_https_is_refused_before_anything_starts() {
+    // An agent finding remote servers alone reads it too.
+    let remote = project_with("kinds = [\"remote\"]\n", "[]");
+    let out = run_with(remote.path(), "http://registry.example.com", 9);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("YOBUILD_MCP_REGISTRY \"http://registry.example.com\""),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let dir = project("[]");
     let out = run_with(dir.path(), "http://registry.example.com", 9);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -576,5 +593,80 @@ fn check_of_a_pi_and_dsh_agent_lists_both_tools_and_a_bad_registry_refuses_nothi
             .unwrap()
             .ends_with("a pi or DSH package loaded runs in a runtime of its own with its tools only: no hooks, grants, config or host services")),
         "{agent:#}"
+    );
+}
+
+/// Remote servers: the MCP registry alone (npm lists none, and is never
+/// asked), a remote it lists that yobuild could reach offered with its
+/// address and headers; `load_plugin` refuses it for now, uncounted.
+#[test]
+fn remote_servers_are_found_in_the_mcp_registry_alone() {
+    let (port, asked) = stub(Broken::default());
+    let dir = project_with(
+        "kinds = [\"remote\"]\n",
+        r#"[{ "tools": [{ "name": "find_plugin", "arguments": { "need": "lint" }, "expect": [
+              "find_plugin(\"lint\", kind \"remote\"): remote MCP servers, as the sources say.",
+              "Sources: MCP registry: 1 found (2 left out: 1 not a remote server, 1 naming none of the need's words).",
+              "1. io.example/remote at lint.example.com (version 2.1.0, published 2026-09-30; found in the MCP registry)\n   lints remotely\n",
+              "address: https://lint.example.com/mcp; headers: Authorization (required, secret) (the owner names the environment variable of each one asked; you never do); repository (claimed by the entry): not given"
+            ] }] },
+            { "tools": [{ "name": "load_plugin", "arguments": { "package": "io.example/remote" } }] },
+            { "text": "done" }]"#,
+    );
+    let out = run(dir.path(), port);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.contains("\n  find_plugin ✓\n"), "{stderr}");
+    // Under `--once` the load is refused before it looks at the kind.
+    assert!(
+        stderr.contains("  load_plugin ✗ load_plugin refused it: not under --once"),
+        "{stderr}"
+    );
+    assert_eq!(*asked.lock().unwrap(), ["registry lint"]);
+    // The registry failing is the one source failing: an error, said.
+    let (port, _) = stub(Broken {
+        registry: true,
+        ..Broken::default()
+    });
+    let dir = project_with(
+        "kinds = [\"remote\"]\n",
+        r#"[{ "tools": [{ "name": "find_plugin", "arguments": { "need": "lint" }, "expect": [
+              "Sources: MCP registry: failed (HTTP 503",
+              "The MCP registry, the one source for this kind, failed: this is not \"nothing found\"."
+            ] }] },
+            { "text": "done" }]"#,
+    );
+    let out = run(dir.path(), port);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(!stderr.contains("the reply file expected"), "{stderr}");
+    assert!(
+        stderr.contains("Warning: find_plugin could not search: MCP registry: HTTP 503")
+            && stderr.contains("  find_plugin ✗ find_plugin(\"lint\", kind \"remote\")"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn check_of_a_remote_agent_says_it_asks_the_mcp_registry_only() {
+    let dir = project_with("kinds = [\"remote\"]\n", "[]");
+    let out = Command::new(env!("CARGO_BIN_EXE_yobuild"))
+        .args(["check", "agent.toml", "--json"])
+        .current_dir(dir.path())
+        .env("HOME", dir.path().join("home"))
+        .env("YOBUILD_HOME", dir.path().join("home/.yobuild"))
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
+    assert_eq!(report["ok"], true, "{report:#}");
+    let notes = report["agent"]["notes"].as_array().unwrap();
+    assert!(
+        notes.iter().any(|n| {
+            let n = n.as_str().unwrap();
+            n.starts_with("[extend]: the agent may search the MCP registry for remote MCP servers (`find_plugin`) and load")
+                && n.ends_with("; a remote MCP server is found only, not loaded yet (a later step): `load_plugin` refuses it, uncounted")
+        }),
+        "{notes:#?}"
     );
 }

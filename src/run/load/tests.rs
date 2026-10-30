@@ -700,6 +700,7 @@ fn candidate(package: &str, version: Result<&str, &str>) -> Candidate {
         provenance: None,
         required_env: None,
         required_args: None,
+        remote: None,
     }
 }
 
@@ -720,10 +721,19 @@ fn tool(once: bool) -> (LoadPlugin, Driver, tempfile::TempDir) {
     lint_as_pi.kind = ExtendKind::Pi;
     let mut dsh = candidate("dsh-lint", Ok("1.0.0"));
     dsh.kind = ExtendKind::Dsh;
+    let mut remote = candidate(
+        "io.github.upstash/context7",
+        Err(crate::builtins::find_plugin::NO_VERSION),
+    );
+    remote.kind = ExtendKind::Remote;
+    remote.remote = Some(crate::builtins::find_plugin::Remote::stand_in(
+        "https://mcp.context7.com/mcp",
+    ));
     find.remember(&[lint_as_pi]);
     find.remember(&[
         pi,
         dsh,
+        remote,
         candidate("lint-mcp", Ok("1.2.0")),
         candidate("young", Err("no version was published 7 or more days ago")),
         candidate("taken-mcp", Ok("1.0.0")),
@@ -787,6 +797,10 @@ async fn what_the_limits_refuse_before_anything_is_installed() {
         (
             json!({ "package": "lint-mcp", "version": "1.3.0" }),
             "lint-mcp@1.3.0 is not the version find_plugin offered: lint-mcp@1.2.0 (or give no `version`)",
+        ),
+        (
+            json!({ "package": "io.github.upstash/context7" }),
+            "io.github.upstash/context7 is a remote MCP server: yobuild does not connect to one the agent found yet (nothing was counted)",
         ),
     ];
     for (args, said) in cases {
