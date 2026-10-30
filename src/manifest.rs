@@ -1368,10 +1368,17 @@ fn model(raw: &RawAgent) -> Result<Model, Located> {
 /// this machine (`localhost`, `127.0.0.1`, `[::1]`), with no user in it.
 pub(crate) fn endpoint(text: &str) -> Result<url::Url, String> {
     let url = url::Url::parse(text).map_err(|e| format!("{text:?} is not a URL: {e}"))?;
+    match endpoint_problem(&url) {
+        None => Ok(url),
+        Some(why) => Err(format!("{text:?} {why}")),
+    }
+}
+
+/// Why `url` is not an [`endpoint`], in words that do not repeat it (a
+/// URL filled in from the environment may hold a secret).
+pub(crate) fn endpoint_problem(url: &url::Url) -> Option<&'static str> {
     if !url.username().is_empty() || url.password().is_some() {
-        return Err(format!(
-            "{text:?} has a user in it: give credentials as a header"
-        ));
+        return Some("has a user in it: give credentials as a header");
     }
     let local = match url.host() {
         Some(url::Host::Domain(d)) => d == "localhost",
@@ -1380,11 +1387,9 @@ pub(crate) fn endpoint(text: &str) -> Result<url::Url, String> {
         None => false,
     };
     match url.scheme() {
-        "https" if url.host().is_some() => Ok(url),
-        "http" if local => Ok(url),
-        _ => Err(format!(
-            "{text:?}: https, or http on this machine (localhost)"
-        )),
+        "https" if url.host().is_some() => None,
+        "http" if local => None,
+        _ => Some("is not https, nor http on this machine (localhost)"),
     }
 }
 

@@ -2300,3 +2300,72 @@ fn check_says_what_a_plugins_code_reads_and_what_it_is_given() {
         text(&out.stdout)
     );
 }
+
+/// An HTTP server's URL holding a secret: what `check` and `run` say when
+/// it cannot be reached names the URL as written, never as filled (reqwest
+/// names the URL it failed to reach); and a value bringing a user is
+/// refused before anything connects, the value unsaid.
+#[test]
+fn an_http_servers_filled_url_is_never_said() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
+    let manifest = |url: &str| {
+        std::fs::write(
+            dir.path().join("agent.toml"),
+            format!(
+                "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
+                 [[mcp]]\nname = \"s\"\nurl = \"{url}\"\n"
+            ),
+        )
+        .unwrap();
+    };
+    let said = |vars: &[(&str, &str)]| {
+        let mut said = String::new();
+        for args in [
+            &["check", "agent.toml", "--json"][..],
+            &[
+                "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+            ],
+        ] {
+            let mut command = bin();
+            command
+                .env("DEEPSEEK_API_KEY", "sk-d")
+                .env_remove("RUST_LOG");
+            for (name, value) in vars {
+                command.env(name, value);
+            }
+            let out = command.args(args).current_dir(dir.path()).output().unwrap();
+            assert!(!out.status.success(), "{}", text(&out.stderr));
+            said.push_str(&text(&out.stdout));
+            said.push_str(&text(&out.stderr));
+        }
+        said
+    };
+    // Nothing listens: refused at connect, in reqwest's words.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let written = format!("https://127.0.0.1:{port}/mcp?api_key=${{YB_TEST_KEY}}");
+    manifest(&written);
+    let out = said(&[("YB_TEST_KEY", "sk-yobuild-test-0123456789")]);
+    assert!(!out.contains("sk-yobuild-test"), "{out}");
+    assert!(out.contains(&written), "{out}");
+    // A user brought in: refused before anything connects.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    manifest("https://${YB_TEST_HOST}/mcp");
+    let host = format!("me:s3cret-pass@127.0.0.1:{port}");
+    let out = said(&[("YB_TEST_HOST", host.as_str())]);
+    assert!(!out.contains("s3cret-pass"), "{out}");
+    // Both refuse before anything starts, on stderr.
+    let refusal =
+        r#"yobuild: mcp s: url "https://${YB_TEST_HOST}/mcp", filled in, has a user in it"#;
+    assert_eq!(out.matches(refusal).count(), 2, "{out}");
+    let accepted = listener.accept().map(|_| ());
+    assert_eq!(
+        accepted.map_err(|e| e.kind()),
+        Err(std::io::ErrorKind::WouldBlock),
+        "something connected"
+    );
+}

@@ -4031,9 +4031,9 @@ refuses `[extend]` without it, as the manifest does with `gate = "off"`.
     against them, and its loop ends the session on one; `check` is raced
     whole. A SIGKILL still leaves them; and a wrapper that exited and was
     collected (yobuild's 250 ms look at each loaded server collects it)
-    leaves its children, which yoagent then no longer kills — asked of
-    yoagent: kill the group when the exit watch first sees the wrapper
-    gone, before collecting it.
+    left its children, which yoagent then no longer killed — asked of
+    yoagent, and since yoagent 0.26.0 the group is killed as soon as the
+    wrapper's exit is seen, before it is collected.
   - One that dies while the owner is asked to keep it is refused then
     (an Error notice), never announced as loaded.
   - A server whose process lives on but no longer reads its input is
@@ -4691,7 +4691,7 @@ Surveyed on 2026-10-28:
   an optional `Authorization`. Without one it answers `initialize` and
   `tools/list`, offering `resolve-library-id` and `query-docs`.
 
-yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
+yoagent 0.25.16's HTTP transport, as `[[mcp]] url` used it before 0.26.0:
 - **What it speaks:** `HttpTransport` covers the request/response subset
   of streamable HTTP: no GET stream and no SSE-only servers.
 - **Headers:** fixed for its lifetime and marked sensitive.
@@ -4703,6 +4703,13 @@ yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
   host reqwest drops `Authorization` and cookies, but **a custom header
   (`x-api-key`) follows it there**, and nothing stops a downgrade from
   https to http.
+
+yoagent 0.26.0 (asked for below) changes the errors and the redirects:
+an HTTP error is `McpError::Http { status, .. }` (`http_status()`), and
+redirects stay within the URL's own scheme, host and port by default
+(`HttpTransport::with_redirects(Redirects::None | SameOrigin | Any)`), a
+redirect elsewhere an error naming where it pointed. A manifest's
+`[[mcp]] url` gets that default.
 
 1. **A kind of its own, `"remote"`.** `[extend] kinds` takes `"remote"`
    (label "remote MCP server"), off unless listed: whether an agent may
@@ -4810,10 +4817,10 @@ yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
      `DEFAULT_CALL_TIMEOUT`.
    - **Refused:** a `401` or `403` at `initialize`: "it refused yobuild's
      request (HTTP 401): it needs a credential, or a sign-in (OAuth) yobuild
-     cannot do yet". This is read from yoagent's text; a typed status is
-     asked of yoagent.
-   - **Redirects:** none followed. A redirect is refused, naming where it
-     pointed. Asked of yoagent (below), and this stage waits for it.
+     cannot do yet", read from `McpError::http_status()` (yoagent
+     0.26.0).
+   - **Redirects:** none followed (`Redirects::None`, yoagent 0.26.0). A
+     redirect is refused, naming where it pointed.
    - **No exit watch:** `Server.exit` becomes `Option<ExitWatch>`, `None`
      for a remote, so a remote is never seen gone between calls. A call
      whose error says the server ended the session ("MCP session expired")
@@ -4839,14 +4846,32 @@ yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
 10. **First, the manifest's gap.** A manifest's `[[mcp]] url` holding a
     reference is checked by `endpoint` as `x` when read and never again,
     so `https://${HOST}/mcp` could become anything. It is checked again
-    once filled, in `run::launch`, before anything connects.
+    once filled, in `run::launch`, before anything connects. Done
+    (`run::filled_url`):
+    - a reference filled empty is refused (`https://${HOST}/mcp` would
+      read as the host `mcp`);
+    - a host written out before a reference stays that host
+      (`https://api.example${P}/mcp` may gain a port, not become
+      `api.example.evil.example`); a host from a reference may be any;
+    - the URL connected to is the one checked, as `url` writes it;
+    - a refusal quotes the URL as written, never as filled, since a value
+      may be a secret; and what connecting or listing its tools says
+      (reqwest names the URL: "… for url (https://…?api_key=…)") has the
+      filled URL shown as written and each value of 8 characters or more
+      filled into the URL or headers as its `${NAME}` (`run::hide`).
+    - Not covered: a tool call's error once connected reaches the model
+      and the log as yoagent's `McpToolAdapter` words it, the URL filled
+      — for yoagent (`reqwest::Error::without_url`), asked only with the
+      owner's approval.
 11. **OAuth later.** Servers that need a sign-in refuse at `initialize`,
     said as such. A sign-in on the page (the provider's page opened, the
     token kept somewhere, refreshed) is its own design.
 
-**Asked of yoagent** (sent only with the owner's approval):
+**Asked of yoagent** (sent with the owner's approval, 2026-10-29):
 `HttpTransport` follows no redirect, or takes a policy (none by default,
-or the same origin only), and an HTTP error carries its status.
+or the same origin only), and an HTTP error carries its status. Given in
+yoagent 0.26.0 (same origin by default, `Redirects::None` to follow
+none; `McpError::Http`), which yobuild takes in its own PR.
 
 **The demo.** A docs helper: asked how to use a library at its current
 version, it finds Context7 (`kind "remote"`), connects without a key and
@@ -4881,13 +4906,14 @@ party's day as npm's is.
 4. Wait for yoagent's redirect change, or, if it does not come, a
    transport of yobuild's own (`McpClient::from_transport` takes any
    `McpTransport`) over a reqwest client that follows no redirect?
+   Settled: yoagent 0.26.0 gives `Redirects::None`.
 5. OAuth later?
 
 **Order of PRs.**
 
 1. this design;
-2. the manifest's URL checked once filled (point 10), and the request to
-   yoagent;
+2. the manifest's URL checked once filled (point 10); yoagent 0.26.0
+   taken in its own PR;
 3. `find_plugin`'s `remote` kind (done: `load_plugin` refuses a remote,
    uncounted, until 4; a name of one label is refused too, as a machine
    on this network);
