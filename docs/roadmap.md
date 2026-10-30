@@ -391,5 +391,5 @@ remote servers that need one.
    server loaded) unchanged but for `model`, each `Completed` with its
    report, $0.010 in all (their READMEs, "On Claude"). A local model has
    not been run at all (not yet tried: it needs a runner and a model that
-   calls tools), and it gets no dollar budget, because it has no price. DeepSeek pricing: done (yoagent
-   0.25.6).
+   calls tools), and it gets no dollar budget, because it has no price.
+   DeepSeek pricing: done (yoagent 0.25.6).
