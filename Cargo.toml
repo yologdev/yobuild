@@ -1,6 +1,6 @@
 [package]
 name = "yobuild"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 resolver = "3"
 description = "Build an agent by choosing its parts: plugins from other ecosystems on the yoagent loop, a few built-ins of its own, and a frontend"
