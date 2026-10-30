@@ -209,10 +209,12 @@ MCP server it lacks and load it for the session. It works like this:
   `project-notebook` loads the `pi-memory` package this way.
 - **Remote MCP servers too:** with `"remote"` among the `kinds` it can
   find a server in the MCP registry that runs elsewhere and connect to it
-  over https. Nothing of it runs on your computer, but each call sends
-  its arguments to the server's host. When it takes a credential, you
-  are asked which environment variable holds it, never the value: the
-  value goes to that host only and is shown nowhere. A server that needs
+  over https. The search asks the MCP registry only, and
+  `min_age_days` does not apply: nothing installs or runs on your
+  computer, but each call sends its arguments to the server's host.
+  When it takes a credential, you are asked between the two questions
+  which environment variable holds it, never the value: the value goes
+  to that host only and is shown nowhere. A server that needs
   you to sign in through a browser (OAuth) is refused: yobuild cannot do
   that yet. The gallery's `docs-helper` connects to Context7 this way.
 

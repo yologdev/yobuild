@@ -106,8 +106,8 @@ yobuild's tests run all three this way, answering over the page's
 WebSocket, in the sample project (`package.json` and `src/app.js`).
 They use the live MCP registry and Context7: either one down, or
 Context7 no longer listing `v5.1.0` for Express or answering about its
-promise support, fails the test. The reply files expect only
-`io.github.upstash/context7` among the candidates.
+promise support, fails the test. The reply files' only expectation of the search is that it returns
+`io.github.upstash/context7`.
 
 Under `--once`, every `load_plugin` call is refused alike ("not under
 --once"), so all three look the same there: they show the search.

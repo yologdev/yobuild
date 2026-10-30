@@ -334,8 +334,8 @@ plugins"):**
 servers"):**
 - **What it does:** `find_plugin` searches the MCP registry for servers
   reached over https, and `load_plugin` connects to one. Nothing of it
-  runs here. A credential is named by its environment variable at the
-  question, never typed or shown; a server that needs a sign-in (OAuth)
+  runs here. The owner names a credential's environment variable at the
+  question; its value is never asked for, shown or given to the agent; a server that needs a sign-in (OAuth)
   is refused.
 - **The demo:** the gallery's `docs-helper` connects to Context7 with no
   key and answers from a library's docs at the project's version.

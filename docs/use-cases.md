@@ -31,7 +31,7 @@ your browser, in your terminal, or on your phone on the same Wi-Fi.
 Each of these is built into yobuild. `yobuild new my-agent --from <name>`
 makes a copy you can run.
 
-The first five are the gallery. A coding agent built each one with the
+The rows before `handoff` are the gallery. A coding agent built each one with the
 yobuild skill, from a request a person would make. Each copy has a README
 that quotes the request and says what the agent needs and does.
 
@@ -160,7 +160,7 @@ Within that:
   - Settings can cap dollars per run and per session, and turns, tokens
     and time per run.
   - Unless set, a run stops at 50 turns, 1M tokens or 10 minutes.
-  - The five gallery agents each cap dollars per run and per session.
+  - The gallery agents each cap dollars per run and per session.
     Their runs above cost under two cents each.
 - **Plugins don't get your keys from the environment.** Plugins and
   servers start without your environment variables, keys included,

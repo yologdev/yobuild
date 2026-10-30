@@ -214,7 +214,7 @@ Do not answer the page yourself (no script or client of your own
 playing the person): run each reply file under `--once`, then tell the
 person how to run it on the page and what to answer — Allow, Allow and
 Allow for each call (for a remote, the variable question between the two
-Allows: its name, or nothing); or Block — and ask what they saw.
+Allows: its name, or nothing for an optional one); or Block — and ask what they saw.
 
 Three reply files show the shape of a run with `[extend]`:
 
@@ -222,7 +222,9 @@ Three reply files show the shape of a run with `[extend]`:
   and allowed);
 - a package `find_plugin` did not return, refused before anything
   installs (`… is not among this session's candidates …`): the agent
-  goes on without it. Its `find_plugin` call, searching for that name,
+  goes on without it. Its report says the package was not among what
+  the search returned — not that it does not exist or is not in the
+  registry: yobuild knows only the search's candidates. Its `find_plugin` call, searching for that name,
   takes no `expect` (the package is not there to find). The task names
   the package (the owner's friend recommended it, say); the prompt has
   the agent search for a package the owner names — by that name, in

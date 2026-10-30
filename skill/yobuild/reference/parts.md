@@ -200,6 +200,7 @@ package …".
   could not resolve one). `PI_MEMORY_EXIT_SUMMARY=0`, passed by an `env`
   grant, turns the attempt off. Its writes then run without asking only if
   `allow` names them.
+
 When `kinds` lists `"remote"`, `find_plugin(need, kind "remote")`
 searches the MCP registry only, for servers that run elsewhere and are
 reached over https (streamable HTTP; SSE-only ones are left out, and so
@@ -208,15 +209,20 @@ Nothing of a remote runs here: each call sends its arguments to the
 server's host, which answers as it likes that day. `load_plugin` takes
 the registry's name (`io.github.upstash/context7`), no `version` and no
 `args`; the default `name` is the name's own part without its
-`mcp`/`server` words (`context7`), its tools `context7__<tool>`. The
+`mcp`/`server` words (`context7`) — the namespace's last label when
+nothing else is left (`com.notion/mcp` → `notion`), a `.` made `-` —
+its tools `context7__<tool>`. The
 person is asked "Connect to the remote MCP server … at <host> as …?",
-then, for each header the server takes a credential in, which
-environment variable holds it — never the value: the variable is set
-where yobuild runs, and its value is sent to that host only, said
-nowhere. An empty answer leaves an optional header off and refuses a
-server whose header is required. Then "Keep the remote MCP server …? It
+then, for each header the server takes a credential in (required, or
+optional and secret), which environment variable holds it — never the
+value: the variable is set where yobuild runs, and its value is sent to
+that host only, said nowhere. A variable yoagent reads for a model's key
+(`DEEPSEEK_API_KEY` …) is refused there, as is one not set; each header
+is asked up to 3 times. An empty answer leaves an optional header off
+and refuses a server whose header is required; an optional header still
+without a usable variable after 3 answers is not sent (a Warning). Then "Keep the remote MCP server …? It
 offers: …". A server that needs a sign-in (OAuth) is refused at the
-connection (HTTP 401): yobuild cannot sign in yet. The block printed at
+connection (HTTP 401 or 403): yobuild cannot sign in yet. The block printed at
 the end is an `[[mcp]]` with `url` and, for a credential, `headers`
 naming its variable.
 

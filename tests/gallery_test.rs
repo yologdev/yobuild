@@ -510,6 +510,14 @@ fn on_page(manifest: &str, file: &Path, task: &str, page: &Page, rules: &Rules) 
         "a kept server stopped: {all}"
     );
     if kept {
+        // Kept as asked: no load Warning (a header not sent, a refusal).
+        assert!(
+            !shown
+                .notices
+                .iter()
+                .any(|n| n.starts_with("warning: The agent's plugin `")),
+            "a load Warning though kept: {all}"
+        );
         for said in page.block {
             assert!(stderr.contains(said), "{said:?} not in the block: {all}");
         }
@@ -1073,7 +1081,8 @@ fn docs_helper() {
                 ],
                 refused: None,
                 block: &[
-                    "[[mcp]]\nname = \"context7\"\nurl  = \"https://mcp.context7.com/mcp\"\n",
+                    // No `headers` line: nothing was sent.
+                    "[[mcp]]\nname = \"context7\"\nurl  = \"https://mcp.context7.com/mcp\"\n# allow = [",
                     "io.github.upstash/context7 at mcp.context7.com",
                 ],
                 offers: &["resolve-library-id", "query-docs"],
