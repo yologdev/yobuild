@@ -90,3 +90,11 @@ tokens in, 526 out; 4 turns)`, then:
 > **Waiting on you:** none
 
 `Completed`.
+
+### On Claude
+
+2026-10-30, the same task with `model = "anthropic/claude-haiku-5-5"`
+and `ANTHROPIC_API_KEY` (nothing else changed), `--once`: three searches
+(`domain_search`, then `research` twice), `Cost: $0.0033 (42099 tokens
+in, 1079 out; 3 turns)`, the same date (30 April 2026) with the three
+sections and five sources, `Completed`.

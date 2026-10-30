@@ -56,6 +56,9 @@ load it for the session, with the person's yes each time.
     from a library's docs at your project's version.
 - **The skill** covers `[extend]`: which kinds to allow, how to script
   the search, and why the load is tried on the page.
+- **Tried on Claude:** web-research, code-reviewer and docs-helper ran
+  live on `anthropic/claude-haiku-5-5`, unchanged but for `model` (their
+  READMEs, "On Claude"). Until now only DeepSeek had been run live.
 - **yoagent 0.26.1 and yoagent-rutis 0.10.0.**
 - **The DSH base:** unchanged since 0.1.0, so 0.1.0's locks still hold
   under `--locked`.
