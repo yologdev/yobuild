@@ -129,7 +129,8 @@ price`").
   local plugin, loaded in its own npm package — the nearest folder above
   it with a `package.json`, which must be `"type": "module"` for a `.ts`
   file and have `@arcships/rutis-runtime` installed at the version
-  yobuild's runtimes use (0.12.0; `check` names it when it is missing).
+  yobuild's runtimes use (0.12.0; `check` names it when it is missing),
+  and `@arcships/rutis` (the SDK) at the same version (`parts.md`).
   Or one of yobuild's own, `rutis = "yobuild:todo-plan"` or
   `"yobuild:search-links"` (`parts.md`): no `runtime` needed (Node).
 
@@ -349,6 +350,11 @@ lists both as allowed and says what `[extend]` lets the agent do.
   folder).
 - **Not in a git repository**: leave `facts` off — it only says "not a
   git repository".
+- **`facts` and "never change my files"**: `facts` changes no file, ref
+  or index of the project. It does add unreferenced objects to `.git`
+  (`git stash create`, to snapshot the start), which `git gc` removes.
+  Say so to a person who forbids every change, and leave it off if they
+  mind.
 - **A budget**: start small (`budget_usd = 0.5` for a short task) and
   raise it once a live run shows the cost (yobuild says each run's tokens
   with `facts`). `budget_usd` is per run, and an answered question starts

@@ -1818,6 +1818,71 @@ invalid rather than asked.
    **CI** mark, the CI workflow's `rm`, and the skill fixes its build
    finds.
 
+#### A tool of its own: release notes (proposed 2026-10-30)
+
+A ninth gallery agent, for the vision's first measure of success: "a
+useful agent from a manifest and at most one small custom tool, in an
+afternoon".
+
+**Why.** Every gallery agent so far is made of parts that already exist.
+The skill describes writing a rutis plugin (`parts.md`, `manifest.md`),
+and `run_test` loads rutis plugins. But no coding agent has written one
+for a person, and no gallery agent carries one. Nobody has walked that
+path from start to finish.
+
+**The request.** "I want an agent that drafts release notes for my
+project: everything since the last version tag, grouped into features,
+fixes and other changes, in plain words for the people who use it. It
+should only read: never commit, tag or change my files." No listed part
+reads git history. With `tools = "read-only"` the agent has no `bash`,
+and `tools = "coding"` would give it writes it must not have. So the one
+small tool is the person's own: a rutis plugin that runs read-only `git`
+in the agent's folder (`grants = { workspace = true }`, for
+`host_workspace.cwd()`).
+
+**What is expected, and what the build should show.**
+- The plugin is the person's own code. The gate does not judge what it
+  runs; the kept environment still applies. Its README says so.
+- It needs `@arcships/rutis-runtime` 0.12.0 installed beside it, in an npm
+  package of its own. `yobuild new --from` copies files, not
+  `node_modules`. So who installs it, the person (`npm ci` in the folder,
+  said by the README and by `check`'s problem) or yobuild (as it installs
+  a pi set), is decided after the build. The evidence is what the coding
+  agent and the test run into.
+
+  **Decided (2026-10-30): the person, with one command.** Neither build
+  had trouble with `npm install --ignore-scripts`. The package is the
+  person's code's own, like a project's dependencies. And yobuild
+  installing it would mean a fourth kind of set, for one command.
+  Instead, yobuild says the command where the person meets it:
+  - `yobuild new --from` prints `(cd …/plugins && npm ci)` first;
+  - `run` and `check` refuse with `npm ci in <folder>` when the package
+    has its lock (else `npm install @arcships/rutis-runtime@0.12.0`);
+  - the README says it under "What it needs".
+
+**What the builds found.** The first build (2026-10-30) worked, but only
+because the coding agent wrote the SDK's object by hand. `parts.md`
+imported `@arcships/rutis` and named only the runtime to install. It also
+had to guess the tool contract and how a plugin reaches a granted
+service. The skill now has:
+- the package with both rutis packages;
+- the tool contract as yoagent-rutis reads it;
+- `inject` plus `ctx.use` for grants;
+- checking the model's arguments before use, and turning off a
+  repository's own config;
+- making a sample's other states as copies.
+
+The second build guessed nothing that mattered. It went into the gallery
+as built.
+- The gallery test makes a small git repository with two version tags
+  and commits after the last one. It installs the plugin's package, then
+  runs `check` and the reply files, as for every gallery agent.
+
+Like every gallery agent, it is built once through the skill. What the
+build gets wrong goes into the skill, and it is built again; the agent is
+never edited by hand. The design, the agent, its test and the skill's
+fixes come in one PR.
+
 ## 12. The host layer: what a plugin's own app gives it (proposed 2026-10-19)
 
 The gallery's third agent found it twice in a day: a plugin that loads,

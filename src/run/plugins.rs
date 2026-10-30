@@ -889,12 +889,18 @@ fn package_of(path: &Path) -> Result<PathBuf, BoxError> {
 }
 
 /// A rutis plugin's Node runtime: `@arcships/rutis-runtime` installed in its
-/// package (`dir`), at the version yobuild's own runtimes use.
+/// package (`dir`), at the version yobuild's own runtimes use. A package
+/// with its lock (a gallery agent copied by `yobuild new --from`) is told
+/// `npm ci`, which installs what the lock holds.
 fn rutis_runtime(dir: &Path) -> Result<(), BoxError> {
     let package = Package::new(RUTIS_RUNTIME, RUTIS_RUNTIME_VERSION)?;
+    let command = if dir.join("package-lock.json").is_file() {
+        String::from("npm ci")
+    } else {
+        format!("npm install {}", package.spec())
+    };
     let install = format!(
-        "a rutis plugin runs in a Node runtime in its package: npm install {} in {}",
-        package.spec(),
+        "a rutis plugin runs in a Node runtime in its package: {command} in {}",
         dir.display()
     );
     installed(&package, &dir.join("node_modules"), &install)?;
@@ -1038,6 +1044,17 @@ mod tests {
         assert!(plan_of(dir.path(), "[[plugin]]\npi = \"./gone.ts\"\n")
             .unwrap_err()
             .ends_with("gone.ts does not exist"));
+        // A package with its lock (a copied gallery agent) is told `npm ci`.
+        std::fs::write(dir.path().join("package-lock.json"), "{}").unwrap();
+        let e = plan_of(
+            dir.path(),
+            "[[plugin]]\nrutis = \"./p.ts\"\nruntime = \"node\"\n",
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("in its package: npm ci in ") && !e.contains("npm install"),
+            "{e}"
+        );
     }
 
     #[test]

@@ -1,0 +1,5 @@
+[
+  { "tools": [{ "name": "version_tags", "arguments": {}, "expect": "no version tag" }] },
+  { "tools": [{ "name": "commits_since", "arguments": {}, "expect": ["5 commit(s) in all of HEAD's history", "Initial commit", "feat: add greet", "feat: add shout command"] }] },
+  { "text": "## Release notes draft\n\nFirst release: no earlier version tag, so these notes cover the whole history.\n\n### Features\n- A `greet` command that says hello to a name.\n- A `shout` command that turns your text into capitals.\n\n### Fixes\n- The greeting now ends with proper punctuation.\n\n### Other changes\n- The README describes the command-line tool.\n- The project was set up.\n\n## Unsure how to group\n- c8ca792 Initial commit — put under Other changes; a first commit may hold features of its own, but its subject says nothing about them." }
+]

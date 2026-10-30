@@ -37,6 +37,8 @@ each was run live for a real task (costs with DeepSeek's `deepseek-flash`):
   decisions across sessions, in a memory it finds and loads ($0.0045).
 - **`docs-helper`**: answers from a library's docs at your project's
   version, connecting to them when you allow it ($0.0046).
+- **`release-notes`**: drafts release notes from the commits since your
+  last version tag, with a small tool of its own ($0.0013).
 - **`handoff`**: hand it any task and walk away; it asks only what is
   yours to decide, without waiting, and ends with a report.
 

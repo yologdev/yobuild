@@ -45,6 +45,8 @@ my-agent/
   prompts/agent.md    the prompt
   scripts/demo.json   the scripted replies
   scripts/demo.task   the task each reply file was written for
+  plugins/            only with a tool of your own: its npm package (parts.md, rutis)
+  README.md           what it does and needs, when the person must do something first (`npm ci`)
 ```
 
 ## The method
@@ -163,7 +165,9 @@ my-agent/
   It lets every call run as the agent asks.
 - Never write a secret into a file: `${NAME}`, set in the environment.
 - Never install plugin packages by hand, and never edit a lock: yobuild
-  installs pinned plugins into its cache from the lock it writes.
+  installs pinned plugins into its cache from the lock it writes. (A
+  rutis plugin of your own is the exception: its package is installed in
+  its folder, `parts.md`.)
 - Never skip `check`, and never run live before a scripted run passed.
 - Ask the person before a live run.
 

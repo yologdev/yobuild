@@ -204,14 +204,50 @@ fn script(replies: &Json) -> (Vec<String>, String) {
 /// show refusals (every call `✗`, whatever the reason); the tools that ask
 /// (each call denied: nobody answers); the plugins' and servers' tools,
 /// whose own `✗` is tolerated; a `HOME` shared by every run, when the
-/// agent's plugin keeps a large cache there (else a temporary one each).
+/// agent's plugin keeps a large cache there (else a temporary one each);
+/// what makes the folder more than its files ([`Sample`]).
 struct Rules<'a> {
     files: &'a [(&'a str, &'a str)],
+    sample: Option<&'a Sample<'a>>,
     page: &'a [Page<'a>],
     home: Option<&'a Path>,
     refusing: &'a [&'a str],
     asks: HashSet<String>,
     theirs: HashSet<String>,
+}
+
+/// A run's folder beyond its files: `make` (the folder, the reply file's
+/// name) runs once they are written — a git repository, say, in the state
+/// that reply file is for — and `state` (the folder) is the same after the
+/// run as before it.
+struct Sample<'a> {
+    make: &'a dyn Fn(&Path, &str),
+    state: &'a dyn Fn(&Path) -> String,
+}
+
+/// The run's folder: `rules.files` written, then the sample made for the
+/// reply file `name`; its state, to compare after the run.
+fn fill(rules: &Rules, work: &Path, name: &str) -> Option<String> {
+    for (path, contents) in rules.files {
+        let path = work.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    rules.sample.map(|sample| {
+        (sample.make)(work, name);
+        (sample.state)(work)
+    })
+}
+
+/// The run's folder as [`fill`] left it: its files and its sample's state.
+fn unchanged(rules: &Rules, work: &Path, before: Option<String>, all: &str) {
+    for (path, contents) in rules.files {
+        let now = std::fs::read_to_string(work.join(path)).unwrap_or_default();
+        assert_eq!(&now, contents, "{path} changed: {all}");
+    }
+    if let (Some(sample), Some(before)) = (rules.sample, before) {
+        assert_eq!((sample.state)(work), before, "the sample changed: {all}");
+    }
 }
 
 /// A reply file (`file`, its name) run on the page: each question's answer
@@ -350,11 +386,7 @@ fn on_page(manifest: &str, file: &Path, task: &str, page: &Page, rules: &Rules) 
     let (called, last) = script(&replies);
     let (work, own) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let home = rules.home.unwrap_or(own.path());
-    for (path, contents) in rules.files {
-        let path = work.path().join(path);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, contents).unwrap();
-    }
+    let before = fill(rules, work.path(), &name);
     let mut command = Command::new(env!("CARGO_BIN_EXE_yobuild"));
     for key in yobuild::manifest::KEY_VARIABLES {
         command.env_remove(key);
@@ -460,10 +492,7 @@ fn on_page(manifest: &str, file: &Path, task: &str, page: &Page, rules: &Rules) 
     names.sort_unstable();
     called.sort_unstable();
     assert_eq!(names, called, "{all}");
-    for (path, contents) in rules.files {
-        let now = std::fs::read_to_string(work.path().join(path)).unwrap_or_default();
-        assert_eq!(&now, contents, "{path} changed: {all}");
-    }
+    unchanged(rules, work.path(), before, &all);
     // Loaded only when allowed to start and then kept (the questions came
     // as `answers` says: checked above, in order).
     let allowed = |q: &str| {
@@ -548,11 +577,7 @@ fn scripted(manifest: &str, file: &Path, task: &str, rules: &Rules) {
     let (called, last) = script(&replies);
     let (work, own) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let home = rules.home.unwrap_or(own.path());
-    for (path, contents) in rules.files {
-        let path = work.path().join(path);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, contents).unwrap();
-    }
+    let before = fill(rules, work.path(), &name);
     let ran = yobuild(
         &[
             "run",
@@ -580,10 +605,7 @@ fn scripted(manifest: &str, file: &Path, task: &str, rules: &Rules) {
     names.sort_unstable();
     called.sort_unstable();
     assert_eq!(names, called, "{all}");
-    for (path, contents) in rules.files {
-        let now = std::fs::read_to_string(work.path().join(path)).unwrap_or_default();
-        assert_eq!(&now, contents, "{path} changed: {all}");
-    }
+    unchanged(rules, work.path(), before, &all);
     let refusing = rules.refusing.contains(&name.as_ref());
     for (tool, mark) in made {
         if refusing {
@@ -613,6 +635,22 @@ fn holds(dir: &Path, files: &[(&str, &str)], refusing: &[&str], home: Option<&Pa
 fn holds_with(
     dir: &Path,
     files: &[(&str, &str)],
+    refusing: &[&str],
+    page: &[Page],
+    home: Option<&Path>,
+) {
+    holds_all(dir, files, None, refusing, page, home)
+}
+
+/// As [`holds`], each run's folder made by `sample` too.
+fn holds_in(dir: &Path, files: &[(&str, &str)], sample: &Sample, refusing: &[&str]) {
+    holds_all(dir, files, Some(sample), refusing, &[], None)
+}
+
+fn holds_all(
+    dir: &Path,
+    files: &[(&str, &str)],
+    sample: Option<&Sample>,
     refusing: &[&str],
     page: &[Page],
     home: Option<&Path>,
@@ -737,6 +775,7 @@ fn holds_with(
 
     let rules = Rules {
         files,
+        sample,
         page,
         home,
         refusing,
@@ -1170,5 +1209,126 @@ fn code_health() {
         ],
         &[],
         Some(&home),
+    );
+}
+
+/// `from`'s files copied into `to`, as `yobuild new --from` would copy
+/// them (no `node_modules`).
+fn copy_agent(from: &Path, to: &Path) {
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let (path, name) = (entry.path(), entry.file_name());
+        if name == "node_modules" {
+            continue;
+        }
+        if path.is_dir() {
+            std::fs::create_dir_all(to.join(&name)).unwrap();
+            copy_agent(&path, &to.join(&name));
+        } else {
+            std::fs::copy(&path, to.join(&name)).unwrap();
+        }
+    }
+}
+
+/// `git` in `dir`, fixed dates and author, nobody's config: the commits
+/// are the same each time.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "user.name=Ana", "-c", "user.email=ana@example.com"])
+        .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+        .args(["--no-optional-locks"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_DATE", "2026-10-01T12:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-10-01T12:00:00Z")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+#[test]
+fn release_notes() {
+    let Some(dir) = agent("release-notes") else {
+        return;
+    };
+    // Its tool is the person's own rutis plugin, in its own package: copied
+    // as `yobuild new --from` copies it, then `npm ci` there, as its README
+    // says.
+    let copy = tempfile::tempdir().unwrap();
+    copy_agent(&dir, copy.path());
+    let ci = Command::new("npm")
+        .args([
+            "ci", "--ignore-scripts", "--prefer-offline", "--no-audit", "--no-fund",
+        ])
+        .current_dir(copy.path().join("plugins"))
+        .output()
+        .unwrap();
+    assert!(
+        ci.status.success(),
+        "npm ci: {}",
+        String::from_utf8_lossy(&ci.stderr)
+    );
+    // A tiny CLI's history: v0.1.0, v0.2.0, then a fix, a feature and docs.
+    // `no-tag.json` is the same history before any tag.
+    let make = |work: &Path, reply: &str| {
+        git(work, &["init", "-q", "-b", "main"]);
+        let commit = |file: &str, text: &str, message: &str, tag: Option<&str>| {
+            std::fs::write(work.join(file), text).unwrap();
+            git(work, &["add", "-A"]);
+            git(work, &["commit", "-q", "-m", message]);
+            if let Some(tag) = tag.filter(|_| reply != "no-tag.json") {
+                git(work, &["tag", tag]);
+            }
+        };
+        commit(
+            "README.md",
+            "# tiny-cli\n",
+            "Initial commit",
+            Some("v0.1.0"),
+        );
+        commit(
+            "greet.js",
+            "export function greet(n) { return `Hi ${n}` }\n",
+            "feat: add greet",
+            Some("v0.2.0"),
+        );
+        commit(
+            "greet.js",
+            "export function greet(n) { return `Hello, ${n}!` }\n",
+            "fix: greet says Hello with punctuation",
+            None,
+        );
+        commit(
+            "shout.js",
+            "export const shout = s => s.toUpperCase()\n",
+            "feat: add shout command",
+            None,
+        );
+        commit(
+            "README.md", "# tiny-cli\n\nA small CLI.\n", "docs: describe the CLI", None,
+        );
+    };
+    // Read-only: no ref, HEAD or file of the repository moves.
+    let state = |work: &Path| {
+        let refs = git(work, &["for-each-ref", "--format=%(refname) %(objectname)"]);
+        let head = git(work, &["rev-parse", "HEAD"]);
+        let status = git(work, &["status", "--porcelain", "--ignored"]);
+        format!("{refs}{head}{status}")
+    };
+    holds_in(
+        copy.path(),
+        &[],
+        &Sample {
+            make: &make,
+            state: &state,
+        },
+        &[],
     );
 }

@@ -1,0 +1,6 @@
+[
+  { "tools": [{ "name": "version_tags", "arguments": {}, "expect": "latest version tag: v0.2.0" }] },
+  { "tools": [{ "name": "commits_since", "arguments": { "since": "v0.2.0" }, "expect": ["3 commit(s) since v0.2.0", "feat: add shout command", "fix: greet says Hello with punctuation", "docs: describe the CLI", "files: shout.js"] }] },
+  { "tools": [{ "name": "read_file", "arguments": { "path": "shout.js" }, "expect": "toUpperCase" }, { "name": "read_file", "arguments": { "path": "README.md" }, "expect": "tiny-cli" }] },
+  { "text": "## Release notes draft\n\nChanges since v0.2.0.\n\n### Features\n- New `shout` command: turns your text into capitals.\n\n### Fixes\n- The greeting now ends with proper punctuation (\"Hello, Ada!\").\n\n### Other changes\n- The README now describes the command-line tool.\n\n## Unsure how to group\n- 8623fac docs: describe the CLI — put under Other changes; it could be worth a line for users, since the README is what they read." }
+]

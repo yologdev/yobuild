@@ -48,12 +48,22 @@ load it for the session, with the person's yes each time.
   - **An HTTP server's URL** is checked again once its `${…}` values are
     filled in. What its errors say shows each filled value as its
     `${NAME}`, in tool calls too.
-- **Three new gallery agents** (`yobuild new --from <name>`):
+- **Four new gallery agents** (`yobuild new --from <name>`):
   - `self-extending-reviewer` finds and loads ESLint's MCP server;
   - `project-notebook` loads the `pi-memory` pi package and remembers
     your decisions across sessions;
   - `docs-helper` connects to Context7, a remote MCP server, and answers
-    from a library's docs at your project's version.
+    from a library's docs at your project's version;
+  - `release-notes` drafts release notes from git history. It is the
+    first with a tool of its own, a small rutis plugin that the coding
+    agent wrote. `yobuild new` says to run `npm ci` in its `plugins/`.
+- **A tool of your own:** the skill now covers writing a rutis plugin:
+  - its package, with both `@arcships/rutis` and its runtime;
+  - the tool contract;
+  - host services through grants;
+  - arguments from the model, checked before use.
+
+  A missing runtime in a package with its lock is now told `npm ci`.
 - **The skill** covers `[extend]`: which kinds to allow, how to script
   the search, and why the load is tried on the page.
 - **yoagent 0.26.1 and yoagent-rutis 0.10.0.**

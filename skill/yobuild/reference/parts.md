@@ -73,29 +73,111 @@ attachments, credentials, storage, sessions, skills): set
 
 ### rutis (`[[plugin]] rutis = "…"`)
 
-Your own plugin, in TypeScript, written with the rutis SDK
-(`@arcships/rutis`), in an npm package of its own (`"type": "module"`,
-`@arcships/rutis-runtime` 0.12.0 installed):
+A tool of your own, in TypeScript with the rutis SDK: for the one thing no
+listed part does (reading git history in a read-only agent, an exact
+calculation, a private API). Keep it small: one plugin, a few tools.
+
+**Where it lives.** In the agent's folder, in an npm package of its own,
+say `plugins/`:
+- `plugins/package.json`: `"type": "module"`, `"private": true`, and
+  dependencies `@arcships/rutis` (the SDK the plugin imports) and
+  `@arcships/rutis-runtime` (the runtime yobuild starts it in), both at
+  exactly `0.12.0`;
+- `plugins/package-lock.json`, from `npm install --ignore-scripts` there
+  (both packages work without install scripts);
+- the plugin file, `plugins/<name>.ts`.
+
+Keep `package.json` and the lock with the agent, not `node_modules` (a
+`.gitignore` beside `agent.toml` holding `plugins/node_modules/`). This
+package is the one install yobuild does not do: the person runs `npm ci`
+in `plugins/` once, and after `yobuild new --from` copies the agent. Until
+then `run` and `check` refuse, naming that command. Say it in the
+README's "What it needs". (The rule "never install plugin packages by
+hand" is about pinned plugins, which yobuild installs.)
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+
+const run = promisify(execFile)
 
 export default definePlugin({
-  inject: ['yoagent'],              // required: its tools are its own only through it
+  inject: ['yoagent', 'host_workspace'],   // `yoagent`: required; the rest: services its grants allow
   apply(ctx: any) {
-    ctx.effect(ctx.use('yoagent').register('my-tools', {
+    // register(name, handler) returns a disposer; ctx.effect calls it when the plugin unloads.
+    ctx.effect(ctx.use('yoagent').register('git-history', {
       async tools() {
-        return [{ name: 'shout', description: 'Say it loudly', parameters: { type: 'object', properties: { text: { type: 'string' } } } }]
+        return [{
+          name: 'git_log',
+          description: 'Commits since a tag, newest first',
+          parameters: { type: 'object', properties: { since: { type: 'string' } }, additionalProperties: false },
+        }]
       },
-      async call_tool(call: any) {            // call.tool, call.args, call.signal
-        return { text: String(call.args.text).toUpperCase() }   // or a string; is_error: true for a failure
+      async call_tool(call: any) {               // call.tool: the name; call.args: the model's arguments
+        const since = call.args?.since
+        if (since !== undefined && !/^v\d+\.\d+\.\d+$/.test(since)) {
+          return { text: `not a version tag: ${since}`, is_error: true }
+        }
+        const cwd = await ctx.use('host_workspace').cwd()   // the agent's folder; needs `workspace`
+        const range = since ? [`${since}..HEAD`] : []
+        const { stdout } = await run('git', ['--no-pager', 'log', '--format=%h %s', ...range, '--'], { cwd })
+        return { text: stdout || 'no commits' }
       },
     }))
   },
 })
 ```
 
-`[[plugin]] rutis = "plugins/shout.ts"`, `runtime = "node"`.
+```toml
+[[plugin]]
+rutis   = "plugins/git-history.ts"
+runtime = "node"
+grants  = { workspace = true }     # host_workspace.cwd(); see manifest.md's grants
+allow   = ["git_log"]              # it only reads: let it run without asking
+```
+
+**The contract.**
+- `tools()` returns `{ name, description, parameters }` per tool,
+  `parameters` a JSON Schema object. It is asked at each run.
+- `call_tool(call)`: `call.tool` is the tool's name, and `call.args` the
+  model's arguments as it gave them: an object, any key possibly
+  missing (`{}` when it gave none; read it as `call.args ?? {}`). It
+  returns one of:
+  - a string;
+  - `{ text }`, or `{ content: [blocks] }` (not both);
+  - with `is_error: true`, the text becomes the error the model sees
+    (`✗`);
+  - `details`, optional: data for the page, not for the model.
+
+  Any other key or shape is refused as "`call_tool` returned an
+  unexpected value". A throw is a failed call too.
+- **Its arguments come from the model.** Check each one's type and shape
+  before you use it. Never pass one to a shell. Give a program fixed
+  arguments, with a value never in an option's place: a `since` of
+  `--output=/tmp/x` must be refused, not handed to `git`.
+- **Host services through grants.** Add the service to `inject` and call
+  it through `ctx.use(…)`, with its grant on the `[[plugin]]`:
+  - `host_workspace`: `cwd()`, the agent's folder (`workspace = true`).
+    The plugin's own `process.cwd()` is not the agent's folder. The rest
+    of the grants are in `manifest.md`.
+- **It is the person's code.** The gate does not judge what the plugin
+  runs. Its `process.env` is the kept environment (`PATH` and `HOME`
+  among it), plus what its `env` grant passes. Read-only, as in the
+  example, is a property of the code you write:
+  - for git: `--no-pager`, `--no-optional-locks` (git then writes no
+    lock file), and no subcommand that writes;
+  - a repository's own config can still run programs. Turn off what the
+    command would read: `-c log.showSignature=false` (gpg),
+    `-c core.fsmonitor=false`, and `--no-ext-diff --no-textconv` on
+    `log -p` and `diff`.
+- **Trying it:**
+  - `check --json` lists its tools and their kinds.
+  - A scripted reply file `expect`s its results (`scripted.md`).
+  - For a state the sample project is not in (no tag yet, an empty
+    file), make a copy of the sample (`cp -R`), change the copy into that
+    state, and write a reply file of its own for it. A reply file's
+    `expect`s hold for its own sample only.
 
 yobuild's own plugins are named, not given a path:
 - `rutis = "yobuild:todo-plan"` draws a pi to-do plan (`rpiv-todo`'s

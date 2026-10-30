@@ -39,6 +39,22 @@ macro_rules! file {
 
 /// A gallery agent's files: its folder as it is.
 macro_rules! gallery {
+    // An agent with files of its own beyond these (a rutis plugin's
+    // package, `plugins/`), each named.
+    (unlocked $name:literal, [$($script:literal),*], [$($own:literal),*]) => {
+        &[
+            file!("agent.toml", concat!("gallery/", $name, "/agent.toml")),
+            file!("prompts/agent.md", concat!("gallery/", $name, "/prompts/agent.md")),
+            file!("README.md", concat!("gallery/", $name, "/README.md")),
+            $(
+                file!(concat!("scripts/", $script, ".json"), concat!("gallery/", $name, "/scripts/", $script, ".json")),
+                file!(concat!("scripts/", $script, ".task"), concat!("gallery/", $name, "/scripts/", $script, ".task")),
+            )*
+            $(
+                file!($own, concat!("gallery/", $name, "/", $own)),
+            )*
+        ]
+    };
     // An agent that pins nothing has no lock.
     (unlocked $name:literal, [$($script:literal),*]) => {
         &[
@@ -114,6 +130,16 @@ pub const BUILTIN: &[Builtin] = &[
         kind: "gallery",
         summary: "answers how to use a library at the version a project depends on, from docs it connects to when you allow it (Context7, remote)",
         files: gallery!(unlocked "docs-helper", ["demo", "blocked", "not-offered"]),
+    },
+    Builtin {
+        name: "release-notes",
+        kind: "gallery",
+        summary: "drafts release notes from the commits since the last version tag, reading git through a small tool of its own (a rutis plugin)",
+        files: gallery!(
+            unlocked "release-notes",
+            ["demo", "no-tag"],
+            [".gitignore", "plugins/package.json", "plugins/package-lock.json", "plugins/release-history.ts"]
+        ),
     },
     Builtin {
         name: "handoff",
@@ -399,6 +425,11 @@ mod tests {
         let mut out = Vec::new();
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
+            // A plugin's package installed in place (`npm ci`) is not the
+            // agent's.
+            if path.ends_with("node_modules") {
+                continue;
+            }
             match path.is_dir() {
                 true => out.extend(walk(&path)),
                 false => out.push(path),

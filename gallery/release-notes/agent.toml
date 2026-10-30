@@ -1,0 +1,35 @@
+# release-notes: drafts release notes for a git project — every commit since
+# the last version tag (vX.Y.Z), grouped into features, fixes and other
+# changes, in plain words for the project's users — and says which commits
+# it was not sure how to group. It only reads: no bash, no writers, and its
+# one plugin runs git with fixed, read-only arguments.
+#
+# Once, before the first run (installs the plugin's SDK into plugins/):
+#   (cd plugins && npm ci)
+# From the project's folder (the agent works in the folder `run` starts in):
+#   yobuild check /path/to/agent.toml
+#   yobuild run /path/to/agent.toml --scripted /path/to/scripts/demo.json --once "$(cat /path/to/scripts/demo.task)"
+#   DEEPSEEK_API_KEY=… yobuild run /path/to/agent.toml        # live, on the web page
+
+[agent]
+name   = "release-notes"
+model  = "deepseek/deepseek-flash"   # needs DEEPSEEK_API_KEY
+prompt = "prompts/agent.md"
+
+[limits]
+budget_usd         = 0.25   # dollars a run
+session_budget_usd = 1.0    # dollars in all, until yobuild stops
+max_turns          = 20     # model turns a run: a draft needs a handful
+
+[[plugin]]
+rutis   = "plugins/release-history.ts"
+runtime = "node"
+grants  = { workspace = true }            # host_workspace.cwd(): the folder it reads git in
+allow   = ["version_tags", "commits_since"]   # both only read
+
+[builtins]
+tools  = "read-only"        # read, list and search only, inside the project's folder
+report = ["Release notes draft", "Unsure how to group"]
+
+[frontend]
+web = true                  # the web page, at 127.0.0.1:8787
