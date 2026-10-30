@@ -65,7 +65,7 @@ phone    = false                      # the web page on the local network, with 
 terminal = false                      # the terminal UI instead of the web page
 
 [extend]                              # optional: the agent may search for plugins it lacks
-kinds        = ["mcp"]                # "mcp", "pi", "dsh": what find_plugin searches for
+kinds        = ["mcp"]                # "mcp", "pi", "dsh", "remote": what find_plugin searches for
 max_loads    = 2                      # 1 to 5
 max_attempts = 4                      # 1 to 10
 min_age_days = 7                      # 0 to 365: newer versions are not taken
@@ -288,11 +288,15 @@ again with its tools; its tools are the agent's from its next step
 `max_attempts` calls a session. Nothing is written to the manifest: when
 the session ends, yobuild prints the `[[mcp]]` or `[[plugin]]` block
 that would keep each one. `kinds` names what `find_plugin` searches for
-and `load_plugin` loads — `"mcp"`, `"pi"`, `"dsh"`; `["mcp"]` when left
-out — and its `kind` argument defaults to the first listed. pi and DSH
-packages are searched on npm only, by their marks, and run loaded in a
-runtime of their own with their tools only: no hooks, grants, `config`
-or host services (parts.md). Refused with `gate = "off"`; a
+and `load_plugin` loads — `"mcp"`, `"pi"`, `"dsh"`, `"remote"`;
+`["mcp"]` when left out — and its `kind` argument defaults to the first
+listed. pi and DSH packages are searched on npm only, by their marks,
+and run loaded in a runtime of their own with their tools only: no
+hooks, grants, `config` or host services (parts.md). A remote MCP server
+(`"remote"`) is found in the MCP registry only and connected to over
+https: nothing installs or runs here, so `min_age_days` does not apply,
+and the person names the environment variable of any credential it
+takes (parts.md). Refused with `gate = "off"`; a
 plugin's `allow` may not name `find_plugin` or `load_plugin`. `check`
 lists both as allowed and says what `[extend]` lets the agent do.
 

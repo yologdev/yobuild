@@ -248,7 +248,10 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
             None => text.push_str(".\n"),
         }
     }
-    if kept.iter().any(|k| k.remote.is_some()) {
+    if kept
+        .iter()
+        .any(|k| k.remote.as_ref().is_some_and(|r| !r.headers.is_empty()))
+    {
         text.push_str(&format!(
             "\nA remote server's headers name the variables you gave: {} reads them from the environment when it connects, as any `[[mcp]]` header's.\n",
             files.manifest

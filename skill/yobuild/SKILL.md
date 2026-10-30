@@ -62,9 +62,10 @@ my-agent/
    version it lists (**CI** rows first: yobuild's own CI runs them); then
    an MCP server. A part not listed: pin `npm view <package> version`.
    When the person cannot say which tool a task will need, `[extend]`
-   lets the agent find an MCP server — or a pi or DSH package — and load
-   it for the session, the person asked twice (parts.md, "Servers the
-   agent finds itself").
+   lets the agent find an MCP server — or a pi or DSH package, or a
+   remote MCP server it connects to over https — and load it for the
+   session, the person asked twice (parts.md, "Servers the agent finds
+   itself").
 3. **Write** `agent.toml` and a first prompt — from `yobuild new <folder>
    --from <agent>` when a built-in agent is near the request, else from
    `yobuild new <folder>`'s starter (`check` reads it) — then

@@ -4926,4 +4926,5 @@ party's day as npm's is.
    without an exit watch, the block, `check`, the hints (done; an
    optional header with no `{…}` is left off, a required one sent as
    listed; the credential asked at most three times);
-5. the demo, the skill, the guide, `CLAUDE.md` and the roadmap.
+5. the demo, the skill, the guide, `CLAUDE.md` and the roadmap (done:
+   the gallery's `docs-helper`).

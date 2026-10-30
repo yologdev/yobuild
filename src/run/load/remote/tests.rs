@@ -115,6 +115,10 @@ fn the_end_says_a_remote_by_its_address_and_its_headers_variables() {
          # allow = [\"echo\"]   # tools that would run without asking\n\n\
          A remote server's headers name the variables you gave: agent.toml reads them from the environment when it connects, as any `[[mcp]]` header's.\n"
     );
+    // With no header, nothing is said of headers.
+    let mut bare = kept.clone();
+    bare.remote.as_mut().unwrap().headers.clear();
+    assert!(!kept_text(&[bare], &files).contains("headers"));
     kept.stopped = Some(super::ENDED.into());
     assert!(kept_text(&[kept], &files).contains(
         "as docs (tools: echo, stopped this session: the server ended its session (HTTP 404): it is not reconnected this session)"

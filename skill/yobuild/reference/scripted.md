@@ -133,8 +133,9 @@ found. Nobody is there to answer:
 - **Running out of replies** without `report`: the model answers
   `(no more mock responses)` and the run ends `Completed` with that
   answer — check the last answer, not only the outcome.
-- **The same call over and over** (same tool, same arguments): after 3
-  in a row yoagent asks the agent to change approach, then stops the run
+- **The same call over and over** (same tool, same arguments, in one
+  `tools` reply or in replies in a row): after 3 yoagent asks the agent
+  to change approach, then stops the run
   (`Stopped: [Agent stopped: repeated tool call — …]`). Vary the replies.
 - **Limits count**: more `tools` replies than `[limits] max_turns` (50
   by default) stop the run (`Stopped: [Agent stopped: Max turns reached
@@ -168,7 +169,9 @@ throwaway copy of the manifest at the version `find_plugin` offers (in a
 folder of its own, outside the agent's) — a server as an `[[mcp]]`
 entry, a pi package as a `[[plugin]]` with `pi = "<package>@<version>"`,
 a DSH package with `dsh = "<package>@<version>"` (there a package's tools
-have their own names, without the `<name>__`), the entry's `allow`
+have their own names, without the `<name>__`), a remote server as an
+`[[mcp]]` entry with its `url` (and `headers` naming a variable when it
+needs a credential; a remote has no version), the entry's `allow`
 naming the tool you call (else it asks, and under `--once` nobody
 answers: the call is denied and shows no result) — `check` it and run
 that one call scripted under `--once`; then delete the copy. Pinned
@@ -197,7 +200,10 @@ its call no `expect`, or expect only what this reply file's own earlier
 calls put there (a note it wrote a turn before). Run it
 without `--once`, on the page: the person answers both questions
 (start it, then keep it — for a package, "Start the pi package …" and
-"Keep the pi package …") and each call of its tools. Under `--once` the
+"Keep the pi package …"; for a remote, "Connect to the remote MCP server
+…", then which variable holds each credential it takes — nothing, for
+one it does not need — and "Keep the remote MCP server …") and each call
+of its tools. Under `--once` the
 same file stops at `load_plugin`'s refusal: that run shows the search.
 
 The commands you give the person for these files — in the manifest's
@@ -207,7 +213,8 @@ under `--once` the loaded tools' calls name tools that are not there.
 Do not answer the page yourself (no script or client of your own
 playing the person): run each reply file under `--once`, then tell the
 person how to run it on the page and what to answer — Allow, Allow and
-Allow for each call; or Block — and ask what they saw.
+Allow for each call (for a remote, the variable question between the two
+Allows: its name, or nothing); or Block — and ask what they saw.
 
 Three reply files show the shape of a run with `[extend]`:
 
