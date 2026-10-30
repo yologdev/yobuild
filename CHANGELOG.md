@@ -56,7 +56,9 @@ load it for the session, with the person's yes each time.
     from a library's docs at your project's version.
 - **The skill** covers `[extend]`: which kinds to allow, how to script
   the search, and why the load is tried on the page.
-- **yoagent 0.26.1 and yoagent-rutis 0.10.0.**
+- **yoagent 0.26.2 and yoagent-rutis 0.10.0.** yoagent's compaction now
+  keeps the task prompt and the newest turn when a context budget is
+  small.
 - **The DSH base:** unchanged since 0.1.0, so 0.1.0's locks still hold
   under `--locked`.
 
