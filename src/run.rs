@@ -2445,12 +2445,12 @@ fn server_headers(server: &Mcp) -> impl Iterator<Item = &crate::manifest::Value>
 /// region) is no secret, and replacing it would garble the text around it.
 const HIDDEN_AT_LEAST: usize = 8;
 
-/// What an HTTP server's errors must not show: the URL as filled (yoagent
-/// 0.26.1 names only its scheme, host and port, a host filled from a
-/// reference among them; older words named it whole), shown as written, and each
-/// value filled into its URL or headers of [`HIDDEN_AT_LEAST`] characters
-/// or more, shown as its `${NAME}`; longest first, so a value inside
-/// another is not replaced first.
+/// What an HTTP server's errors must not show: each value filled into its
+/// URL or headers of [`HIDDEN_AT_LEAST`] characters or more, shown as its
+/// `${NAME}` (a host or port filled from a shorter value stays visible:
+/// yoagent's errors name the server by origin), and the URL as filled,
+/// shown as written, should any text quote it whole; longest first, so a
+/// value inside another is not replaced first.
 fn hide(
     written: &str,
     filled: &str,
@@ -2785,10 +2785,52 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
         ))
         .into());
     }
+    let shown = Arc::new(shown.to_vec());
     Ok(tools
         .into_iter()
-        .map(|t| Box::new(t) as Box<dyn AgentTool>)
+        .map(|t| match shown.is_empty() {
+            true => Box::new(t) as Box<dyn AgentTool>,
+            false => Box::new(Hiding {
+                inner: t,
+                hide: shown.clone(),
+            }),
+        })
         .collect())
+}
+
+/// An HTTP server's tool whose call errors show each value filled into its
+/// URL or headers as its `${NAME}` ([`hide`]): yoagent redacts the URL's
+/// key-like parts in what a server says, never its headers, and a server
+/// may echo the key it refused.
+struct Hiding {
+    inner: McpToolAdapter,
+    hide: Arc<Vec<(String, String)>>,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for Hiding {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn label(&self) -> &str {
+        self.inner.label()
+    }
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.inner.parameters_schema()
+    }
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: yoagent::ToolContext,
+    ) -> Result<yoagent::ToolResult, yoagent::ToolError> {
+        self.inner.execute(params, ctx).await.map_err(|e| match e {
+            yoagent::ToolError::Failed(why) => yoagent::ToolError::Failed(hidden(&why, &self.hide)),
+            other => other,
+        })
+    }
 }
 
 /// A tool name providers take: 1 to 64 letters, digits, `_` and `-`.
@@ -3425,8 +3467,9 @@ mod tests {
         assert_eq!(url_of(sub), "https://eu.example/mcp");
     }
 
-    /// An HTTP server's errors show its URL as written and its long values
-    /// as their names: reqwest names the URL it failed to reach.
+    /// An HTTP server's errors show its long values as their names, and its
+    /// URL as written should a text quote it whole: a server may echo what
+    /// it was sent.
     #[test]
     fn an_http_servers_errors_hide_what_was_filled_in() {
         let written = "https://api.example/mcp?api_key=${KEY}&r=${R}";
@@ -3441,13 +3484,13 @@ mod tests {
         ];
         let hide = super::hide(written, filled, values.into_iter());
         let error = format!(
-            "HTTP error: error sending request for url ({filled}); europe; \
+            "the server said: no access for {filled}; europe; \
              echoed sk-live-123456 and Bearer tok-abcdefgh"
         );
         assert_eq!(
             super::hidden(&error, &hide),
             format!(
-                "HTTP error: error sending request for url ({written}); europe; \
+                "the server said: no access for {written}; europe; \
                  echoed ${{KEY}} and Bearer ${{TOKEN}}"
             )
         );

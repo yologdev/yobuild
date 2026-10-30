@@ -410,7 +410,8 @@ async fn a_server_without_tools_or_with_a_name_tools_cannot_take_is_refused() {
 }
 
 /// An MCP server over HTTP that answers like the bash one and records each
-/// request's `authorization` header.
+/// request's `authorization` header; a call with the text `leak` fails,
+/// its error echoing that header.
 async fn http_server() -> (
     std::net::SocketAddr,
     std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -435,6 +436,18 @@ async fn http_server() -> (
                 let Some(id) = request.get("id").cloned() else {
                     return StatusCode::ACCEPTED.into_response();
                 };
+                if request["params"]["arguments"]["text"] == "leak" {
+                    let auth = headers
+                        .get("authorization")
+                        .map(|a| a.to_str().unwrap().to_owned())
+                        .unwrap_or_default();
+                    let error = json!({ "code": -32000, "message": format!("refused {auth}") });
+                    return (
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        json!({ "jsonrpc": "2.0", "id": id, "error": error }).to_string(),
+                    )
+                        .into_response();
+                }
                 let result = match request["method"].as_str() {
                     Some("initialize") => json!({
                         "protocolVersion": "2024-11-05",
@@ -466,11 +479,15 @@ async fn http_server() -> (
 async fn an_http_server_gets_its_headers_with_their_values_filled_in() {
     let (addr, seen) = http_server().await;
     // Set for this test only: no other test reads it.
-    std::env::set_var("YOBUILD_RUN_TEST_TOKEN", "t0ken");
+    std::env::set_var("YOBUILD_RUN_TEST_TOKEN", "t0ken-0123456789");
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("script.json"),
-        SCRIPT.replace("server__echo", "web__echo"),
+        r#"[
+  { "tools": [{ "name": "web__echo", "arguments": { "text": "hi" } }] },
+  { "tools": [{ "name": "web__echo", "arguments": { "text": "leak" } }] },
+  { "text": "done" }
+]"#,
     )
     .unwrap();
     std::fs::write(
@@ -484,10 +501,19 @@ async fn an_http_server_gets_its_headers_with_their_values_filled_in() {
     )
     .unwrap();
     let ended = run_once(dir.path()).await;
-    assert_eq!(results(&ended), [("web echoed hi".to_string(), false)]);
+    // The call whose error echoes the key: its value shown as its name.
+    let results = results(&ended);
+    assert_eq!(results[0], ("web echoed hi".to_string(), false));
+    let (echoed, failed) = &results[1];
+    assert!(
+        *failed
+            && echoed.contains("refused Bearer ${YOBUILD_RUN_TEST_TOKEN}")
+            && !echoed.contains("t0ken-0123456789"),
+        "{echoed}"
+    );
     let seen = seen.lock().unwrap().clone();
     assert!(
-        !seen.is_empty() && seen.iter().all(|a| a == "Bearer t0ken"),
+        !seen.is_empty() && seen.iter().all(|a| a == "Bearer t0ken-0123456789"),
         "{seen:?}"
     );
 }
