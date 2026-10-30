@@ -2350,6 +2350,9 @@ enum Launch {
     Http {
         url: String,
         headers: Vec<(String, String)>,
+        /// What its errors must not show, and what they show instead
+        /// ([`hidden`]).
+        hide: Vec<(String, String)>,
     },
 }
 
@@ -2406,15 +2409,112 @@ fn launch(
                 withheld: withheld.to_vec(),
             }
         }
-        Transport::Http { url, headers } => Launch::Http {
-            url: url.resolve_with(lookup).map_err(|e| failed(&e))?,
-            headers: headers
+        Transport::Http { url, headers } => {
+            let filled = filled_url(url, lookup).map_err(|e| failed(&e))?;
+            let headers = headers
                 .iter()
                 .map(|(name, value)| Ok((name.clone(), value.resolve_with(lookup)?)))
                 .collect::<Result<_, crate::manifest::Unset>>()
-                .map_err(|e| failed(&e))?,
-        },
+                .map_err(|e| failed(&e))?;
+            let values = std::iter::once(url)
+                .chain(server_headers(server))
+                .flat_map(|v| v.references())
+                .filter_map(|name| Some((lookup(name)?, format!("${{{name}}}"))));
+            Launch::Http {
+                hide: hide(url.as_str(), &filled, values),
+                url: filled,
+                headers,
+            }
+        }
     })
+}
+
+/// An HTTP server's header values, as written.
+fn server_headers(server: &Mcp) -> impl Iterator<Item = &crate::manifest::Value> {
+    match &server.transport {
+        Transport::Http { headers, .. } => Some(headers.values()),
+        Transport::Stdio { .. } => None,
+    }
+    .into_iter()
+    .flatten()
+}
+
+/// Shortest value [`hide`] replaces on its own: a shorter one (a port, a
+/// region) is no secret, and replacing it would garble the text around it.
+const HIDDEN_AT_LEAST: usize = 8;
+
+/// What an HTTP server's errors must not show: the URL as filled (reqwest
+/// names it: "… for url (https://…?api_key=…)"), shown as written, and each
+/// value filled into its URL or headers of [`HIDDEN_AT_LEAST`] characters
+/// or more, shown as its `${NAME}`; longest first, so a value inside
+/// another is not replaced first.
+fn hide(
+    written: &str,
+    filled: &str,
+    values: impl Iterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    let mut hide: Vec<(String, String)> = values
+        .filter(|(value, _)| value.chars().count() >= HIDDEN_AT_LEAST)
+        .collect();
+    if filled != written {
+        hide.push((filled.to_owned(), written.to_owned()));
+    }
+    hide.sort_by_key(|(value, _)| std::cmp::Reverse(value.len()));
+    hide.dedup_by(|a, b| a.0 == b.0);
+    hide
+}
+
+/// `text` with each of `hide`'s values replaced by what is shown instead.
+fn hidden(text: &str, hide: &[(String, String)]) -> String {
+    hide.iter().fold(text.to_owned(), |text, (value, shown)| {
+        text.replace(value.as_str(), shown)
+    })
+}
+
+/// A server's URL filled in, checked again as an endpoint (design §14,
+/// "Stage 3", point 10): when read, each reference stood in as `x`, so
+/// `https://${HOST}/mcp` could become anything. A reference filled empty
+/// is refused, and a host the manifest writes out whole stays that host
+/// (`https://api.example${P}/mcp` cannot become `api.example.evil.example`).
+/// What is wrong is said with the URL as written, never as filled (a value
+/// may be a secret). The URL returned is the one checked, as `url` writes
+/// it, so what connects is what was checked.
+fn filled_url(
+    url: &crate::manifest::Value,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
+    let written = url.as_str();
+    if let Some(name) = url
+        .references()
+        .into_iter()
+        .find(|name| lookup(name).is_some_and(|v| v.is_empty()))
+    {
+        return Err(format!("url {written:?}: `{name}` is set empty"));
+    }
+    let filled = url
+        .resolve_with(lookup)
+        .map_err(|e: crate::manifest::Unset| e.to_string())?;
+    let parsed = url::Url::parse(&filled)
+        .map_err(|e| format!("url {written:?}, filled in, is not a URL: {e}"))?;
+    if let Some(why) = crate::manifest::endpoint_problem(&parsed) {
+        return Err(format!("url {written:?}, filled in, {why}"));
+    }
+    // The host as written: the same whatever the references hold, a `/`
+    // in each ending the host where it stands — so a reference after a
+    // host written out (`api.example${P}`) may not change it, and one
+    // standing for the host (`${HOST}`, `${SUB}.example`) may.
+    let host_with = |stand_in: &'static str| {
+        let text = url.resolve_with(|_| Some(stand_in.into())).ok()?;
+        Some(url::Url::parse(&text).ok()?.host_str()?.to_owned())
+    };
+    if let Some(host) = host_with("/x").filter(|h| Some(h) == host_with("/y").as_ref()) {
+        if parsed.host_str() != Some(host.as_str()) {
+            return Err(format!(
+                "url {written:?}, filled in, names another host than {host:?}, the one it writes"
+            ));
+        }
+    }
+    Ok(parsed.into())
 }
 
 /// The credentials yoagent reads that are set in this process (design §12,
@@ -2612,7 +2712,13 @@ fn without(
 /// An MCP server's tools, each `<server>__<tool>` (the server is called with
 /// its own names); those its `allow` names must be among them.
 async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, BoxError> {
-    let failed = |e: &dyn std::fmt::Display| format!("mcp {}: {e}", server.name);
+    let shown: &[(String, String)] = match launch {
+        Launch::Http { hide, .. } => hide,
+        Launch::Stdio { .. } => &[],
+    };
+    let failed = |e: &dyn std::fmt::Display| {
+        format!("mcp {}: {}", server.name, hidden(&e.to_string(), shown))
+    };
     let client = match launch {
         Launch::Stdio {
             command,
@@ -2627,7 +2733,7 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
                 .await
                 .map_err(|e| failed(&e))?
         }
-        Launch::Http { url, headers } => {
+        Launch::Http { url, headers, .. } => {
             let mut transport = HttpTransport::new(url).map_err(|e| failed(&e))?;
             for (name, value) in headers {
                 transport = transport
@@ -3239,6 +3345,116 @@ mod tests {
         assert_eq!(bin(None).unwrap_err(), "@s/srv: its bin is not a path");
         write("null");
         assert_eq!(bin(None).unwrap_err(), "@s/srv has no bin");
+    }
+
+    /// An HTTP server's URL is checked again once filled in: a reference
+    /// stood in as `x` when read could bring a user, no URL at all, nothing,
+    /// or another host than the one written out. The refusal quotes the URL
+    /// as written, never the value filled in.
+    #[test]
+    fn an_http_servers_url_is_checked_again_once_filled_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = |url: &str| {
+            let m = Manifest::parse(
+                &format!(
+                    "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-chat\"\n\
+                     [[mcp]]\nname = \"s\"\nurl = \"{url}\"\n"
+                ),
+                &dir.path().join("a.toml"),
+                dir.path(),
+            )
+            .unwrap();
+            m.mcp[0].clone()
+        };
+        let launch_with = |url: &str, value: Option<&'static str>| {
+            super::launch(
+                &server(url),
+                &install::Installed::default(),
+                &move |_: &str| value.map(str::to_owned),
+                &[],
+            )
+        };
+        let launch = |host: &'static str| launch_with("https://${HOST}/mcp", Some(host));
+        let url_of = |launch: Result<Launch, BoxError>| match launch {
+            Ok(Launch::Http { url, .. }) => url,
+            Ok(Launch::Stdio { .. }) => panic!("http"),
+            Err(e) => panic!("{e}"),
+        };
+        let Launch::Http { url, .. } = launch("docs.example").unwrap() else {
+            panic!("http")
+        };
+        assert_eq!(url, "https://docs.example/mcp");
+        let user = launch("me:s3cret@evil.example").err().unwrap().to_string();
+        assert_eq!(
+            user,
+            "mcp s: url \"https://${HOST}/mcp\", filled in, has a user in it: give credentials as a header"
+        );
+        let bad = launch("a b").err().unwrap().to_string();
+        assert!(
+            bad.starts_with("mcp s: url \"https://${HOST}/mcp\", filled in, is not a URL: "),
+            "{bad}"
+        );
+        // Unset, and set empty (`https:///mcp` would read as the host `mcp`).
+        let unset = launch_with("https://${HOST}/mcp", None).err().unwrap();
+        assert_eq!(
+            unset.to_string(),
+            "mcp s: the environment variable HOST is not set"
+        );
+        let empty = launch("").err().unwrap();
+        assert_eq!(
+            empty.to_string(),
+            "mcp s: url \"https://${HOST}/mcp\": `HOST` is set empty"
+        );
+        // A host written out whole stays that host; one from a reference
+        // may be any, and a local http URL stays local.
+        let moved = launch_with("https://api.example${P}/mcp", Some(".evil.example"));
+        assert_eq!(
+            moved.err().unwrap().to_string(),
+            "mcp s: url \"https://api.example${P}/mcp\", filled in, names another host than \"api.example\", the one it writes"
+        );
+        let path = launch_with("http://localhost:8080/${P}", Some("mcp"));
+        assert_eq!(url_of(path), "http://localhost:8080/mcp");
+        let query = launch_with("https://api.example/mcp?k=${K}", Some("v"));
+        assert_eq!(url_of(query), "https://api.example/mcp?k=v");
+        let port = launch_with("https://api.example${P}/mcp", Some(":8443"));
+        assert_eq!(url_of(port), "https://api.example:8443/mcp");
+        let sub = launch_with("https://${SUB}.example/mcp", Some("eu"));
+        assert_eq!(url_of(sub), "https://eu.example/mcp");
+    }
+
+    /// An HTTP server's errors show its URL as written and its long values
+    /// as their names: reqwest names the URL it failed to reach.
+    #[test]
+    fn an_http_servers_errors_hide_what_was_filled_in() {
+        let written = "https://api.example/mcp?api_key=${KEY}&r=${R}";
+        let filled = "https://api.example/mcp?api_key=sk-live-123456&r=eu";
+        let values = [
+            ("sk-live-123456".to_owned(), "${KEY}".to_owned()),
+            ("eu".to_owned(), "${R}".to_owned()),
+            (
+                "Bearer tok-abcdefgh".to_owned(),
+                "Bearer ${TOKEN}".to_owned(),
+            ),
+        ];
+        let hide = super::hide(written, filled, values.into_iter());
+        let error = format!(
+            "HTTP error: error sending request for url ({filled}); europe; \
+             echoed sk-live-123456 and Bearer tok-abcdefgh"
+        );
+        assert_eq!(
+            super::hidden(&error, &hide),
+            format!(
+                "HTTP error: error sending request for url ({written}); europe; \
+                 echoed ${{KEY}} and Bearer ${{TOKEN}}"
+            )
+        );
+        // Nothing filled: nothing hidden.
+        assert!(super::hide(
+            "https://a.example/mcp",
+            "https://a.example/mcp",
+            std::iter::empty()
+        )
+        .is_empty());
     }
 
     /// A stdio server has the credentials set here taken out but those its

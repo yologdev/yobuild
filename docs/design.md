@@ -4828,7 +4828,23 @@ yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
 10. **First, the manifest's gap.** A manifest's `[[mcp]] url` holding a
     reference is checked by `endpoint` as `x` when read and never again,
     so `https://${HOST}/mcp` could become anything. It is checked again
-    once filled, in `run::launch`, before anything connects.
+    once filled, in `run::launch`, before anything connects. Done
+    (`run::filled_url`):
+    - a reference filled empty is refused (`https://${HOST}/mcp` would
+      read as the host `mcp`);
+    - a host written out before a reference stays that host
+      (`https://api.example${P}/mcp` may gain a port, not become
+      `api.example.evil.example`); a host from a reference may be any;
+    - the URL connected to is the one checked, as `url` writes it;
+    - a refusal quotes the URL as written, never as filled, since a value
+      may be a secret; and what connecting or listing its tools says
+      (reqwest names the URL: "… for url (https://…?api_key=…)") has the
+      filled URL shown as written and each value of 8 characters or more
+      filled into the URL or headers as its `${NAME}` (`run::hide`).
+    - Not covered: a tool call's error once connected reaches the model
+      and the log as yoagent's `McpToolAdapter` words it, the URL filled
+      — for yoagent (`reqwest::Error::without_url`), asked only with the
+      owner's approval.
 11. **OAuth later.** Servers that need a sign-in refuse at `initialize`,
     said as such. A sign-in on the page (the provider's page opened, the
     token kept somewhere, refreshed) is its own design.

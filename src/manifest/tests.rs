@@ -456,7 +456,7 @@ fn models_are_provider_and_id() {
     );
     assert_eq!(
         error("[agent]\nname = \"a\"\nmodel = \"acme/m\"\nbase_url = \"http://acme.example/v1\"\napi_key_env = \"K\"\n"),
-        "4:12: base_url \"http://acme.example/v1\": https, or http on this machine (localhost)"
+        "4:12: base_url \"http://acme.example/v1\" is not https, nor http on this machine (localhost)"
     );
     assert_eq!(
         error("[agent]\nname = \"a\"\nmodel = \"acme/m\"\nbase_url = \"https://acme.example/v1\"\napi_key_env = \"\"\n"),
@@ -660,7 +660,7 @@ fn http_servers_are_https_or_on_this_machine() {
     ] {
         assert_eq!(
             error(&with(&format!("[[mcp]]\nurl = \"{url}\"\n"))),
-            format!("5:7: url {url:?}: https, or http on this machine (localhost)")
+            format!("5:7: url {url:?} is not https, nor http on this machine (localhost)")
         );
     }
     assert_eq!(
@@ -776,7 +776,7 @@ fn local_providers_take_no_key() {
         error(
             "[agent]\nname = \"a\"\nmodel = \"ollama/x\"\nbase_url = \"http://gpu.lan:11434/v1\"\n"
         ),
-        "4:12: base_url \"http://gpu.lan:11434/v1\": https, or http on this machine (localhost)"
+        "4:12: base_url \"http://gpu.lan:11434/v1\" is not https, nor http on this machine (localhost)"
     );
 }
 
