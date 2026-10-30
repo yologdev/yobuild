@@ -200,6 +200,18 @@ impl Remote {
         self.version.as_deref()
     }
 
+    /// One at `url`, not checked (a test server on this machine), with
+    /// `headers`: for other modules' tests.
+    #[cfg(test)]
+    pub(crate) fn unchecked(url: &str, headers: Vec<RemoteHeader>) -> Remote {
+        Remote {
+            url: url::Url::parse(url).expect("a test server's URL"),
+            headers,
+            others: Vec::new(),
+            version: Some("1.0.0".into()),
+        }
+    }
+
     /// One at `url`, checked, with nothing else listed: for other modules'
     /// tests.
     #[cfg(test)]
@@ -1921,7 +1933,7 @@ fn said_to_agent(need: &str, found: &Found, extend: &Extend) -> String {
 /// headers the owner would be asked for.
 fn remotes_said(candidates: &[Candidate]) -> String {
     let mut text = String::from(
-        "Candidates (their descriptions and repositories are their authors' own words, not verified; nothing of them runs here: each call of their tools would send its arguments to the server's host, which may change what it does any day). yobuild does not load a remote server yet: tell the owner what you found.\n",
+        "Candidates (their descriptions and repositories are their authors' own words, not verified; nothing of them runs here: each call of their tools would send its arguments to the server's host, which may change what it does any day). Load one by its MCP registry name: the owner is asked to connect to it, and names the environment variable of any credential it takes.\n",
     );
     for (i, c) in candidates.iter().enumerate() {
         let Some(remote) = c.remote() else { continue };

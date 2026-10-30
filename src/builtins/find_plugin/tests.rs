@@ -1308,7 +1308,7 @@ fn a_remote_candidate_is_said_with_its_address_and_the_headers_asked() {
         said_to_agent("library docs", &found, &extend),
         "find_plugin(\"library docs\", kind \"remote\"): remote MCP servers, as the sources say. Nothing was installed or started.\n\
          Sources: MCP registry: 1 found.\n\
-         Candidates (their descriptions and repositories are their authors' own words, not verified; nothing of them runs here: each call of their tools would send its arguments to the server's host, which may change what it does any day). yobuild does not load a remote server yet: tell the owner what you found.\n\
+         Candidates (their descriptions and repositories are their authors' own words, not verified; nothing of them runs here: each call of their tools would send its arguments to the server's host, which may change what it does any day). Load one by its MCP registry name: the owner is asked to connect to it, and names the environment variable of any credential it takes.\n\
          1. io.github.upstash/context7 at mcp.context7.com (version 1.0.2, published 2026-09-30; found in the MCP registry)\n   Up-to-date docs\n   \
          address: https://mcp.context7.com/mcp; headers: Authorization (optional, secret), X-Theme (optional, left off), X-Client (required, fixed) (the owner names the environment variable of each one asked; you never do); repository (claimed by the entry): https://github.com/upstash/context7"
     );

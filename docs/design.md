@@ -4918,5 +4918,7 @@ party's day as npm's is.
    uncounted, until 4; a name of one label is refused too, as a machine
    on this network);
 4. `load_plugin` for a remote: the questions, the credential, `Server`
-   without an exit watch, the block, `check`, the hints;
+   without an exit watch, the block, `check`, the hints (done; an
+   optional header with no `{…}` is left off, a required one sent as
+   listed; the credential asked at most three times);
 5. the demo, the skill, the guide, `CLAUDE.md` and the roadmap.

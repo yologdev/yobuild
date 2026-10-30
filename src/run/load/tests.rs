@@ -101,6 +101,7 @@ fn kept(name: &str, args: &[&str]) -> Kept {
         args: args.iter().map(|a| a.to_string()).collect(),
         tools: vec!["lint-files".into()],
         stopped: None,
+        remote: None,
     }
 }
 
@@ -156,6 +157,7 @@ fn the_end_says_a_package_as_a_plugin_block_and_what_it_would_share() {
         args: Vec::new(),
         tools: vec!["memory_add".into(), "scratchpad".into()],
         stopped: None,
+        remote: None,
     };
     assert_eq!(
         pi.block(),
@@ -799,8 +801,8 @@ async fn what_the_limits_refuse_before_anything_is_installed() {
             "lint-mcp@1.3.0 is not the version find_plugin offered: lint-mcp@1.2.0 (or give no `version`)",
         ),
         (
-            json!({ "package": "io.github.upstash/context7" }),
-            "io.github.upstash/context7 is a remote MCP server: yobuild does not connect to one the agent found yet (nothing was counted)",
+            json!({ "package": "io.github.upstash/context7", "version": "1.0.2" }),
+            "io.github.upstash/context7: a remote server has no version to take (give no `version`)",
         ),
     ];
     for (args, said) in cases {
@@ -1097,6 +1099,7 @@ fn a_stopped_packages_tools_are_refused_and_the_naming_holds_loaded_weakly() {
         args: Vec::new(),
         tools: vec!["shout".into()],
         stopped: stopped.map(str::to_owned),
+        remote: None,
     };
     locked(&loaded.0.lists).kept.extend([
         package(ExtendKind::Pi, "loud", Some("its runtime stopped: exit 7")),

@@ -313,7 +313,7 @@ fn extend_note(extend: &crate::manifest::Extend) -> String {
         note.push_str("; a pi or DSH package loaded runs in a runtime of its own with its tools only: no hooks, grants, config or host services");
     }
     if extend.kinds.contains(&ExtendKind::Remote) {
-        note.push_str("; a remote MCP server is found only, not loaded yet (a later step): `load_plugin` refuses it, uncounted");
+        note.push_str("; a remote MCP server is connected over https, nothing of it running here: each call sends its arguments to its host, and the owner names the environment variable of any credential it takes");
     }
     note
 }
@@ -1523,7 +1523,7 @@ mod tests {
                 )
             )
         );
-        let remote = "; a remote MCP server is found only, not loaded yet (a later step): `load_plugin` refuses it, uncounted";
+        let remote = "; a remote MCP server is connected over https, nothing of it running here: each call sends its arguments to its host, and the owner names the environment variable of any credential it takes";
         assert_eq!(
             with(vec![ExtendKind::Remote]),
             format!(
