@@ -3673,7 +3673,11 @@ made plain:
   first version needs one); from 0.2 by crates.io's trusted publishing
   (the crate's settings name this repository, `publish.yml` and the
   `crates-io` environment; a token for 30 minutes from the job's GitHub
-  identity, none stored). A version already there is skipped; a failure
+  identity, none stored). Changed 2026-10-30: v0.2.0's run found no
+  trusted-publishing entry on crates.io (the stored token had been
+  deleted the day the workflow changed, before the entry was ever tried),
+  so the token is stored again and used when set; trusted publishing is
+  the way when it is not. A version already there is skipped; a failure
   is said on the release ("Not on crates.io yet", with the run); a
   pre-release (a tag with `-`) stays off crates.io.
 - **Windows (open question 7).** Decided, and shipped so in 0.1: not
