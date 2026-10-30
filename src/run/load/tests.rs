@@ -721,8 +721,14 @@ fn tool(once: bool) -> (LoadPlugin, Driver, tempfile::TempDir) {
     lint_as_pi.kind = ExtendKind::Pi;
     let mut dsh = candidate("dsh-lint", Ok("1.0.0"));
     dsh.kind = ExtendKind::Dsh;
-    let mut remote = candidate("io.github.upstash/context7", Ok("1.0.2"));
+    let mut remote = candidate(
+        "io.github.upstash/context7",
+        Err(crate::builtins::find_plugin::NO_VERSION),
+    );
     remote.kind = ExtendKind::Remote;
+    remote.remote = Some(crate::builtins::find_plugin::Remote::stand_in(
+        "https://mcp.context7.com/mcp",
+    ));
     find.remember(&[lint_as_pi]);
     find.remember(&[
         pi,

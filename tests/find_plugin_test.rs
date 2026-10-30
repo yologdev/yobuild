@@ -465,6 +465,16 @@ fn npm_failing_for_every_candidate_is_an_error_not_ten_unloadable_ones() {
 
 #[test]
 fn a_registry_that_is_not_https_is_refused_before_anything_starts() {
+    // An agent finding remote servers alone reads it too.
+    let remote = project_with("kinds = [\"remote\"]\n", "[]");
+    let out = run_with(remote.path(), "http://registry.example.com", 9);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("YOBUILD_MCP_REGISTRY \"http://registry.example.com\""),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let dir = project("[]");
     let out = run_with(dir.path(), "http://registry.example.com", 9);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -620,11 +630,16 @@ fn remote_servers_are_found_in_the_mcp_registry_alone() {
     });
     let dir = project_with(
         "kinds = [\"remote\"]\n",
-        r#"[{ "tools": [{ "name": "find_plugin", "arguments": { "need": "lint" } }] },
+        r#"[{ "tools": [{ "name": "find_plugin", "arguments": { "need": "lint" }, "expect": [
+              "Sources: MCP registry: failed (HTTP 503",
+              "The MCP registry, the one source for this kind, failed: this is not \"nothing found\"."
+            ] }] },
             { "text": "done" }]"#,
     );
     let out = run(dir.path(), port);
     let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(!stderr.contains("the reply file expected"), "{stderr}");
     assert!(
         stderr.contains("Warning: find_plugin could not search: MCP registry: HTTP 503")
             && stderr.contains("  find_plugin ✗ find_plugin(\"lint\", kind \"remote\")"),
@@ -649,8 +664,8 @@ fn check_of_a_remote_agent_says_it_asks_the_mcp_registry_only() {
     assert!(
         notes.iter().any(|n| {
             let n = n.as_str().unwrap();
-            n.starts_with("[extend]: the agent may search the MCP registry for remote MCP servers (")
-                && n.ends_with("; a remote MCP server is connected over https, nothing of it running here: each call sends its arguments to its host, and the owner names the environment variable of any credential it takes")
+            n.starts_with("[extend]: the agent may search the MCP registry for remote MCP servers (`find_plugin`) and load")
+                && n.ends_with("; a remote MCP server is found only, not loaded yet (a later step): `load_plugin` refuses it, uncounted")
         }),
         "{notes:#?}"
     );

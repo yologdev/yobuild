@@ -658,7 +658,7 @@ fn pieces(text: &str) -> Result<Vec<Piece<'_>>, String> {
 }
 
 /// `[A-Za-z_][A-Za-z0-9_]*`.
-fn identifier(name: &str) -> bool {
+pub(crate) fn identifier(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()

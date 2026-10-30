@@ -4716,24 +4716,35 @@ yoagent 0.25.16's HTTP transport, as `[[mcp]] url` uses it today:
 2. **Which remotes count.** The entry's first `remotes` item of type
    `streamable-http` whose URL is checked by `manifest::endpoint` and,
    since the agent picked it, more strictly:
-   - **The address:** https only, and not an IP address, `localhost`, nor
-     a `.local` or `.internal` name. A server the agent found may not reach
+   - **The address:** https only, and not an IP address (in any form the
+     URL parser reads: `2130706433`, `0x7f000001`, `[::ffff:127.0.0.1]`),
+     `localhost`, `localhost.localdomain`, `localhost6.localdomain6`, a
+     `.localhost`, `.local`, `.internal`, `.home.arpa` or `.localdomain`
+     name, nor a name of one label. A server the agent found may not reach
      this machine or its network by name. The name is not resolved, so a
      public name pointing inward is not caught: said as a limit.
+   - **The name:** of the registry's shape (`namespace/name`, plain, at
+     most 200 characters), since the agent reads it and passes it to
+     `load_plugin`; else left out, counted.
    - **Left out, each counted on the sources' line:**
      - a URL with `{…}` values: "its address takes values";
      - SSE only: "SSE only: yoagent speaks streamable HTTP";
      - an address refused, with why;
-     - a header whose `value` yobuild cannot fill: more than one `{…}`, or
-       a literal part other than `Bearer`/`Basic`/`Token` on a header the
-       manifest's secret rule (`guard`) covers.
+     - a header yobuild would send whose `value` it cannot fill: more than
+       one `{…}`, a `$`, a name or value too long (64, 256), or a literal
+       part other than `Bearer`/`Basic`/`Token` on a header the manifest's
+       secret rule (`guard`) covers. A `value` with no `{…}` is fixed:
+       sent as listed when required, nothing asked; left off when
+       optional. Names and values are kept whole (they are sent), cut only
+       where shown.
    - **Several remotes:** the others are listed in the first question's
      details.
 3. **No age and no version to take.** `min_age_days` does not apply: a
    remote has no versions to choose between. The entry's `version` and
    `publishedAt` are shown as the registry says them. `load_plugin`'s
    `version` is refused for a remote: "a remote server has no version to
-   take".
+   take". The candidate's version is that refusal (an `Err`), the
+   entry's version kept beside its address.
 4. **The name.** `default_name` from the registry name:
    - the part after `/`, without the `mcp`/`server` words as for a package;
    - else the namespace's last label: `com.notion/mcp` → `notion`,

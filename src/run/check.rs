@@ -292,9 +292,18 @@ fn extend_note(extend: &crate::manifest::Extend) -> String {
         [] => String::new(),
     };
     let sources = extend.sources();
+    // Remote servers have no versions to choose between: the age is the
+    // packages'.
+    let age = match extend.asks_npm() {
+        true => format!(
+            ", versions published {} or more days ago",
+            extend.min_age_days
+        ),
+        false => String::new(),
+    };
     let mut note = format!(
-        "[extend]: the agent may search {sources} for {kinds} (`find_plugin`, versions published {} or more days ago) and load up to {} a session (`load_plugin`, in {} calls): each with the owner's approval before it starts and again with its tools, which all ask, call by call; nothing is written to the manifest",
-        extend.min_age_days, extend.max_loads, extend.max_attempts
+        "[extend]: the agent may search {sources} for {kinds} (`find_plugin`{age}) and load up to {} a session (`load_plugin`, in {} calls): each with the owner's approval before it starts and again with its tools, which all ask, call by call; nothing is written to the manifest",
+        extend.max_loads, extend.max_attempts
     );
     let packages = extend
         .kinds
@@ -304,7 +313,7 @@ fn extend_note(extend: &crate::manifest::Extend) -> String {
         note.push_str("; a pi or DSH package loaded runs in a runtime of its own with its tools only: no hooks, grants, config or host services");
     }
     if extend.kinds.contains(&ExtendKind::Remote) {
-        note.push_str("; a remote MCP server is connected over https, nothing of it running here: each call sends its arguments to its host, and the owner names the environment variable of any credential it takes");
+        note.push_str("; a remote MCP server is found only, not loaded yet (a later step): `load_plugin` refuses it, uncounted");
     }
     note
 }
@@ -1514,17 +1523,20 @@ mod tests {
                 )
             )
         );
-        let remote = "; a remote MCP server is connected over https, nothing of it running here: each call sends its arguments to its host, and the owner names the environment variable of any credential it takes";
+        let remote = "; a remote MCP server is found only, not loaded yet (a later step): `load_plugin` refuses it, uncounted";
         assert_eq!(
             with(vec![ExtendKind::Remote]),
             format!(
                 "{}{remote}",
                 mcp.replace(
-                    "the MCP registry and npm for MCP servers",
-                    "the MCP registry for remote MCP servers"
+                    "the MCP registry and npm for MCP servers (`find_plugin`, versions published 7 or more days ago)",
+                    "the MCP registry for remote MCP servers (`find_plugin`)"
                 )
             )
         );
+        // Beside a package kind, the age stays: it is the packages'.
+        assert!(with(vec![ExtendKind::Remote, ExtendKind::Pi])
+            .contains("(`find_plugin`, versions published 7 or more days ago)"));
     }
 
     fn entry(name: &str, ecosystem: Ecosystem) -> Entry {

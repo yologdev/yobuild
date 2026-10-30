@@ -59,6 +59,10 @@ pub(crate) struct Kept {
     pub stopped: Option<String>,
 }
 
+/// A remote is refused before anything is kept, until its load comes
+/// (design §14 "Stage 3", PR 4): a `Kept` is never one.
+const REMOTE_NOT_KEPT: &str = "a remote MCP server is refused before it is kept";
+
 impl Kept {
     /// The `[[mcp]]` (or `[[plugin]]`) block that would keep it.
     pub fn block(&self) -> String {
@@ -70,9 +74,8 @@ impl Kept {
                 .join(", ")
         };
         let (table, key) = match self.kind {
-            // A remote is refused before anything is kept, until its load
-            // comes (design §14 "Stage 3", PR 4).
-            ExtendKind::Mcp | ExtendKind::Remote => ("mcp", "npm  "),
+            ExtendKind::Mcp => ("mcp", "npm  "),
+            ExtendKind::Remote => unreachable!("{REMOTE_NOT_KEPT}"),
             ExtendKind::Pi => ("plugin", "pi   "),
             ExtendKind::Dsh => ("plugin", "dsh  "),
         };
@@ -202,7 +205,8 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
     let mut sets: Vec<&str> = Vec::new();
     for k in kept {
         let set = match k.kind {
-            ExtendKind::Mcp | ExtendKind::Remote => "mcp",
+            ExtendKind::Mcp => "mcp",
+            ExtendKind::Remote => unreachable!("{REMOTE_NOT_KEPT}"),
             ExtendKind::Pi => "pi",
             ExtendKind::Dsh => "dsh",
         };

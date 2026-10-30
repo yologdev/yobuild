@@ -3439,6 +3439,12 @@ mod tests {
             needs_node(&m("[extend]\n"), false),
             "find_plugin searches with npm"
         );
+        // Remote servers are the MCP registry's: npm is not asked.
+        assert!(!needs_node(&m("[extend]\nkinds = [\"remote\"]\n"), false));
+        assert!(needs_node(
+            &m("[extend]\nkinds = [\"remote\", \"pi\"]\n"),
+            false
+        ));
         assert!(needs_node(
             &m("[[plugin]]\nrutis = \"./r.ts\"\nruntime = \"node\"\n"),
             false

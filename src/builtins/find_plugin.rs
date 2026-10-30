@@ -142,26 +142,79 @@ pub struct Candidate {
     /// What the MCP registry lists as required; `None` when not in it.
     pub required_env: Option<Vec<String>>,
     pub required_args: Option<Vec<String>>,
-    /// A remote server's address and headers (`kind` remote: its `package`
-    /// is its MCP registry name, its `version` the entry's).
+    /// A remote server's address and headers: only for `kind` remote
+    /// (read it through [`Candidate::remote`]), whose `package` is its MCP
+    /// registry name and whose `version` is an `Err`: a remote has none to
+    /// take (the entry's is `Remote::version`).
     pub remote: Option<Remote>,
 }
 
+impl Candidate {
+    /// The remote server it is, when its kind is remote.
+    pub fn remote(&self) -> Option<&Remote> {
+        self.remote
+            .as_ref()
+            .filter(|_| self.kind == ExtendKind::Remote)
+    }
+}
+
+/// Why a remote candidate's `version` is an `Err`.
+pub(crate) const NO_VERSION: &str = "a remote server has no version to take";
+
 /// A remote MCP server, as the MCP registry lists it and as yobuild would
 /// reach it (design §14 "Stage 3", point 2): its first streamable-HTTP
-/// remote whose address [`remote_address`] takes and whose headers the
-/// owner would be asked for can all be filled.
+/// remote whose address [`remote_address`] takes and whose headers yobuild
+/// can fill. Made only from the registry's answer, so its address is
+/// always one [`remote_address`] took.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Remote {
-    pub url: String,
-    pub host: String,
-    pub headers: Vec<RemoteHeader>,
-    /// Its other remotes (`<type> <url>`): listed, not taken.
-    pub others: Vec<String>,
+    url: url::Url,
+    headers: Vec<RemoteHeader>,
+    others: Vec<String>,
+    version: Option<String>,
 }
 
-/// A header a remote server lists.
+impl Remote {
+    /// Its address, as checked.
+    pub fn url(&self) -> &url::Url {
+        &self.url
+    }
+
+    pub fn host(&self) -> &str {
+        self.url.host_str().unwrap_or_default()
+    }
+
+    pub fn headers(&self) -> &[RemoteHeader] {
+        &self.headers
+    }
+
+    /// Its other remotes (`<type> <url>`, cut for showing): listed, not
+    /// taken.
+    pub fn others(&self) -> &[String] {
+        &self.others
+    }
+
+    /// The entry's version, as the registry says it.
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+
+    /// One at `url`, checked, with nothing else listed: for other modules'
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn stand_in(url: &str) -> Remote {
+        Remote {
+            url: remote_address(url).expect("a stand-in's address is one the agent may reach"),
+            headers: Vec::new(),
+            others: Vec::new(),
+            version: None,
+        }
+    }
+}
+
+/// A header a remote server lists. `name` and `template` are as listed
+/// (whole, not cut: what is sent), `description` cut for showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RemoteHeader {
@@ -170,36 +223,57 @@ pub struct RemoteHeader {
     pub secret: bool,
     pub description: String,
     /// Its value with one `{…}` where the credential goes (`Bearer
-    /// {token}`), as listed; `None`: the credential alone.
+    /// {token}`), or a fixed value (no `{…}`), as listed; `None`: the
+    /// credential alone.
     pub template: Option<String>,
 }
 
+/// The longest header name and template yobuild takes.
+const HEADER_NAME_CHARS: usize = 64;
+const HEADER_VALUE_CHARS: usize = 256;
+
 impl RemoteHeader {
-    /// Whether the owner is asked for it: required, or optional and secret
-    /// (an optional header that is not secret is left off).
-    pub fn asked(&self) -> bool {
-        self.required || self.secret
+    /// Whether its value is fixed: a template with no `{…}`, sent as
+    /// listed when required, nothing asked.
+    pub fn fixed(&self) -> bool {
+        self.template
+            .as_deref()
+            .is_some_and(|t| !t.contains(['{', '}']))
     }
 
-    /// Its value with `${variable}` where the credential goes (its
-    /// template's one `{…}`, else alone), checked as a manifest's header
-    /// is ([`crate::manifest::guard`]); `None` when yobuild cannot fill it:
-    /// a name a header cannot have, a template with no `{…}` or several, or
-    /// a `$` in it, or a value the rule refuses (a literal part other than
+    /// Whether the owner is asked for it: required, or optional and secret
+    /// (an optional header that is not secret is left off), and not fixed.
+    pub fn asked(&self) -> bool {
+        (self.required || self.secret) && !self.fixed()
+    }
+
+    /// Whether it is sent: asked, or required with a fixed value.
+    pub fn sent(&self) -> bool {
+        self.asked() || (self.required && self.fixed())
+    }
+
+    /// Its value: `${variable}` where the credential goes (its template's
+    /// one `{…}`, else alone), or its fixed value; checked as a manifest's
+    /// header is ([`crate::manifest::guard`]). `None` when yobuild cannot
+    /// fill it: `variable` not a plain name, a name a header cannot have,
+    /// a name or template too long, a template with several `{…}`, or a
+    /// `$` in it, or a value the rule refuses (a literal part other than
     /// `Bearer`/`Basic`/`Token` on a header named like a secret).
     pub fn value(&self, variable: &str) -> Option<Value> {
         let named = !self.name.is_empty()
+            && self.name.chars().count() <= HEADER_NAME_CHARS
             && self
                 .name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-        if !named {
+        if !named || !crate::manifest::identifier(variable) {
             return None;
         }
         let reference = format!("${{{variable}}}");
         let text = match &self.template {
             None => reference,
-            Some(t) if t.contains('$') => return None,
+            Some(t) if t.contains('$') || t.chars().count() > HEADER_VALUE_CHARS => return None,
+            Some(t) if self.fixed() => t.clone(),
             Some(t) => {
                 let (open, close) = (t.find('{')?, t.find('}')?);
                 let single = t.matches('{').count() == 1 && t.matches('}').count() == 1;
@@ -218,11 +292,20 @@ impl RemoteHeader {
 /// The stand-in variable a header's value is checked with when found.
 const CREDENTIAL: &str = "CREDENTIAL";
 
+/// Names on this machine or its network (RFC 6761's `localhost`, RFC 6762's
+/// `local`, RFC 8375's `home.arpa`, ICANN's `internal`, and
+/// `localhost.localdomain`, which many systems map to this machine).
+const LOCAL_SUFFIXES: [&str; 5] = [
+    ".localhost", ".local", ".internal", ".home.arpa", ".localdomain",
+];
+const LOCAL_NAMES: [&str; 3] = ["localhost", "localdomain", "localhost6.localdomain6"];
+
 /// Why a remote's address is not one the agent may reach: more strictly
 /// than a manifest's (`manifest::endpoint`), since the agent picked it — no
-/// user in it, https only, not an IP address, not `localhost`, a `.localhost`, `.local` or `.internal`
-/// name, nor a name of one label (a machine on this network). The name is
-/// not resolved: a public name pointing inward is not caught.
+/// user in it, https only, not an IP address, not a name on this machine
+/// or its network ([`LOCAL_NAMES`], [`LOCAL_SUFFIXES`]), nor a name of one
+/// label (a machine on this network). The name is not resolved: a public
+/// name pointing inward is not caught.
 pub(crate) fn remote_address(url: &str) -> Result<url::Url, String> {
     if url.contains('{') {
         return Err("its address takes values".into());
@@ -240,10 +323,8 @@ pub(crate) fn remote_address(url: &str) -> Result<url::Url, String> {
     match parsed.host() {
         Some(url::Host::Domain(name)) => {
             let name = name.trim_end_matches('.').to_ascii_lowercase();
-            let local = name == "localhost"
-                || [".localhost", ".local", ".internal"]
-                    .iter()
-                    .any(|end| name.ends_with(end))
+            let local = LOCAL_NAMES.contains(&name.as_str())
+                || LOCAL_SUFFIXES.iter().any(|end| name.ends_with(end))
                 || !name.contains('.');
             if local {
                 return refused("a name on this machine or its network");
@@ -255,9 +336,29 @@ pub(crate) fn remote_address(url: &str) -> Result<url::Url, String> {
     Ok(parsed)
 }
 
+/// The longest registry name yobuild takes as a remote's.
+const REGISTRY_NAME_CHARS: usize = 200;
+
+/// Whether `name` is of the MCP registry's shape (`namespace/name`: the
+/// namespace letters, digits, `.` and `-`; the name those and `_`), within
+/// [`REGISTRY_NAME_CHARS`]: a remote candidate's name is what the agent
+/// reads and passes to `load_plugin`, so it is one plain line.
+fn registry_name(name: &str) -> bool {
+    let Some((space, own)) = name.split_once('/') else {
+        return false;
+    };
+    let plain = |part: &str, more: &[char]| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || more.contains(&c))
+    };
+    name.len() <= REGISTRY_NAME_CHARS && plain(space, &[]) && plain(own, &['_'])
+}
+
 /// A registry entry's remote, when it lists any: the one taken, or why
 /// none is (each reason a count on the sources' line).
-fn remote_of(server: &Json) -> Option<Result<RemoteHit, String>> {
+fn remote_of(server: &Json) -> Option<Result<Remote, String>> {
     let remotes = server["remotes"].as_array().filter(|r| !r.is_empty())?;
     let said = |r: &Json| {
         clip(
@@ -284,16 +385,16 @@ fn remote_of(server: &Json) -> Option<Result<RemoteHit, String>> {
             .unwrap_or(&empty)
             .iter()
             .map(|h| RemoteHeader {
-                name: clip(&text(&h["name"]), FIELD_CHARS),
+                name: text(&h["name"]),
                 required: h["isRequired"] == true,
                 secret: h["isSecret"] == true,
                 description: clip(&text(&h["description"]), DESCRIPTION_CHARS),
-                template: h["value"].as_str().map(|v| clip(v, FIELD_CHARS)),
+                template: h["value"].as_str().map(String::from),
             })
             .collect();
         if headers
             .iter()
-            .any(|h| h.asked() && h.value(CREDENTIAL).is_none())
+            .any(|h| h.sent() && h.value(CREDENTIAL).is_none())
         {
             why.get_or_insert("a header yobuild cannot fill".into());
             continue;
@@ -304,17 +405,11 @@ fn remote_of(server: &Json) -> Option<Result<RemoteHit, String>> {
             .filter(|(i, _)| *i != at)
             .map(|(_, r)| said(r))
             .collect();
-        return Some(Ok(RemoteHit {
-            remote: Remote {
-                url: address.to_string(),
-                host: address.host_str().unwrap_or_default().to_owned(),
-                headers,
-                others,
-            },
+        return Some(Ok(Remote {
+            url: address,
+            headers,
+            others,
             version: server["version"].as_str().map(|v| clip(v, FIELD_CHARS)),
-            repository: server["repository"]["url"]
-                .as_str()
-                .map(|r| clip(r, FIELD_CHARS)),
         }));
     }
     Some(Err(why.unwrap_or_else(|| {
@@ -325,12 +420,13 @@ fn remote_of(server: &Json) -> Option<Result<RemoteHit, String>> {
     })))
 }
 
-/// A remote the registry lists, with its entry's version and repository.
+/// A remote the registry lists, with its entry's repository and when it
+/// was published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RemoteHit {
     remote: Remote,
-    version: Option<String>,
     repository: Option<String>,
+    published: Option<String>,
 }
 
 /// The `find_plugin` tool. Clones share what the session found.
@@ -464,64 +560,11 @@ impl FindPlugin {
     /// candidate as its entry says it — nothing to install, no version to
     /// choose between, so npm is not asked.
     async fn find_remote(&self, need: &str) -> Found {
-        let kind = ExtendKind::Remote;
         let found = match &self.sources.registry {
-            Some(at) => registry(at, need, kind).await,
+            Some(at) => registry(at, need, ExtendKind::Remote).await,
             None => Err("no MCP registry was set up for this agent".into()),
         };
-        let (mut lines, mut failed) = (Vec::new(), Vec::new());
-        let hits = match found {
-            Ok(found) => {
-                lines.push(found.line());
-                found.hits
-            }
-            Err(e) => {
-                lines.push(format!("MCP registry: failed ({e})"));
-                failed.push(format!("MCP registry: {e}"));
-                Vec::new()
-            }
-        };
-        let total = hits.len();
-        let candidates: Vec<Candidate> = hits
-            .into_iter()
-            .take(MAX_CANDIDATES)
-            .filter_map(|hit| {
-                let (found, published) = hit.remote?;
-                Some(Candidate {
-                    need: need.to_owned(),
-                    kind,
-                    package: hit.package,
-                    version: Ok(found.version.unwrap_or_else(|| "(not given)".into())),
-                    registry_name: hit.registry_name,
-                    from_npm: false,
-                    description: clip(&hit.description, DESCRIPTION_CHARS),
-                    licence: None,
-                    repository: found.repository,
-                    published,
-                    downloads: Err("a remote server has no npm downloads".into()),
-                    provenance: None,
-                    required_env: None,
-                    required_args: None,
-                    remote: Some(found.remote),
-                })
-            })
-            .collect();
-        let not_viewed = total - candidates.len();
-        if not_viewed > 0 {
-            lines.push(format!(
-                "{not_viewed} more found and not offered (a search offers at most {MAX_CANDIDATES}): a narrower need puts others first"
-            ));
-        }
-        Found {
-            kind,
-            sources: 1,
-            lines,
-            failed,
-            candidates,
-            found: total,
-            not_viewed,
-            unviewed: None,
-        }
+        remote_found(need, found)
     }
 
     /// Keeps `candidates`, each in place of its package's, but for one
@@ -530,6 +573,11 @@ impl FindPlugin {
     pub(crate) fn remember(&self, candidates: &[Candidate]) {
         let mut found = self.found.lock().unwrap_or_else(|e| e.into_inner());
         for candidate in candidates {
+            debug_assert_eq!(
+                candidate.kind == ExtendKind::Remote,
+                candidate.remote.is_some(),
+                "a remote candidate, and only one, has its remote"
+            );
             let same =
                 |c: &&mut Candidate| c.package == candidate.package && c.kind == candidate.kind;
             match found.iter_mut().find(same) {
@@ -538,6 +586,66 @@ impl FindPlugin {
                 None => found.push(candidate.clone()),
             }
         }
+    }
+}
+
+/// A remote search's result from the MCP registry's answer: each candidate
+/// as its entry says it — nothing to install, no version to choose between,
+/// so npm is not asked — up to [`MAX_CANDIDATES`].
+fn remote_found(need: &str, found: Result<RegistryFound, String>) -> Found {
+    let kind = ExtendKind::Remote;
+    let (mut lines, mut failed) = (Vec::new(), Vec::new());
+    let hits = match found {
+        Ok(found) => {
+            lines.push(found.line());
+            found.hits
+        }
+        Err(e) => {
+            lines.push(format!("MCP registry: failed ({e})"));
+            failed.push(format!("MCP registry: {e}"));
+            Vec::new()
+        }
+    };
+    let total = hits.len();
+    let candidates: Vec<Candidate> = hits
+        .into_iter()
+        .filter_map(|hit| {
+            let found = hit.remote?;
+            Some(Candidate {
+                need: need.to_owned(),
+                kind,
+                package: hit.package,
+                version: Err(NO_VERSION.into()),
+                registry_name: hit.registry_name,
+                from_npm: false,
+                description: clip(&hit.description, DESCRIPTION_CHARS),
+                licence: None,
+                repository: found.repository,
+                published: found.published,
+                downloads: Err("a remote server has no npm downloads".into()),
+                provenance: None,
+                required_env: None,
+                required_args: None,
+                remote: Some(found.remote),
+            })
+        })
+        .take(MAX_CANDIDATES)
+        .collect();
+    let not_viewed = total - candidates.len();
+    if not_viewed > 0 {
+        lines.push(format!(
+            "{not_viewed} more found and not offered (a search offers at most {MAX_CANDIDATES}): a narrower need puts others first"
+        ));
+    }
+    Found {
+        kind,
+        sources: 1,
+        lines,
+        failed,
+        candidates,
+        found: total,
+        not_viewed,
+        unviewed: None,
     }
 }
 
@@ -575,7 +683,7 @@ struct Hit {
     required_env: Option<Vec<String>>,
     required_args: Option<Vec<String>>,
     /// A remote server: its entry's remote, and when it was published.
-    remote: Option<(RemoteHit, Option<String>)>,
+    remote: Option<RemoteHit>,
 }
 
 /// What the MCP registry's searches for a need found, each server counted
@@ -841,20 +949,21 @@ fn ranked(
                 continue;
             }
             let hit = match kind {
-                ExtendKind::Remote => match listed.remote_hit {
-                    Some(Ok(found)) => Some(Hit {
+                ExtendKind::Remote => match listed.remote {
+                    Some(Ok(found)) if registry_name(&listed.key) => Some(Hit {
                         package: listed.key.clone(),
-                        registry_name: Some(clip(&listed.key, FIELD_CHARS)),
+                        registry_name: Some(listed.key.clone()),
                         from_npm: false,
                         description: listed.description,
                         required_env: None,
                         required_args: None,
-                        remote: Some((found, listed.published)),
+                        remote: Some(found),
                     }),
                     found => {
                         let why = match found {
+                            Some(Ok(_)) => "a name not of the registry's shape".into(),
                             Some(Err(why)) => why,
-                            _ => "not a remote server".into(),
+                            None => "not a remote server".into(),
                         };
                         match left.iter_mut().find(|(w, _)| *w == why) {
                             Some((_, keys)) => _ = keys.insert(listed.key),
@@ -870,7 +979,7 @@ fn ranked(
                     Some((n, _)) => *n += 1,
                     None => ranked.push((1, hit)),
                 },
-                None if listed.remote => _ = remote.insert(listed.key),
+                None if listed.remote_only => _ = remote.insert(listed.key),
                 None => _ = other.insert(listed.key),
             }
         }
@@ -923,12 +1032,10 @@ struct Listed {
     /// When it has an npm package over stdio.
     hit: Option<Hit>,
     /// Else, whether it is remote only.
-    remote: bool,
+    remote_only: bool,
     /// Its remote, or why none is taken; `None`: it lists none.
-    remote_hit: Option<Result<RemoteHit, String>>,
+    remote: Option<Result<RemoteHit, String>>,
     description: String,
-    /// When the registry published it (`YYYY-MM-DD`).
-    published: Option<String>,
 }
 
 /// The MCP registry's answer (`v0`: `{servers: [{server, _meta}],
@@ -947,11 +1054,19 @@ fn registry_page(body: &Json) -> Result<Page, String> {
     };
     for entry in servers {
         let server = entry.get("server").unwrap_or(entry);
-        let remote_hit = remote_of(server);
-        let published = entry["_meta"]["io.modelcontextprotocol.registry/official"]["publishedAt"]
-            .as_str()
-            .and_then(seconds)
-            .map(day);
+        let remote_hit = remote_of(server).map(|found| {
+            found.map(|remote| RemoteHit {
+                remote,
+                repository: server["repository"]["url"]
+                    .as_str()
+                    .map(|r| clip(r, FIELD_CHARS)),
+                published: entry["_meta"]["io.modelcontextprotocol.registry/official"]
+                    ["publishedAt"]
+                    .as_str()
+                    .and_then(seconds)
+                    .map(day),
+            })
+        });
         let empty = Vec::new();
         let packages = server["packages"].as_array().unwrap_or(&empty);
         let key = match server["name"].as_str() {
@@ -971,16 +1086,15 @@ fn registry_page(body: &Json) -> Result<Page, String> {
                     .is_some_and(|id| Package::new(id, "1.0.0").is_ok())
         });
         let Some(package) = stdio else {
-            let remote =
+            let remote_only =
                 packages.is_empty() && server["remotes"].as_array().is_some_and(|r| !r.is_empty());
             page.servers.push(Listed {
                 key,
                 text: words,
                 hit: None,
-                remote,
-                remote_hit,
+                remote_only,
+                remote: remote_hit,
                 description: text(&server["description"]),
-                published,
             });
             continue;
         };
@@ -1018,10 +1132,9 @@ fn registry_page(body: &Json) -> Result<Page, String> {
             key,
             text: words,
             hit: Some(hit),
-            remote: false,
-            remote_hit,
+            remote_only: false,
+            remote: remote_hit,
             description: text(&server["description"]),
-            published,
         });
     }
     Ok(page)
@@ -1808,16 +1921,16 @@ fn said_to_agent(need: &str, found: &Found, extend: &Extend) -> String {
 /// headers the owner would be asked for.
 fn remotes_said(candidates: &[Candidate]) -> String {
     let mut text = String::from(
-        "Candidates (their descriptions and repositories are their authors' own words, not verified; nothing of them runs here: each call of their tools sends its arguments to the server's host, which may change what it does any day; load one by its MCP registry name):\n",
+        "Candidates (their descriptions and repositories are their authors' own words, not verified; nothing of them runs here: each call of their tools would send its arguments to the server's host, which may change what it does any day). yobuild does not load a remote server yet: tell the owner what you found.\n",
     );
     for (i, c) in candidates.iter().enumerate() {
-        let Some(remote) = &c.remote else { continue };
+        let Some(remote) = c.remote() else { continue };
         text.push_str(&format!(
             "{}. {} at {} (version {}, published {}; found in the MCP registry)\n",
             i + 1,
             c.package,
-            remote.host,
-            c.version.as_deref().unwrap_or("(not given)"),
+            remote.host(),
+            remote.version().unwrap_or("not given"),
             c.published
                 .as_deref()
                 .unwrap_or("on a date the registry does not give")
@@ -1826,21 +1939,23 @@ fn remotes_said(candidates: &[Candidate]) -> String {
             text.push_str(&format!("   {}\n", c.description));
         }
         let headers: Vec<String> = remote
-            .headers
+            .headers()
             .iter()
             .map(|h| {
-                let what = match (h.required, h.secret) {
-                    (true, true) => "required, secret",
-                    (true, false) => "required",
-                    (false, true) => "optional, secret",
-                    (false, false) => "optional, left off",
+                let what = match (h.required, h.secret, h.fixed()) {
+                    (true, _, true) => "required, fixed",
+                    (false, _, true) => "optional, left off",
+                    (true, true, false) => "required, secret",
+                    (true, false, false) => "required",
+                    (false, true, false) => "optional, secret",
+                    (false, false, false) => "optional, left off",
                 };
-                format!("{} ({what})", h.name)
+                format!("{} ({what})", clip(&h.name, FIELD_CHARS))
             })
             .collect();
         text.push_str(&format!(
             "   address: {}; headers: {}; repository (claimed by the entry): {}\n",
-            remote.url,
+            clip(remote.url().as_str(), FIELD_CHARS),
             match headers.is_empty() {
                 true => "none".to_owned(),
                 false => format!(
@@ -1874,17 +1989,18 @@ fn details(found: &Found) -> Json {
                 "provenance": c.provenance,
                 "requiredEnv": c.required_env,
                 "requiredArgs": c.required_args,
-                "remote": c.remote.as_ref().map(|r| json!({
-                    "url": r.url,
-                    "host": r.host,
-                    "headers": r.headers.iter().map(|h| json!({
-                        "name": h.name,
+                "remote": c.remote().map(|r| json!({
+                    "url": r.url().as_str(),
+                    "host": r.host(),
+                    "version": r.version(),
+                    "headers": r.headers().iter().map(|h| json!({
+                        "name": clip(&h.name, FIELD_CHARS),
                         "required": h.required,
                         "secret": h.secret,
                         "description": h.description,
-                        "value": h.template,
+                        "value": h.template.as_deref().map(|t| clip(t, FIELD_CHARS)),
                     })).collect::<Vec<_>>(),
-                    "others": r.others,
+                    "others": r.others(),
                 })),
             })
         })
