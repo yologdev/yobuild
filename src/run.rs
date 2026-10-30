@@ -2445,8 +2445,9 @@ fn server_headers(server: &Mcp) -> impl Iterator<Item = &crate::manifest::Value>
 /// region) is no secret, and replacing it would garble the text around it.
 const HIDDEN_AT_LEAST: usize = 8;
 
-/// What an HTTP server's errors must not show: the URL as filled (reqwest
-/// names it: "… for url (https://…?api_key=…)"), shown as written, and each
+/// What an HTTP server's errors must not show: the URL as filled (yoagent
+/// 0.26.1 names only its scheme, host and port, a host filled from a
+/// reference among them; older words named it whole), shown as written, and each
 /// value filled into its URL or headers of [`HIDDEN_AT_LEAST`] characters
 /// or more, shown as its `${NAME}`; longest first, so a value inside
 /// another is not replaced first.

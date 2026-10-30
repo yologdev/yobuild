@@ -4861,13 +4861,17 @@ redirect elsewhere an error naming where it pointed. A manifest's
     - the URL connected to is the one checked, as `url` writes it;
     - a refusal quotes the URL as written, never as filled, since a value
       may be a secret; and what connecting or listing its tools says
-      (reqwest names the URL: "… for url (https://…?api_key=…)") has the
-      filled URL shown as written and each value of 8 characters or more
-      filled into the URL or headers as its `${NAME}` (`run::hide`).
-    - Not covered: a tool call's error once connected reaches the model
-      and the log as yoagent's `McpToolAdapter` words it, the URL filled
-      — for yoagent (`reqwest::Error::without_url`), asked only with the
-      owner's approval.
+      has the filled URL shown as written and each value of 8 characters
+      or more filled into the URL or headers as its `${NAME}`
+      (`run::hide`).
+    - A tool call's error once connected reaches the model and the log as
+      yoagent's `McpToolAdapter` words it. Since yoagent 0.26.1 (asked
+      with the owner's approval, 2026-10-29) its HTTP errors name the
+      server by scheme, host and port only — no path, query or user — and
+      a body or JSON-RPC message it quotes has the URL's key-like parts
+      (8 characters or more) replaced with `[redacted]`. Left: a host
+      filled from a reference is shown in a call's error, and a key
+      shorter than 8 characters that the server echoes in its own words.
 11. **OAuth later.** Servers that need a sign-in refuse at `initialize`,
     said as such. A sign-in on the page (the provider's page opened, the
     token kept somewhere, refreshed) is its own design.
@@ -4877,6 +4881,11 @@ redirect elsewhere an error naming where it pointed. A manifest's
 or the same origin only), and an HTTP error carries its status. Given in
 yoagent 0.26.0 (same origin by default, `Redirects::None` to follow
 none; `McpError::Http`), which yobuild takes in its own PR.
+Asked next (with the owner's approval): no URL in its HTTP errors.
+Given in yoagent 0.26.1: the server named by origin only, quoted
+server text with the URL's key-like parts redacted, session ids no
+longer logged, and a notification's 404 clearing an expired session
+as a call's does; taken in its own PR.
 
 **The demo.** A docs helper: asked how to use a library at its current
 version, it finds Context7 (`kind "remote"`), connects without a key and
