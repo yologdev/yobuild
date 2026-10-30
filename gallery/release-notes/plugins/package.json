@@ -1,0 +1,9 @@
+{
+  "name": "release-notes-plugins",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@arcships/rutis": "0.12.0",
+    "@arcships/rutis-runtime": "0.12.0"
+  }
+}

@@ -1,0 +1,6 @@
+[
+  { "tools": [{ "name": "release_commits", "arguments": {},
+      "expect": ["after the tag v0.2.0", "Commits: 3.", "feat: add shout command", "fix: greet says Hello with punctuation", "docs: describe the CLI", "shout.js"] }] },
+  { "tools": [{ "name": "read_file", "arguments": { "path": "shout.js" }, "expect": "toUpperCase" }] },
+  { "text": "## Range covered\nThe commits after v0.2.0 up to HEAD (5daf951): 3 commits. No tags left out.\n\n## Release notes draft\n### Features\n- New `shout` command: prints your text in capital letters. (601002b)\n\n### Fixes\n- The greeting now ends with punctuation: \"Hello, Ada!\". (8d999d8)\n\n### Other changes\n- The README now describes the command-line tool. (5daf951)\n\n## Grouping unsure\n- 8d999d8 \"fix: greet says Hello with punctuation\": a change to what users see; put under Fixes, but it could be read as a new behaviour." }
+]

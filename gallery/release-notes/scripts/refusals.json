@@ -1,0 +1,7 @@
+[
+  { "tools": [{ "name": "release_commits", "arguments": { "since": "--output=/tmp/x" }, "expect": "not a version tag (v1.2.3): \"--output=/tmp/x\"" }] },
+  { "tools": [{ "name": "release_commits", "arguments": { "since": "v9.9.9" }, "expect": "There is no tag v9.9.9 in this repository" }] },
+  { "tools": [{ "name": "release_commits", "arguments": { "path": "." }, "expect": "unknown argument(s): path" }] },
+  { "tools": [{ "name": "release_commits", "arguments": { "since": "v0.1.0" }, "expect": ["after the tag v0.1.0", "the tag asked for", "Commits: 4.", "feat: add greet"] }] },
+  { "text": "## Range covered\nThe owner asked for v0.1.0: the commits after it up to HEAD (5daf951), 4 commits. v9.9.9 does not exist; \"--output=/tmp/x\" is not a tag.\n\n## Release notes draft\n### Features\n- greet, shout. (3cf1ae6, 601002b)\n\n### Fixes\n- Punctuation in the greeting. (8d999d8)\n\n### Other changes\n- README. (5daf951)\n\n## Grouping unsure\nnone" }
+]

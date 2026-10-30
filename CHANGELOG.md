@@ -48,14 +48,29 @@ load it for the session, with the person's yes each time.
   - **An HTTP server's URL** is checked again once its `${…}` values are
     filled in. What its errors say shows each filled value as its
     `${NAME}`, in tool calls too.
-- **Three new gallery agents** (`yobuild new --from <name>`):
+- **Four new gallery agents** (`yobuild new --from <name>`):
   - `self-extending-reviewer` finds and loads ESLint's MCP server;
   - `project-notebook` loads the `pi-memory` pi package and remembers
     your decisions across sessions;
   - `docs-helper` connects to Context7, a remote MCP server, and answers
-    from a library's docs at your project's version.
+    from a library's docs at your project's version;
+  - `release-notes` drafts release notes from git history. It is the
+    first with a tool of its own, a small rutis plugin that the coding
+    agent wrote. `yobuild new` says to run `npm ci --ignore-scripts` in its
+    `plugins/`.
+- **A tool of your own:** the skill now covers writing a rutis plugin:
+  - its package, with both `@arcships/rutis` and its runtime;
+  - the tool contract;
+  - host services through grants;
+  - arguments from the model, checked before use.
+
+  A missing runtime is now told `npm ci --ignore-scripts` when the
+  package's lock pins it, and otherwise what the lock pins.
 - **The skill** covers `[extend]`: which kinds to allow, how to script
   the search, and why the load is tried on the page.
+- **Tried on Claude:** web-research, code-reviewer and docs-helper ran
+  live on `anthropic/claude-haiku-5-5`, unchanged but for `model` (their
+  READMEs, "On Claude"). Until now only DeepSeek had been run live.
 - **yoagent 0.26.2 and yoagent-rutis 0.10.0.** yoagent's compaction now
   keeps the task prompt and the newest turn when a context budget is
   small.

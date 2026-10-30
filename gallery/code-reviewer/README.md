@@ -100,3 +100,14 @@ The first live run showed none of ESLint's findings. yoagent 0.25.7 sent
 the model only the first of a tool result's text blocks, and ESLint's
 server answers in three: an intro, the findings, a note. yoagent 0.25.9
 sends every block (yologdev/yoagent#347).
+
+### On Claude
+
+2026-10-30, the same project and task with `model =
+"anthropic/claude-haiku-5-5"` and `ANTHROPIC_API_KEY` (nothing else
+changed), `--once`: 16 calls (`read_file`, `list_files`, `search`, one
+`eslint__lint-files`, one `ask_owner`: whether `.ts` files should be
+linted too), no change to the project, `Cost: $0.0041 (36251 tokens in,
+5207 out; 6 turns)`. It reported ESLint's three errors, the type error
+in `src/math.ts:5` (marked as found by reading) and the config leaving
+the `.ts` files unlinted. `Completed`.
