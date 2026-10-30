@@ -5,6 +5,7 @@
 //! choice — then connected over streamable HTTP with no redirect followed,
 //! its tools listed, and the owner asked again with them in front of them.
 
+use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value as Json;
@@ -12,8 +13,8 @@ use yoagent::mcp::{HttpTransport, McpClient, McpError, McpToolAdapter, McpToolIn
 use yoagent::{AgentTool, ToolContext, ToolError, ToolResult};
 
 use super::{
-    failed, kept_text, locked, refused, second_details, tools_problem, Kept, KeptRemote,
-    LoadPlugin, Refused, Server, START_TIME,
+    close_quietly, failed, kept_text, locked, refused, second_details, tools_problem, Kept,
+    KeptRemote, LoadPlugin, Refused, Server, START_TIME,
 };
 use crate::builtins::find_plugin::{Remote, RemoteHeader};
 use crate::builtins::Candidate;
@@ -25,9 +26,31 @@ use crate::run::host::clip;
 /// How many times the owner is asked for one header's variable.
 const CREDENTIAL_ASKS: usize = 3;
 
-/// What yoagent says of a call made once the server ended its session: the
-/// server is then gone for this session (it is not reconnected).
-const SESSION_EXPIRED: &str = "MCP session expired";
+/// How yoagent's adapter words a call made once the server ended its
+/// session (a 404 while one is held): the server is then gone for this
+/// session (it is not reconnected). Matched from its start, so a server's
+/// own error text cannot say it.
+const SESSION_EXPIRED: &str = "MCP call failed: Transport error: MCP session expired";
+
+/// What a call that found the session ended answers, and why the server
+/// is said stopped.
+const ENDED: &str = "the server ended its session (HTTP 404): it is not reconnected this session";
+
+/// How the environment is read: `std::env::var_os`, or a test's map.
+pub(crate) type Lookup = Arc<dyn Fn(&str) -> Option<OsString> + Send + Sync>;
+
+/// The environment as it is.
+pub(crate) fn environment() -> Lookup {
+    Arc::new(|name: &str| std::env::var_os(name))
+}
+
+/// What one header came to.
+enum Taken {
+    Sent(Header),
+    /// An optional header left off: by the owner (`None`), or after
+    /// [`CREDENTIAL_ASKS`] answers not taken (the last one's why).
+    LeftOff(Option<String>),
+}
 
 /// A header the owner named a variable for, or one sent as listed.
 struct Header {
@@ -66,18 +89,32 @@ impl LoadPlugin {
         .await?;
         // 5. Each credential, by the variable that holds it.
         let mut headers = Vec::new();
+        let mut not_sent = Vec::new();
         for header in remote.headers().iter().filter(|h| h.sent()) {
-            if let Some(header) = self.header(header, name, host, ctx).await? {
-                headers.push(header);
+            match self.header(header, name, host, ctx).await? {
+                Taken::Sent(header) => headers.push(header),
+                Taken::LeftOff(None) => {}
+                Taken::LeftOff(Some(why)) => {
+                    let said = format!(
+                        "its optional header `{}` is not sent: no usable variable was named after {CREDENTIAL_ASKS} tries (the last: {why})",
+                        clip(&header.name, 64)
+                    );
+                    self.session.notice(
+                        NoticeLevel::Warning,
+                        format!("The agent's plugin `{package}`: {said}."),
+                    );
+                    not_sent.push(said);
+                }
             }
         }
+        let hide = Arc::new(credentials_hidden(&headers));
         // 6. Connected, its tools listed and judged.
-        let (client, listed) = self.connect(package, remote, &headers, ctx).await?;
+        let (client, listed) = self.connect(package, remote, &headers, &hide, ctx).await?;
         let names: Vec<String> = listed.iter().map(|t| t.name.clone()).collect();
         let own = match tools_problem(name, &names) {
             Ok(own) => own,
             Err(e) => {
-                let _ = client.close().await;
+                close_quietly(&client, name).await;
                 return Err(failed(format!("{package}: {e}")));
             }
         };
@@ -86,7 +123,7 @@ impl LoadPlugin {
             "Keep the remote MCP server {name}? It offers: {}",
             clip(&own.join(", "), 200)
         );
-        let details = second_details(
+        let mut details = second_details(
             "the server",
             listed.iter().map(|t| {
                 (
@@ -96,9 +133,12 @@ impl LoadPlugin {
                 )
             }),
         );
+        for said in &not_sent {
+            details.push_str(&format!("\nNot sent: {said}."));
+        }
         if let Err(no) = self.ask(title, details, package, "keep it", ctx).await {
             // Not kept: its session ended (yoagent's `close` sends DELETE).
-            let _ = client.close().await;
+            close_quietly(&client, name).await;
             return Err(no);
         }
         let client = Arc::new(tokio::sync::Mutex::new(client));
@@ -111,6 +151,7 @@ impl LoadPlugin {
                         .with_prefix(name.to_owned())
                         .with_call_timeout(Some(McpToolAdapter::DEFAULT_CALL_TIMEOUT)),
                     ended: ended.clone(),
+                    hide: hide.clone(),
                 }) as Arc<dyn AgentTool>
             })
             .collect();
@@ -148,15 +189,17 @@ impl LoadPlugin {
     }
 
     /// Step 5 for one header: a fixed one as listed; else the variable the
-    /// owner names, asked at most [`CREDENTIAL_ASKS`] times. `None`: an
-    /// optional header left off.
+    /// owner names, asked at most [`CREDENTIAL_ASKS`] times. No answer is
+    /// ever repeated where the agent or a notice would read it: an owner
+    /// may paste the key itself.
     async fn header(
         &self,
         header: &RemoteHeader,
         name: &str,
         host: &str,
         ctx: &ToolContext,
-    ) -> Result<Option<Header>, Refused> {
+    ) -> Result<Taken, Refused> {
+        // Checked when found (`find_plugin::remote_of`): a defence only.
         let cannot = || {
             failed(format!(
                 "its header `{}` cannot be filled",
@@ -165,7 +208,7 @@ impl LoadPlugin {
         };
         if header.fixed() {
             let value = header.value("UNUSED").ok_or_else(cannot)?;
-            return Ok(Some(Header {
+            return Ok(Taken::Sent(Header {
                 name: header.name.clone(),
                 written: value.as_str().to_owned(),
                 filled: value.as_str().to_owned(),
@@ -199,33 +242,41 @@ impl LoadPlugin {
                         "not connected: you named no variable for its required header `{}` (it may be proposed again)",
                         clip(&header.name, 64)
                     ))),
-                    false => Ok(None),
+                    false => Ok(Taken::LeftOff(None)),
                 };
             }
-            match credential_problem(answer, &self.keys, &|n| super::super::key_is_set(n)) {
-                Some(problem) => why = Some(problem),
-                None => {
-                    let value = header.value(answer).ok_or_else(cannot)?;
-                    let secret = std::env::var(answer).unwrap_or_default();
-                    let filled = value
-                        .resolve_with(|_| Some(secret.clone()))
-                        .map_err(|e| refused(e.to_string()))?;
-                    return Ok(Some(Header {
-                        name: header.name.clone(),
-                        written: value.as_str().to_owned(),
-                        filled,
-                        variable: Some((answer.to_owned(), secret)),
-                    }));
+            let secret = match credential(answer, &self.keys, &*self.lookup) {
+                Ok(secret) => secret,
+                Err(problem) => {
+                    why = Some(problem);
+                    continue;
                 }
+            };
+            let value = header.value(answer).ok_or_else(cannot)?;
+            let filled = value
+                .resolve_with(|_| Some(secret.clone()))
+                .map_err(|e| failed(e.to_string()))?;
+            if reqwest::header::HeaderValue::from_str(&filled).is_err() {
+                why = Some(
+                    "that variable's value cannot be sent in a header (visible ASCII only: no line break, no other character)"
+                        .into(),
+                );
+                continue;
             }
+            return Ok(Taken::Sent(Header {
+                name: header.name.clone(),
+                written: value.as_str().to_owned(),
+                filled,
+                variable: Some((answer.to_owned(), secret)),
+            }));
         }
         let last = why.unwrap_or_default();
         match header.required {
             true => Err(refused(format!(
-                "not connected: no variable named for its required header `{}` after {CREDENTIAL_ASKS} tries ({last})",
+                "not connected: no usable variable was named for its required header `{}` after {CREDENTIAL_ASKS} tries (the last: {last})",
                 clip(&header.name, 64)
             ))),
-            false => Ok(None),
+            false => Ok(Taken::LeftOff(Some(last))),
         }
     }
 
@@ -237,18 +288,10 @@ impl LoadPlugin {
         package: &str,
         remote: &Remote,
         headers: &[Header],
+        hide: &[(String, String)],
         ctx: &ToolContext,
     ) -> Result<(McpClient, Vec<McpToolInfo>), Refused> {
-        // Each credential's value shown as its `${NAME}`.
-        let hide = super::super::hide(
-            "",
-            "",
-            headers.iter().filter_map(|h| {
-                let (variable, value) = h.variable.as_ref()?;
-                Some((value.clone(), format!("${{{variable}}}")))
-            }),
-        );
-        let hidden = |text: &str| super::super::hidden(text, &hide);
+        let hidden = |text: &str| super::super::hidden(text, hide);
         let did_not = |e: &McpError| failed(connect_failed(package, e, &hidden));
         let mut transport = HttpTransport::new(remote.url().as_str())
             .and_then(|t| t.with_redirects(Redirects::None))
@@ -288,7 +331,7 @@ impl LoadPlugin {
             }),
         };
         if listed.is_err() {
-            let _ = client.close().await;
+            close_quietly(&client, package).await;
         }
         listed.map(|listed| (client, listed))
     }
@@ -309,29 +352,48 @@ fn connect_failed(package: &str, e: &McpError, hidden: &dyn Fn(&str) -> String) 
     }
 }
 
-/// Why `answer` is not a variable a credential may come from: not a plain
-/// name, a credential yoagent reads (`keys`), or not set here (`is_set`:
-/// set and not empty).
-fn credential_problem(
+/// The credential the variable `answer` holds, or why it cannot be taken:
+/// not a plain name, a credential yoagent reads (`keys`), not set here or
+/// empty, not text. Only a name of `keys` — never an answer otherwise —
+/// is repeated: an owner may paste the key itself.
+fn credential(
     answer: &str,
     keys: &[String],
-    is_set: &dyn Fn(&str) -> bool,
-) -> Option<String> {
-    let shown = clip(answer, 64);
+    lookup: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<String, String> {
     if !crate::manifest::identifier(answer) {
-        return Some(format!(
-            "`{shown}` is not a variable's name (letters, digits and `_`)"
-        ));
+        return Err(
+            "that is not a variable's name (letters, digits and `_`): name the variable that holds the key, never the key"
+                .into(),
+        );
     }
     if keys.iter().any(|k| k == answer) {
-        return Some(format!(
-            "`{shown}` is a credential yoagent reads: hand it over in agent.toml if you mean to"
+        return Err(format!(
+            "`{answer}` is a credential yoagent reads: hand it over in agent.toml if you mean to"
         ));
     }
-    if !is_set(answer) {
-        return Some(format!("`{shown}` is not set here, or is empty"));
+    match lookup(answer) {
+        Some(value) if !value.is_empty() => value
+            .into_string()
+            .map_err(|_| "that variable's value is not text (UTF-8)".into()),
+        _ => Err("no variable of that name is set here, or it is empty".into()),
     }
-    None
+}
+
+/// What a credential named for `headers` is shown as wherever text from
+/// the server is said: each value, whatever its length, as its `${NAME}`,
+/// longest first.
+fn credentials_hidden(headers: &[Header]) -> Vec<(String, String)> {
+    let mut hide: Vec<(String, String)> = headers
+        .iter()
+        .filter_map(|h| {
+            let (variable, value) = h.variable.as_ref()?;
+            Some((value.clone(), format!("${{{variable}}}")))
+        })
+        .filter(|(value, _)| !value.is_empty())
+        .collect();
+    hide.sort_by_key(|(value, _)| std::cmp::Reverse(value.len()));
+    hide
 }
 
 /// The credential question's text: the header as the entry describes it,
@@ -438,6 +500,9 @@ pub(super) fn default_name(registry: &str) -> String {
 struct Ending {
     inner: McpToolAdapter,
     ended: Arc<Mutex<Option<String>>>,
+    /// Its credentials, shown as their names in what a call's error says
+    /// (a server may echo the key it refused).
+    hide: Arc<Vec<(String, String)>>,
 }
 
 #[async_trait::async_trait]
@@ -455,15 +520,16 @@ impl AgentTool for Ending {
         self.inner.parameters_schema()
     }
     async fn execute(&self, params: Json, ctx: ToolContext) -> Result<ToolResult, ToolError> {
-        let out = self.inner.execute(params, ctx).await;
-        if let Err(ToolError::Failed(why)) = &out {
-            if why.contains(SESSION_EXPIRED) {
-                locked(&self.ended).get_or_insert_with(|| {
-                    "the server ended its session (HTTP 404): it is not reconnected".into()
-                });
+        match self.inner.execute(params, ctx).await {
+            Err(ToolError::Failed(why)) if why.starts_with(SESSION_EXPIRED) => {
+                locked(&self.ended).get_or_insert_with(|| ENDED.into());
+                Err(ToolError::Failed(ENDED.into()))
             }
+            Err(ToolError::Failed(why)) => {
+                Err(ToolError::Failed(super::super::hidden(&why, &self.hide)))
+            }
+            out => out,
         }
-        out
     }
 }
 

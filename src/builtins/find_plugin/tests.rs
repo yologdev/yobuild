@@ -1211,6 +1211,39 @@ fn a_remote_entry_takes_its_first_streamable_remote_it_could_reach() {
         "headers": [{ "name": "X-Client", "value": "yobuild", "isRequired": true }] }]),
     );
     assert!(fixed.unwrap().is_ok());
+    // Refused: a header the transport sets itself, one listed twice (in
+    // any case), and an address whose block the manifest would refuse.
+    let headers = |headers: Json| {
+        of(
+            serde_json::json!([{ "type": "streamable-http", "url": "https://f.x.com/mcp",
+            "headers": headers }]),
+        )
+    };
+    assert_eq!(
+        headers(
+            serde_json::json!([{ "name": "Content-Type", "value": "application/json", "isRequired": true }])
+        ),
+        Some(Err("a header the transport sets itself".into()))
+    );
+    assert_eq!(
+        headers(serde_json::json!([
+            { "name": "Authorization", "isRequired": true, "isSecret": true },
+            { "name": "authorization", "value": "Token {t}", "isRequired": true, "isSecret": true }
+        ])),
+        Some(Err("a header listed twice".into()))
+    );
+    // A transport's header left off (optional, not secret) is no matter.
+    assert!(
+        headers(serde_json::json!([{ "name": "Accept", "value": "text/plain" }]))
+            .unwrap()
+            .is_ok()
+    );
+    assert_eq!(
+        of(
+            serde_json::json!([{ "type": "streamable-http", "url": "https://g.x.com/mcp?apiKey=demo" }])
+        ),
+        Some(Err("an address the manifest would refuse".into()))
+    );
     assert_eq!(of(serde_json::json!([])), None);
     assert_eq!(
         of(serde_json::json!([{ "type": "stdio" }])),

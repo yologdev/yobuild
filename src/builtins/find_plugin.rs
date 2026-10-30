@@ -304,6 +304,14 @@ impl RemoteHeader {
 /// The stand-in variable a header's value is checked with when found.
 const CREDENTIAL: &str = "CREDENTIAL";
 
+/// Headers yoagent's HTTP transport sets itself and refuses to take
+/// (`HttpTransport::with_header`): a remote that would send one is left
+/// out, as it could never connect.
+const TRANSPORT_HEADERS: [&str; 7] = [
+    "accept", "content-type", "mcp-session-id", "content-length", "transfer-encoding",
+    "connection", "host",
+];
+
 /// Names on this machine or its network (RFC 6761's `localhost`, RFC 6762's
 /// `local`, RFC 8375's `home.arpa`, ICANN's `internal`, and
 /// `localhost.localdomain`, which many systems map to this machine).
@@ -391,6 +399,11 @@ fn remote_of(server: &Json) -> Option<Result<Remote, String>> {
                 continue;
             }
         };
+        // The block printed for the owner must read back.
+        if crate::manifest::url_problem(&url).is_some() {
+            why.get_or_insert("an address the manifest would refuse".into());
+            continue;
+        }
         let empty = Vec::new();
         let headers: Vec<RemoteHeader> = item["headers"]
             .as_array()
@@ -404,11 +417,25 @@ fn remote_of(server: &Json) -> Option<Result<Remote, String>> {
                 template: h["value"].as_str().map(String::from),
             })
             .collect();
-        if headers
-            .iter()
-            .any(|h| h.sent() && h.value(CREDENTIAL).is_none())
-        {
+        let sent: Vec<&RemoteHeader> = headers.iter().filter(|h| h.sent()).collect();
+        if sent.iter().any(|h| h.value(CREDENTIAL).is_none()) {
             why.get_or_insert("a header yobuild cannot fill".into());
+            continue;
+        }
+        if sent
+            .iter()
+            .any(|h| TRANSPORT_HEADERS.contains(&h.name.to_ascii_lowercase().as_str()))
+        {
+            why.get_or_insert("a header the transport sets itself".into());
+            continue;
+        }
+        let mut names: Vec<String> = headers
+            .iter()
+            .map(|h| h.name.to_ascii_lowercase())
+            .collect();
+        names.sort();
+        if names.windows(2).any(|w| w[0] == w[1]) {
+            why.get_or_insert("a header listed twice".into());
             continue;
         }
         let others = remotes

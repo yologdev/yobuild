@@ -1671,3 +1671,15 @@ fn a_plugin_may_not_allow_the_tools_extend_brings() {
         );
     }
 }
+
+#[test]
+fn a_url_the_manifest_would_refuse_is_said_without_a_place() {
+    use crate::manifest::url_problem;
+    assert_eq!(url_problem("https://x.example/mcp?q=${Q}"), None);
+    assert_eq!(url_problem("https://x.example/mcp?page=2"), None);
+    assert!(url_problem("https://x.example/mcp?apiKey=demo")
+        .unwrap()
+        .starts_with("url: apiKey looks like a secret"));
+    assert_eq!(url_problem("https://x.example/$mcp"), None);
+    assert!(url_problem("https://x.example/${mcp").is_some());
+}

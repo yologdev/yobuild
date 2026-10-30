@@ -1986,13 +1986,32 @@ fn server_url(raw: Spanned<String>) -> Result<(Value, String), Located> {
         .host_str()
         .unwrap_or_default()
         .to_owned();
+    query_guard(&value).map_err(|m| (span.clone(), m))?;
+    Ok((value, host))
+}
+
+/// A URL's query parameters by the rule of [`guard`], by name
+/// (`?api_key=…` a reference).
+fn query_guard(value: &Value) -> Result<(), String> {
     let query = value.as_str().split_once('?').map_or("", |(_, q)| q);
     for pair in query.split(['&', '#']).filter(|p| !p.is_empty()) {
         let (name, given) = pair.split_once('=').unwrap_or((pair, ""));
-        let given = Value::new(given).map_err(|m| (span.clone(), m))?;
-        guard(name, &given).map_err(|m| (span.clone(), format!("url: {m}")))?;
+        let given = Value::new(given)?;
+        guard(name, &given).map_err(|m| format!("url: {m}"))?;
     }
-    Ok((value, host))
+    Ok(())
+}
+
+/// Why `url`, written as it is in an `[[mcp]] url`, would be refused by
+/// the manifest's rules beyond its address (a `$` that is not a
+/// reference, a parameter named like a secret with a literal value):
+/// what a remote server's printed block must pass.
+pub(crate) fn url_problem(url: &str) -> Option<String> {
+    let value = match Value::new(url) {
+        Ok(value) => value,
+        Err(m) => return Some(m),
+    };
+    query_guard(&value).err()
 }
 
 /// Every string in a plugin's configuration, by the key it is under (in a

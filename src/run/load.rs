@@ -31,6 +31,22 @@ use crate::run::host::clip;
 
 /// Starting the server, and listing its tools: each.
 const START_TIME: Duration = Duration::from_secs(30);
+/// Closing a server: a remote's DELETE to a host gone quiet would
+/// otherwise hold the end of a run, or of the session, for minutes.
+const CLOSE_TIME: Duration = Duration::from_secs(5);
+
+/// Closes `client` within [`CLOSE_TIME`]; what fails is logged, not said
+/// (the server is left either way).
+async fn close_quietly(client: &McpClient, name: &str) {
+    match tokio::time::timeout(CLOSE_TIME, client.close()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("stopping the loaded MCP server {name}: {e}"),
+        Err(_) => tracing::warn!(
+            "stopping the loaded MCP server {name}: no answer within {} s; left",
+            CLOSE_TIME.as_secs()
+        ),
+    }
+}
 /// Each npm call of the install.
 const NPM_TIME: Duration = Duration::from_secs(300);
 const DESCRIPTION_CHARS: usize = 300;
@@ -654,15 +670,13 @@ impl Loaded {
         out
     }
 
-    /// Stops every server (yoagent's stdio `close` kills it; it returns no
-    /// error of its own, but another transport's is logged).
+    /// Stops every server (yoagent's stdio `close` kills it; a remote's
+    /// sends DELETE), each within [`CLOSE_TIME`].
     pub async fn close(&self) {
         let servers = std::mem::take(&mut locked(&self.0.lists).servers);
         self.0.generation.fetch_add(1, Ordering::SeqCst);
         for server in servers {
-            if let Err(e) = server.client.lock().await.close().await {
-                tracing::warn!("stopping the loaded MCP server {}: {e}", server.name);
-            }
+            close_quietly(&*server.client.lock().await, &server.name).await;
         }
     }
 }
@@ -821,6 +835,8 @@ pub(crate) struct LoadPlugin {
     withheld: Arc<Vec<String>>,
     /// The credentials yoagent reads (the helper scripts' environment).
     keys: Arc<Vec<String>>,
+    /// How a remote's credential is read from the environment.
+    lookup: remote::Lookup,
     /// What a pi or DSH package runs on; `None` in `check`, which loads
     /// nothing.
     plugins: Option<Plugins>,
@@ -889,9 +905,17 @@ impl LoadPlugin {
             cwd: cwd.to_path_buf(),
             withheld: Arc::new(super::withheld(manifest)),
             keys: Arc::new(manifest.key_variables()),
+            lookup: remote::environment(),
             plugins,
             state: Arc::default(),
         }
+    }
+
+    /// The environment a remote's credential is read from: a test's.
+    #[cfg(test)]
+    pub(crate) fn with_lookup(mut self, lookup: remote::Lookup) -> Self {
+        self.lookup = lookup;
+        self
     }
 
     /// Step 1, the limits: the candidate, the version taken — `version`, or
@@ -1653,7 +1677,7 @@ impl AgentTool for LoadPlugin {
         json!({
             "type": "object",
             "properties": {
-                "package": { "type": "string", "description": "The npm package, as find_plugin gave it." },
+                "package": { "type": "string", "description": "The npm package, or a remote server's MCP registry name, as find_plugin gave it." },
                 "version": { "type": "string", "description": "The version find_plugin said could be loaded; leave it out to take that one." },
                 "name": { "type": "string", "description": "What to call it (its tools are <name>__<tool>); by default from the package's name." },
                 "args": { "type": "array", "items": { "type": "string" }, "description": "An MCP server's own arguments, as its documentation gives them (a pi or DSH package takes none)." }
