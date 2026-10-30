@@ -159,6 +159,12 @@ pub(crate) const HINTS: &[Hint] = &[
         pattern: "is in use by another plugin or server: pass another `name`",
         fix: "the agent can pass another `name`; or rename the manifest's entry of that name",
     },
+    Hint {
+        id: "load-remote-refused",
+        scope: Scope::Call,
+        pattern: "it needs a credential, or a sign-in (OAuth) yobuild cannot do yet",
+        fix: "when the server takes a key, set it in an environment variable and name that variable at the credential question (load it again); one that needs a sign-in cannot be connected yet",
+    },
     // Refused at start (check, run, and plugins stopping later).
     Hint {
         id: "shadowed-builtin",
@@ -401,6 +407,12 @@ mod tests {
                 Scope::Call,
                 "load_plugin refused it: the name \"eslint\" is in use by another plugin or server: pass another `name` (letters, digits, `-`, `_`)".into(),
                 "load-name-in-use",
+            ),
+            // yobuild: run/load/remote.rs `connect_failed`.
+            (
+                Scope::Call,
+                "load_plugin refused it: io.github.upstash/context7 refused yobuild's request (HTTP 401): it needs a credential, or a sign-in (OAuth) yobuild cannot do yet (HTTP 401 Unauthorized from server on 'initialize')".into(),
+                "load-remote-refused",
             ),
             // yobuild: run/check.rs, run.rs, frontend/host.rs.
             (

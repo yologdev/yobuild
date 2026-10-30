@@ -4826,6 +4826,11 @@ redirect elsewhere an error naming where it pointed. A manifest's
      whose error says the server ended the session ("MCP session expired")
      marks it stopped with that reason, said by the tick, since every
      later call would fail too. It is not reconnected.
+     Only that: a remote unreachable, or answering 401 later, stays
+     offered, each call failing with its reason (a host's bad day is not
+     its end).
+   - **Closing:** within 5 s; a DELETE to a host gone quiet is left, so
+     the end of a run or the session is never held by it.
    - **The end:** `close()` sends yoagent's `DELETE`.
 8. **The block.** `Kept` gains the address and the headers:
 
@@ -4918,5 +4923,7 @@ party's day as npm's is.
    uncounted, until 4; a name of one label is refused too, as a machine
    on this network);
 4. `load_plugin` for a remote: the questions, the credential, `Server`
-   without an exit watch, the block, `check`, the hints;
+   without an exit watch, the block, `check`, the hints (done; an
+   optional header with no `{…}` is left off, a required one sent as
+   listed; the credential asked at most three times);
 5. the demo, the skill, the guide, `CLAUDE.md` and the roadmap.

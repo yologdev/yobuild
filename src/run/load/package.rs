@@ -285,6 +285,7 @@ impl LoadPlugin {
             args: Vec::new(),
             tools: own.clone(),
             stopped: None,
+            remote: None,
         };
         self.session.notice(
             NoticeLevel::Info,

@@ -31,6 +31,22 @@ use crate::run::host::clip;
 
 /// Starting the server, and listing its tools: each.
 const START_TIME: Duration = Duration::from_secs(30);
+/// Closing a server: a remote's DELETE to a host gone quiet would
+/// otherwise hold the end of a run, or of the session, for minutes.
+const CLOSE_TIME: Duration = Duration::from_secs(5);
+
+/// Closes `client` within [`CLOSE_TIME`]; what fails is logged, not said
+/// (the server is left either way).
+async fn close_quietly(client: &McpClient, name: &str) {
+    match tokio::time::timeout(CLOSE_TIME, client.close()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("stopping the loaded MCP server {name}: {e}"),
+        Err(_) => tracing::warn!(
+            "stopping the loaded MCP server {name}: no answer within {} s; left",
+            CLOSE_TIME.as_secs()
+        ),
+    }
+}
 /// Each npm call of the install.
 const NPM_TIME: Duration = Duration::from_secs(300);
 const DESCRIPTION_CHARS: usize = 300;
@@ -38,6 +54,7 @@ const SCHEMA_CHARS: usize = 400;
 const DAY: i64 = 24 * 60 * 60;
 
 mod package;
+mod remote;
 pub(crate) use package::Plugins;
 
 /// A server or package the owner kept this session, as the end of the
@@ -57,11 +74,20 @@ pub(crate) struct Kept {
     pub tools: Vec<String>,
     /// Why it stopped, once it was seen to.
     pub stopped: Option<String>,
+    /// A remote server's address and headers: `Some` exactly when `kind`
+    /// is remote (whose `package` is its registry name, `version` empty).
+    pub remote: Option<KeptRemote>,
 }
 
-/// A remote is refused before anything is kept, until its load comes
-/// (design §14 "Stage 3", PR 4): a `Kept` is never one.
-const REMOTE_NOT_KEPT: &str = "a remote MCP server is refused before it is kept";
+/// A remote server as the block keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeptRemote {
+    pub url: String,
+    pub host: String,
+    /// Each header sent, its value as written (`Bearer ${CTX_KEY}`): the
+    /// variable the owner named, never its value.
+    pub headers: Vec<(String, String)>,
+}
 
 impl Kept {
     /// The `[[mcp]]` (or `[[plugin]]`) block that would keep it.
@@ -73,16 +99,34 @@ impl Kept {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let (table, key) = match self.kind {
-            ExtendKind::Mcp => ("mcp", "npm  "),
-            ExtendKind::Remote => unreachable!("{REMOTE_NOT_KEPT}"),
-            ExtendKind::Pi => ("plugin", "pi   "),
-            ExtendKind::Dsh => ("plugin", "dsh  "),
+        let source = match (self.kind, &self.remote) {
+            (ExtendKind::Remote, Some(remote)) => {
+                let mut lines = format!("url  = {}\n", Json::String(remote.url.clone()));
+                if !remote.headers.is_empty() {
+                    let headers: Vec<String> = remote
+                        .headers
+                        .iter()
+                        .map(|(name, value)| format!("{name} = {}", Json::String(value.clone())))
+                        .collect();
+                    lines.push_str(&format!("headers = {{ {} }}\n", headers.join(", ")));
+                }
+                ("mcp", lines)
+            }
+            (kind, _) => {
+                let (table, key) = match kind {
+                    ExtendKind::Pi => ("plugin", "pi   "),
+                    ExtendKind::Dsh => ("plugin", "dsh  "),
+                    _ => ("mcp", "npm  "),
+                };
+                let spec = Json::String(format!("{}@{}", self.package, self.version));
+                (table, format!("{key}= {spec}\n"))
+            }
         };
         let mut block = format!(
-            "[[{table}]]\nname = {}\n{key}= {}\n",
+            "[[{}]]\nname = {}\n{}",
+            source.0,
             Json::String(self.name.clone()),
-            Json::String(format!("{}@{}", self.package, self.version))
+            source.1
         );
         if !self.args.is_empty() {
             block.push_str(&format!("args = [{}]\n", quoted(&self.args)));
@@ -161,10 +205,12 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
                     Some(why) => format!(", stopped this session: {why}"),
                     None => String::new(),
                 };
+                let what = match &k.remote {
+                    Some(remote) => format!("{} at {}", k.package, remote.host),
+                    None => format!("{}@{}", k.package, k.version),
+                };
                 format!(
-                    "{}@{} as {} (tools: {}{stopped})",
-                    k.package,
-                    k.version,
+                    "{what} as {} (tools: {}{stopped})",
                     k.name,
                     k.tools.join(", ")
                 )
@@ -202,11 +248,18 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
             None => text.push_str(".\n"),
         }
     }
+    if kept.iter().any(|k| k.remote.is_some()) {
+        text.push_str(&format!(
+            "\nA remote server's headers name the variables you gave: {} reads them from the environment when it connects, as any `[[mcp]]` header's.\n",
+            files.manifest
+        ));
+    }
     let mut sets: Vec<&str> = Vec::new();
     for k in kept {
         let set = match k.kind {
             ExtendKind::Mcp => "mcp",
-            ExtendKind::Remote => unreachable!("{REMOTE_NOT_KEPT}"),
+            // Nothing installed: in no set.
+            ExtendKind::Remote => continue,
             ExtendKind::Pi => "pi",
             ExtendKind::Dsh => "dsh",
         };
@@ -223,7 +276,7 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        [] => String::new(),
+        [] => return text,
     };
     text.push_str(&format!(
         "\nThe next run resolves {its} dependencies again ({sets}, without the age limit) and writes {}, which --locked needs.",
@@ -243,8 +296,12 @@ struct Server {
     client: Arc<tokio::sync::Mutex<McpClient>>,
     /// yoagent's watch over its process, taken from the transport before
     /// the client was built: read without the `tokio::Mutex` yobuild keeps
-    /// the client in (a call in flight holds it).
-    exit: ExitWatch,
+    /// the client in (a call in flight holds it). `None` for a remote
+    /// server, which has no process here.
+    exit: Option<ExitWatch>,
+    /// Why a remote server is gone, once a call found it had ended its
+    /// session (`remote::Ending` sets it).
+    ended: Arc<Mutex<Option<String>>>,
     /// Once the watch said it had gone: when it first did, and the longest
     /// reason read since (yoagent answers without the stderr tail while a
     /// call or `close` holds the child).
@@ -262,7 +319,25 @@ impl Server {
             name,
             tools,
             client,
-            exit,
+            exit: Some(exit),
+            ended: Arc::default(),
+            gone: Mutex::default(),
+        }
+    }
+
+    /// A remote server: seen gone only once a call finds its session ended.
+    fn remote(
+        name: String,
+        tools: Vec<Arc<dyn AgentTool>>,
+        client: Arc<tokio::sync::Mutex<McpClient>>,
+        ended: Arc<Mutex<Option<String>>>,
+    ) -> Self {
+        Server {
+            name,
+            tools,
+            client,
+            exit: None,
+            ended,
             gone: Mutex::default(),
         }
     }
@@ -270,7 +345,12 @@ impl Server {
     /// Reads the watch: whether the server was newly seen gone. A reason
     /// read is kept when longer than the one before.
     fn look(&self) -> bool {
-        let Some(why) = self.exit.exited().map(|why| said(&why)) else {
+        let exited = self
+            .exit
+            .as_ref()
+            .and_then(|e| e.exited())
+            .map(|why| said(&why));
+        let Some(why) = exited.or_else(|| locked(&self.ended).clone()) else {
             return false;
         };
         let mut gone = locked(&self.gone);
@@ -590,15 +670,13 @@ impl Loaded {
         out
     }
 
-    /// Stops every server (yoagent's stdio `close` kills it; it returns no
-    /// error of its own, but another transport's is logged).
+    /// Stops every server (yoagent's stdio `close` kills it; a remote's
+    /// sends DELETE), each within [`CLOSE_TIME`].
     pub async fn close(&self) {
         let servers = std::mem::take(&mut locked(&self.0.lists).servers);
         self.0.generation.fetch_add(1, Ordering::SeqCst);
         for server in servers {
-            if let Err(e) = server.client.lock().await.close().await {
-                tracing::warn!("stopping the loaded MCP server {}: {e}", server.name);
-            }
+            close_quietly(&*server.client.lock().await, &server.name).await;
         }
     }
 }
@@ -757,6 +835,8 @@ pub(crate) struct LoadPlugin {
     withheld: Arc<Vec<String>>,
     /// The credentials yoagent reads (the helper scripts' environment).
     keys: Arc<Vec<String>>,
+    /// How a remote's credential is read from the environment.
+    lookup: remote::Lookup,
     /// What a pi or DSH package runs on; `None` in `check`, which loads
     /// nothing.
     plugins: Option<Plugins>,
@@ -825,9 +905,17 @@ impl LoadPlugin {
             cwd: cwd.to_path_buf(),
             withheld: Arc::new(super::withheld(manifest)),
             keys: Arc::new(manifest.key_variables()),
+            lookup: remote::environment(),
             plugins,
             state: Arc::default(),
         }
+    }
+
+    /// The environment a remote's credential is read from: a test's.
+    #[cfg(test)]
+    pub(crate) fn with_lookup(mut self, lookup: remote::Lookup) -> Self {
+        self.lookup = lookup;
+        self
     }
 
     /// Step 1, the limits: the candidate, the version taken — `version`, or
@@ -865,14 +953,16 @@ impl LoadPlugin {
             .into_iter()
             .find(|c| c.kind == ExtendKind::Mcp)
             .unwrap_or(first);
-        // Found, not yet loadable: nothing counted (design §14 "Stage 3",
-        // whose load is its next step).
-        if candidate.kind == ExtendKind::Remote {
-            return Err(refused(format!(
-                "{package} is a remote MCP server: yobuild does not connect to one the agent found yet (nothing was counted)"
-            )));
-        }
-        let version = match (&candidate.version, version) {
+        let version = match (candidate.remote(), &candidate.version, version) {
+            // A remote has no version to take.
+            (Some(_), _, Some(_)) => {
+                return Err(refused(format!(
+                    "{package}: {} (give no `version`)",
+                    find_plugin::NO_VERSION
+                )))
+            }
+            (Some(_), _, None) => String::new(),
+            (None, version_, version) => match (version_, version) {
             (Err(why), _) => {
                 return Err(refused(format!("{package} is not loadable: {why}")))
             }
@@ -882,6 +972,7 @@ impl LoadPlugin {
                 )))
             }
             (Ok(v), _) => v.clone(),
+            },
         };
         if let Some(k) = self
             .loaded
@@ -919,10 +1010,11 @@ impl LoadPlugin {
     }
 
     /// Step 2, the name: given, or the package's.
-    fn name(&self, package: &str, given: Option<&str>) -> Result<String, Refused> {
-        let name = match given {
-            Some(name) => name.to_owned(),
-            None => default_name(package),
+    fn name(&self, candidate: &Candidate, given: Option<&str>) -> Result<String, Refused> {
+        let name = match (given, candidate.remote()) {
+            (Some(name), _) => name.to_owned(),
+            (None, Some(_)) => remote::default_name(&candidate.package),
+            (None, None) => default_name(&candidate.package),
         };
         let pass_another = |why: String| {
             refused(format!(
@@ -992,7 +1084,15 @@ impl LoadPlugin {
             }
         };
         let (candidate, version, _busy) = self.limits(&package, version.as_deref())?;
-        let name = self.name(&package, given.as_deref())?;
+        let name = self.name(&candidate, given.as_deref())?;
+        if let Some(remote) = candidate.remote() {
+            if !args.is_empty() {
+                return Err(refused(
+                    "a remote MCP server takes no `args` (they are a stdio server's)",
+                ));
+            }
+            return self.load_remote(&candidate, remote, &name, ctx).await;
+        }
         if candidate.kind != ExtendKind::Mcp {
             if !args.is_empty() {
                 return Err(refused(format!(
@@ -1109,6 +1209,7 @@ impl LoadPlugin {
             args,
             tools: own,
             stopped: None,
+            remote: None,
         };
         self.session.notice(
             NoticeLevel::Info,
@@ -1576,7 +1677,7 @@ impl AgentTool for LoadPlugin {
         json!({
             "type": "object",
             "properties": {
-                "package": { "type": "string", "description": "The npm package, as find_plugin gave it." },
+                "package": { "type": "string", "description": "The npm package, or a remote server's MCP registry name, as find_plugin gave it." },
                 "version": { "type": "string", "description": "The version find_plugin said could be loaded; leave it out to take that one." },
                 "name": { "type": "string", "description": "What to call it (its tools are <name>__<tool>); by default from the package's name." },
                 "args": { "type": "array", "items": { "type": "string" }, "description": "An MCP server's own arguments, as its documentation gives them (a pi or DSH package takes none)." }

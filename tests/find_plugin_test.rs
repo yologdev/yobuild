@@ -665,7 +665,7 @@ fn check_of_a_remote_agent_says_it_asks_the_mcp_registry_only() {
         notes.iter().any(|n| {
             let n = n.as_str().unwrap();
             n.starts_with("[extend]: the agent may search the MCP registry for remote MCP servers (`find_plugin`) and load")
-                && n.ends_with("; a remote MCP server is found only, not loaded yet (a later step): `load_plugin` refuses it, uncounted")
+                && n.ends_with("; a remote MCP server is connected over https, nothing of it running here: each call sends its arguments to its host, and the owner names the environment variable of any credential it takes")
         }),
         "{notes:#?}"
     );
