@@ -2,14 +2,15 @@ name: Release
 
 # On a version tag (`v0.1.0`): the binaries for macOS and Linux, each a
 # tarball with its checksum, attached to a draft GitHub release named after
-# the tag. Windows is not built (design §13). A person publishes the
-# release, and publishing it publishes the crate (`publish.yml`), so the
-# notes' `cargo install yobuild` works a few minutes later. Run by hand
-# (workflow_dispatch) it builds and checks the crate, and drafts nothing.
-# A tag with a `-` (`v0.2.0-rc.1`) is drafted as a pre-release, which
-# `publish.yml` leaves off crates.io. Run again on a tag whose draft
-# exists, it replaces the draft's files; a published release is not
-# touched.
+# the tag, its notes the version's section of CHANGELOG.md
+# (`scripts/release-notes.sh`). Windows is not built (design §13). A person
+# publishes the release, and publishing it publishes the crate
+# (`publish.yml`), so the notes' `cargo install yobuild` works a few minutes
+# later. Run by hand (workflow_dispatch) it builds and checks the crate, and
+# drafts nothing. A tag with a `-` (`v0.2.0-rc.1`) is drafted as a
+# pre-release, which `publish.yml` leaves off crates.io. Run again on a tag
+# whose draft exists, it replaces the draft's files and notes; a published
+# release is not touched.
 on:
   push:
     tags: ["v*"]
@@ -93,6 +94,8 @@ jobs:
           # 4 targets (the build matrix), a tarball and a checksum each.
           n=$(ls dist | wc -l)
           [ "$n" -eq 8 ] || { echo "::error::expected 8 files, found $n: $(ls dist)"; exit 1; }
+      - name: The notes, from the version's section of CHANGELOG.md
+        run: scripts/release-notes.sh "${GITHUB_REF_NAME#v}" > notes.md
       - name: Draft the release, the binaries attached
         env:
           GH_TOKEN: ${{ github.token }}
@@ -104,7 +107,8 @@ jobs:
               exit 1
             fi
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
             exit 0
           fi
           gh release create "$GITHUB_REF_NAME" dist/* --draft $pre --title "yobuild $GITHUB_REF_NAME" \
-            --notes "See CHANGELOG.md. Needs Node 22.19+ and npm 11.19+ for plugins. Install: download the tarball for your platform (macOS or Linux), or \`cargo install yobuild\` (\`cargo binstall yobuild\` downloads the tarball)."
+            --notes-file notes.md
