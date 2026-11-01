@@ -5,7 +5,7 @@ base changed**, because a lock with DSH plugins records it: when it
 changed, `--locked` refuses such a lock, and one run without `--locked`
 locks it again (commit the new lock).
 
-## Unreleased
+## 0.2.1 — 2026-11-01
 
 - **yoagent 0.26.3.** Gemini and Vertex now stream non-ASCII text
   whole: a character split across two HTTP chunks (Chinese text, emoji;
