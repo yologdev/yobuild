@@ -5,6 +5,14 @@ base changed**, because a lock with DSH plugins records it: when it
 changed, `--locked` refuses such a lock, and one run without `--locked`
 locks it again (commit the new lock).
 
+## Unreleased
+
+- **yoagent 0.26.3.** Gemini and Vertex now stream non-ASCII text
+  whole: a character split across two HTTP chunks (Chinese text, emoji;
+  in answers, thinking and tool-call arguments) came back as U+FFFD.
+  Other providers were never affected. yoagent-rutis is unchanged
+  (0.10.0), and so is the DSH base.
+
 ## 0.2.0 — 2026-10-30
 
 Agents that extend themselves: an agent can find a tool it lacks and
