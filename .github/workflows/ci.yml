@@ -76,6 +76,13 @@ jobs:
           for f in $d/*.log; do echo "== $f"; grep -iE 'typescript|tsserver|broken|spawn failure|install' "$f" | head -80; done
           ls $d/tools/node_modules/.bin 2>&1 | head; node --version; which node
           find $d/projects -name '*.json' -newer $d/instances.json 2>/dev/null | head -5 | while read f; do echo "== $f"; head -c 3000 "$f"; echo; done
+      - name: A release's notes (scripts/release-notes.sh on its fixtures, on Linux's awk)
+        run: scripts/release-notes-test.sh
+      - name: Cargo.toml's version has its CHANGELOG.md section (the release's notes)
+        shell: bash
+        # Shown as the job's summary: its wrapped lines already joined, as
+        # the release page needs.
+        run: scripts/release-notes.sh "$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)" >> "$GITHUB_STEP_SUMMARY"
       - name: Page logic and the approval gate (node --test)
         run: node --test frontend/web/lib.test.js frontend/plugins/pi-extensions/confirm-dangerous.test.mjs
       - name: Example (scripted, headless; a pi dialog reaches the terminal UI)

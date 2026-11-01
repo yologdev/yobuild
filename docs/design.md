@@ -3663,7 +3663,15 @@ made plain:
 - **Prebuilt binaries.** A release workflow on a `v*` tag builds for macOS
   (arm64, x86_64) and Linux (x86_64, aarch64; glibc). It attaches tarballs
   and checksums to the GitHub release, plus `cargo binstall` metadata. No
-  install script piped to a shell.
+  install script piped to a shell. The release's notes are its version's
+  section of `CHANGELOG.md`, its wrapped lines joined (GitHub draws each
+  line break of a release's notes; lists, headings, tables, quotes, HTML,
+  hard breaks and fenced blocks kept as written), then how to install it
+  (`scripts/release-notes.sh`; decided 2026-10-31, after 0.1.0 and 0.2.0
+  went out with one line pointing to `CHANGELOG.md`, and how to install,
+  instead of what they brought). CI runs it on Cargo.toml's version, so a
+  version without its section, or with an empty one, fails before it is
+  tagged, and checks it on fixtures (`scripts/release-notes-test.sh`).
 - **Publishing the crate** (decided 2026-10-25, as yoagent does it): a
   person publishes the draft release, and that publishes the crate —
   `publish.yml`, on `release: published`, runs `cargo publish --locked`
