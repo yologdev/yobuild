@@ -27,19 +27,30 @@ const COALESCE: Duration = Duration::from_millis(30);
 /// How long a plugin's question waits for an answer before the safe default.
 pub const UI_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// How long a sign-in question waits ([`UiRequest::SignIn`]): an account
-/// to make or a second factor take longer than a question's answer.
+/// The timeout a sign-in question ([`UiRequest::SignIn`]) is asked with,
+/// through [`Session::ask_or_why`]: an account to make or a second factor
+/// take longer than a question's answer.
 pub const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Why [`Session::ask_or_why`] got no answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Unanswered {
-    /// No frontend was attached to ask.
+    /// No frontend was attached to ask as it was asked (observers are not
+    /// frontends). One that leaves while it waits does not end it: a page
+    /// opened again gets it in its `Hello`, else it times out.
     NoFrontend,
     /// Nobody answered in time.
     TimedOut,
-    /// It was withdrawn (by its key, or a reset), or the session ended.
+    /// The session ended, before it was asked or while it waited.
+    SessionEnded,
+}
+
+/// Why `ask_inner` got no answer: [`Unanswered`], or a withdrawal by key or
+/// a reset — which only a keyed or held question can get, never
+/// [`Session::ask_or_why`]'s.
+enum Missed {
+    Unanswered(Unanswered),
     Withdrawn,
 }
 
@@ -302,7 +313,13 @@ impl Session {
                 let mut ui = self.inner.ui.lock().unwrap();
                 match ui.pending.get(&id) {
                     Some((_, request)) if !request.accepts(&value) => {
-                        tracing::warn!(id, answer = %value, "an answer that does not fit its question was ignored");
+                        // Not the answer itself: a sign-in's could be a code
+                        // pasted by its user.
+                        tracing::warn!(
+                            id,
+                            title = request.title(),
+                            "an answer that does not fit its question was ignored"
+                        );
                     }
                     Some(_) => {
                         if let Some((waiter, _)) = ui.pending.remove(&id) {
@@ -370,7 +387,15 @@ impl Session {
         request: UiRequest,
         timeout: Duration,
     ) -> Result<Json, Unanswered> {
-        self.ask_inner(request, Some(timeout), None, false).await
+        self.ask_inner(request, Some(timeout), None, false)
+            .await
+            .map_err(|missed| match missed {
+                Missed::Unanswered(why) => why,
+                Missed::Withdrawn => {
+                    debug_assert!(false, "a question with no key, not held, was withdrawn");
+                    Unanswered::SessionEnded
+                }
+            })
     }
 
     /// Ask, and keep the question open until it is answered — however long
@@ -391,7 +416,7 @@ impl Session {
         timeout: Option<Duration>,
         key: Option<String>,
         hold: bool,
-    ) -> Result<Json, Unanswered> {
+    ) -> Result<Json, Missed> {
         let request = request.normalized();
         let expects = request.expects_answer();
         let (tx, rx) = oneshot::channel();
@@ -404,13 +429,13 @@ impl Session {
             if let Some(key) = &key {
                 if ui.early.remove(key).is_some() {
                     tracing::debug!(%key, "a question withdrawn before it was asked");
-                    return Err(Unanswered::Withdrawn);
+                    return Err(Missed::Withdrawn);
                 }
             }
             // Checked under `ui`: the session's end clears `pending` under it
             // too, so a question is either refused here or cleared there.
             if self.is_closed() {
-                return Err(Unanswered::Withdrawn);
+                return Err(Missed::Unanswered(Unanswered::SessionEnded));
             }
             if !attached && !hold {
                 drop(ui);
@@ -418,7 +443,7 @@ impl Session {
                     title = request.title(),
                     "no frontend to ask: the safe default"
                 );
-                return Err(Unanswered::NoFrontend);
+                return Err(Missed::Unanswered(Unanswered::NoFrontend));
             }
             ui.next_id += 1;
             let id = ui.next_id;
@@ -485,11 +510,13 @@ impl Session {
                 close.reason = ResolveReason::Answered;
                 Ok(value)
             }
-            Ok(Err(_)) => Err(Unanswered::Withdrawn),
+            // The session's end marks it closed before it clears `pending`.
+            Ok(Err(_)) if self.is_closed() => Err(Missed::Unanswered(Unanswered::SessionEnded)),
+            Ok(Err(_)) => Err(Missed::Withdrawn),
             Err(_) => {
                 close.reason = ResolveReason::TimedOut;
                 tracing::info!(%title, "no answer in time: the safe default");
-                Err(Unanswered::TimedOut)
+                Err(Missed::Unanswered(Unanswered::TimedOut))
             }
         }
     }

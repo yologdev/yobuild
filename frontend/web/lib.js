@@ -958,26 +958,41 @@ export function safeUrl(url) {
   }
 }
 
-// A sign-in question's link, when it may be opened: https, or http to this
-// machine's loopback address `127.0.0.1` (the short link yobuild serves,
-// which sends the browser on). Anything else, or none (phone mode: the link
-// opens on yobuild's machine only), is `undefined`: not shown as a link.
-export function signInLink(request) {
-  if (typeof request?.url !== 'string') return undefined
+// How a sign-in question's link is shown, for a frontend whose page is at
+// `pageHost` (`location.hostname`; none: on yobuild's machine, as the
+// terminal UI is):
+// - `{ link }`: one to open — https, or http to the loopback address
+//   `127.0.0.1` (the short link yobuild serves, which sends the browser on)
+//   from a page on yobuild's machine;
+// - `{ there }`: that loopback link, from a page on another machine (a page
+//   served on every interface, opened over the network): it opens on
+//   yobuild's machine only, so it is shown as text, to open there;
+// - `{ printed: true }`: no link (phone mode: yobuild printed it on its
+//   machine);
+// - `{ refused: true }`: a link of any other kind (http elsewhere, a user in
+//   it, another scheme), never shown.
+export function signInLink(request, pageHost) {
+  if (request?.url == null) return { printed: true }
+  if (typeof request.url !== 'string') return { refused: true }
   try {
     const parsed = new URL(request.url)
-    if (parsed.username || parsed.password) return undefined
-    if (parsed.protocol === 'https:') return parsed.href
-    if (parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1') return parsed.href
+    if (parsed.username || parsed.password) return { refused: true }
+    if (parsed.protocol === 'https:') return { link: parsed.href }
+    if (parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1') {
+      return pageHost === undefined || LOOPBACK_PAGES.includes(pageHost) ? { link: parsed.href } : { there: parsed.href }
+    }
   } catch {}
-  return undefined
+  return { refused: true }
 }
+const LOOPBACK_PAGES = ['127.0.0.1', 'localhost', '[::1]']
 
 // A typed answer (the terminal UI) to a question: `{ value }`, or `{ error }`
 // when it does not fit, so the question is asked again rather than answered
 // with a guess. confirm: y/yes or n/no. select: a number (blank: no choice);
 // with `multiple`, numbers split by commas or spaces, each at most once
-// (blank: none). input: the text.
+// (blank: none). input: the text. signIn: `cancel` typed → "cancel" (its one
+// answer; blank asks again: an Enter pressed once the browser is done must
+// not cancel it).
 export function parseAnswer(request, text) {
   const trimmed = String(text ?? '').trim()
   if (request.kind === 'confirm') {
@@ -1003,8 +1018,8 @@ export function parseAnswer(request, text) {
   }
   // A sign-in ends in the browser; its one answer here is its cancel.
   if (request.kind === 'signIn') {
-    if (!trimmed || /^cancel$/i.test(trimmed)) return { value: 'cancel' }
-    return { error: 'the sign-in ends in your browser: press Enter with nothing typed to cancel it' }
+    if (/^cancel$/i.test(trimmed)) return { value: 'cancel' }
+    return { error: 'the sign-in ends in your browser: type cancel to give it up' }
   }
   return { value: String(text ?? '') }
 }

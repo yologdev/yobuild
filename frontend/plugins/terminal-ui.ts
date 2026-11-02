@@ -151,11 +151,17 @@ export default definePlugin<{ demo?: string }>({
       say(bold(`  ? ${t(r.title)}`) + (r.message ? dim(` — ${t(r.message)}`) : ''))
       if (r.kind === 'select') r.options.forEach((o: string, i: number) => say(`    ${i + 1}. ${t(o)}`))
       // A sign-in: its host, then its link on a line of its own (a short
-      // one, yobuild's, that sends the browser on), or where it is.
+      // one, yobuild's, that sends the browser on); none shown otherwise.
       if (r.kind === 'signIn') {
         say(`    the sign-in page is at ${t(r.host)}`)
-        const link = signInLink(r)
-        say(link ? `    ${t(link)}` : dim('    open the link yobuild printed, on the machine it runs on'))
+        const shown = signInLink(r)
+        say(
+          shown.link
+            ? `    ${t(shown.link)}`
+            : shown.printed
+              ? dim('    open the link yobuild printed, on the machine it runs on')
+              : red('    its link cannot be shown here (neither https nor yobuild\'s own): type cancel'),
+        )
       }
       // Shown cleaned: an answer typed from it is the cleaned text.
       if (r.kind === 'input' && r.value) {
@@ -171,7 +177,7 @@ export default definePlugin<{ demo?: string }>({
                 ? 'answer with numbers, e.g. 1,3 (empty for none)'
                 : 'answer with a number (empty for no choice)'
               : r.kind === 'signIn'
-                ? 'sign in in your browser (Enter with nothing typed cancels)'
+                ? 'sign in in your browser (type cancel to give it up)'
                 : 'type your answer',
         ),
       )
@@ -179,9 +185,12 @@ export default definePlugin<{ demo?: string }>({
     const askUser = (id: number, r: Message) => {
       if (r.kind === 'notify') return say(yellow(`  ! ${t(r.message)}`))
       if (headless) {
-        // Nobody to ask: decline, as a user who walked away would.
         say(bold(`  ? ${t(r.title)}`) + (r.message ? dim(` — ${t(r.message)}`) : ''))
-        const value = r.kind === 'confirm' ? false : r.kind === 'signIn' ? 'cancel' : null
+        // A sign-in is left to time out, as nobody there would: a cancel
+        // would be a user's choice.
+        if (r.kind === 'signIn') return say(dim('  left unanswered (headless demo)'))
+        // Nobody to ask: decline.
+        const value = r.kind === 'confirm' ? false : null
         say(dim(`  answered: ${jsonText(value)} (headless demo)`))
         send({ type: 'uiResponse', id, value })
         return
@@ -197,8 +206,9 @@ export default definePlugin<{ demo?: string }>({
       const { id, request } = first
       const parsed = parseAnswer(request, text)
       if ('error' in parsed) {
-        // Not an answer: ask again rather than guess.
+        // Not an answer: ask again rather than guess, the text kept to edit.
         say(red(`  ${t(parsed.error)}`))
+        editor.setText(text)
         return true
       }
       const { value } = parsed

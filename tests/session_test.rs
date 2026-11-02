@@ -633,6 +633,8 @@ fn sign_in() -> UiRequest {
 #[tokio::test]
 async fn a_sign_in_tells_cancel_from_timeout_and_is_withdrawn_by_its_asker() {
     let (session, _driver) = Session::new(true);
+    // `run` always watches: an observer is not a frontend to ask.
+    let _watch = session.observe();
     assert_eq!(
         session.ask_or_why(sign_in(), WAIT).await,
         Err(Unanswered::NoFrontend)
@@ -681,6 +683,29 @@ async fn a_sign_in_tells_cancel_from_timeout_and_is_withdrawn_by_its_asker() {
     asking.abort();
     let _ = asking.await;
     assert_eq!(resolved(&mut ui).await, (id, ResolveReason::Withdrawn));
+}
+
+/// A sign-in open as the session ends is said as its end — not a Cancel,
+/// not a timeout — and so is one asked after it.
+#[tokio::test]
+async fn a_sign_in_open_as_the_session_ends_says_so() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    next(&mut ui).await;
+    let asking = {
+        let session = session.clone();
+        tokio::spawn(async move { session.ask_or_why(sign_in(), WAIT).await })
+    };
+    asked(&mut ui).await;
+    drop(driver);
+    assert_eq!(
+        tokio::time::timeout(WAIT, asking).await.unwrap().unwrap(),
+        Err(Unanswered::SessionEnded)
+    );
+    assert_eq!(
+        session.ask_or_why(sign_in(), WAIT).await,
+        Err(Unanswered::SessionEnded)
+    );
 }
 
 /// An asker that cannot drop its future (a plugin in another process)

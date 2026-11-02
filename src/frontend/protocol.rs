@@ -192,18 +192,22 @@ pub enum UiRequest {
     /// A sign-in in the user's browser (a remote MCP server's OAuth
     /// provider; design §14, "Stage 4"), asked by yobuild only: a plugin's
     /// `ui.request` is refused one. Answer: [`SIGN_IN_CANCEL`] (the user
-    /// gave up), nothing else; the sign-in itself ends it, by withdrawing
-    /// it once its browser page came back.
+    /// gave up), nothing else; the sign-in itself ends it once its browser
+    /// page came back, its asker dropping the question (yobuild's OAuth
+    /// steps, design §14 "Stage 4": to come).
     SignIn {
         title: String,
         #[serde(default)]
         message: String,
-        /// The host the link opens, said beside it.
+        /// The host of the sign-in page the link leads to (the
+        /// authorization server's), said beside it.
         host: String,
         /// The link to open: https, or http to this machine's loopback
-        /// (`127.0.0.1`, a short link that sends the browser on). `None`
-        /// where it is not shown (phone mode: it opens on this machine
-        /// only, so it is printed there instead).
+        /// (`127.0.0.1`, a short link that sends the browser on). Not
+        /// checked here: its asker keeps to it, and the frontends draw no
+        /// other link (`signInLink`). `None` where it is not shown (phone
+        /// mode: it opens on this machine only, so it is printed there
+        /// instead).
         #[serde(default)]
         url: Option<String>,
     },

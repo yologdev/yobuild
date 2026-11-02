@@ -291,8 +291,9 @@ function closeQuestion() {
 }
 
 function resolved(id, reason) {
+  const signIn = questions.waiting.some((q) => q.id === id && q.request.kind === 'signIn')
   const shown = questions.remove(id)
-  if (reason === 'timedOut') add('notice', 'A question timed out: the safe answer was used.')
+  if (reason === 'timedOut') add('notice', signIn ? 'The sign-in timed out: not signed in.' : 'A question timed out: the safe answer was used.')
   if (shown && dialog.open) {
     closeQuestion()
     showNextQuestion()
@@ -357,25 +358,37 @@ function showNextQuestion() {
     button('OK', () => field.value, true)
   } else if (request.kind === 'signIn') {
     // It ends in the browser: the sign-in withdraws it once the page came
-    // back. Only its link, checked, is drawn as one; with none (phone mode)
-    // the link is on yobuild's machine.
+    // back. Only its link, checked, is drawn as one (`signInLink`).
     dialog.append(el('p', 'host', `The sign-in page is at ${request.host}.`))
-    const href = signInLink(request)
-    if (href) {
+    const shown = signInLink(request, location.hostname)
+    if (shown.link) {
       const a = el('a', 'primary', 'Open the sign-in page')
-      a.href = href
+      a.href = shown.link
       a.target = '_blank'
       a.rel = 'noopener noreferrer'
       dialog.append(a)
-    } else {
+    } else if (shown.there) {
+      dialog.append(el('p', 'message', `This page is not on the machine yobuild runs on: open ${shown.there} in a browser there, where the sign-in comes back.`))
+    } else if (shown.printed) {
       dialog.append(el('p', 'message', 'Open the link yobuild printed, in a browser on the machine it runs on: the sign-in comes back there.'))
+    } else {
+      console.warn('a sign-in link not drawn (neither https nor http to 127.0.0.1):', request.url)
+      dialog.append(el('p', 'message', 'Its link cannot be shown here (neither https nor yobuild\'s own): cancel it.'))
     }
     button('Cancel', 'cancel')
   }
   dialog.append(actions)
+  const decline = () => reply(request.kind === 'confirm' ? false : request.kind === 'signIn' ? 'cancel' : null)
   dialog.oncancel = (e) => {
     e.preventDefault()
-    reply(request.kind === 'confirm' ? false : request.kind === 'signIn' ? 'cancel' : null)
+    decline()
+  }
+  // Opened with `show()`, the dialog is not modal, and a non-modal dialog
+  // gets no `cancel` from Escape: its keys are heard here instead.
+  dialog.onkeydown = (e) => {
+    if (e.key !== 'Escape' || e.defaultPrevented) return
+    e.preventDefault()
+    decline()
   }
   document.body.classList.add('asking')
   dialog.show()
