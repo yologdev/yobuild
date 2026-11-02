@@ -53,23 +53,25 @@ pkg-fmt = "tgz"
 async-trait = "0.1"
 # DshHome: a private, per-process home for DSH's own services.
 tempfile = "3"
-# Floors: 0.25.10 (DeepSeek priced; an MCP tool prefix applied; every text
+# Floors: 0.26.4 (the presets the skill's `manifest.md` names); 0.25.10
+# (DeepSeek priced; an MCP tool prefix applied; every text
 # block of a tool result sent to the model; `ModelConfig::preset`/`generic`;
-# steering a cancelled run took kept in the history); 0.11 (rutis 0.19.3:
+# steering a cancelled run took kept in the history); 0.12 (rutis 0.20.0;
+# since 0.11, rutis 0.19:
 # runtimes started by rutis-host's `SpawnPlugin`, rows resolved by
 # rutis-loader's `SessionResolver` as `<runtime>:<name>`; hook timings;
 # which plugin offered a tool, by its row; pi's `nestedCalls`), whose
 # adapters `scripts/copy-adapters.sh` copies (and whose `adapters()` names
 # the crate's own files, read in place: `dsh/host-services.json`). rutis
-# 0.19.3 throughout: the runtimes (`frontend/plugins`, the adapters', a
+# 0.20.0 throughout: the runtimes (`frontend/plugins`, the adapters', a
 # gallery agent's plugins) must match, as only neighbouring rutis
 # releases talk to each other.
-yoagent = "0.26.3"
-yoagent-rutis = { version = "0.11", features = ["node", "loader", "probe", "embedded-adapters"] }
-rutis = "0.19.3"
-rutis-bridge = { version = "0.19.3", default-features = false }
-rutis-host = "0.19.3"
-rutis-loader = { version = "0.19.3", features = ["node"] }
+yoagent = "0.26.5"
+yoagent-rutis = { version = "0.12", features = ["node", "loader", "probe", "embedded-adapters"] }
+rutis = "0.20.0"
+rutis-bridge = { version = "0.20.0", default-features = false }
+rutis-host = "0.20.0"
+rutis-loader = { version = "0.20.0", features = ["node"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

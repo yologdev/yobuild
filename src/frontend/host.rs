@@ -38,8 +38,8 @@ use rutis_loader::{
 use serde_json::{json, Value as Json};
 
 /// A rutis root on the current tokio runtime whose errors go to the log,
-/// at warn: rutis 0.19's default writes them to stderr, over a terminal
-/// UI's screen. A plugin's failed start and a runtime gone down the host's
+/// at warn: rutis's default (since 0.19) writes them to stderr, over a
+/// terminal UI's screen. A plugin's failed start and a runtime gone down the host's
 /// own checks say (`stopped`, `load`'s errors); a plugin's event listener
 /// or filter that throws goes to target [`PLUGIN_ERRORS`], which a running
 /// session says as a Warning notice (`run::plugin_log`).
@@ -127,14 +127,15 @@ impl Row {
         self
     }
 
-    /// The services injected into this plugin, in place of those it declares.
+    /// Services injected into this plugin, added to those it declares.
     ///
-    /// The plugin then waits for every one of them. (On rutis 0.7 and 0.8 a
-    /// TypeScript plugin given a row inject list never applied; 0.9 applies
-    /// it.) To hand a plugin a service it may go without — it only looks it
-    /// up, as the pi adapter does with `ui` — load a small plugin that
-    /// injects it and provides it again under the name looked up instead:
-    /// see `yoagent-rutis/plugins/pi/host-ui.ts`.
+    /// The row then waits until every one of them exists (rutis 0.20, #1001;
+    /// on rutis 0.7 and 0.8 a TypeScript plugin given a row inject list
+    /// never applied). A name its plugin declares `optional` fails the row.
+    /// A service a plugin may go without is declared `optional` in the
+    /// plugin and read with `ctx.get`, as the adapters do their host shims;
+    /// a host service another runtime must reach is provided again there
+    /// (`yoagent-rutis/plugins/pi/host-ui.ts`).
     pub fn inject(mut self, services: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.inject = services.into_iter().map(Into::into).collect();
         self
@@ -775,7 +776,7 @@ impl PluginHostBuilder {
         for service in &self.local {
             catalog.register::<RuntimeLocal>(service);
         }
-        // The id the host greets its runtimes with (rutis 0.19 has none by
+        // The id the host greets its runtimes with (rutis has none by
         // default); one a caller provided first stays.
         if root.get::<LocalId>().is_none() {
             root.provide(LocalId(PeerId::new("yobuild")?))?;
@@ -1058,7 +1059,7 @@ impl PluginHost {
     }
 
     /// The rows `ids` that run on an added runtime wait in rutis for no
-    /// service another runtime's plugin declares it provides: rutis 0.19
+    /// service another runtime's plugin declares it provides: rutis
     /// shares every name it is not told otherwise, so a plugin the agent
     /// loaded could otherwise get a service a manifest plugin provides.
     /// Asked of the loader's dry run (`Loader::check`) before anything

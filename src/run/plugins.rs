@@ -22,7 +22,7 @@ const RUTIS_RUNTIME: &str = "@arcships/rutis-runtime";
 
 /// The version yobuild's own runtimes run (`frontend/plugins/package.json`'s
 /// pin, unit-tested equal), which a rutis plugin's package must install.
-const RUTIS_RUNTIME_VERSION: &str = "0.19.3";
+const RUTIS_RUNTIME_VERSION: &str = "0.20.0";
 
 /// The rows re-providing `host_approval` and `host_session` to the pi
 /// adapter (`pi-host-approval`, `pi-host-session`).

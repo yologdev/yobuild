@@ -86,12 +86,14 @@ min_age_days = 7                      # 0 to 365: newer versions are not taken
   `anthropic/claude-opus-4-8`, `anthropic/claude-sonnet-5-5`,
   `anthropic/claude-sonnet-5`, `anthropic/claude-haiku-5-5`,
   `anthropic/claude-haiku-4-5`; `openai/gpt-5.5`, `openai/gpt-6-astra`,
-  `openai/gpt-6-sol`, `openai/gpt-6-luna`, `openai/gpt-6.1-sol`;
-  `google/gemini-4-argon`, `google/gemini-3.8-flash`; `xai/grok-4.7`;
-  `mistral/mistral-large-4`; `zai/glm-5.3`, `zai/glm-5.3-flash`;
-  `qwen/qwen3.8-max`, `qwen/qwen3.8-flash`. Any other id (but DeepSeek's
-  and Meta's) gets the provider's default limits, and `check` notes it:
-  prefer a listed one. Use the provider whose key
+  `openai/gpt-6-sol`, `openai/gpt-6-luna`, `openai/gpt-6.1-sol`,
+  `openai/gpt-6.1-terra`; `google/gemini-4-argon`,
+  `google/gemini-3.8-flash`; `xai/grok-4.7`; `mistral/mistral-large-4`;
+  `zai/glm-5.3`, `zai/glm-5.3-flash`, `zai/glm-5.3-flashx`;
+  `qwen/qwen3.8-max`, `qwen/qwen3.8-flash`, `qwen/qwen3.8-omni-flash`.
+  Any other id (but DeepSeek's and Meta's) gets the provider's default
+  limits, and `check` notes it: prefer a listed one. Use the provider
+  whose key
   the person has; for DeepSeek, `deepseek/deepseek-flash` unless the
   task needs a stronger model (`deepseek/deepseek-v4-pro`). Providers and their key
   variables: `anthropic` (`ANTHROPIC_API_KEY`), `openai`
@@ -129,7 +131,7 @@ price`").
   local plugin, loaded in its own npm package — the nearest folder above
   it with a `package.json`, which must be `"type": "module"` for a `.ts`
   file and have `@arcships/rutis-runtime` installed at the version
-  yobuild's runtimes use (0.19.3; `check` names it when it is missing),
+  yobuild's runtimes use (0.20.0; `check` names it when it is missing),
   and `@arcships/rutis` (the SDK) at the same version (`parts.md`).
   Or one of yobuild's own, `rutis = "yobuild:todo-plan"` or
   `"yobuild:search-links"` (`parts.md`): no `runtime` needed (Node).

@@ -1524,9 +1524,9 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rutis"
-version = "0.19.3"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37143a70e4a943d50dd1e3303b7f2b856460a56a362ee62fa62712e55882961a"
+checksum = "4ad2cf6139c481743978275a2cb26cdb4b4c1fe0cb68a0abba86f55745831ce0"
 dependencies = [
  "erased-serde",
  "rutis-macros",
@@ -1540,9 +1540,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-bridge"
-version = "0.19.3"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1e15efcf6926d6c0f8c5ca78a3a7c0af80bdeac3fac95c1332086c779266959"
+checksum = "84d4b20e21e7883d8099bae1f3290cef8849f9a1553bef01e6bdfa03e8f94918"
 dependencies = [
  "futures-util",
  "getrandom 0.2.17",
@@ -1564,9 +1564,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-host"
-version = "0.19.3"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77639ad2d64bce41e6f2e4a487669bc1c755566d63f41ef1c34b30fe26c50743"
+checksum = "56839bc2cfea36cef97645145e5488f23135837315d798fa0c6caf50a218ef94"
 dependencies = [
  "libc",
  "rustls-pki-types",
@@ -1582,9 +1582,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-loader"
-version = "0.19.3"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa6a552b9bd8f52acf066104bfc859bb4458b860db38f486ad85e99a12254d06"
+checksum = "8501f7c22fd5ad6c3bdb601736158b7132aed86844581d38ecd7d7e8c1e5a688"
 dependencies = [
  "libc",
  "rutis",
@@ -1598,9 +1598,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-macros"
-version = "0.19.3"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91dacd6ec042c7f181577318cfa73a05598b0878fb119071b971a67ff1e01db0"
+checksum = "cae4c3ea79854be829ada2ff513dcc97283a3d6493b748af02b4eb692e5a272b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1609,9 +1609,9 @@ dependencies = [
 
 [[package]]
 name = "rutis-types"
-version = "0.19.3"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86c93f394dffdbc00686ffcb182141bc8b4a9e940d3e96e18f16fc39d2a3a785"
+checksum = "00655240f4ea30484dcfddb69dc343d7873868ee54a80d4653d56a741a3fc675"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2773,9 +2773,9 @@ dependencies = [
 
 [[package]]
 name = "yoagent"
-version = "0.26.3"
+version = "0.26.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6aea599507b4ee9c3380345198bf869517e0772fa5fd11f488e1226fdcef2afa"
+checksum = "cde7bb1e9828caef2a17327d377b96ab1855036d4ce04da4e4060f78f10117fa"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2804,9 +2804,9 @@ dependencies = [
 
 [[package]]
 name = "yoagent-rutis"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43a3e9ea4de31a1798f584af0a489df86a6e1141580ca891ab935ee6da3eb080"
+checksum = "ab8708a36ba2cda6115a2adb606079c47b85ba0a5b937c89895b7ab779c43277"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

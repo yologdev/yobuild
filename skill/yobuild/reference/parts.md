@@ -82,7 +82,7 @@ say `plugins/`:
 - `plugins/package.json`: `"type": "module"`, `"private": true`, and
   dependencies `@arcships/rutis` (the SDK the plugin imports) and
   `@arcships/rutis-runtime` (the runtime yobuild starts it in), both at
-  exactly `0.19.3`;
+  exactly `0.20.0`;
 - `plugins/package-lock.json`, from `npm install --ignore-scripts` there.
   The runtime brings `tsx`, `typescript` and `esbuild`; all of them work
   without install scripts.
