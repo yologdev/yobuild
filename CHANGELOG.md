@@ -7,11 +7,14 @@ locks it again (commit the new lock).
 
 ## Unreleased
 
-- **yoagent 0.26.5** (by way of 0.26.4). Three more models with their
-  real limits and prices: `openai/gpt-6.1-terra`, `zai/glm-5.3-flashx`
-  and `qwen/qwen3.8-omni-flash`; Meta's `muse-spark-1.3` and
-  `muse-wonder-1.0` are now priced, so a manifest may name them.
-- **rutis 0.20.0 (yoagent-rutis 0.12, yoagent 0.26.5).** yobuild's
+- **yoagent 0.26.6** (by way of 0.26.4 and 0.26.5). Three more models
+  with their real limits and prices: `openai/gpt-6.1-terra`,
+  `zai/glm-5.3-flashx` and `qwen/qwen3.8-omni-flash`; Meta's
+  `muse-spark-1.3` and `muse-wonder-1.0` are now priced, so a manifest
+  may name them. A remote MCP server that echoes a credential header
+  (`Authorization`, a cookie, a name holding `key`, `token`, `secret`,
+  `auth` or `session`) back in an error has it shown as `[redacted]`.
+- **rutis 0.20.0 (yoagent-rutis 0.12).** yobuild's
   plugin runtimes move from rutis 0.12 to 0.20.0 (by way of 0.19.3),
   which talks only to its neighbouring releases, so every runtime moves
   at once:

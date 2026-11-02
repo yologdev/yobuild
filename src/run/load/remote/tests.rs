@@ -842,11 +842,9 @@ async fn a_remote_that_wants_a_sign_in_is_said_so_and_the_key_hidden() {
         );
         assert!(!said.contains(SECRET), "{said}");
         if mode == Mode::Unauthorized {
-            // The server echoed the key it refused: shown as its name.
-            assert!(
-                said.contains(&format!("rejected Bearer ${{{KEY}}}")),
-                "{said}"
-            );
+            // The server echoed the key it refused: never shown (yoagent
+            // 0.26.6 redacts a credential header's value first).
+            assert!(said.contains("rejected [redacted]"), "{said}");
         }
         let notices = l.notices_until(|(_, m)| m.contains("was refused")).await;
         assert!(
@@ -960,10 +958,7 @@ async fn a_calls_error_hides_the_key_and_a_tools_own_words_end_nothing() {
             .execute(json!({ "text": "hi" }), ToolContext::new("2", "docs__echo"))
             .await,
     );
-    assert!(
-        failed.contains(&format!("revoked Bearer ${{{KEY}}}")),
-        "{failed}"
-    );
+    assert!(failed.contains("revoked [redacted]"), "{failed}");
     assert!(!failed.contains(SECRET), "{failed}");
     // A tool's error result that says "MCP session expired": its own
     // words, not the transport's: the server stays.

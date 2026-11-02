@@ -502,14 +502,13 @@ async fn an_http_server_gets_its_headers_with_their_values_filled_in() {
     )
     .unwrap();
     let ended = run_once(dir.path()).await;
-    // The call whose error echoes the key: its value shown as its name.
+    // The call whose error echoes the key: never shown (yoagent 0.26.6
+    // redacts a credential header's value before yobuild hides it).
     let results = results(&ended);
     assert_eq!(results[0], ("web echoed hi".to_string(), false));
     let (echoed, failed) = &results[1];
     assert!(
-        *failed
-            && echoed.contains("refused Bearer ${YOBUILD_RUN_TEST_TOKEN}")
-            && !echoed.contains("t0ken-0123456789"),
+        *failed && echoed.contains("refused [redacted]") && !echoed.contains("t0ken-0123456789"),
         "{echoed}"
     );
     let seen = seen.lock().unwrap().clone();
