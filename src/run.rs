@@ -1087,9 +1087,9 @@ async fn start(
     )?;
     // `ask_owner`, the tool and (for plugins) the host service: one
     // numbering. Before the plugins start: one may use it as it loads. The
-    // service is there either way (rutis has no optional inject: a plugin
-    // injecting a missing service would never start), refusing without the
-    // built-in.
+    // service is there either way, refusing without the built-in, so a
+    // plugin may `inject` it (or declare it `optional`, rutis 0.20: a host
+    // service is leased only if there when the plugin starts).
     let ask_owner = manifest
         .builtins
         .ask_owner

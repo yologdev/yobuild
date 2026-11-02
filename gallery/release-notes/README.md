@@ -25,10 +25,10 @@ whole of its custom code.
 - **Its tool:** `plugins/git-history.ts`, a rutis plugin in its own npm
   package (`plugins/package.json`, with `@arcships/rutis` and
   `@arcships/rutis-runtime` 0.20.0: built on 0.12.0, the pin alone
-  moved by hand when yobuild moved to rutis 0.19). It offers one tool,
-  allowed: `release_commits`. It returns the commits after the highest
-  `vX.Y.Z` tag in HEAD's history, or after the tag you name, newest
-  first, each with its subject, body and changed files.
+  moved by hand when yobuild moved to rutis 0.19, then 0.20). It offers
+  one tool, allowed: `release_commits`. It returns the commits after the
+  highest `vX.Y.Z` tag in HEAD's history, or after the tag you name,
+  newest first, each with its subject, body and changed files.
   - **What it says, not just what it found:** a tag that does not exist,
     or is not in HEAD's history, is an error. It lists the tags it left
     out (`1.0`, `beta`, a tag on another branch). It warns on a shallow

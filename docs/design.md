@@ -310,9 +310,10 @@ tool does: without waiting.
 - **The service:** `ask_owner`, offered to every plugin runtime (like `ui`
   and `frontend`, shared by yobuild's plugin host). A plugin injects it
   (`inject: ['ask_owner']`). It is there whatever the manifest says —
-  rutis shows a host service only to a plugin that injects it, and has no
-  optional inject: a plugin injecting a missing service would never start,
-  and nobody would be told. Without `[builtins] ask_owner = true` every
+  rutis shows a host service only to a plugin that declares it, and a
+  plugin injecting a missing service would wait for it (rutis 0.20 adds
+  `optional`, read with `ctx.get`, but a host service is leased only if
+  it is there when the plugin starts). Without `[builtins] ask_owner = true` every
   `ask` is refused, saying so (the plugin goes without); so is one after
   the session ended.
 - **One method** (`from`'s meaning since changed — §4, "Who a plugin
@@ -4401,8 +4402,10 @@ answers calls to its own tools and reaches nothing else. A plugin is more:
    never reaches `yoagent`; its rows reload and unload; a row naming no
    runtime stays out of it; removed, its handler and its process gone, the
    others' kept; one that cannot start said at once. Found there:
-   - a row whose injected service is left to its runtime's own Cordis
-     reads as running to the host (`load` is `Ok`) while it never starts,
+   - a row whose plugin's injected service is left to its runtime's own
+     Cordis reads as running to the host (`load` is `Ok`) while it never
+     starts (a plugin-level `inject`; a row's own is gated since rutis
+     0.20, #1001),
      so `load_plugin` learns that a plugin started from its handler, never
      from `load`;
    - the loader keeps a row's resolution by its name, the runtime's
@@ -4670,13 +4673,16 @@ come:
 yoagent-rutis 0.12 moved to rutis 0.20.0 (protocol 4 still, so a 0.19
 runtime connects, on 0.19's rules: every runtime moves together). What
 changed for yobuild: a plugin's `ctx.use`/`ctx.get` sees only the
-services it or its row declares (`inject`, or `optional` read with
-`ctx.get`; rutis #1000): yobuild's own plugins and the release-notes
-plugin declare what they use, and the adapters' optional host shims are
+services it or its row declares (rutis #1000; `optional`, read with
+`ctx.get`, is #999): yobuild's own plugins and the release-notes plugin
+declare what they use, and the adapters' optional host shims are
 declared by yoagent-rutis; a row's own `inject` gates it, so such a row
-reads as waiting until its services exist (#1001); cleanups run one at
-a time, in reverse order (#1010). No Rust API changed. The rest of this
-note, written for 0.19, holds.
+reads as waiting until its services exist (#1001), and one naming a
+service its plugin declares `optional` fails (no yobuild row sets
+`inject`); cleanups run one at a time, in reverse order (#1010); a
+runtime that never greets fails after 30 s. No Rust API changed. The
+rest of this note, written for 0.19, holds, but for the release-notes
+pins, which moved again, to 0.20.0.
 
 **rutis 0.19 (yoagent-rutis 0.11, taken 2026-11-02).** rutis 0.13
 changed the wire protocol, and since 0.19 a host talks only to its
