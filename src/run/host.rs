@@ -59,7 +59,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rutis::{CordisError, Ctx};
+use rutis::host::CtxHost;
+use rutis::{Ctx, Error as CordisError};
 use rutis_bridge::session::{host_key, Error, HostDispatch, Reply, Value};
 use serde_json::{json, Value as Json};
 
@@ -330,9 +331,9 @@ fn one_line(text: &str) -> Option<&str> {
 /// Provide the three services on `root`.
 pub(crate) fn provide(ctx: &Ctx, host: Host) -> Result<(), CordisError> {
     let host = Arc::new(host);
-    ctx.provide_as::<dyn HostDispatch>(host_key(WORKSPACE), Arc::new(Workspace(host.clone())))?;
-    ctx.provide_as::<dyn HostDispatch>(host_key(SESSION), Arc::new(SessionService(host.clone())))?;
-    ctx.provide_as::<dyn HostDispatch>(host_key(APPROVAL), Arc::new(Approval(host)))?;
+    ctx.provide_at::<dyn HostDispatch>(host_key(WORKSPACE), Arc::new(Workspace(host.clone())))?;
+    ctx.provide_at::<dyn HostDispatch>(host_key(SESSION), Arc::new(SessionService(host.clone())))?;
+    ctx.provide_at::<dyn HostDispatch>(host_key(APPROVAL), Arc::new(Approval(host)))?;
     Ok(())
 }
 

@@ -790,12 +790,14 @@ yobuild's takes a row's id (they share one name space).
   (`plugin:<name>`), not the names they chose; the adapters as
   `pi-extensions` / `dsh-tools`, as before.
 - **A plugin that waits for a service nobody provides** is said, not
-  left waiting unseen: the host shares every service name (rutis 0.12's
+  left waiting unseen: the host shares every service name (rutis's
   default), so such a row waits in rutis, and yoagent-rutis's
   `rows::wait_running` names what it lacks (from what the plugin
-  injects, looked up in rutis). Rows that wait only for missing services
-  are refused at 15 s — a provider may start slowly — not after the
-  minute a loading row gets; DSH plugins' are said as the DSH check says
+  injects, looked up in rutis). A wait for something that cannot come —
+  a service no row provides while nothing could still provide it, a
+  provider that failed or is disabled, a cycle — ends half a second
+  after it is seen, not after the minute a loading row gets (yoagent-rutis
+  0.11; until then a first look at 15 s: "rutis 0.19" below); DSH plugins' are said as the DSH check says
   them, with its hints. The suite (DSH's rows providing each other
   `tools`, `systemPrompt`, `userQuestions`; host services; pi; every
   example) runs with every name shared. Sharing every name also means a
@@ -1843,7 +1845,8 @@ in the agent's folder (`grants = { workspace = true }`, for
 **What is expected, and what the build should show.**
 - The plugin is the person's own code. The gate does not judge what it
   runs; the kept environment still applies. Its README says so.
-- It needs `@arcships/rutis-runtime` 0.12.0 installed beside it, in an npm
+- It needs `@arcships/rutis-runtime` installed beside it at the version
+  yobuild's runtimes run (0.12.0 then, 0.19.3 since 2026-11-02), in an npm
   package of its own. `yobuild new --from` copies files, not
   `node_modules`. So who installs it, the person (`npm ci` in the folder,
   said by the README and by `run`'s and `check`'s refusal) or yobuild (as it installs
@@ -1858,8 +1861,8 @@ in the agent's folder (`grants = { workspace = true }`, for
   - `yobuild new --from` prints `(cd …/plugins && npm ci
     --ignore-scripts)` first, for each package it copies with its lock;
   - `run` and `check` refuse with `npm ci --ignore-scripts in <folder>`
-    when the package's lock pins the runtime at 0.12.0. Otherwise they
-    say `npm install --ignore-scripts @arcships/rutis-runtime@0.12.0`
+    when the package's lock pins the runtime at that version. Otherwise
+    they say `npm install --ignore-scripts @arcships/rutis-runtime@<it>`
     and what the lock pins, so the advice never repeats what failed;
   - the README says it under "What it needs".
 
@@ -4388,9 +4391,10 @@ answers calls to its own tools and reaches nothing else. A plugin is more:
      service catalog (point 3), and waits until it runs: one that does not
      start is said, with why, and removed;
    - a loaded runtime's rows are routed to it only: the loader resolves
-     a row by its name alone, so the host gives it `<runtime>::<name>`,
-     and its rows never meet the manifest's; a row naming no runtime
-     never goes to it;
+     a row by its name alone, so the host gives it `<runtime>::<name>`
+     (until rutis 0.19, which runs `<runtime>:<name>` on that runtime
+     itself: "rutis 0.19" below), and its rows never meet the manifest's;
+     a row naming no runtime never goes to it;
    - `remove_runtime` unloads its rows, then stops its process.
 
    Built (PR 3, `host_test`): the same file loaded in `ui` and in an
@@ -4663,6 +4667,76 @@ come:
   its tools under their own names, and names the grants it would have to
   share (`model`, `env`; the DSH plugins' grants) when the manifest's
   plugins of that kind have any.
+
+**rutis 0.19 (yoagent-rutis 0.11, taken 2026-11-02).** rutis 0.13
+changed the wire protocol, and since 0.19 a host talks only to its
+neighbouring releases, so the crates, yobuild's runtimes, the adapters
+and a gallery agent's own plugins move to 0.19.3 together. What changed
+for yobuild:
+- **How runtimes start and rows find them.** `LocalRuntime`,
+  `RuntimeResolver`, `RuntimeRowsPlugin` and `share_registered_only` are
+  gone. Each runtime is rutis-host's `SpawnPlugin`, and the loader is
+  given `<runtime>:<name>`, which rutis-loader's `SessionResolver` runs
+  on that runtime's session. A row naming no runtime runs on the first.
+  yobuild's own routes (a name kept in the runtime it first loaded in)
+  and the `<runtime>::<name>` of added runtimes go: one file may load in
+  two runtimes, each in its own process. A row naming no runtime whose
+  name begins as a runtime's row (`loaded-1:…`) is refused, and a
+  runtime's name follows rutis's rule (two or more lowercase letters,
+  digits and `-`, not `file`). `start` waits for each runtime and says
+  one that does not start (one back to idle at once: its start ended
+  before its process ran).
+- **Reload.** `Loader::reload(id)` alone: `SessionResolver` keeps no
+  cache, describes the row again, and the runner imports the changed file
+  with its `?rutis-reload=` query (confirmed by yoagent's owner from the
+  sources, and by `host_test`).
+- **An added runtime's services.** Its own `SessionResolver` and catalog:
+  the services it is given shared, and every name the host shares or
+  keeps to a runtime registered as one nobody provides, so its rows'
+  injections of those stay in its own Cordis. A name the host does not
+  know is shared by name (rutis's default; there is no "share only
+  these" any more), so a service another runtime's row announces
+  reaches it, and what its own rows announce undeclared is published to
+  every runtime (as before). rutis 0.19 has no per-runtime scope for
+  either; asked of yoagent's owner, who is raising it upstream
+  (2026-11-02). Meanwhile `load` asks the loader's dry run
+  (`Loader::check`) what each row of an added runtime waits for, and
+  refuses one that waits for a service a row of another runtime
+  declares it provides. A service only announced is not seen: rutis
+  lists every row whose plugin does not say all it provides as one that
+  may announce it (the host's `yoagent` came back as "announced by" a
+  manifest plugin), so that list tells nothing. Refusing rows that
+  announce would refuse every loaded DSH package (a Cordis plugin
+  announces), so it is not done. A row of an added runtime that goes
+  down meanwhile ends `load`'s wait at once ("runtime `x` is not
+  running").
+- **Waiting rows.** yoagent-rutis 0.11's `wait_running` ends the wait half
+  a second after a row waits for something that cannot come (a service
+  no row provides while nothing could still provide it, a provider that
+  failed or is disabled, a cycle), and its error says it as rutis does:
+  `waiting for X (no row provides it)`, `(no row provides it; did you
+  mean Y?)` or `(no enabled row provides it…)` (the hint
+  `nothing-provides` matches each). Where every row waits only for
+  services nobody provides (`run::unprovided`: each wait
+  `NoProvider`/`NoEnabledProvider`), the DSH check, `check`'s "not
+  checked alone" and a loaded DSH package's refusal say it in yobuild's
+  words; else rutis's stand.
+- **Uncaught errors.** Since rutis 0.18 an error a plugin leaves uncaught
+  is reported and its runtime goes on (the row is not failed outside
+  `rutis-host dev`); `process.exit` still ends it. A policy plugin that
+  throws in a timer keeps judging.
+- **rutis's errors** go to the log (`frontend::host::root`, a sink at
+  warn): its default writes them on stderr, over the terminal UI. A
+  plugin's event listener or filter that throws (rutis reports it and
+  goes on) is also said to the owner, a Warning notice once a session per
+  text ("A plugin's event handler failed: …", through `plugin_log`'s
+  layer, whatever `RUST_LOG` says). An uncaught error the runtime reports
+  itself (`runtime ui: an unhandled error from an unknown row: …`) is on
+  the runtime's stderr, as before.
+- **The release-notes gallery agent's pins** moved to 0.19.3 by hand: its
+  own plugin package pinned 0.12.0, which a 0.19 host refuses. Only the
+  two versions and its lock moved, its README says so; its code and
+  manifest are as the coding agent built them.
 
 **The questions.** Question 1 names the kind: `Start the pi package
 <package>@<version> as <name>? (asked by the agent)`, with what stage 1

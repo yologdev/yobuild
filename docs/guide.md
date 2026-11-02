@@ -165,9 +165,9 @@ web = true
   - the nearest folder above it with a `package.json`, which must be
     `"type": "module"` for a `.ts` plugin;
   - with `@arcships/rutis-runtime` installed there at the version
-    yobuild's runtimes use, 0.12.0, and the SDK it imports,
+    yobuild's runtimes use, 0.19.3, and the SDK it imports,
     `@arcships/rutis`, at the same version (`npm install
-    @arcships/rutis@0.12.0 @arcships/rutis-runtime@0.12.0`, with
+    @arcships/rutis@0.19.3 @arcships/rutis-runtime@0.19.3`, with
     `--ignore-scripts` if you like; `npm ci --ignore-scripts` where the
     package has its lock, as an agent copied by `yobuild new --from`
     does). Without the runtime, `run` and `check` refuse before anything

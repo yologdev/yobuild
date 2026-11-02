@@ -187,7 +187,7 @@ pub(crate) const HINTS: &[Hint] = &[
     Hint {
         id: "nothing-provides",
         scope: Scope::Start,
-        pattern: "nothing provides",
+        pattern: "row provides it",
         fix: "the plugin injects a service no plugin provides: add the plugin that provides it, or remove the inject",
     },
     Hint {
@@ -347,7 +347,7 @@ mod tests {
                 "report",
             ),
             (Scope::Fail, crate::frontend::session::TASK_FAILED.to_owned(), "task-failed"),
-            // yoagent-rutis 0.7.0 host.rs `NOT_RUNNING`, extension.rs
+            // yoagent-rutis host.rs `NOT_RUNNING` (0.7.0 on), extension.rs
             // `input rejected: {NOT_RUNNING}`.
             (
                 Scope::Fail,
@@ -364,7 +364,7 @@ mod tests {
                 ProviderError::RateLimited { retry_after_ms: Some(1500) }.to_string(),
                 "rate-limited",
             ),
-            // yoagent-rutis 0.7.0 extension.rs: `UNJUDGED`, the handler
+            // yoagent-rutis extension.rs (0.7.0 on): `UNJUDGED`, the handler
             // gone (348), the wait (376), a failed handler (632).
             (Scope::Call, "no plugin policy is loaded to judge this call".into(), "no-policy"),
             (
@@ -439,7 +439,19 @@ mod tests {
             ),
             (
                 Scope::Start,
-                "`run` would refuse it at start: plugin rows not running: plugin:needy (waiting): nothing provides nosuchService".into(),
+                "`run` would refuse it at start: plugin rows not running: plugin:needy (waiting): waiting for nosuchService (no row provides it)".into(),
+                "nothing-provides",
+            ),
+            // rutis's other words for it: a name close to one provided (a
+            // misspelt inject), and one only a disabled row may provide.
+            (
+                Scope::Start,
+                "plugin rows not running: plugin:needy (waiting): waiting for yoagnt (no row provides it; did you mean yoagent?)".into(),
+                "nothing-provides",
+            ),
+            (
+                Scope::Start,
+                "plugin rows not running: plugin:needy (waiting): waiting for x (no enabled row provides it; rutis-host check says whether a disabled row does)".into(),
                 "nothing-provides",
             ),
             (
@@ -458,7 +470,7 @@ mod tests {
                 "plugins failed to load: [Failure { id: \"plugin:late\", error: \"plugin failed: Error: boom\" }]".into(),
                 "load-failed",
             ),
-            // yoagent-rutis 0.7.0 rows.rs `RowsNotRunning`: a row that
+            // yoagent-rutis rows.rs `RowsNotRunning` (0.7.0 on): a row that
             // failed while `load` waited (`{id} ({state}): {error}`).
             (
                 Scope::Start,
@@ -607,7 +619,7 @@ mod tests {
         assert_eq!(
             hint(
                 Scope::Start,
-                "a plugin stopped: plugin `plugin:x` failed: nothing provides y"
+                "a plugin stopped: plugin `plugin:x` failed: waiting for y (no row provides it)"
             )
             .map(|h| h.id),
             Some("nothing-provides")

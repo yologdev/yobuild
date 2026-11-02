@@ -983,7 +983,7 @@ async fn a_dsh_package_starts_restricted_on_the_base_and_one_lacking_services_is
         );
         return;
     }
-    let root = rutis::Ctx::root().unwrap();
+    let root = crate::frontend::host::root().unwrap();
     let bridge = yoagent_rutis::RutisBridge::install(&root).unwrap();
     let host = crate::frontend::host::PluginHost::builder()
         .share("yoagent")
@@ -1066,7 +1066,7 @@ async fn a_dsh_package_starts_restricted_on_the_base_and_one_lacking_services_is
             && message.ends_with("a loaded DSH package gets none of DSH's host services"),
         "{message}"
     );
-    root.shutdown().await.unwrap();
+    rutis::host::CtxHost::shutdown(&root).await.unwrap();
 }
 
 /// A name a package load started a runtime under is not given again this

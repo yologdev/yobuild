@@ -5,6 +5,32 @@ base changed**, because a lock with DSH plugins records it: when it
 changed, `--locked` refuses such a lock, and one run without `--locked`
 locks it again (commit the new lock).
 
+## Unreleased
+
+- **rutis 0.19.3 (yoagent-rutis 0.11).** yobuild's plugin runtimes move
+  from rutis 0.12 to 0.19.3, which talks only to its neighbouring
+  releases, so every runtime moves at once:
+  - **A rutis plugin of your own** must pin `@arcships/rutis` and
+    `@arcships/rutis-runtime` at exactly 0.19.3 in its package (`check`
+    and `run` say so for the runtime, with the command). `definePlugin`
+    is unchanged.
+  - **An error a plugin leaves uncaught** no longer ends its runtime:
+    rutis reports it (in the log) and the plugins there go on. A plugin
+    calling `process.exit` still ends it.
+  - **A plugin waiting for something that cannot come** (a service
+    nobody provides while nothing could still provide it, a provider that
+    failed, a cycle) is refused half a second after it is seen, said as
+    rutis says it (`waiting for X (no row provides it)`, with `did you
+    mean Y?` for a misspelt name).
+  - **rutis's own errors** go to the log, not over the terminal UI; a
+    plugin's event listener or filter that throws is also a Warning
+    notice.
+  - **A plugin the agent loads** is refused if it would use a service a
+    plugin of the agent's own declares it provides.
+  - **The DSH base changed** (the DSH adapter's rutis pins): `--locked`
+    refuses a lock with DSH plugins made before; one run without it
+    locks it again.
+
 ## 0.2.1 — 2026-11-01
 
 - **yoagent 0.26.3.** Gemini and Vertex now stream non-ASCII text

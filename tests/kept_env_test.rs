@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use rutis::host::CtxHost;
 use rutis::Ctx;
 use yobuild::frontend::host::{Inherit, PluginHost, Row};
 

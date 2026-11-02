@@ -345,9 +345,9 @@ fn the_guide_links_lead_somewhere_and_its_facts_are_the_codes() {
     let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap();
     assert!(text.contains("Node 22.19+ and npm 11.19+"));
     assert!(read("src/runtime.rs").contains("Node 22.19+ and npm 11.19+"));
-    assert!(text.contains("@arcships/rutis-runtime@0.12.0"));
+    assert!(text.contains("@arcships/rutis-runtime@0.19.3"));
     assert!(
-        read("frontend/plugins/package.json").contains("\"@arcships/rutis-runtime\": \"0.12.0\"")
+        read("frontend/plugins/package.json").contains("\"@arcships/rutis-runtime\": \"0.19.3\"")
     );
     let rust = read("Cargo.toml");
     assert!(rust.contains("rust-version = \"1.88\"") && text.contains("1.88+"));

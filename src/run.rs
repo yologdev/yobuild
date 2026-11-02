@@ -324,11 +324,25 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // What the pi adapter only logs and a grant would change: said, once
     // (seen through `plugin_log::layer`, which the binary installs).
     let said = plugin_log::Said::new(&checked.plan.pi_names(), manifest.pi_model());
+    // A plugin's event listener or filter that throws: rutis reports it and
+    // goes on; said once a session per text (one may throw on every event).
+    let thrown = std::sync::Mutex::new(std::collections::HashSet::new());
     let _watching = plugin_log::watch({
         let session = session.clone();
         move |line: &plugin_log::Line| {
             if let Some((_, note)) = said.note(line) {
                 session.notice(NoticeLevel::Warning, note);
+            } else if let Some(text) = plugin_log::plugin_error(line) {
+                let new = thrown
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(text.to_owned());
+                if new {
+                    session.notice(
+                        NoticeLevel::Warning,
+                        format!("A plugin's event handler failed: {text}"),
+                    );
+                }
             }
         }
     });
@@ -764,7 +778,7 @@ fn allowed(manifest: &Manifest) -> (Vec<String>, Vec<String>) {
 }
 
 /// Who may offer a plugin's allowed tool, by the row that registered its
-/// handler (the owner the host sees, rutis 0.12's `caller_row`; design §4
+/// handler (the owner the host sees, rutis's `caller_row`; design §4
 /// "Who a plugin is"): a pi plugin, the `pi` row's adapter handler and one
 /// of the plugin's own extension files (`source`, said by the adapter); a
 /// DSH plugin, the `dsh` row's adapter handler (all DSH plugins share it)
@@ -2132,7 +2146,7 @@ pub(crate) fn dsh_host_refusal(missing: &[String], dir: &Path) -> Option<String>
 /// provides (rutis says which, from what each row injects): said as the
 /// DSH check says it, with its hints. Any other failure as it is.
 fn dsh_waiting(error: BoxError, plan: &plugins::Plan, host_services: bool) -> BoxError {
-    use yoagent_rutis::rows::{RowState, RowsNotRunning};
+    use yoagent_rutis::rows::RowsNotRunning;
     let Some(not_running) = error.downcast_ref::<RowsNotRunning>() else {
         return error;
     };
@@ -2142,24 +2156,66 @@ fn dsh_waiting(error: BoxError, plan: &plugins::Plan, host_services: bool) -> Bo
         .filter(|row| row.runtime_is("dsh") && row.id().starts_with("plugin:"))
         .map(|row| row.id())
         .collect();
+    if !not_running
+        .rows
+        .iter()
+        .all(|row| dsh_rows.contains(&row.id.as_str()))
+    {
+        return error;
+    }
+    match unprovided(not_running) {
+        Some(missing) => dsh_missing(&missing, plan, host_services),
+        None => error,
+    }
+}
+
+/// A row that does not run, as [`unprovided_of`] reads it: its state, the
+/// services it waits for that nobody provides, and why it waits for each.
+pub(crate) struct Waiting<'a> {
+    pub(crate) state: &'a yoagent_rutis::rows::RowState,
+    pub(crate) missing: Option<&'a [String]>,
+    pub(crate) reasons: Vec<&'a rutis_loader::report::WaitReason>,
+}
+
+/// The services `error`'s rows wait for that nobody provides, sorted and
+/// each once — when every row waits, and only for such services (no row
+/// provides it, or no enabled row): `None` when a row failed, loads, or
+/// waits for anything else too (a provider that failed or waits itself, a
+/// cycle), which rutis's own words say.
+pub(crate) fn unprovided(error: &yoagent_rutis::rows::RowsNotRunning) -> Option<Vec<String>> {
+    let rows: Vec<Waiting> = error
+        .rows
+        .iter()
+        .map(|row| Waiting {
+            state: &row.state,
+            missing: row.missing.as_deref(),
+            reasons: row.waits.iter().map(|wait| &wait.reason).collect(),
+        })
+        .collect();
+    unprovided_of(&rows)
+}
+
+/// [`unprovided`] over plain rows (its unit tests build them).
+pub(crate) fn unprovided_of(rows: &[Waiting]) -> Option<Vec<String>> {
+    use rutis_loader::report::WaitReason;
+    use yoagent_rutis::rows::RowState;
     let mut missing: Vec<String> = Vec::new();
-    for row in &not_running.rows {
-        // Not with a note: the list may be incomplete, which the error as
-        // it is says.
-        match (&row.state, &row.missing) {
-            (RowState::Waiting, Some(names))
-                if !names.is_empty()
-                    && row.note.is_none()
-                    && dsh_rows.contains(&row.id.as_str()) =>
-            {
-                missing.extend(names.iter().cloned());
-            }
-            _ => return error,
+    for row in rows {
+        let names = row.missing.filter(|names| !names.is_empty())?;
+        let only = row.reasons.iter().all(|reason| {
+            matches!(
+                reason,
+                WaitReason::NoProvider { .. } | WaitReason::NoEnabledProvider { .. }
+            )
+        });
+        if *row.state != RowState::Waiting || !only {
+            return None;
         }
+        missing.extend(names.iter().cloned());
     }
     missing.sort();
     missing.dedup();
-    dsh_missing(&missing, plan, host_services)
+    (!missing.is_empty()).then_some(missing)
 }
 
 /// "DSH plugins wait for services nobody provides: …", with what may help.
@@ -2929,6 +2985,60 @@ mod tests {
             cost(RunOutcome::Stopped, &stats, None),
             "Cost: not priced (1334 tokens in, 60 out; 1 turn)"
         );
+    }
+
+    /// Said as "nobody provides" only when every row waits, and only for
+    /// services nobody provides: a failed provider, a cycle, a row that
+    /// failed or loads, or a wait with no names leaves rutis's own words.
+    #[test]
+    fn unprovided_only_when_every_wait_has_no_provider() {
+        use rutis_loader::report::WaitReason;
+        use yoagent_rutis::rows::RowState;
+        let (no, none_enabled) = (
+            WaitReason::NoProvider {
+                like: Some("fs".into()),
+            },
+            WaitReason::NoEnabledProvider { like: None },
+        );
+        let failed = WaitReason::ProviderFailed {
+            row: "p".into(),
+            error: "boom".into(),
+        };
+        let (waiting, failed_row) = (RowState::Waiting, RowState::Failed);
+        let (fs, both) = (vec!["fs".to_owned()], vec!["fs".to_owned(), "a".to_owned()]);
+        fn row<'a>(
+            state: &'a RowState,
+            missing: Option<&'a Vec<String>>,
+            reasons: Vec<&'a WaitReason>,
+        ) -> Waiting<'a> {
+            Waiting {
+                state,
+                missing: missing.map(Vec::as_slice),
+                reasons,
+            }
+        }
+        assert_eq!(
+            unprovided_of(&[
+                row(&waiting, Some(&fs), vec![&no]),
+                row(&waiting, Some(&both), vec![&no, &none_enabled]),
+            ]),
+            Some(vec!["a".to_owned(), "fs".to_owned()])
+        );
+        // Another reason beside it: not the whole story.
+        assert_eq!(
+            unprovided_of(&[row(&waiting, Some(&fs), vec![&no, &failed])]),
+            None
+        );
+        // A row that failed, or one waiting with nothing missing.
+        assert_eq!(
+            unprovided_of(&[
+                row(&waiting, Some(&fs), vec![&no]),
+                row(&failed_row, None, vec![])
+            ]),
+            None
+        );
+        assert_eq!(unprovided_of(&[row(&waiting, Some(&vec![]), vec![])]), None);
+        assert_eq!(unprovided_of(&[]), None);
     }
 
     #[test]
