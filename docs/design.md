@@ -5256,8 +5256,12 @@ a token, an account, or a way to look like a server the owner trusts.
      that `remote_address` takes (https, no IP address, no local or
      one-label name). For a server the agent loaded it must be on the
      MCP server's own site (the same registrable domain, by the public
-     suffix list compiled in): else refused, "its sign-in is at another
-     site (…), which a server the agent found may not name". Without
+     suffix list compiled in), and so must every endpoint its metadata
+     names (authorization, token, registration, revocation): else
+     refused, "its sign-in's … is at another site (…), which a server the
+     agent found may not name" (a server whose own host is a public
+     suffix has no site: refused too). The issuer alone would not do: its
+     metadata could name a real provider's endpoints. Without
      this an attacker's server could name a real provider's sign-in, the
      owner would sign in there for real, and a provider that ignores
      `resource` would issue a token that works for its whole service,
@@ -5274,7 +5278,19 @@ a token, an account, or a way to look like a server the owner trusts.
      (serde's text, which quotes values, never). Names are resolved
      through a resolver that refuses loopback, private and link-local
      addresses, so a name pointing inside the network is refused too
-     (DNS rebinding).
+     (DNS rebinding). Through a proxy (`HTTPS_PROXY` or `ALL_PROXY`,
+     which reqwest reads), the targets' names are the proxy's to resolve,
+     so this guard holds only without one; the proxy's own name is
+     resolved as the system would (a proxy is the owner's, often on the
+     network). Built (2026-11-02): `oauth::Net` (`PublicOnly`: every
+     address a name has must be public — not loopback, private,
+     link-local, CGNAT, documentation or reserved IPv4; not loopback,
+     unique-local, link-local, site-local, discard, documentation,
+     Teredo, IPv4-compatible or local-use NAT64 IPv6; an IPv4-mapped,
+     NAT64 or 6to4 address judged as the IPv4 one it carries). Any other
+     status than 404, 405 or 410 where metadata is looked for is an
+     error said with it (a redirect too), not "none there"; where the
+     challenge points, a 404 is one.
 4. **The question.** `Sign in to <registry name> (<MCP host>) at <link
    host>? (asked by the agent)`, or `(for agent.toml's [[mcp]] <name>)`;
    the agent's `name` is not in the title. Allow/Block. Its details: the
@@ -5343,12 +5359,20 @@ a token, an account, or a way to look like a server the owner trusts.
    - **`iss`** (RFC 9207, mix-up): required when the metadata says
      `authorization_response_iss_parameter_supported`, compared whenever
      present, else refused;
-   - **`error`:** ends the sign-in with its code, its description cut
-     and cleaned (`terminalText`; text on the page);
+   - **`error`:** ends the sign-in with its code (one that is no OAuth
+     error code said as such), its description cut and cleaned (control
+     and bidi characters dropped, 200 characters);
    - **`code`:** exchanged (point 8);
-   - **then** the listener closes. Its answer page holds no code: "go
-     back to yobuild". No request to it is traced (its URI holds the
-     code).
+   - **then** the listener closes. Its answer page holds no code and
+     claims nothing it does not know ("Back from the sign-in: go back to
+     yobuild, which finishes it"; "over" when nothing waits for it any
+     more; plain text, `no-store`, `no-referrer`). No request to it is
+     traced (its URI holds the code).
+   The start link answers a redirect to the authorization URL until the
+   browser came back (then 410); any other path on the port is 404. A
+   `state` given twice matches nothing (400); with the `state` matching,
+   a `code`, `error` or `iss` given twice ends the sign-in ("came back
+   with `code` twice"), a description given twice is left out.
 7. **Registration: dynamic.** A client per sign-in (`client_name`
    "yobuild", the one `redirect_uri`, `token_endpoint_auth_method:
    "none"`, `grant_types` authorization code and refresh). The answer is
@@ -5366,7 +5390,10 @@ a token, an account, or a way to look like a server the owner trusts.
 8. **The exchange.** The code with the verifier, `redirect_uri`,
    `client_id` and `resource`; the answer must have a `token_type` of
    `Bearer` in any case and an `access_token` of printable ASCII
-   (`expires_in` and `refresh_token` kept when given). At this point the
+   (`refresh_token` kept when given; `expires_in` is not: a 401 says the
+   token ended). A refusal is said to the owner with its OAuth `error`
+   and its `error_description` cleaned, each secret sent (the code, the
+   verifier, a token) shown as `${oauth}`. At this point the
    issuer, the token endpoint, the `client_id` and the MCP server's URL
    are pinned: the token goes to that URL only, and a refresh only to
    that endpoint.
@@ -5377,9 +5404,12 @@ a token, an account, or a way to look like a server the owner trusts.
    - **one refresh at a time:** a 401 for a value that is not the current
      one (`refused()`: another request refreshed meanwhile) is answered
      with the current value, unrefreshed;
-   - **the challenge checked:** one pointing at other metadata, another
-     scheme or another resource ends the sign-in (`Err`), never a new
-     discovery;
+   - **the challenge checked:** one pointing at other metadata (its
+     `resource_metadata`, which names the resource) or with no `Bearer`
+     scheme ends the sign-in (`Err`), never a new discovery; a 403 is not
+     refreshed;
+   - **a passing trouble** (not reached, 408, 429, 5xx): that request
+     fails, the sign-in stays, and the next 401 refreshes again;
    - **no refresh token, or a refresh refused:** the sign-in ends; a
      loaded server is marked stopped, "its sign-in ended: it is not signed
      in again this session" (unlike stage 3's other remotes, which stay
@@ -5513,7 +5543,8 @@ account, so CI could run only the stub, which the tests already do.
 4. `src/run/oauth.rs`: discovery and its checks, the resolver,
    registration, PKCE, the callback and its short start link, the
    exchange, the source and its refresh, revocation, the hidden values,
-   against the stub;
+   against the stub (built 2026-11-02: `discover`, `sign_in`, `Source`;
+   used by nothing yet, its tests in `src/run/oauth/tests.rs`);
 5. `load_plugin`'s remote signed in: the unauthenticated connect, the
    questions, cancellation, a sign-in that ends marking it stopped, the
    block's `auth = "oauth"`, the hints;

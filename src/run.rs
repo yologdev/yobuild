@@ -19,6 +19,7 @@ pub(crate) mod expect;
 pub(crate) mod host;
 pub(crate) mod load;
 pub(crate) mod measure;
+pub(crate) mod oauth;
 pub mod plugin_log;
 pub(crate) mod plugins;
 pub(crate) mod script;
