@@ -27,6 +27,22 @@ const COALESCE: Duration = Duration::from_millis(30);
 /// How long a plugin's question waits for an answer before the safe default.
 pub const UI_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How long a sign-in question waits ([`UiRequest::SignIn`]): an account
+/// to make or a second factor take longer than a question's answer.
+pub const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Why [`Session::ask_or_why`] got no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Unanswered {
+    /// No frontend was attached to ask.
+    NoFrontend,
+    /// Nobody answered in time.
+    TimedOut,
+    /// It was withdrawn (by its key, or a reset), or the session ended.
+    Withdrawn,
+}
+
 /// How many of the latest runs' messages (`runStart`, `event`, `runEnd`,
 /// `notice`) the session keeps to replay to a frontend that connects later,
 /// so a page opened mid-run or after it shows what happened.
@@ -343,6 +359,20 @@ impl Session {
             .unwrap_or(default)
     }
 
+    /// [`Session::ask`], saying why there was no answer instead of giving
+    /// the safe default: for an asker that must tell a user's "no" (an
+    /// answer) from nobody answering — a sign-in's Cancel from its timeout.
+    /// Dropping the future withdraws the question, as `ask`'s does: how an
+    /// asker ends a question its own event made moot (a sign-in whose
+    /// browser page came back).
+    pub async fn ask_or_why(
+        &self,
+        request: UiRequest,
+        timeout: Duration,
+    ) -> Result<Json, Unanswered> {
+        self.ask_inner(request, Some(timeout), None, false).await
+    }
+
     /// Ask, and keep the question open until it is answered — however long
     /// that takes, and with no frontend attached: one that connects later
     /// gets it in its `Hello`. For an agent working while its owner is away
@@ -352,7 +382,7 @@ impl Session {
     /// they belong to the forgotten conversation — or the session ended. A
     /// `notify` is shown and returns `Some(null)` at once.
     pub async fn ask_later(&self, request: UiRequest) -> Option<Json> {
-        self.ask_inner(request, None, None, true).await
+        self.ask_inner(request, None, None, true).await.ok()
     }
 
     async fn ask_inner(
@@ -361,7 +391,7 @@ impl Session {
         timeout: Option<Duration>,
         key: Option<String>,
         hold: bool,
-    ) -> Option<Json> {
+    ) -> Result<Json, Unanswered> {
         let request = request.normalized();
         let expects = request.expects_answer();
         let (tx, rx) = oneshot::channel();
@@ -374,13 +404,13 @@ impl Session {
             if let Some(key) = &key {
                 if ui.early.remove(key).is_some() {
                     tracing::debug!(%key, "a question withdrawn before it was asked");
-                    return None;
+                    return Err(Unanswered::Withdrawn);
                 }
             }
             // Checked under `ui`: the session's end clears `pending` under it
             // too, so a question is either refused here or cleared there.
             if self.is_closed() {
-                return None;
+                return Err(Unanswered::Withdrawn);
             }
             if !attached && !hold {
                 drop(ui);
@@ -388,7 +418,7 @@ impl Session {
                     title = request.title(),
                     "no frontend to ask: the safe default"
                 );
-                return None;
+                return Err(Unanswered::NoFrontend);
             }
             ui.next_id += 1;
             let id = ui.next_id;
@@ -412,7 +442,7 @@ impl Session {
         let title = request.title().to_owned();
         self.broadcast(ServerMessage::UiRequest { id, request });
         if !expects {
-            return Some(Json::Null);
+            return Ok(Json::Null);
         }
         /// Closes the question however `ask` ends — answered, timed out,
         /// withdrawn by key, or dropped — and tells the frontends why.
@@ -453,13 +483,13 @@ impl Session {
         match answered {
             Ok(Ok(value)) => {
                 close.reason = ResolveReason::Answered;
-                Some(value)
+                Ok(value)
             }
-            Ok(Err(_)) => None,
+            Ok(Err(_)) => Err(Unanswered::Withdrawn),
             Err(_) => {
                 close.reason = ResolveReason::TimedOut;
                 tracing::info!(%title, "no answer in time: the safe default");
-                None
+                Err(Unanswered::TimedOut)
             }
         }
     }

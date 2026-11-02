@@ -5288,22 +5288,34 @@ a token, an account, or a way to look like a server the owner trusts.
    For a loaded server it comes after stage 3's "Connect to …" Allow and
    the unauthenticated connect. Block is remembered as stage 3's;
    unanswered is not.
-5. **The sign-in question** (`UiRequest::SignIn { title, message, url,
-   host }`):
+5. **The sign-in question** (`UiRequest::SignIn { title, message, host,
+   url }`, built 2026-11-02):
    - **Answers:** `"cancel"` (the owner's Cancel), else nothing:
      `UiRequest::accepts` takes that string only, so no frontend can send
-     a code or a token through it. The sign-in asks it keyed (`ask_keyed`)
-     and races the callback against it: a callback that ends the sign-in
-     withdraws the key, so every frontend gets `UiResolved` (withdrawn)
-     and closes it; Cancel and a timeout are told apart.
+     a code or a token through it. A plugin's `ui.request` is refused one
+     (its link would send the owner to a page of its choosing, titled as
+     yobuild's own).
+   - **Asked with `Session::ask_or_why`,** which says why there was no
+     answer (`Unanswered::{NoFrontend, TimedOut, Withdrawn}`) instead of
+     giving the safe default, so Cancel (an answer) and a timeout are told
+     apart. The sign-in races the callback against it; a callback that
+     ends the sign-in drops it, so every frontend gets `UiResolved`
+     (withdrawn) and closes it.
    - **Its time:** `SIGN_IN_TIMEOUT`, 10 minutes (an account to make, a
      second factor), not `UI_TIMEOUT`.
-   - **On the page:** a docked dialog like a question's, the link (https
-     only, and only the authorization endpoint checked in point 3: not
-     `safeUrl`, which takes http too), its host shown, and a Cancel
-     button.
-   - **In the terminal UI:** the host, then the URL on a line of its own,
-     unwrapped, through `terminalText`; an empty answer is Cancel.
+   - **The link** is short: yobuild's own `http://127.0.0.1:<port>/start/<32
+     random bytes>` on the callback's listener, which sends the browser on
+     to the authorization URL (checked in point 3). The terminal UI wraps
+     every line to the screen's width, so a long authorization URL could
+     not be copied whole; the short one fits, and opens on this machine
+     only. `lib.js`'s `signInLink` draws a link only for https or http to
+     `127.0.0.1` (not `safeUrl`, which takes any http), no user in it.
+   - **On the page:** a docked dialog like a question's, its host, the
+     link ("Open the sign-in page", a new tab, `noopener noreferrer`) and
+     a Cancel button; Escape cancels.
+   - **In the terminal UI:** the host, then the link on a line of its own,
+     through `terminalText`; Enter with nothing typed (or `cancel`)
+     cancels, any other text is asked again; the headless demo cancels.
    - **Phone mode:** the redirect is to this machine's loopback, so the
      link is useless on the phone: the page shows the question without
      the link ("open the link yobuild printed on the machine it runs
@@ -5488,8 +5500,9 @@ account, so CI could run only the stub, which the tests already do.
    withdrawn by its caller, its timeout, the page's and the terminal
    UI's dialogs, phone mode;
 4. `src/run/oauth.rs`: discovery and its checks, the resolver,
-   registration, PKCE, the callback, the exchange, the source and its
-   refresh, revocation, the hidden values, against the stub;
+   registration, PKCE, the callback and its short start link, the
+   exchange, the source and its refresh, revocation, the hidden values,
+   against the stub;
 5. `load_plugin`'s remote signed in: the unauthenticated connect, the
    questions, cancellation, a sign-in that ends marking it stopped, the
    block's `auth = "oauth"`, the hints;

@@ -9,7 +9,7 @@
 // A tool no plugin draws, whose result carries `details.view`, gets a card
 // (and its line the view's title).
 
-import { diffRows, drawMarkdown, jsonText, Questions, runEndLine, safeUrl, toolView, viewTitle } from './lib.js'
+import { diffRows, drawMarkdown, jsonText, Questions, runEndLine, safeUrl, signInLink, toolView, viewTitle } from './lib.js'
 
 const log = document.getElementById('log')
 const panels = document.getElementById('panels')
@@ -355,11 +355,27 @@ function showNextQuestion() {
     dialog.append(field)
     button('Cancel', null)
     button('OK', () => field.value, true)
+  } else if (request.kind === 'signIn') {
+    // It ends in the browser: the sign-in withdraws it once the page came
+    // back. Only its link, checked, is drawn as one; with none (phone mode)
+    // the link is on yobuild's machine.
+    dialog.append(el('p', 'host', `The sign-in page is at ${request.host}.`))
+    const href = signInLink(request)
+    if (href) {
+      const a = el('a', 'primary', 'Open the sign-in page')
+      a.href = href
+      a.target = '_blank'
+      a.rel = 'noopener noreferrer'
+      dialog.append(a)
+    } else {
+      dialog.append(el('p', 'message', 'Open the link yobuild printed, in a browser on the machine it runs on: the sign-in comes back there.'))
+    }
+    button('Cancel', 'cancel')
   }
   dialog.append(actions)
   dialog.oncancel = (e) => {
     e.preventDefault()
-    reply(request.kind === 'confirm' ? false : null)
+    reply(request.kind === 'confirm' ? false : request.kind === 'signIn' ? 'cancel' : null)
   }
   document.body.classList.add('asking')
   dialog.show()

@@ -432,4 +432,19 @@ test('a typed answer fits its question, or is asked again', () => {
   assert.deepEqual(parseAnswer({ kind: 'confirm' }, 'n'), { value: false })
   assert.ok(parseAnswer({ kind: 'confirm' }, 'maybe').error)
   assert.deepEqual(parseAnswer({ kind: 'input' }, '  spaced '), { value: '  spaced ' })
+  // A sign-in's only answer is its cancel: nothing typed, or "cancel".
+  assert.deepEqual(parseAnswer({ kind: 'signIn' }, ''), { value: 'cancel' })
+  assert.deepEqual(parseAnswer({ kind: 'signIn' }, ' Cancel '), { value: 'cancel' })
+  assert.ok(parseAnswer({ kind: 'signIn' }, 'code=abc').error)
+})
+
+test('a sign-in link is https, or http to this machine only', async () => {
+  const { signInLink } = await import('./lib.js')
+  const link = (url) => signInLink({ kind: 'signIn', url })
+  assert.equal(link('https://auth.example/authorize?x=1'), 'https://auth.example/authorize?x=1')
+  assert.equal(link('http://127.0.0.1:53111/start/abc'), 'http://127.0.0.1:53111/start/abc')
+  for (const bad of ['http://auth.example/', 'http://localhost:1/', 'http://127.0.0.2/', 'javascript:alert(1)', 'https://user:pw@auth.example/', 'not a url', undefined, 7]) {
+    assert.equal(link(bad), undefined, String(bad))
+  }
+  assert.equal(signInLink({ kind: 'signIn' }), undefined, 'no link: phone mode')
 })

@@ -23,4 +23,4 @@ pub mod web;
 pub use protocol::{
     ClientMessage, NoticeLevel, ResolveReason, RunOutcome, ServerMessage, UiPlugin, UiRequest,
 };
-pub use session::{Connection, Driver, Session};
+pub use session::{Connection, Driver, Session, Unanswered};

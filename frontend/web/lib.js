@@ -958,6 +958,21 @@ export function safeUrl(url) {
   }
 }
 
+// A sign-in question's link, when it may be opened: https, or http to this
+// machine's loopback address `127.0.0.1` (the short link yobuild serves,
+// which sends the browser on). Anything else, or none (phone mode: the link
+// opens on yobuild's machine only), is `undefined`: not shown as a link.
+export function signInLink(request) {
+  if (typeof request?.url !== 'string') return undefined
+  try {
+    const parsed = new URL(request.url)
+    if (parsed.username || parsed.password) return undefined
+    if (parsed.protocol === 'https:') return parsed.href
+    if (parsed.protocol === 'http:' && parsed.hostname === '127.0.0.1') return parsed.href
+  } catch {}
+  return undefined
+}
+
 // A typed answer (the terminal UI) to a question: `{ value }`, or `{ error }`
 // when it does not fit, so the question is asked again rather than answered
 // with a guess. confirm: y/yes or n/no. select: a number (blank: no choice);
@@ -985,6 +1000,11 @@ export function parseAnswer(request, text) {
     if (!trimmed) return { value: null }
     const choice = pick(trimmed)
     return choice === undefined ? { error: `answer with a number from 1 to ${options.length}` } : { value: choice }
+  }
+  // A sign-in ends in the browser; its one answer here is its cancel.
+  if (request.kind === 'signIn') {
+    if (!trimmed || /^cancel$/i.test(trimmed)) return { value: 'cancel' }
+    return { error: 'the sign-in ends in your browser: press Enter with nothing typed to cancel it' }
   }
   return { value: String(text ?? '') }
 }

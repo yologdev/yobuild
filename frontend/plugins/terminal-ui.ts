@@ -15,7 +15,7 @@ import * as tty from 'node:tty'
 import { definePlugin } from '@arcships/rutis'
 // The answer parsing and the terminal's text cleaning the page's tests
 // cover (`node --test frontend/web/lib.test.js`).
-import { jsonText, parseAnswer, terminalText } from '../web/lib.js'
+import { jsonText, parseAnswer, signInLink, terminalText } from '../web/lib.js'
 import {
   Container,
   Editor,
@@ -150,6 +150,13 @@ export default definePlugin<{ demo?: string }>({
       const r = first.request
       say(bold(`  ? ${t(r.title)}`) + (r.message ? dim(` — ${t(r.message)}`) : ''))
       if (r.kind === 'select') r.options.forEach((o: string, i: number) => say(`    ${i + 1}. ${t(o)}`))
+      // A sign-in: its host, then its link on a line of its own (a short
+      // one, yobuild's, that sends the browser on), or where it is.
+      if (r.kind === 'signIn') {
+        say(`    the sign-in page is at ${t(r.host)}`)
+        const link = signInLink(r)
+        say(link ? `    ${t(link)}` : dim('    open the link yobuild printed, on the machine it runs on'))
+      }
       // Shown cleaned: an answer typed from it is the cleaned text.
       if (r.kind === 'input' && r.value) {
         prefilled = t(r.value)
@@ -163,7 +170,9 @@ export default definePlugin<{ demo?: string }>({
               ? r.multiple
                 ? 'answer with numbers, e.g. 1,3 (empty for none)'
                 : 'answer with a number (empty for no choice)'
-              : 'type your answer',
+              : r.kind === 'signIn'
+                ? 'sign in in your browser (Enter with nothing typed cancels)'
+                : 'type your answer',
         ),
       )
     }
@@ -172,8 +181,9 @@ export default definePlugin<{ demo?: string }>({
       if (headless) {
         // Nobody to ask: decline, as a user who walked away would.
         say(bold(`  ? ${t(r.title)}`) + (r.message ? dim(` — ${t(r.message)}`) : ''))
-        say(dim('  answered: null (headless demo)'))
-        send({ type: 'uiResponse', id, value: r.kind === 'confirm' ? false : null })
+        const value = r.kind === 'confirm' ? false : r.kind === 'signIn' ? 'cancel' : null
+        say(dim(`  answered: ${jsonText(value)} (headless demo)`))
+        send({ type: 'uiResponse', id, value })
         return
       }
       if (questions.some((q) => q.id === id)) return
