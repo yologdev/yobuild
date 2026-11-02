@@ -90,8 +90,15 @@ tracing = "0.1"
 # The `yobuild` binary's log (stderr, or a file under a terminal UI).
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
-# A cache folder's name: the hash of its set in `agent.lock`.
+# A cache folder's name: the hash of its set in `agent.lock`; PKCE's
+# challenge (`run::oauth`).
 sha2 = "0.10"
+# The sign-in (`run::oauth`, design §14 "Stage 4"): PKCE, `state` and the
+# callback's paths (random bytes, base64url), and a site's registrable
+# domain (the public suffix list, compiled in).
+base64 = "0.22"
+getrandom = "0.3"
+psl = "2"
 
 [target.'cfg(unix)'.dependencies]
 # Whether this user may run a program (`access(X_OK)`), asked before it is
