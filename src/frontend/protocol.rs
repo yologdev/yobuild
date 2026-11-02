@@ -189,7 +189,32 @@ pub enum UiRequest {
         #[serde(default)]
         level: String,
     },
+    /// A sign-in in the user's browser (a remote MCP server's OAuth
+    /// provider; design §14, "Stage 4"), asked by yobuild only: a plugin's
+    /// `ui.request` is refused one. Answer: [`SIGN_IN_CANCEL`] (the user
+    /// gave up), nothing else; the sign-in itself ends it once its browser
+    /// page came back, its asker dropping the question (yobuild's OAuth
+    /// steps, design §14 "Stage 4": to come).
+    SignIn {
+        title: String,
+        #[serde(default)]
+        message: String,
+        /// The host of the sign-in page the link leads to (the
+        /// authorization server's), said beside it.
+        host: String,
+        /// The link to open: https, or http to this machine's loopback
+        /// (`127.0.0.1`, a short link that sends the browser on). Not
+        /// checked here: its asker keeps to it, and the frontends draw no
+        /// other link (`signInLink`). `None` where it is not shown (phone
+        /// mode: it opens on this machine only, so it is printed there
+        /// instead).
+        #[serde(default)]
+        url: Option<String>,
+    },
 }
+
+/// A sign-in question's one answer ([`UiRequest::SignIn`]).
+pub const SIGN_IN_CANCEL: &str = "cancel";
 
 impl UiRequest {
     /// The answer when no frontend is attached, none answered in time, or
@@ -221,15 +246,17 @@ impl UiRequest {
         match self {
             UiRequest::Confirm { title, .. }
             | UiRequest::Select { title, .. }
-            | UiRequest::Input { title, .. } => title,
+            | UiRequest::Input { title, .. }
+            | UiRequest::SignIn { title, .. } => title,
             UiRequest::Notify { message, .. } => message,
         }
     }
 
     /// Whether `answer` fits this question: a boolean for `confirm`, one of
     /// the options or `null` for `select` (with `multiple`, a list of
-    /// distinct options), a string or `null` for `input`. (The string
-    /// `"false"` is not a `confirm` answer.)
+    /// distinct options), a string or `null` for `input`,
+    /// [`SIGN_IN_CANCEL`] for `signIn`. (The string `"false"` is not a
+    /// `confirm` answer.)
     pub fn accepts(&self, answer: &Json) -> bool {
         match (self, answer) {
             (UiRequest::Confirm { .. }, Json::Bool(_)) => true,
@@ -258,6 +285,7 @@ impl UiRequest {
                 })
             }
             (UiRequest::Input { .. }, Json::String(_)) => true,
+            (UiRequest::SignIn { .. }, Json::String(answer)) => answer == SIGN_IN_CANCEL,
             _ => false,
         }
     }
@@ -307,5 +335,21 @@ mod tests {
         let confirm: UiRequest =
             serde_json::from_value(json!({"kind": "confirm", "title": "t"})).unwrap();
         assert!(confirm.accepts(&json!(true)) && !confirm.accepts(&json!("false")));
+        // A sign-in takes its cancel only: no frontend sends a code through it.
+        let sign_in: UiRequest = serde_json::from_value(
+            json!({"kind": "signIn", "title": "t", "host": "auth.example", "url": "https://auth.example/a"}),
+        )
+        .unwrap();
+        assert!(sign_in.accepts(&json!("cancel")));
+        for other in [json!(null), json!("code=1"), json!(true), json!(["cancel"])] {
+            assert!(!sign_in.accepts(&other), "{other}");
+        }
+        assert_eq!(sign_in.default_answer(), json!(null));
+        assert!(sign_in.expects_answer());
+        // Its link may be left out (phone mode).
+        let away: UiRequest =
+            serde_json::from_value(json!({"kind": "signIn", "title": "t", "host": "auth.example"}))
+                .unwrap();
+        assert!(matches!(away, UiRequest::SignIn { url: None, .. }));
     }
 }

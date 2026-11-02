@@ -16,7 +16,7 @@ use yoagent::{
 };
 use yobuild::frontend::{
     ClientMessage, Connection, NoticeLevel, ResolveReason, RunOutcome, ServerMessage, Session,
-    UiPlugin, UiRequest,
+    UiPlugin, UiRequest, Unanswered,
 };
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -615,6 +615,97 @@ async fn a_dropped_question_is_withdrawn() {
         panic!("Hello")
     };
     assert!(ui_requests.is_empty());
+}
+
+fn sign_in() -> UiRequest {
+    serde_json::from_value(json!({
+        "kind": "signIn",
+        "title": "Sign in to io.x/docs (mcp.x.example) at auth.x.example?",
+        "host": "auth.x.example",
+        "url": "https://auth.x.example/authorize"
+    }))
+    .unwrap()
+}
+
+/// A sign-in's asker tells the user's Cancel (an answer, its only one) from
+/// nobody answering, from no frontend, and ends the question itself by
+/// dropping it: frontends hear it withdrawn.
+#[tokio::test]
+async fn a_sign_in_tells_cancel_from_timeout_and_is_withdrawn_by_its_asker() {
+    let (session, _driver) = Session::new(true);
+    // `run` always watches: an observer is not a frontend to ask.
+    let _watch = session.observe();
+    assert_eq!(
+        session.ask_or_why(sign_in(), WAIT).await,
+        Err(Unanswered::NoFrontend)
+    );
+    let mut ui = session.connect();
+    next(&mut ui).await;
+
+    let asking = {
+        let session = session.clone();
+        tokio::spawn(async move { session.ask_or_why(sign_in(), WAIT).await })
+    };
+    let id = asked(&mut ui).await;
+    // Not an answer it takes: it stays open.
+    assert!(session.send(ClientMessage::UiResponse {
+        id,
+        value: json!("code=x")
+    }));
+    assert!(session.send(ClientMessage::UiResponse {
+        id,
+        value: json!(null)
+    }));
+    assert!(session.send(ClientMessage::UiResponse {
+        id,
+        value: json!("cancel")
+    }));
+    assert_eq!(asking.await.unwrap(), Ok(json!("cancel")));
+    assert_eq!(resolved(&mut ui).await, (id, ResolveReason::Answered));
+
+    let short = Duration::from_millis(50);
+    assert_eq!(
+        session.ask_or_why(sign_in(), short).await,
+        Err(Unanswered::TimedOut)
+    );
+    asked(&mut ui).await;
+    assert!(matches!(
+        resolved(&mut ui).await,
+        (_, ResolveReason::TimedOut)
+    ));
+
+    // The sign-in came back: its asker drops the question.
+    let asking = {
+        let session = session.clone();
+        tokio::spawn(async move { session.ask_or_why(sign_in(), WAIT).await })
+    };
+    let id = asked(&mut ui).await;
+    asking.abort();
+    let _ = asking.await;
+    assert_eq!(resolved(&mut ui).await, (id, ResolveReason::Withdrawn));
+}
+
+/// A sign-in open as the session ends is said as its end — not a Cancel,
+/// not a timeout — and so is one asked after it.
+#[tokio::test]
+async fn a_sign_in_open_as_the_session_ends_says_so() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    next(&mut ui).await;
+    let asking = {
+        let session = session.clone();
+        tokio::spawn(async move { session.ask_or_why(sign_in(), WAIT).await })
+    };
+    asked(&mut ui).await;
+    drop(driver);
+    assert_eq!(
+        tokio::time::timeout(WAIT, asking).await.unwrap().unwrap(),
+        Err(Unanswered::SessionEnded)
+    );
+    assert_eq!(
+        session.ask_or_why(sign_in(), WAIT).await,
+        Err(Unanswered::SessionEnded)
+    );
 }
 
 /// An asker that cannot drop its future (a plugin in another process)

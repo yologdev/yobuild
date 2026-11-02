@@ -432,4 +432,27 @@ test('a typed answer fits its question, or is asked again', () => {
   assert.deepEqual(parseAnswer({ kind: 'confirm' }, 'n'), { value: false })
   assert.ok(parseAnswer({ kind: 'confirm' }, 'maybe').error)
   assert.deepEqual(parseAnswer({ kind: 'input' }, '  spaced '), { value: '  spaced ' })
+  // A sign-in's only answer is its cancel, typed: an Enter pressed once the
+  // browser is done asks again.
+  assert.deepEqual(parseAnswer({ kind: 'signIn' }, ' Cancel '), { value: 'cancel' })
+  assert.ok(parseAnswer({ kind: 'signIn' }, '').error)
+  assert.ok(parseAnswer({ kind: 'signIn' }, 'code=abc').error)
+})
+
+test('a sign-in link is https, or http to this machine only', async () => {
+  const { signInLink } = await import('./lib.js')
+  const shown = (url, pageHost) => signInLink({ kind: 'signIn', url }, pageHost)
+  const local = 'http://127.0.0.1:53111/start/abc'
+  assert.deepEqual(shown('https://auth.example/authorize?x=1'), { link: 'https://auth.example/authorize?x=1' })
+  assert.deepEqual(shown(local), { link: local }, 'the terminal UI: on its machine')
+  for (const host of ['127.0.0.1', 'localhost', '[::1]']) assert.deepEqual(shown(local, host), { link: local }, host)
+  // A page opened over the network: the loopback link opens on yobuild's
+  // machine only.
+  assert.deepEqual(shown(local, '192.168.1.20'), { there: local })
+  assert.deepEqual(shown('https://auth.example/', '192.168.1.20'), { link: 'https://auth.example/' })
+  for (const bad of ['http://auth.example/', 'http://localhost:1/', 'http://127.0.0.2/', 'http://127.0.0.1.evil.example/', 'http://user@127.0.0.1/', 'javascript:alert(1)', 'https://user:pw@auth.example/', 'not a url', 7]) {
+    assert.deepEqual(shown(bad), { refused: true }, String(bad))
+  }
+  assert.deepEqual(signInLink({ kind: 'signIn' }), { printed: true }, 'no link: phone mode')
+  assert.deepEqual(shown(null), { printed: true }, 'None on the wire')
 })

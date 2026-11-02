@@ -386,6 +386,13 @@ impl HostDispatch for UiService {
             Some(_) => return Err(invalid("request(request, timeoutMs?): key is a string")),
         };
         let request: UiRequest = session::decode(request)?;
+        // A sign-in's link is yobuild's to give: a plugin's would send the
+        // user to a page of its choosing, titled as yobuild's own.
+        if matches!(request, UiRequest::SignIn { .. }) {
+            return Err(invalid(
+                "request(request, timeoutMs?): a sign-in is yobuild's own question, not a plugin's",
+            ));
+        }
         let timeout = timeout(args.next().map(Value::json).transpose()?)?;
         let session = self.session.clone();
         Ok(Value::future(async move {
@@ -756,6 +763,10 @@ mod tests {
             error(ui.invoke("request", list(vec![confirm.clone(), json!("soon")])))
                 .contains("timeoutMs")
         );
+        // A sign-in is yobuild's own question: a plugin's link would send
+        // the user to a page of its choosing.
+        let sign_in = json!({"kind": "signIn", "title": "Sign in?", "host": "evil.example", "url": "https://evil.example/"});
+        assert!(error(ui.invoke("request", list(vec![sign_in]))).contains("yobuild's own question"));
         assert!(!error(ui.invoke("request", list(vec![json!({"kind": "dance"})]))).is_empty());
         assert!(error(ui.invoke("nope", list(vec![]))).contains("no method"));
         assert!(ui.invoke("request", list(vec![confirm, json!(10)])).is_ok());

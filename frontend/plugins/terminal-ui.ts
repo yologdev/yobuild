@@ -15,7 +15,7 @@ import * as tty from 'node:tty'
 import { definePlugin } from '@arcships/rutis'
 // The answer parsing and the terminal's text cleaning the page's tests
 // cover (`node --test frontend/web/lib.test.js`).
-import { jsonText, parseAnswer, terminalText } from '../web/lib.js'
+import { jsonText, parseAnswer, signInLink, terminalText } from '../web/lib.js'
 import {
   Container,
   Editor,
@@ -150,6 +150,19 @@ export default definePlugin<{ demo?: string }>({
       const r = first.request
       say(bold(`  ? ${t(r.title)}`) + (r.message ? dim(` — ${t(r.message)}`) : ''))
       if (r.kind === 'select') r.options.forEach((o: string, i: number) => say(`    ${i + 1}. ${t(o)}`))
+      // A sign-in: its host, then its link on a line of its own (a short
+      // one, yobuild's, that sends the browser on); none shown otherwise.
+      if (r.kind === 'signIn') {
+        say(`    the sign-in page is at ${t(r.host)}`)
+        const shown = signInLink(r)
+        say(
+          shown.link
+            ? `    ${t(shown.link)}`
+            : shown.printed
+              ? dim('    open the link yobuild printed, on the machine it runs on')
+              : red('    its link cannot be shown here (neither https nor yobuild\'s own): type cancel'),
+        )
+      }
       // Shown cleaned: an answer typed from it is the cleaned text.
       if (r.kind === 'input' && r.value) {
         prefilled = t(r.value)
@@ -163,17 +176,23 @@ export default definePlugin<{ demo?: string }>({
               ? r.multiple
                 ? 'answer with numbers, e.g. 1,3 (empty for none)'
                 : 'answer with a number (empty for no choice)'
-              : 'type your answer',
+              : r.kind === 'signIn'
+                ? 'sign in in your browser (type cancel to give it up)'
+                : 'type your answer',
         ),
       )
     }
     const askUser = (id: number, r: Message) => {
       if (r.kind === 'notify') return say(yellow(`  ! ${t(r.message)}`))
       if (headless) {
-        // Nobody to ask: decline, as a user who walked away would.
         say(bold(`  ? ${t(r.title)}`) + (r.message ? dim(` — ${t(r.message)}`) : ''))
-        say(dim('  answered: null (headless demo)'))
-        send({ type: 'uiResponse', id, value: r.kind === 'confirm' ? false : null })
+        // A sign-in is left to time out, as nobody there would: a cancel
+        // would be a user's choice.
+        if (r.kind === 'signIn') return say(dim('  left unanswered (headless demo)'))
+        // Nobody to ask: decline.
+        const value = r.kind === 'confirm' ? false : null
+        say(dim(`  answered: ${jsonText(value)} (headless demo)`))
+        send({ type: 'uiResponse', id, value })
         return
       }
       if (questions.some((q) => q.id === id)) return
@@ -187,8 +206,9 @@ export default definePlugin<{ demo?: string }>({
       const { id, request } = first
       const parsed = parseAnswer(request, text)
       if ('error' in parsed) {
-        // Not an answer: ask again rather than guess.
+        // Not an answer: ask again rather than guess, the text kept to edit.
         say(red(`  ${t(parsed.error)}`))
+        editor.setText(text)
         return true
       }
       const { value } = parsed
