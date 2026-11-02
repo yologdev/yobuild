@@ -129,7 +129,7 @@ price`").
   local plugin, loaded in its own npm package — the nearest folder above
   it with a `package.json`, which must be `"type": "module"` for a `.ts`
   file and have `@arcships/rutis-runtime` installed at the version
-  yobuild's runtimes use (0.12.0; `check` names it when it is missing),
+  yobuild's runtimes use (0.19.3; `check` names it when it is missing),
   and `@arcships/rutis` (the SDK) at the same version (`parts.md`).
   Or one of yobuild's own, `rutis = "yobuild:todo-plan"` or
   `"yobuild:search-links"` (`parts.md`): no `runtime` needed (Node).

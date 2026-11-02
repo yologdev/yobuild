@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use rutis::host::CtxHost;
 use rutis::Ctx;
 use serde_json::json;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
@@ -628,7 +629,7 @@ fn refused(result: Result<(), Box<dyn std::error::Error + Send + Sync>>) -> Stri
 /// only the services it was given, refuses a row that declares one it
 /// provides, reloads and unloads its rows, never takes a row naming no
 /// runtime, and is removed whole — its plugins and its process — leaving
-/// the other runtimes' and their routes as they should be.
+/// the other runtimes' as they should be.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole() {
     if !runtime_installed() {
@@ -660,6 +661,9 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
         ("Loaded A", vec![], "lowercase"),
         ("", vec![], "lowercase"),
         ("a::b", vec![], "lowercase"),
+        // rutis's rule, so `<name>:<row>` reads as that runtime's row.
+        ("a", vec![], "two or more"),
+        ("file", vec![], "not `file`"),
         (
             "loaded-b",
             vec!["nope"],
@@ -681,15 +685,6 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
         refused(host.add_runtime("loaded-a", plugins(), &[]).await),
         "a runtime `loaded-a` runs already"
     );
-    // A name that would read as an added runtime's row is no row's.
-    assert_eq!(
-        refused(
-            host.load([Row::new("odd", "loaded-a::x.mjs").runtime("ui")])
-                .await
-        ),
-        "`loaded-a::x.mjs`: a plugin's name holds no `::`"
-    );
-
     // The same file, loaded again in the runtime added: two processes.
     host.load([Row::new("second", pid.display()).runtime("loaded-a")])
         .await
@@ -713,43 +708,44 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
     )
     .await;
 
-    // A row naming no runtime goes to the host's own runtimes, never to an
-    // added one.
+    // A row naming no runtime goes to the first of the host's runtimes,
+    // never to an added one.
     let other = pid_plugin(dir, "other", "g");
     host.load([Row::new("unrouted", other.display())])
         .await
         .unwrap();
     let unrouted = processes_of(dir, "other", 1).await;
-    assert_eq!(unrouted, [first], "the first runtime that has it: `ui`");
+    assert_eq!(unrouted, [first], "the first runtime: `ui`");
     host.unload("unrouted").await.unwrap();
-    // The loader keeps it in `ui`, and so does its route.
+    // A name that begins as a runtime's row would run there: refused.
     let said = refused(
-        host.load([Row::new("routed", other.display()).runtime("two")])
+        host.load([Row::new("odd", format!("loaded-a:{}", other.display()))])
             .await,
     );
-    assert!(
-        said.ends_with(
-            "was loaded by runtime `ui` this session, where the loader keeps it: not `two`"
-        ),
-        "{said}"
-    );
-    // So does a batch that failed: what the loader saw stays where it went.
+    assert!(said.contains("may not begin as a runtime's row"), "{said}");
+    // The loader is given `<runtime>:<name>`: a file one runtime loaded
+    // loads in another too, in its process.
+    host.load([Row::new("routed", other.display()).runtime("two")])
+        .await
+        .unwrap();
+    let both = processes_of(dir, "other", 2).await;
+    assert!(both.contains(&first) && both.len() == 2, "{both:?}");
+    host.unload("routed").await.unwrap();
+    // A batch that failed leaves nothing behind: the same file then loads
+    // in another runtime.
     let failing = dir.join("failing.mjs");
     write_failing_plugin(&failing);
     assert!(host
         .load([Row::new("failing", failing.display()).runtime("two")])
         .await
         .is_err());
-    let said = refused(
-        host.load([Row::new("failing", failing.display()).runtime("ui")])
-            .await,
-    );
-    assert!(
-        said.ends_with(
-            "was loaded by runtime `two` this session, where the loader keeps it: not `ui`"
-        ),
-        "{said}"
-    );
+    let control = plain_plugin(dir, "after-failure", "ran");
+    host.load([Row::new("failing", control.display()).runtime("ui")])
+        .await
+        .unwrap();
+    assert_eq!(processes_of(dir, "after-failure", 1).await, [first]);
+    host.unload("failing").await.unwrap();
+
     // A runtime that does not run is no row's.
     assert_eq!(
         refused(
@@ -784,21 +780,9 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
     assert_eq!(lines, "one\nsecond\n");
     host.unload("fifth").await.unwrap();
 
-    // `first` unloaded: the loader keeps that file's resolution, `ui`'s,
-    // so another of the host's runtimes may not load it; `second`, in the
-    // added runtime, goes on.
+    // `first` unloaded: `second`, in the added runtime, goes on.
     host.unload("first").await.unwrap();
     handlers_become(&bridge, &["h-"], vec![format!("h-{second}")]).await;
-    let said = refused(
-        host.load([Row::new("again", pid.display()).runtime("two")])
-            .await,
-    );
-    assert!(
-        said.ends_with(
-            "was loaded by runtime `ui` this session, where the loader keeps it: not `two`"
-        ),
-        "{said}"
-    );
     std::fs::remove_file(dir.join(format!("pid-{first}.json"))).unwrap();
     host.load([Row::new("again", pid.display()).runtime("ui")])
         .await
@@ -853,6 +837,33 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
         said.contains("it provides thing: a runtime added while running may provide no service"),
         "{said}"
     );
+    // A service another runtime's plugin provides is not an added
+    // runtime's to use: refused before anything starts there.
+    host.load([Row::new("provided", provider.display()).runtime("ui")])
+        .await
+        .unwrap();
+    let consumer = dir.join("consumer.mjs");
+    std::fs::write(
+        &consumer,
+        format!(
+            "import {{ writeFileSync }} from 'node:fs'\n\
+             import {{ definePlugin }} from 'file://{}'\n\
+             export default definePlugin({{ inject: ['thing'], async apply(ctx) {{ await ctx.use('thing').hi(); writeFileSync({:?} + '/consumer-' + process.pid + '.txt', '') }} }})\n",
+            plugins().join("node_modules/@arcships/rutis/src/index.mjs").display(),
+            dir.display().to_string()
+        ),
+    )
+    .unwrap();
+    let said = refused(
+        host.load([Row::new("consumer", consumer.display()).runtime("loaded-a")])
+            .await,
+    );
+    assert!(
+        said.contains("plugin `consumer` (runtime `loaded-a`) waits for `thing`, which plugins of another runtime provide (provided)"),
+        "{said}"
+    );
+    assert!(written_by(dir, "consumer").is_empty());
+    host.unload("provided").await.unwrap();
 
     // One that dies: a row naming it is refused, with why.
     #[cfg(unix)]
@@ -938,6 +949,56 @@ async fn a_runtime_added_while_running_loads_its_own_rows_and_is_removed_whole()
 /// A runtime that cannot start (no rutis runtime in its folder) is said
 /// at `add_runtime`, with why, and is gone again, its name free; one whose
 /// start is cut short is stopped, its name spent.
+/// A runtime the host starts with that does not start fails `start`,
+/// naming it; and a plugin's uncaught error does not end its runtime
+/// (since rutis 0.18 it is reported, and the plugins there go on).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runtime_that_does_not_start_fails_start_and_an_uncaught_error_ends_nothing() {
+    if !runtime_installed() {
+        return;
+    }
+    let empty = tempfile::tempdir().unwrap();
+    std::fs::write(empty.path().join("package.json"), "{}").unwrap();
+    let root = Ctx::root().unwrap();
+    let said = match PluginHost::builder()
+        .node("ui", plugins())
+        .node("broken", empty.path())
+        .start(&root)
+        .await
+    {
+        Ok(_) => panic!("started"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        said.starts_with("runtime `broken` did not start: "),
+        "{said}"
+    );
+    root.shutdown().await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    let file = dir.path().join("throws.mjs");
+    std::fs::write(
+        &file,
+        "export const name = 'throws'\n\
+         export function apply() { setTimeout(() => { throw new Error('late') }, 200) }\n",
+    )
+    .unwrap();
+    let root = Ctx::root().unwrap();
+    let mut host = PluginHost::builder()
+        .node("ui", plugins())
+        .start(&root)
+        .await
+        .unwrap();
+    host.load([Row::new("throws", file.display()).runtime("ui")])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(host.is_running("throws"));
+    assert!(host.stopped(&[]).is_empty(), "{:?}", host.stopped(&[]));
+    root.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_added_runtime_that_cannot_start_is_said_and_gone_and_one_cut_short_stopped() {
     if !runtime_installed() {

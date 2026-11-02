@@ -9,6 +9,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+use rutis::host::CtxHost;
 use rutis::Ctx;
 use yoagent::{AgentMessage, Content, Message};
 use yobuild::frontend::RunOutcome;
@@ -821,8 +822,9 @@ async fn a_plugin_that_stops_during_the_session_is_said() {
         return;
     }
     // It starts, then — once the run makes a file it waits for — takes its
-    // runtime down with it (an error nothing catches), while the run is
-    // still going.
+    // runtime down with it (`process.exit`: since rutis 0.18 an error
+    // nothing catches is reported and the runtime goes on), while the run
+    // is still going.
     let dir = tempfile::tempdir().unwrap();
     let signal = dir.path().join("crash-now");
     std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
@@ -832,7 +834,7 @@ async fn a_plugin_that_stops_during_the_session_is_said() {
          export const name = 'fails-later'\n\
          export function apply(_ctx: any, config: { file: string }) {\n\
            const timer = setInterval(() => {\n\
-             if (existsSync(config.file)) { clearInterval(timer); setTimeout(() => { throw new Error('gave up') }) }\n\
+             if (existsSync(config.file)) { clearInterval(timer); process.exit(1) }\n\
            }, 50)\n\
          }\n",
     )
@@ -1203,12 +1205,14 @@ async fn a_rutis_plugin_waiting_for_a_service_nobody_provides_is_named() {
     let started = std::time::Instant::now();
     let e = try_once(dir.path()).await.err().unwrap();
     assert!(
-        e.contains("plugin:needy (waiting): nothing provides nosuchService") && !e.contains("DSH"),
+        e.contains("plugin:needy (waiting): waiting for nosuchService (no row provides it)")
+            && !e.contains("DSH"),
         "{e}"
     );
-    // Said at the first look, not after the minute a loading row gets.
+    // Said half a second after nothing could provide it (yoagent-rutis
+    // 0.11), not after the minute a loading row gets.
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(45),
+        started.elapsed() < std::time::Duration::from_secs(10),
         "{:?}",
         started.elapsed()
     );
@@ -1256,7 +1260,7 @@ async fn a_call_after_the_policy_plugin_died_is_denied() {
            apply(ctx: any, config: { file: string }) {\n\
              ctx.effect(ctx.use('yoagent').register('guard', { async before_tool() {} }))\n\
              const timer = setInterval(() => {\n\
-               if (existsSync(config.file)) { clearInterval(timer); setTimeout(() => { throw new Error('gone') }) }\n\
+               if (existsSync(config.file)) { clearInterval(timer); process.exit(1) }\n\
              }, 50)\n\
            },\n\
          })\n",
@@ -1617,7 +1621,7 @@ async fn check_says_a_rutis_plugin_that_stops_or_waits() {
         text.contains(
             "  note: not checked alone: it waits for a service another plugin may provide"
         ) && text.contains("agent a: 1 problem\n  problem: `run` would refuse it at start: ")
-            && text.contains("nothing provides nosuchService"),
+            && text.contains("waiting for nosuchService (no row provides it)"),
         "{text}"
     );
 }

@@ -21,6 +21,8 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::filter::{Filtered, Targets};
 use tracing_subscriber::layer::{Context, Layer};
 
+use crate::frontend::host::PLUGIN_ERRORS;
+
 /// A plugin line: who wrote it (the calling row), at what level, the text.
 pub(crate) struct Line<'a> {
     pub row: Option<&'a str>,
@@ -42,7 +44,21 @@ fn sink() -> MutexGuard<'static, Option<(u64, Sink)>> {
 /// The layer to add beside the log: plugin lines at info and above, to the
 /// running session's watcher.
 pub fn layer<S: Subscriber>() -> Filtered<impl Layer<S>, Targets, S> {
-    PluginLines.with_filter(Targets::new().with_target("yoagent_rutis::plugin", Level::INFO))
+    PluginLines.with_filter(
+        Targets::new()
+            .with_target("yoagent_rutis::plugin", Level::INFO)
+            .with_target(PLUGIN_ERRORS, Level::WARN),
+    )
+}
+
+/// The row [`layer`] gives rutis's own lines: none a plugin's can be (row
+/// ids are yobuild's: `plugin:…`, `loaded:…`, the adapters').
+const RUTIS: &str = "(rutis)";
+
+/// What a plugin's event listener or filter that threw says, from rutis's
+/// error sink: `None` for any other line.
+pub(crate) fn plugin_error<'a>(line: &Line<'a>) -> Option<&'a str> {
+    (line.row == Some(RUTIS)).then_some(line.text)
 }
 
 /// [`layer`]'s inner layer.
@@ -56,8 +72,12 @@ impl<S: Subscriber> Layer<S> for PluginLines {
         let mut message = Message(String::new());
         event.record(&mut message);
         let row = rutis_bridge::session::caller_row();
+        let rutis = event.metadata().target() == PLUGIN_ERRORS;
         sink(&Line {
-            row: row.as_ref().map(|r| r.id()),
+            row: match rutis {
+                true => Some(RUTIS),
+                false => row.as_ref().map(|r| r.id()),
+            },
             level: *event.metadata().level(),
             text: &message.0,
         });
@@ -557,6 +577,23 @@ mod tests {
                 named.display()
             );
         }
+    }
+
+    /// rutis's own line for a plugin's listener that threw is read as one;
+    /// a plugin's line is not, whatever it says.
+    #[test]
+    fn a_failed_listener_is_rutiss_own_line() {
+        let line = |row, text| Line {
+            row,
+            level: Level::WARN,
+            text,
+        };
+        assert_eq!(
+            plugin_error(&line(Some(RUTIS), "listener of e from p failed: x")),
+            Some("listener of e from p failed: x")
+        );
+        assert_eq!(plugin_error(&line(Some(PI_ROW), "x")), None);
+        assert_eq!(plugin_error(&line(None, "x")), None);
     }
 
     #[test]

@@ -51,7 +51,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use rutis::Ctx;
+use rutis::host::CtxHost;
 use yoagent::{AgentMessage, Content, Message};
 use yobuild::frontend::RunOutcome;
 use yobuild::manifest::Manifest;
@@ -173,7 +173,7 @@ fn start() -> Result<ExitCode, BoxError> {
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        let root = Ctx::root()?;
+        let root = yobuild::frontend::host::root()?;
         let ended = run(&root, options).await;
         // A runtime that does not stop is said after the run's own error;
         // then where the log is.
