@@ -21,6 +21,10 @@ use crate::manifest::{ExtendKind, Manifest};
 /// process's).
 const KEY: &str = "YB_REMOTE_TEST_KEY";
 const SECRET: &str = "sk-remote-test-123456";
+/// A header yoagent does not take for a credential (`X-Org`): only
+/// yobuild's own hiding keeps its value out of what is said.
+const ORG: &str = "YB_REMOTE_TEST_ORG";
+const ORG_VALUE: &str = "acme-workspace-42";
 
 /// An environment holding only `vars`.
 fn lookup(vars: &[(&str, OsString)]) -> Lookup {
@@ -171,6 +175,11 @@ async fn stub(mode: Mode) -> (String, Arc<Mutex<Vec<String>>>) {
                         .and_then(|a| a.to_str().ok())
                         .unwrap_or("-")
                         .to_owned();
+                    let org = headers
+                        .get("x-org")
+                        .and_then(|a| a.to_str().ok())
+                        .unwrap_or("-")
+                        .to_owned();
                     let version = headers
                         .get("x-api-version")
                         .and_then(|a| a.to_str().ok())
@@ -185,7 +194,7 @@ async fn stub(mode: Mode) -> (String, Arc<Mutex<Vec<String>>>) {
                     }
                     match (mode, what.as_str()) {
                         (Mode::Unauthorized, _) => {
-                            let body = format!("rejected {auth}");
+                            let body = format!("rejected {auth} org {org}");
                             return (StatusCode::UNAUTHORIZED, body).into_response();
                         }
                         (Mode::Forbidden, _) => {
@@ -199,7 +208,7 @@ async fn stub(mode: Mode) -> (String, Arc<Mutex<Vec<String>>>) {
                             return StatusCode::NOT_FOUND.into_response()
                         }
                         (Mode::CallUnauthorized, "tools/call") => {
-                            let body = format!("revoked {auth}");
+                            let body = format!("revoked {auth} org {org}");
                             return (StatusCode::UNAUTHORIZED, body).into_response();
                         }
                         (Mode::Hang, "tools/list") => {
@@ -252,6 +261,23 @@ async fn stub(mode: Mode) -> (String, Arc<Mutex<Vec<String>>>) {
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await });
     (url, seen)
+}
+
+/// A required header that is no credential by its name, its value filled
+/// from a variable the owner names.
+fn org() -> RemoteHeader {
+    RemoteHeader {
+        name: "X-Org".into(),
+        required: true,
+        secret: false,
+        description: "Your workspace".into(),
+        template: Some("{org}".into()),
+    }
+}
+
+/// The key and the workspace, both set.
+fn with_key_and_org() -> Lookup {
+    lookup(&[(KEY, SECRET.into()), (ORG, ORG_VALUE.into())])
 }
 
 fn authorization(required: bool) -> RemoteHeader {
@@ -830,21 +856,27 @@ async fn a_run_stopped_at_any_question_or_while_connecting_ends_the_load() {
 async fn a_remote_that_wants_a_sign_in_is_said_so_and_the_key_hidden() {
     for (mode, status) in [(Mode::Unauthorized, 401), (Mode::Forbidden, 403)] {
         let (url, _) = stub(mode).await;
-        let l = loading(
+        let l = loading_with(
             &url,
-            vec![authorization(true)],
-            vec![json!("Allow"), json!(KEY)],
+            vec![authorization(true), org()],
+            vec![json!("Allow"), json!(KEY), json!(ORG)],
+            with_key_and_org(),
         );
         let said = text(&l.call().await);
         assert!(
             said.contains(&format!("io.x/docs refused yobuild's request (HTTP {status}): it needs a credential, or a sign-in (OAuth) yobuild cannot do yet")),
             "{said}"
         );
-        assert!(!said.contains(SECRET), "{said}");
+        assert!(
+            !said.contains(SECRET) && !said.contains(ORG_VALUE),
+            "{said}"
+        );
         if mode == Mode::Unauthorized {
-            // The server echoed the key it refused: shown as its name.
+            // The server echoed what it refused: the key redacted by yoagent
+            // (0.26.6: a credential header's value), the workspace, which it
+            // takes for none, shown as its name by yobuild.
             assert!(
-                said.contains(&format!("rejected Bearer ${{{KEY}}}")),
+                said.contains(&format!("rejected [redacted] org ${{{ORG}}}")),
                 "{said}"
             );
         }
@@ -946,12 +978,14 @@ async fn a_remote_that_ends_its_session_is_said_stopped() {
 
 #[tokio::test]
 async fn a_calls_error_hides_the_key_and_a_tools_own_words_end_nothing() {
-    // A 401 to a call, echoing the key: shown as its name.
+    // A 401 to a call, echoing the key (redacted by yoagent) and the
+    // workspace (shown as its name by yobuild's own hiding).
     let (url, _) = stub(Mode::CallUnauthorized).await;
-    let l = loading(
+    let l = loading_with(
         &url,
-        vec![authorization(true)],
-        vec![json!("Allow"), json!(KEY), json!("Allow")],
+        vec![authorization(true), org()],
+        vec![json!("Allow"), json!(KEY), json!(ORG), json!("Allow")],
+        with_key_and_org(),
     );
     assert!(l.call().await.is_ok());
     let tools = l.loaded.tools().await;
@@ -961,10 +995,13 @@ async fn a_calls_error_hides_the_key_and_a_tools_own_words_end_nothing() {
             .await,
     );
     assert!(
-        failed.contains(&format!("revoked Bearer ${{{KEY}}}")),
+        failed.contains(&format!("revoked [redacted] org ${{{ORG}}}")),
         "{failed}"
     );
-    assert!(!failed.contains(SECRET), "{failed}");
+    assert!(
+        !failed.contains(SECRET) && !failed.contains(ORG_VALUE),
+        "{failed}"
+    );
     // A tool's error result that says "MCP session expired": its own
     // words, not the transport's: the server stays.
     let (url, _) = stub(Mode::CallSaysExpired).await;

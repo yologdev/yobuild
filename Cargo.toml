@@ -53,8 +53,9 @@ pkg-fmt = "tgz"
 async-trait = "0.1"
 # DshHome: a private, per-process home for DSH's own services.
 tempfile = "3"
-# Floors: 0.26.4 (the presets the skill's `manifest.md` names); 0.25.10
-# (DeepSeek priced; an MCP tool prefix applied; every text
+# Floors: 0.26.6 (MCP over HTTP: `with_authorization`, a 401's challenge,
+# for stage 4's sign-in); 0.26.4 (the presets the skill's `manifest.md`
+# names); 0.25.10 (DeepSeek priced; an MCP tool prefix applied; every text
 # block of a tool result sent to the model; `ModelConfig::preset`/`generic`;
 # steering a cancelled run took kept in the history); 0.12 (rutis 0.20.0;
 # since 0.11, rutis 0.19:
@@ -66,7 +67,7 @@ tempfile = "3"
 # 0.20.0 throughout: the runtimes (`frontend/plugins`, the adapters', a
 # gallery agent's plugins) must match, as only neighbouring rutis
 # releases talk to each other.
-yoagent = "0.26.5"
+yoagent = "0.26.6"
 yoagent-rutis = { version = "0.12", features = ["node", "loader", "probe", "embedded-adapters"] }
 rutis = "0.20.0"
 rutis-bridge = { version = "0.20.0", default-features = false }
