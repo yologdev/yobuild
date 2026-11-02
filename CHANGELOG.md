@@ -7,13 +7,19 @@ locks it again (commit the new lock).
 
 ## Unreleased
 
-- **rutis 0.19.3 (yoagent-rutis 0.11).** yobuild's plugin runtimes move
-  from rutis 0.12 to 0.19.3, which talks only to its neighbouring
-  releases, so every runtime moves at once:
+- **yoagent 0.26.5.** Three more models with their real limits and
+  prices: `openai/gpt-6.1-terra`, `zai/glm-5.3-flashx` and
+  `qwen/qwen3.8-omni-flash`.
+- **rutis 0.20.0 (yoagent-rutis 0.12, yoagent 0.26.5).** yobuild's
+  plugin runtimes move from rutis 0.12 to 0.20.0 (by way of 0.19.3),
+  which talks only to its neighbouring releases, so every runtime moves
+  at once:
   - **A rutis plugin of your own** must pin `@arcships/rutis` and
-    `@arcships/rutis-runtime` at exactly 0.19.3 in its package (`check`
+    `@arcships/rutis-runtime` at exactly 0.20.0 in its package (`check`
     and `run` say so for the runtime, with the command). `definePlugin`
-    is unchanged.
+    is unchanged, but a plugin's `ctx.use` and `ctx.get` now see only the
+    services it declares: list what it uses in `inject`, and what it can
+    do without in `optional` (read with `ctx.get`).
   - **An error a plugin leaves uncaught** no longer ends its runtime:
     rutis reports it (in the log) and the plugins there go on. A plugin
     calling `process.exit` still ends it.

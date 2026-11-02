@@ -1846,7 +1846,7 @@ in the agent's folder (`grants = { workspace = true }`, for
 - The plugin is the person's own code. The gate does not judge what it
   runs; the kept environment still applies. Its README says so.
 - It needs `@arcships/rutis-runtime` installed beside it at the version
-  yobuild's runtimes run (0.12.0 then, 0.19.3 since 2026-11-02), in an npm
+  yobuild's runtimes run (0.12.0 then; 0.19.3, then 0.20.0, since 2026-11-02), in an npm
   package of its own. `yobuild new --from` copies files, not
   `node_modules`. So who installs it, the person (`npm ci` in the folder,
   said by the README and by `run`'s and `check`'s refusal) or yobuild (as it installs
@@ -4665,6 +4665,18 @@ come:
   its tools under their own names, and names the grants it would have to
   share (`model`, `env`; the DSH plugins' grants) when the manifest's
   plugins of that kind have any.
+
+**rutis 0.20 (yoagent-rutis 0.12, taken 2026-11-02).** The same day
+yoagent-rutis 0.12 moved to rutis 0.20.0 (protocol 4 still, so a 0.19
+runtime connects, on 0.19's rules: every runtime moves together). What
+changed for yobuild: a plugin's `ctx.use`/`ctx.get` sees only the
+services it or its row declares (`inject`, or `optional` read with
+`ctx.get`; rutis #1000): yobuild's own plugins and the release-notes
+plugin declare what they use, and the adapters' optional host shims are
+declared by yoagent-rutis; a row's own `inject` gates it, so such a row
+reads as waiting until its services exist (#1001); cleanups run one at
+a time, in reverse order (#1010). No Rust API changed. The rest of this
+note, written for 0.19, holds.
 
 **rutis 0.19 (yoagent-rutis 0.11, taken 2026-11-02).** rutis 0.13
 changed the wire protocol, and since 0.19 a host talks only to its
