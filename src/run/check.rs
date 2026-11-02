@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use rutis::host::CtxHost;
 use rutis::Ctx;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -875,7 +876,11 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                     }
                     // Waiting for a service another plugin may provide:
                     // `run` would load it with the others.
-                    Err(e) if e.to_string().contains("nothing provides") => {
+                    Err(e)
+                        if e.downcast_ref::<yoagent_rutis::rows::RowsNotRunning>()
+                            .and_then(crate::run::unprovided)
+                            .is_some() =>
+                    {
                         entry.checked_alone = false;
                         entry.notes.push(format!(
                             "not checked alone: it waits for a service another plugin may provide ({e}); checked with the agent together"
@@ -1204,7 +1209,7 @@ async fn rutis_alone(
         .map(|(at, dir)| (plugins::rutis_runtime_name(at), dir))
         .find(|(runtime, _)| row.runtime_is(runtime))
         .ok_or_else(|| format!("no runtime for {id}"))?;
-    let root = Ctx::root()?;
+    let root = crate::frontend::host::root()?;
     let result = async {
         let bridge = RutisBridge::install(&root)?;
         services_on(&root, session, manifest, cwd)?;
@@ -1298,7 +1303,7 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         schemas,
         sources,
     } = *context;
-    let root = match Ctx::root() {
+    let root = match crate::frontend::host::root() {
         Ok(root) => root,
         Err(e) => {
             agent.problems.push(Problem::new(e.to_string()));

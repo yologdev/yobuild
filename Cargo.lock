@@ -85,7 +85,7 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
- "sha1",
+ "sha1 0.10.7",
  "sync_wrapper",
  "tokio",
  "tokio-tungstenite 0.29.0",
@@ -233,6 +233,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "const-oid"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+
+[[package]]
 name = "const-siphasher"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -346,6 +352,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer 0.12.1",
+ "const-oid",
  "crypto-common 0.2.2",
  "ctutils",
 ]
@@ -387,6 +394,17 @@ name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[package]]
+name = "erased-serde"
+version = "0.4.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e59b668157f32d3459d4bd634861a06ffa2503a461ca5f0916b9f0252605e66"
+dependencies = [
+ "serde",
+ "serde_core",
+ "typeid",
+]
 
 [[package]]
 name = "errno"
@@ -1428,7 +1446,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -1504,10 +1524,14 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rutis"
-version = "0.12.1"
+version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed8b36642aa032921d3c406ae1815286f84a0cad4721c4d520d5f2f84045d848"
+checksum = "37143a70e4a943d50dd1e3303b7f2b856460a56a362ee62fa62712e55882961a"
 dependencies = [
+ "erased-serde",
+ "rutis-macros",
+ "serde",
+ "serde_json",
  "shuttle",
  "thiserror 2.0.21",
  "tokio",
@@ -1516,28 +1540,53 @@ dependencies = [
 
 [[package]]
 name = "rutis-bridge"
-version = "0.12.1"
+version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2af4f66922a217999e1cf727437bf0748b8fe277f666e8667aa61c347c8fb67b"
+checksum = "c1e15efcf6926d6c0f8c5ca78a3a7c0af80bdeac3fac95c1332086c779266959"
 dependencies = [
+ "futures-util",
  "getrandom 0.2.17",
  "libc",
+ "rustls",
+ "rustls-native-certs",
  "rutis",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "socket2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite 0.30.0",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
-name = "rutis-loader"
-version = "0.12.1"
+name = "rutis-host"
+version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3604c8fc32c1a03dbeb650e3d5e341916e4f90f10e9682a4966ddbdca03d53cc"
+checksum = "77639ad2d64bce41e6f2e4a487669bc1c755566d63f41ef1c34b30fe26c50743"
 dependencies = [
+ "libc",
+ "rustls-pki-types",
+ "rutis",
+ "rutis-bridge",
+ "rutis-loader",
+ "rutis-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "rutis-loader"
+version = "0.19.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa6a552b9bd8f52acf066104bfc859bb4458b860db38f486ad85e99a12254d06"
+dependencies = [
+ "libc",
  "rutis",
  "rutis-bridge",
  "schemars",
@@ -1545,7 +1594,29 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
- "url",
+]
+
+[[package]]
+name = "rutis-macros"
+version = "0.19.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91dacd6ec042c7f181577318cfa73a05598b0878fb119071b971a67ff1e01db0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "rutis-types"
+version = "0.19.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86c93f394dffdbc00686ffcb182141bc8b4a9e940d3e96e18f16fc39d2a3a785"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1705,6 +1776,17 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest 0.10.7",
+]
+
+[[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.1",
+ "digest 0.11.3",
 ]
 
 [[package]]
@@ -2093,6 +2175,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite 0.30.0",
+]
+
+[[package]]
 name = "tokio-util"
 version = "0.7.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2272,7 +2366,7 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
- "sha1",
+ "sha1 0.10.7",
  "thiserror 2.0.21",
  "utf-8",
 ]
@@ -2289,9 +2383,31 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
- "sha1",
+ "sha1 0.10.7",
  "thiserror 2.0.21",
 ]
+
+[[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.10.3",
+ "sha1 0.11.0",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "typeid"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "typenum"
@@ -2688,15 +2804,16 @@ dependencies = [
 
 [[package]]
 name = "yoagent-rutis"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "047b5f82ae7148d4988a8b71b80137cef687af3be356f7a3a3429a242b6b7e21"
+checksum = "43a3e9ea4de31a1798f584af0a489df86a6e1141580ca891ab935ee6da3eb080"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "futures",
  "rutis",
  "rutis-bridge",
+ "rutis-host",
  "rutis-loader",
  "serde",
  "serde_json",
@@ -2719,6 +2836,7 @@ dependencies = [
  "reqwest",
  "rutis",
  "rutis-bridge",
+ "rutis-host",
  "rutis-loader",
  "serde",
  "serde_json",

@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use rutis::host::CtxHost;
 use rutis::Ctx;
 use serde_json::json;
 use yoagent::provider::mock::{MockResponse, MockToolCall};

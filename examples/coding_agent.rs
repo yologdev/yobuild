@@ -38,6 +38,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use rutis::host::CtxHost;
 use rutis::Ctx;
 use serde_json::json;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
@@ -124,7 +125,7 @@ fn main() -> Result<(), BoxError> {
         .enable_all()
         .build()?
         .block_on(async {
-            let root = Ctx::root()?;
+            let root = yobuild::frontend::host::root()?;
             let result = run(&root, options).await;
             tokio::time::sleep(Duration::from_millis(100)).await;
             // A failed shutdown must not hide why the run failed.

@@ -25,7 +25,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rutis::{CordisError, Ctx};
+use rutis::host::CtxHost;
+use rutis::{Ctx, Error as CordisError};
 use rutis_bridge::session::{self, host_key, Error, HostDispatch, Reply, Value};
 use serde_json::{json, Value as Json};
 use tokio_util::sync::CancellationToken;
@@ -42,14 +43,14 @@ pub const ASK_OWNER: &str = "ask_owner";
 /// Provide `frontend` and `ui` on `ctx` (the rutis root).
 pub fn provide(ctx: &Ctx, session: &Session) -> Result<(), CordisError> {
     let runtime = ctx.handle().clone();
-    ctx.provide_as::<dyn HostDispatch>(
+    ctx.provide_at::<dyn HostDispatch>(
         host_key(FRONTEND),
         Arc::new(FrontendService {
             session: session.clone(),
             runtime,
         }),
     )?;
-    ctx.provide_as::<dyn HostDispatch>(
+    ctx.provide_at::<dyn HostDispatch>(
         host_key(UI),
         Arc::new(UiService {
             session: session.clone(),
@@ -64,7 +65,7 @@ pub fn provide(ctx: &Ctx, session: &Session) -> Result<(), CordisError> {
 /// `None` (the built-in off): there, so a plugin injecting it still starts,
 /// and every `ask` refused, saying why; so is one after the session ended.
 pub fn provide_ask_owner(ctx: &Ctx, ask: Option<AskOwner>) -> Result<(), CordisError> {
-    ctx.provide_as::<dyn HostDispatch>(
+    ctx.provide_at::<dyn HostDispatch>(
         host_key(ASK_OWNER),
         Arc::new(AskOwnerService::new(ask, ctx.handle().clone())),
     )?;

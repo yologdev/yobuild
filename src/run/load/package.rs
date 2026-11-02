@@ -406,7 +406,18 @@ impl LoadPlugin {
                 (all, modules)
             }
         };
-        host.load(rows).await.map_err(|e| e.to_string())?;
+        // rutis 0.19 waits in rutis for what a row injects: rows waiting
+        // only for services nobody provides fail the load, said as the
+        // probe below says them.
+        if let Err(e) = host.load(rows).await {
+            let waiting = e
+                .downcast_ref::<yoagent_rutis::rows::RowsNotRunning>()
+                .and_then(crate::run::unprovided);
+            return Err(match waiting {
+                Some(missing) if !modules.is_empty() => lacking(&missing),
+                _ => e.to_string(),
+            });
+        }
         if !modules.is_empty() {
             let mut missing = Vec::new();
             for wait in [1000, 3000] {
@@ -418,10 +429,7 @@ impl LoadPlugin {
                 }
             }
             if !missing.is_empty() {
-                return Err(format!(
-                    "it waits for services nobody provides here ({}): a loaded DSH package gets none of DSH's host services",
-                    missing.join(", ")
-                ));
+                return Err(lacking(&missing));
             }
         }
         registered(&on.bridge, handler, host, runtime).await?;
@@ -476,4 +484,12 @@ async fn registered(
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+}
+
+/// The refusal of a loaded DSH package whose rows wait for `missing`.
+fn lacking(missing: &[String]) -> String {
+    format!(
+        "it waits for services nobody provides here ({}): a loaded DSH package gets none of DSH's host services",
+        missing.join(", ")
+    )
 }
