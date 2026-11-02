@@ -5304,7 +5304,7 @@ a token, an account, or a way to look like a server the owner trusts.
      nothing will change for it. A manifest server, which nothing marks
      stopped, has each call fail with that reason (a hint: start yobuild
      again to sign in).
-   - **Asked of yoagent** (a draft, not sent): an `Authorization` source
+   - **Asked of yoagent** (sent with the owner's approval, 2026-11-02): an `Authorization` source
      asked before each request and told of a 401 once per request,
      which may answer with a new value to retry it once (the session
      kept); the source's values redacted from what yoagent quotes as
@@ -5394,19 +5394,23 @@ issues and drafts a status note, with `[extend] kinds = ["remote"]`).
 **Decisions for review.**
 
 1. Dynamic registration now, and a Client ID Metadata Document later
-   (where would yobuild host it)?
+   (where would yobuild host it)? Decided (2026-11-02): dynamic now; a
+   document later, if a server needs it.
 2. Tokens kept for the session only, or across sessions (a 0600 file
    under `YOBUILD_HOME`, or the system's keychain; keyed by issuer,
    resource and client, the same-site rule checked again)?
 3. Ask yoagent for the refreshing source (point 9), and ship with a fixed
-   header until it comes?
+   header until it comes? Decided (2026-11-02): asked (sent with the
+   owner's approval, 2026-11-02); a fixed header until it comes.
 4. Phone mode: the link on yobuild's stderr, never over the LAN?
+   Decided (2026-11-02): yes.
 5. The demo: Linear, Notion, or none in the gallery?
 6. A loaded server's sign-in on its own site only (a manifest's
-   anywhere)?
+   anywhere)? Decided (2026-11-02): yes.
 7. A manifest server's `allow` checked at sign-in (a name not offered
-   asks, said), not refused when read?
+   asks, said), not refused when read? Decided (2026-11-02): yes.
 8. No step-up sign-in mid-run (a 403 for scope is the call's error)?
+   Decided (2026-11-02): none.
 
 **Order of PRs.**
 
@@ -5422,5 +5426,5 @@ issues and drafts a status note, with `[extend] kinds = ["remote"]`).
 5. the manifest's `auth = "oauth"`: signed in once a frontend attached,
    its tools through the late source, `allow` at sign-in, `check`,
    `--once`;
-6. refresh, once yoagent ships the source (asked on your approval);
+6. refresh, once yoagent ships the source (asked 2026-11-02);
 7. the demo, the skill, the guide, `CLAUDE.md` and the roadmap.
