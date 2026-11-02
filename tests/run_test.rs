@@ -438,11 +438,15 @@ async fn http_server() -> (
                     return StatusCode::ACCEPTED.into_response();
                 };
                 if request["params"]["arguments"]["text"] == "leak" {
-                    let auth = headers
-                        .get("authorization")
-                        .map(|a| a.to_str().unwrap().to_owned())
-                        .unwrap_or_default();
-                    let error = json!({ "code": -32000, "message": format!("refused {auth}") });
+                    let header = |name: &str| {
+                        headers
+                            .get(name)
+                            .map(|a| a.to_str().unwrap().to_owned())
+                            .unwrap_or_default()
+                    };
+                    let (auth, workspace) = (header("authorization"), header("x-workspace"));
+                    let message = format!("refused {auth} in {workspace}");
+                    let error = json!({ "code": -32000, "message": message });
                     return (
                         [(axum::http::header::CONTENT_TYPE, "application/json")],
                         json!({ "jsonrpc": "2.0", "id": id, "error": error }).to_string(),
@@ -481,6 +485,7 @@ async fn an_http_server_gets_its_headers_with_their_values_filled_in() {
     let (addr, seen) = http_server().await;
     // Set for this test only: no other test reads it.
     std::env::set_var("YOBUILD_RUN_TEST_TOKEN", "t0ken-0123456789");
+    std::env::set_var("YOBUILD_RUN_TEST_WORKSPACE", "acme-workspace-42");
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("script.json"),
@@ -496,19 +501,23 @@ async fn an_http_server_gets_its_headers_with_their_values_filled_in() {
         format!(
             "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\
              [[mcp]]\nname = \"web\"\nurl = \"http://{addr}/mcp\"\n\
-             headers = {{ Authorization = \"Bearer ${{YOBUILD_RUN_TEST_TOKEN}}\" }}\n\
+             headers = {{ Authorization = \"Bearer ${{YOBUILD_RUN_TEST_TOKEN}}\", X-Workspace = \"${{YOBUILD_RUN_TEST_WORKSPACE}}\" }}\n\
              [builtins]\ngate = \"off\"\n"
         ),
     )
     .unwrap();
     let ended = run_once(dir.path()).await;
-    // The call whose error echoes the key: never shown (yoagent 0.26.6
-    // redacts a credential header's value before yobuild hides it).
+    // The call whose error echoes the key and the workspace: neither shown.
+    // yoagent 0.26.6 redacts a credential header's value; a header it takes
+    // for none (`X-Workspace`) is shown as its name by yobuild (`Hiding`).
     let results = results(&ended);
     assert_eq!(results[0], ("web echoed hi".to_string(), false));
     let (echoed, failed) = &results[1];
     assert!(
-        *failed && echoed.contains("refused [redacted]") && !echoed.contains("t0ken-0123456789"),
+        *failed
+            && echoed.contains("refused [redacted] in ${YOBUILD_RUN_TEST_WORKSPACE}")
+            && !echoed.contains("t0ken-0123456789")
+            && !echoed.contains("acme-workspace-42"),
         "{echoed}"
     );
     let seen = seen.lock().unwrap().clone();

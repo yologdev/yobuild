@@ -2856,8 +2856,9 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
 
 /// An HTTP server's tool whose call errors show each value filled into its
 /// URL or headers as its `${NAME}` ([`hide`]): yoagent redacts the URL's
-/// key-like parts in what a server says, never its headers, and a server
-/// may echo the key it refused.
+/// key-like parts in what a server says, and since 0.26.6 a credential
+/// header's value (of 8 characters or more); another header's value (an
+/// `X-Workspace`), which a server may echo, is left to this.
 struct Hiding {
     inner: McpToolAdapter,
     hide: Arc<Vec<(String, String)>>,

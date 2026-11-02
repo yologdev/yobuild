@@ -5068,11 +5068,13 @@ of its errors.
       a body or JSON-RPC message it quotes has the URL's key-like parts
       (8 characters or more, and the whole path or query holding one)
       replaced with `[redacted]`. yoagent redacted no header values until
-      0.26.6, which replaces a credential header's value (`authorization`,
-      a cookie, a name holding `key`, `token`, `secret`, `auth` or
-      `session`) with `[redacted]` too, before yobuild sees it; yobuild
-      shows each value of 8 characters or more filled into the URL or
-      another header as its `${NAME}` in a call's error too
+      0.26.6, which replaces a credential header's value of 8 characters
+      or more (`authorization`, `proxy-authorization`, `cookie`, a name
+      holding `key`, `token`, `secret`, `auth` or `session`) with
+      `[redacted]` too, in an error body or a JSON-RPC error message,
+      before yobuild sees it; yobuild shows each value of 8 characters or
+      more filled into the URL or any header (a credential header's is
+      `[redacted]` by then) as its `${NAME}` in a call's error too
       (`run::Hiding` around a manifest server's tools; a loaded remote's
       `remote::Ending` likewise). Left: a host or port filled from a
       shorter value, which the origin names, and a value shorter than 8
@@ -5092,7 +5094,9 @@ HTTP errors.
 Given in yoagent 0.26.1: the server named by origin only, quoted
 server text with the URL's key-like parts redacted, session ids no
 longer logged, and a notification's 404 clearing an expired session
-as a call's does; taken in its own PR.
+as a call's does; taken in its own PR. Given in yoagent 0.26.6 (not
+asked for this stage): a credential header's value redacted too (taken
+with stage 4's source, below).
 
 **The demo.** A docs helper: asked how to use a library at its current
 version, it finds Context7 (`kind "remote"`), connects without a key and
@@ -5222,16 +5226,24 @@ a token, an account, or a way to look like a server the owner trusts.
    connects: `load_plugin`'s remote (stage 3) and a manifest's `[[mcp]]
    url` with `auth = "oauth"` (point 11). One sign-in at a time in a
    session; a second waits for the first.
-2. **An unauthenticated connect first.** Before stage 3's credential
-   questions, the server is connected with no credential (yoagent's
-   `HttpTransport`, `Redirects::None`, `initialize` within 30 s), and a
-   401 is read from the error (`www_authenticate()`, yoagent 0.26.6). A
-   challenge of the `Bearer` scheme (or, with none, well-known metadata
-   that exists) goes to the sign-in, and the credential questions are not
-   asked. Anything else goes on as stage 3 has it (a header is asked, a
-   401 or 403 at `initialize` refused); a server that answers without a
-   credential is kept as it is, and its optional headers asked as stage 3
-   asks them.
+2. **An unauthenticated connect first,** for a server the registry lists
+   with no required header. Before stage 3's credential questions, it is
+   connected with no credential (yoagent's `HttpTransport`,
+   `Redirects::None`, `initialize` and `tools/list` within 30 s each),
+   and a 401 to either is read from the error (`www_authenticate()`,
+   yoagent 0.26.6). Then:
+   - **a `Bearer` challenge** (or, with none, well-known metadata that
+     exists): the sign-in; the credential questions are not asked;
+   - **it answers with no credential:** kept as it is when it has no
+     header to send; else that client is closed (yoagent's `close`, its
+     `DELETE` ending the session it was given) before stage 3 asks its
+     optional headers and connects again with them, since a transport's
+     headers are fixed when it is built;
+   - **anything else** (a 401 without a challenge, a 403): as stage 3
+     has it, refused.
+   A server whose registry entry lists a required header goes as stage 3
+   has it, its header asked first; a 401 with a `Bearer` challenge to that
+   connect goes to the sign-in too.
 3. **Discovery, every step checked before anyone is asked.**
    - **The resource metadata:** from the challenge's `resource_metadata`,
      else the well-known URIs (path, then root). Its address must be on
@@ -5365,9 +5377,12 @@ a token, an account, or a way to look like a server the owner trusts.
     (`run::hidden`, whatever its length; the hidden list updated on a
     refresh). What
     reaches the agent of a failed sign-in is a fixed reason, never the
-    server's text. At the session's end the tokens are revoked (RFC
-    7009) where the metadata offers a `revocation_endpoint`, within
-    `CLOSE_TIME`. Keeping a sign-in across sessions is decision 2.
+    server's text. At the session's end the server is closed first
+    (yoagent's `close`, whose `DELETE` asks the source; a 401 to that
+    `DELETE` gets no new value: no refresh while closing), then the
+    tokens are revoked (RFC 7009) where the metadata offers a
+    `revocation_endpoint`, all within `CLOSE_TIME`. Keeping a sign-in
+    across sessions is decision 2.
 11. **The manifest: `auth = "oauth"`.** On an `[[mcp]] url` (no
     `headers` naming `Authorization`):
     - **When:** after the agent starts and a frontend is attached (as the
@@ -5402,6 +5417,13 @@ browser would and follows its redirect to yobuild's callback:
   PKCE (`S256` checked by the stub), `state`, `iss`, `resource` in both
   requests, the token on every MCP request and never in a notice, the
   agent's context, the log or the block; revoked at the end;
+- the unauthenticated connect: a `Bearer` challenge at `tools/list`
+  (not `initialize`) going to the sign-in; a server answering with no
+  credential and with optional headers to send closed (its `DELETE`
+  seen) before it is connected again with them; one with a required
+  header asked first, as stage 3;
+- the end: the server closed before the tokens are revoked, a 401 to
+  its `DELETE` getting no refresh;
 - refused before anyone is asked: metadata on another origin, a
   `resource` not identical, an issuer that does not match, no `S256`, an
   endpoint over http or on a local name, a name resolving to a private

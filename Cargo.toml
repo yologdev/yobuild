@@ -55,8 +55,7 @@ async-trait = "0.1"
 tempfile = "3"
 # Floors: 0.26.6 (MCP over HTTP: `with_authorization`, a 401's challenge,
 # for stage 4's sign-in); 0.26.4 (the presets the skill's `manifest.md`
-# names); 0.25.10
-# (DeepSeek priced; an MCP tool prefix applied; every text
+# names); 0.25.10 (DeepSeek priced; an MCP tool prefix applied; every text
 # block of a tool result sent to the model; `ModelConfig::preset`/`generic`;
 # steering a cancelled run took kept in the history); 0.12 (rutis 0.20.0;
 # since 0.11, rutis 0.19:
