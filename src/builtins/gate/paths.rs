@@ -120,15 +120,25 @@ pub(super) fn protected(path: &Path) -> bool {
 
 /// A program named by its path runs freely only from a system folder: a
 /// file the agent wrote (`./cat`, `tmp/ls`) is not the program it is named
-/// after.
+/// after. One named in a system folder may also resolve to the system's
+/// packaged programs (Ubuntu 26.04's `/usr/bin/ls` is a link into
+/// `/usr/lib/cargo/bin/coreutils/`, Rust's coreutils).
 pub(super) fn system_binary(path: &str) -> bool {
     const SYSTEM: [&str; 7] = [
         "/bin/", "/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/", "/usr/sbin/", "/sbin/",
         "/usr/local/sbin/",
     ];
+    const PACKAGED: [&str; 2] = ["/usr/lib/", "/usr/libexec/"];
+    if !Path::new(path).is_absolute() {
+        return false;
+    }
     let resolved = real(Path::new(path));
     let resolved = resolved.to_string_lossy();
-    Path::new(path).is_absolute() && SYSTEM.iter().any(|dir| resolved.starts_with(dir))
+    let named = real(Path::new(path).parent().unwrap_or(Path::new("/")));
+    let named = format!("{}/", named.to_string_lossy().trim_end_matches('/'));
+    SYSTEM.iter().any(|dir| resolved.starts_with(dir))
+        || (SYSTEM.iter().any(|dir| named.starts_with(dir))
+            && PACKAGED.iter().any(|dir| resolved.starts_with(dir)))
 }
 
 /// Which file a path names: device and inode, and when that file was made.
