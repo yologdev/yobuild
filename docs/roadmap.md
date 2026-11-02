@@ -362,8 +362,9 @@ Later: rutis plugins (§14, "Later steps"), once some are published.
 **Proposed (stage 4, a sign-in for remote servers; §14, "Stage 4: remote
 servers that need a sign-in"):** OAuth in the owner's browser for a
 remote server that answers 401 with a Bearer challenge (Linear, Notion),
-loaded or in the manifest (`auth = "oauth"`); the token kept for the
-session, never shown to the agent.
+loaded or in the manifest (`auth = "oauth"`); a loaded server's sign-in
+on its own site only; the token kept for the session, never shown to the
+agent, revoked at the end.
 
 ## Open questions (for review)
 

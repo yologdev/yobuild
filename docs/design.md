@@ -5008,7 +5008,7 @@ of its errors.
      later call would fail too. It is not reconnected.
      Only that: a remote unreachable, or answering 401 later, stays
      offered, each call failing with its reason (a host's bad day is not
-     its end).
+     its end); a signed-in one is the exception (stage 4, point 9).
    - **Closing:** within 5 s; a DELETE to a host gone quiet is left, so
      the end of a run or the session is never held by it.
    - **The end:** `close()` sends yoagent's `DELETE`.
@@ -5124,13 +5124,13 @@ party's day as npm's is.
 5. the demo, the skill, the guide, `CLAUDE.md` and the roadmap (done:
    the gallery's `docs-helper`).
 
-### Stage 4: remote servers that need a sign-in (proposed 2026-11-02)
+### Stage 4: remote servers that need a sign-in (proposed 2026-11-02; revised after its review)
 
-Stage 3 refuses a remote server that answers `initialize` with 401 and
-no header the owner can name: "it needs a credential, or a sign-in
-(OAuth) yobuild cannot do yet". The official servers people want most
-are of that kind. This stage lets the owner sign in, in their own
-browser, and hands the server the token it gets, never the agent.
+Stage 3 refuses a remote server that answers `initialize` with 401 or
+403: "it needs a credential, or a sign-in (OAuth) yobuild cannot do
+yet". The official servers people want most need a sign-in. This stage
+lets the owner sign in, in their own browser, and hands the server the
+token it gets, never the agent.
 
 Surveyed on 2026-11-02 (an unauthenticated `initialize`, then the
 metadata it points to; no account used):
@@ -5146,7 +5146,8 @@ metadata it points to; no account used):
   true`, `token_endpoint_auth_methods_supported` with `none` (a public
   client), and the `refresh_token` grant.
 
-The MCP specification (2025-11-25, "Authorization") asks of a client:
+What the MCP specification (2025-11-25, "Authorization") asks of a
+client:
 - **Discovery:** the `resource_metadata` of a 401's `WWW-Authenticate`,
   else the well-known URIs, at the endpoint's path first, then at the
   root. Then the authorization server's metadata, trying RFC 8414 and
@@ -5158,142 +5159,231 @@ The MCP specification (2025-11-25, "Authorization") asks of a client:
 - **`resource`** (RFC 8707), the server's canonical URI, in the
   authorization and the token request.
 - **Scopes:** the challenge's `scope`, else the resource's
-  `scopes_supported`, else none.
+  `scopes_supported`, else none. On a later 403 `insufficient_scope`, a
+  client acting for a person SHOULD sign in again with more (step-up).
 - **The token** in `Authorization: Bearer` on every request, never in a
-  URL; refresh tokens rotated for a public client.
-- **Redirect URIs** `localhost` or https; `state` checked.
+  URL. A public client's refresh token is rotated by the server: the new
+  one is kept each time.
+- **Redirect URIs** a loopback address or https; `state` checked.
 
-yoagent 0.26.3's `HttpTransport` has what stage 3 needed but not this:
+yoagent 0.26.3's `HttpTransport` has what stage 3 needed, not this:
 - **Headers** are fixed for its lifetime (`with_header`), so a token
   that expires mid-session (an hour, for most servers) cannot be
   replaced without a new transport, which loses the MCP session.
 - **A 401** is `McpError::Http { status, .. }`; its `WWW-Authenticate`
   is not carried (the type's comment foresees it).
 
+**The threat it must hold against.** The agent picks the server, and an
+agent misled by what it read picks the attacker's. The server, its
+metadata and everything they name are untrusted. The owner may be on a
+phone (`phone`: the page over the LAN). Other processes and pages on this
+machine can reach a loopback port. The sign-in must not hand any of them
+a token, an account, or a way to look like a server the owner trusts.
+
 **Proposed answers.**
 
-1. **One sign-in, for loaded and manifest servers alike.** The flow
-   lives in its own module (`src/run/oauth.rs`), called where a remote
-   connects: `load_plugin`'s remote (stage 3) and `run::mcp` for a
-   manifest's `[[mcp]] url`. Only on a 401 whose challenge is `Bearer`
-   (or whose well-known metadata exists): any other 401 or 403 stays
-   stage 3's refusal.
-2. **What is fetched, and checked, before anyone is asked.**
-   - The resource metadata from the challenge's `resource_metadata`,
-     else the two well-known URIs. Its address must be on the server's
-     own origin (an address elsewhere is refused: a server cannot send
-     yobuild to fetch from a host of its choosing). Its `resource` must
-     be the server's URL or a prefix of it at a path boundary (RFC 9728
-     §3.3), else refused.
-   - The first of `authorization_servers` that `remote_address` takes
-     (https, no IP address, no local name), its metadata found in the
-     specification's order. Its `issuer` must equal the address asked
-     (RFC 8414 §3.3). Every endpoint used — authorization, token,
-     registration — must be https and taken by `remote_address`.
-   - `S256` among `code_challenge_methods_supported`, else refused
-     ("it offers no PKCE").
-   - No redirect followed for any of these (`Redirects::None`, as the
-     connection's). 15 s each, 64 KiB at most, JSON read strictly for
-     the fields used.
-   The authorization server may be another host than the MCP server's:
-   both are named at the question.
-3. **The question.** `Sign in to <name> at <authorization host>? (asked
-   by the agent)` for a loaded server; `(for agent.toml's [[mcp]] <name>)`
-   for a manifest's. Allow/Block. Its details: the MCP server's host, the
-   authorization server's, the scopes asked, how yobuild registers
-   (point 5), that the token is kept for this session only (point 7), and
-   that the agent never sees it. For a loaded server it comes after
-   stage 3's "Connect to …" Allow, in place of the credential questions
-   (a server answering 401 with a Bearer challenge is signed in, not
-   handed a header). Block is remembered as stage 3's; unanswered is not.
-4. **The sign-in.** yobuild listens on `127.0.0.1:0` (a port of its
-   own, not the page's) for one request to `/callback/<random>`, makes a
-   PKCE verifier and a `state` (32 random bytes each), and shows the
-   authorization URL (`response_type=code`, `client_id`, `redirect_uri`,
-   `code_challenge`, `S256`, `state`, `scope`, `resource`):
-   - **On the page:** a new question kind, `UiRequest::SignIn { title,
-     message, url, host }`: a link opening in a new tab (`safeUrl`: https
-     only) and a Cancel button. It is resolved by the callback, not by
-     the page; Cancel answers `null`. A frontend that does not know the
-     kind leaves it open until it times out (`UI_TIMEOUT`).
-   - **In the terminal UI:** the URL printed through `terminalText`,
-     with its host first; yobuild never opens a browser itself.
-   - **The callback:** only a `GET` whose `state` matches; anything else
-     answers 400 and keeps waiting. An `error` from the server ends the
-     sign-in with its `error` code (its description cut and cleaned). The
-     page it answers says to go back to yobuild; it holds no code.
-   - **The code** is exchanged at the token endpoint with the verifier,
-     `redirect_uri`, `client_id` and `resource`; the answer must be a
-     `Bearer` `access_token` (`expires_in` and `refresh_token` kept when
-     given).
+1. **One sign-in module** (`src/run/oauth.rs`), used where a remote
+   connects: `load_plugin`'s remote (stage 3) and a manifest's `[[mcp]]
+   url` with `auth = "oauth"` (point 11). One sign-in at a time in a
+   session; a second waits for the first.
+2. **A probe first.** yobuild sends its own unauthenticated `initialize`
+   (no redirect followed, 15 s, 64 KiB read) before stage 3's
+   credential questions, since yoagent's error does not carry
+   `WWW-Authenticate`. A 401 whose challenge is `Bearer` (or, with no
+   challenge, well-known metadata that exists) goes to the sign-in, and
+   the credential questions are not asked. Anything else goes on as stage
+   3 has it (a header is asked, a 401 or 403 at `initialize` refused).
+3. **Discovery, every step checked before anyone is asked.**
+   - **The resource metadata:** from the challenge's `resource_metadata`,
+     else the well-known URIs (path, then root). Its address must be on
+     the MCP server's own origin: stricter than the specification (a
+     conforming server hosting it elsewhere is refused), so the server
+     cannot send yobuild to fetch from a host of its choosing. Its
+     `resource` must be identical to the server's URL (RFC 9728 §3.3:
+     else the metadata "MUST NOT be used").
+   - **The authorization server:** the first of `authorization_servers`
+     that `remote_address` takes (https, no IP address, no local or
+     one-label name). For a server the agent loaded it must be on the
+     MCP server's own site (the same registrable domain, by the public
+     suffix list compiled in): else refused, "its sign-in is at another
+     site (…), which a server the agent found may not name". Without
+     this an attacker's server could name a real provider's sign-in, the
+     owner would sign in there for real, and a provider that ignores
+     `resource` would issue a token that works for its whole service,
+     sent to the attacker on every call. A manifest's `[[mcp]]`, which
+     the owner wrote, may name any host `remote_address` takes.
+   - **Its metadata:** found in the specification's order; its `issuer`
+     must equal the `authorization_servers` entry it was found from (RFC
+     8414 §3.3); every endpoint used (authorization, token, registration,
+     revocation) https and taken by `remote_address`; `S256` among
+     `code_challenge_methods_supported`, else refused ("it offers no
+     PKCE").
+   - **Every request:** no redirect followed, 15 s, 64 KiB, JSON read for
+     the fields used and nothing else, a parse error said in fixed words
+     (serde's text, which quotes values, never). Names are resolved
+     through a resolver that refuses loopback, private and link-local
+     addresses, so a name pointing inside the network is refused too
+     (DNS rebinding).
+4. **The question.** `Sign in to <registry name> (<MCP host>) at <link
+   host>? (asked by the agent)`, or `(for agent.toml's [[mcp]] <name>)`;
+   the agent's `name` is not in the title. Allow/Block. Its details: the
+   MCP server's host, the host the link opens (the authorization
+   endpoint's), the issuer's when it differs (said as a difference), the
+   scopes in full, how yobuild registers (point 7), that the token is
+   kept for this session only (point 10) and that the agent never sees
+   it. Scopes come from the server: at most 20, each at most 64
+   characters of what a scope may hold (RFC 6749 §3.3), else refused;
+   `offline_access` and a scope of `*`, `all` or `admin` said as broad.
+   For a loaded server it comes after stage 3's "Connect to …" Allow and
+   the probe. Block is remembered as stage 3's; unanswered is not.
+5. **The sign-in question** (`UiRequest::SignIn { title, message, url,
+   host }`):
+   - **Answers:** `"cancel"` (the owner's Cancel), else nothing:
+     `UiRequest::accepts` takes that string only, so no frontend can send
+     a code or a token through it. The sign-in asks it keyed (`ask_keyed`)
+     and races the callback against it: a callback that ends the sign-in
+     withdraws the key, so every frontend gets `UiResolved` (withdrawn)
+     and closes it; Cancel and a timeout are told apart.
+   - **Its time:** `SIGN_IN_TIMEOUT`, 10 minutes (an account to make, a
+     second factor), not `UI_TIMEOUT`.
+   - **On the page:** a docked dialog like a question's, the link (https
+     only, and only the authorization endpoint checked in point 3: not
+     `safeUrl`, which takes http too), its host shown, and a Cancel
+     button.
+   - **In the terminal UI:** the host, then the URL on a line of its own,
+     unwrapped, through `terminalText`; an empty answer is Cancel.
    - **Phone mode:** the redirect is to this machine's loopback, so the
-     link must be opened in a browser on this machine; the question says
-     so. Signing in from the phone is not offered.
-5. **Registration: dynamic, the client's metadata document later.** A
-   client per sign-in by dynamic registration (`client_name` "yobuild",
-   the one `redirect_uri`, `token_endpoint_auth_method: "none"`,
-   `grant_types` authorization code and refresh); no
-   `registration_endpoint` → refused ("it offers no way for yobuild to
-   register"). A Client ID Metadata Document needs an https address
-   yobuild's maintainers keep (the specification's preferred way), and
-   its `redirect_uris` are fixed while yobuild's port is not: both
-   servers surveyed take dynamic registration too, so it waits for a
-   decision (below).
-6. **How the token reaches the server.** Asked of yoagent (below): an
-   HTTP transport whose `Authorization` comes from a source asked on
-   each request, and told of a 401, so a refreshed token takes the place
-   of an expired one in the same MCP session; and a 401's
-   `WWW-Authenticate` on `McpError::Http`. Until then, with yoagent as
-   it is: the token as a fixed header, a 401 later marking the server
-   stopped ("its sign-in expired: it is not signed in again this
-   session"), as stage 3 marks an ended session.
-7. **Kept for the session only.** The access and refresh tokens live in
-   memory, in the server's entry, and go with it: nothing on disk, in
-   the lock, the log, a notice, the agent's context or the block. A
-   refresh (point 6) rotates the refresh token as the server returns it.
-   Every token's value is hidden as `${oauth}` wherever a server's error
-   would show it (`run::hidden`, whatever its length). Keeping a sign-in
-   across sessions (a file of the owner's, or the system's keychain) is a
-   decision below; without it, an agent with such a server in its
-   manifest signs in each time it starts.
-8. **The manifest.** `[[mcp]] url = …` takes `auth = "oauth"` (with no
-   `headers` naming `Authorization`): `run` signs in as the session
-   starts, once a frontend is attached (as the task waits for one), each
-   server in turn; `--once` refuses such a server ("a sign-in needs the
-   page or the terminal UI"). `check` connects without signing in: a
-   Bearer challenge is a note ("it needs a sign-in: its tools are not
-   listed by `check`"), not a problem. The end-of-session block of a
-   loaded server signed in carries `auth = "oauth"`.
-9. **Scopes.** The challenge's, else `scopes_supported`, else none. A
-   403 `insufficient_scope` later is the call's error, said as such; no
-   step-up sign-in mid-session.
-10. **Said.** Hints for the refusals the owner can act on (no PKCE, no
-    registration, the sign-in cancelled or timed out, an expired
-    sign-in). `failures.md` and `manifest.md` gain them.
-
-**Asked of yoagent** (a draft, not sent):
-- `HttpTransport::with_authorization(source)`: a source asked for the
-  `Authorization` value before each request, and told of a 401 once per
-  request, which it may answer with a new value to retry that request
-  once (the session id kept).
-- `McpError::Http` carries the response's `WWW-Authenticate`.
+     link is useless on the phone: the page shows the question without
+     the link ("open the link yobuild printed on the machine it runs
+     on"), and yobuild prints it on its stderr. The link (with `state`)
+     never crosses the LAN.
+   - Both frontends are yobuild's own, built into the binary with it;
+     the kind ships with them.
+6. **The callback.** yobuild listens on `127.0.0.1:0`, a port of its own,
+   not the page's, for `GET /callback/<32 random bytes>`; a PKCE
+   verifier and a `state` of 32 random bytes each. Only a request whose
+   `state` matches counts: anything else answers 400 and the sign-in
+   waits on, an `error` without the matching `state` included. With the
+   matching `state`:
+   - **`iss`** (RFC 9207, mix-up): required when the metadata says
+     `authorization_response_iss_parameter_supported`, compared whenever
+     present, else refused;
+   - **`error`:** ends the sign-in with its code, its description cut
+     and cleaned (`terminalText`; text on the page);
+   - **`code`:** exchanged (point 8);
+   - **then** the listener closes. Its answer page holds no code: "go
+     back to yobuild". No request to it is traced (its URI holds the
+     code).
+7. **Registration: dynamic.** A client per sign-in (`client_name`
+   "yobuild", the one `redirect_uri`, `token_endpoint_auth_method:
+   "none"`, `grant_types` authorization code and refresh). The answer is
+   checked: `client_id` a plain string (printable ASCII, at most 256),
+   `redirect_uris` as sent when returned, `token_endpoint_auth_method`
+   `none` when returned (else refused); a `client_secret` or
+   `registration_access_token` is dropped unread. No
+   `registration_endpoint`: refused ("it offers no way for yobuild to
+   register"). A load's sign-in counts within its `load_plugin` attempt
+   (`max_attempts`), one registration each. A Client ID Metadata Document
+   (the specification's preferred way) needs an https address yobuild's
+   maintainers keep, and its `redirect_uris` would have to match the
+   random callback path, which the draft's exact matching may refuse:
+   later, decision 1.
+8. **The exchange.** The code with the verifier, `redirect_uri`,
+   `client_id` and `resource`; the answer must have a `token_type` of
+   `Bearer` in any case and an `access_token` of printable ASCII
+   (`expires_in` and `refresh_token` kept when given). At this point the
+   issuer, the token endpoint, the `client_id` and the MCP server's URL
+   are pinned: the token goes to that URL only, and a refresh only to
+   that endpoint.
+9. **How the token reaches the server.**
+   - **With yoagent as it is:** a fixed `Authorization` header
+     (`with_header`, which yoagent marks sensitive and redacts from what
+     it quotes). A loaded server answering 401 later is marked stopped,
+     "its sign-in expired: it is not signed in again this session":
+     unlike stage 3's other remotes, which stay offered on a 401, since
+     nothing will change for it. A manifest server, which nothing marks
+     stopped, has each call fail with that reason (a hint: start yobuild
+     again to sign in).
+   - **Asked of yoagent** (a draft, not sent): an `Authorization` source
+     asked before each request and told of a 401 once per request,
+     which may answer with a new value to retry it once (the session
+     kept); the source's values redacted from what yoagent quotes as
+     its header values are; and `WWW-Authenticate` on `McpError::Http`.
+     With it, a refresh at the pinned token endpoint; a challenge then
+     pointing at other metadata ends the sign-in (never a new
+     discovery).
+   - **No step-up:** a 403 `insufficient_scope` is the call's error, said
+     as such: signing in again mid-run is a second browser trip the
+     specification only recommends (decision 8).
+10. **Kept for the session, never shown.** The access and refresh tokens
+    live in memory, in the server's entry, and go with it: nothing on
+    disk, in the lock, the log, a notice, the agent's context or the
+    block. Every secret of the sign-in — the access and refresh tokens,
+    the code, the verifier — has a type whose `Debug` prints nothing,
+    is a sensitive header value where it is one, and is shown as
+    `${oauth}` wherever a server's error would show it (`run::hidden`,
+    whatever its length; the hidden list updated on a refresh). What
+    reaches the agent of a failed sign-in is a fixed reason, never the
+    server's text. At the session's end the tokens are revoked (RFC
+    7009) where the metadata offers a `revocation_endpoint`, within
+    `CLOSE_TIME`. Keeping a sign-in across sessions is decision 2.
+11. **The manifest: `auth = "oauth"`.** On an `[[mcp]] url` (no
+    `headers` naming `Authorization`):
+    - **When:** after the agent starts and a frontend is attached (as the
+      task waits for one), each such server in turn, its sign-in asked
+      as a loaded server's is. Its tools are not known at start, so they
+      reach the agent through the late source `Loaded` already is (a
+      kept server), from the next turn, prefixed as any server's; until
+      then, and after a refused sign-in, it offers none.
+    - **Its `allow`:** checked once its tools are listed: a name it does
+      not offer is a Warning notice and that name asks, as `AllowedCheck`
+      says a plugin's.
+    - **`--once`:** refused ("a sign-in needs the page or the terminal
+      UI").
+    - **`check`:** probes it without signing in: a Bearer challenge is a
+      note ("it needs a sign-in: its tools are not listed by `check`, and
+      its `allow` is checked at sign-in"), not a problem; `together`
+      leaves it out.
+    - **The block** of a loaded server signed in carries `auth =
+      "oauth"`; the cross-site rule of point 3 does not apply to it once
+      the owner puts it in the manifest.
+12. **Said.** Hints for the refusals the owner can act on: no PKCE, no
+    registration, a sign-in at another site, cancelled, timed out,
+    expired. `load-remote-refused` ("a sign-in yobuild cannot do yet")
+    is changed: a server with a Bearer challenge is signed in now.
+    `failures.md`, `manifest.md` and `scripted.md` gain them.
 
 **Tests.** An axum stub of an MCP server and its authorization server
-(metadata, registration, authorize, token, refresh), recording what it
-gets; the test answers the authorization page as a browser would,
-following the redirect to yobuild's callback:
-- signed in from the page: the registration, PKCE (`S256` checked by
-  the stub), `state`, `resource` in both requests, the token on every
-  MCP request, never in a notice, the agent's context, the log or the
-  block;
-- refused before asking: metadata on another origin, a `resource` that
-  is not the server's, an issuer that does not match, no `S256`, an
-  endpoint over http or on a local name, no registration endpoint;
-- the callback: a wrong `state` answered 400 and the sign-in kept; the
-  server's `error` said; Cancel, Block and nobody answering;
-- refreshed mid-session (with yoagent's source) and, without it, an
-  expired token marking the server stopped;
-- a manifest's `auth = "oauth"` signed in at start, and refused under
+(metadata, registration, authorize, token, refresh, revocation),
+recording what it gets; the test answers the authorization page as a
+browser would and follows its redirect to yobuild's callback:
+- signed in from the page: the probe, registration, PKCE (`S256` checked
+  by the stub), `state`, `iss`, `resource` in both requests, the token
+  on every MCP request and never in a notice, the agent's context, the
+  log or the block; revoked at the end;
+- refused before anyone is asked: metadata on another origin, a
+  `resource` not identical, an issuer that does not match, no `S256`, an
+  endpoint over http or on a local name, a name resolving to a private
+  address, no registration endpoint, an authorization server at another
+  site (a loaded server; allowed for a manifest's), scopes past the
+  caps;
+- registration answers: a `client_secret` dropped, another auth method
+  refused, other `redirect_uris` refused;
+- the callback: a wrong `state` answered 400 and the sign-in kept; an
+  `error` without the `state` ignored; an `iss` that differs refused;
+  the listener closed after the first match;
+- the question: Cancel, Block, nobody answering, the timeout; phone mode
+  with no link on the page;
+- a run stopped during a metadata fetch, the sign-in wait and the
+  exchange: the listener closed, the question withdrawn, refused "the
+  run was stopped while …";
+- a server error or token response holding a token or a value that
+  fails to parse: never quoted;
+- with the fixed header, a 401 later marking a loaded server stopped;
+  with yoagent's source, a refresh, and a challenge re-pointed at other
+  metadata ending the sign-in;
+- a manifest's `auth = "oauth"` signed in once a frontend attached, its
+  tools from the next turn, its `allow` checked at sign-in; refused under
   `--once`; `check`'s note.
 
 **The demo.** The live servers need an account, so CI runs the stub
@@ -5305,21 +5395,32 @@ issues and drafts a status note, with `[extend] kinds = ["remote"]`).
 
 1. Dynamic registration now, and a Client ID Metadata Document later
    (where would yobuild host it)?
-2. Tokens kept for the session only, or kept across sessions (a 0600
-   file under `YOBUILD_HOME`, or the system's keychain)?
-3. Ask yoagent for the refreshing transport (point 6), and ship with a
-   fixed header until it comes?
-4. Signing in from the phone left out?
+2. Tokens kept for the session only, or across sessions (a 0600 file
+   under `YOBUILD_HOME`, or the system's keychain; keyed by issuer,
+   resource and client, the same-site rule checked again)?
+3. Ask yoagent for the refreshing source (point 9), and ship with a fixed
+   header until it comes?
+4. Phone mode: the link on yobuild's stderr, never over the LAN?
 5. The demo: Linear, Notion, or none in the gallery?
+6. A loaded server's sign-in on its own site only (a manifest's
+   anywhere)?
+7. A manifest server's `allow` checked at sign-in (a name not offered
+   asks, said), not refused when read?
+8. No step-up sign-in mid-run (a 403 for scope is the call's error)?
 
 **Order of PRs.**
 
 1. this design;
-2. yoagent: the authorization source and `WWW-Authenticate` (asked of
-   its owner on your approval), taken in its own PR;
-3. `src/run/oauth.rs`: discovery and its checks, registration, PKCE,
-   the callback listener, the token exchange and refresh, against the
-   stub; `UiRequest::SignIn` on the page and in the terminal UI;
-4. `load_plugin`'s remote signed in, and the manifest's `auth =
-   "oauth"`, `check`'s note, the hints;
-5. the demo, the skill, the guide, `CLAUDE.md` and the roadmap.
+2. `UiRequest::SignIn`: the protocol kind, `accepts`, the keyed question
+   withdrawn by its caller, its timeout, the page's and the terminal
+   UI's dialogs, phone mode;
+3. `src/run/oauth.rs` with a fixed header: the probe, discovery and its
+   checks, the resolver, registration, PKCE, the callback, the exchange,
+   revocation, the hidden values, against the stub;
+4. `load_plugin`'s remote signed in: the questions, cancellation, a 401
+   later marking it stopped, the block's `auth = "oauth"`, the hints;
+5. the manifest's `auth = "oauth"`: signed in once a frontend attached,
+   its tools through the late source, `allow` at sign-in, `check`,
+   `--once`;
+6. refresh, once yoagent ships the source (asked on your approval);
+7. the demo, the skill, the guide, `CLAUDE.md` and the roadmap.
