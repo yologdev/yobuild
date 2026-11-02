@@ -16,6 +16,8 @@ use crate::frontend::{
     ClientMessage, Driver, NoticeLevel, ResolveReason, ServerMessage, Session, UiRequest,
 };
 use crate::manifest::{ExtendKind, Manifest};
+use crate::run::oauth::tests::{access, get as browse, refresh, to_callback, Stub as SignInStub};
+use crate::run::oauth::{Net, ENDED as SIGN_IN_ENDED};
 
 /// The credential the tests name, in their own environment (never this
 /// process's).
@@ -104,6 +106,7 @@ fn the_end_says_a_remote_by_its_address_and_its_headers_variables() {
             url: "https://docs.example.com/mcp".into(),
             host: "docs.example.com".into(),
             headers: vec![("Authorization".into(), "Bearer ${CTX_KEY}".into())],
+            signed_in: false,
         }),
     };
     let files = Files {
@@ -293,6 +296,9 @@ fn authorization(required: bool) -> RemoteHeader {
 /// An answer that is never given: the question stays open.
 const HOLD: &str = "<hold>";
 
+/// A sign-in question answered in the browser.
+const BROWSER: &str = "<browser>";
+
 /// What a frontend saw: each question (title, message), each notice, and
 /// each question withdrawn.
 #[derive(Default)]
@@ -315,15 +321,28 @@ fn answering(session: &Session, answers: Vec<Json>) -> Arc<Mutex<Seen>> {
                 ServerMessage::UiRequest { id, request } => {
                     let (title, message) = match &request {
                         UiRequest::Select { title, message, .. }
-                        | UiRequest::Input { title, message, .. } => {
+                        | UiRequest::Input { title, message, .. }
+                        | UiRequest::SignIn { title, message, .. } => {
                             (title.clone(), message.clone())
                         }
                         other => (format!("{other:?}"), String::new()),
                     };
                     record.lock().unwrap().questions.push((title, message));
                     let value = answers.next().unwrap_or(Json::Null);
-                    if value != HOLD {
-                        session.send(ClientMessage::UiResponse { id, value });
+                    match (&request, value == BROWSER) {
+                        // Signed in as a browser would: the start link, the
+                        // sign-in page, back to yobuild's callback.
+                        (UiRequest::SignIn { url: Some(url), .. }, true) => {
+                            let url = url.clone();
+                            tokio::spawn(async move {
+                                let back = to_callback(&url).await;
+                                browse(&back).await.unwrap();
+                            });
+                        }
+                        _ if value == HOLD => {}
+                        _ => {
+                            session.send(ClientMessage::UiResponse { id, value });
+                        }
                     }
                 }
                 ServerMessage::UiResolved {
@@ -853,8 +872,18 @@ async fn a_run_stopped_at_any_question_or_while_connecting_ends_the_load() {
 }
 
 #[tokio::test]
-async fn a_remote_that_wants_a_sign_in_is_said_so_and_the_key_hidden() {
-    for (mode, status) in [(Mode::Unauthorized, 401), (Mode::Forbidden, 403)] {
+async fn a_remote_that_refuses_its_credential_is_said_so_and_the_key_hidden() {
+    for (mode, said) in [
+        (
+            Mode::Unauthorized,
+            "io.x/docs refused yobuild's request (HTTP 401) and offers no sign-in: it needs a credential yobuild was not given",
+        ),
+        (
+            Mode::Forbidden,
+            "io.x/docs refused yobuild's request (HTTP 403): it does not take the credential or sign-in it was given",
+        ),
+    ] {
+        let expected = said;
         let (url, _) = stub(mode).await;
         let l = loading_with(
             &url,
@@ -863,10 +892,7 @@ async fn a_remote_that_wants_a_sign_in_is_said_so_and_the_key_hidden() {
             with_key_and_org(),
         );
         let said = text(&l.call().await);
-        assert!(
-            said.contains(&format!("io.x/docs refused yobuild's request (HTTP {status}): it needs a credential, or a sign-in (OAuth) yobuild cannot do yet")),
-            "{said}"
-        );
+        assert!(said.contains(expected), "{said}");
         assert!(
             !said.contains(SECRET) && !said.contains(ORG_VALUE),
             "{said}"
@@ -1015,4 +1041,262 @@ async fn a_calls_error_hides_the_key_and_a_tools_own_words_end_nothing() {
     );
     assert_eq!(failed, "MCP session expired, says the tool");
     assert_eq!(l.loaded.tools().await.len(), 1);
+}
+
+/// `load_plugin` with the sign-in stub's MCP server as its one remote
+/// candidate (no header listed), signing in on this machine.
+fn signing_in(stub: &SignInStub, answers: Vec<Json>) -> Loading {
+    let mut l = loading_with(stub.server().as_str(), Vec::new(), answers, with_key());
+    l.load = l.load.with_net(Net::loopback());
+    l
+}
+
+/// The titles of the questions asked.
+fn titles(l: &Loading) -> Vec<String> {
+    l.questions().into_iter().map(|(t, _)| t).collect()
+}
+
+const CONNECT: &str =
+    "Connect to the remote MCP server io.x/docs at 127.0.0.1 as docs? (asked by the agent)";
+const SIGN_IN: &str = "Sign in to io.x/docs (127.0.0.1) at 127.0.0.1? (asked by the agent)";
+
+#[tokio::test]
+async fn a_remote_that_asks_for_a_sign_in_is_signed_in_kept_and_revoked_at_the_end() {
+    let stub = SignInStub::start().await;
+    let l = signing_in(
+        &stub,
+        vec![
+            json!("Allow"),
+            json!("Allow"),
+            json!(BROWSER),
+            json!("Allow"),
+        ],
+    );
+    let result = l.call().await;
+    let said = text(&result);
+    assert!(result.is_ok(), "{said}");
+    assert_eq!(
+        titles(&l),
+        [
+            CONNECT,
+            SIGN_IN,
+            "Sign in to io.x/docs at 127.0.0.1 in your browser",
+            "Keep the remote MCP server docs? It offers: echo",
+        ]
+    );
+    let questions = l.questions();
+    assert!(
+        questions[1].1.contains("Scopes asked: read write"),
+        "{}",
+        questions[1].1
+    );
+    assert!(questions[3]
+        .1
+        .contains("Signed in: its token is kept for this session only"));
+    // Connected with no credential first, then with the token.
+    let seen = stub.seen();
+    let mcp: Vec<&String> = seen.iter().filter(|s| s.contains(" auth=")).collect();
+    assert_eq!(mcp[0], "POST initialize auth=- session=-");
+    assert!(
+        seen.contains(&format!(
+            "POST tools/list auth=Bearer {} session=s-1",
+            access(1)
+        )),
+        "{seen:?}"
+    );
+    // The block says how it signs in; no token anywhere said.
+    let notices = l.notices_until(|(_, m)| m.contains("connected to")).await;
+    let kept = notices
+        .iter()
+        .find(|(_, m)| m.contains("connected to"))
+        .unwrap();
+    assert!(
+        kept.1.contains("auth = \"oauth\"\n")
+            && kept
+                .1
+                .contains("is signed in through your browser each session"),
+        "{}",
+        kept.1
+    );
+    for (_, m) in &notices {
+        assert!(!m.contains(&access(1)) && !m.contains(&refresh(1)), "{m}");
+    }
+    assert!(!said.contains(&access(1)));
+
+    // Its tool, its token renewed on a 401.
+    let tools = l.loaded.tools().await;
+    let echo = tools.iter().find(|t| t.name() == "docs__echo").unwrap();
+    stub.set(|c| c.valid = "expired".into());
+    let called = echo
+        .execute(json!({}), ToolContext::new("2", "docs__echo"))
+        .await;
+    assert_eq!(text(&called), "echoed");
+    assert!(stub
+        .seen()
+        .contains(&"token refresh current=true resource=yes".to_owned()));
+
+    // The end: closed (its DELETE), then its tokens revoked.
+    let before = stub.seen().len();
+    l.loaded.close().await;
+    assert_eq!(
+        stub.seen()[before..],
+        [
+            format!("DELETE - auth=Bearer {} session=s-1", access(2)),
+            format!("revoke refresh_token {}", refresh(2)),
+            format!("revoke access_token {}", access(2)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_sign_in_that_ends_marks_the_server_stopped() {
+    let stub = SignInStub::start().await;
+    let l = signing_in(
+        &stub,
+        vec![
+            json!("Allow"),
+            json!("Allow"),
+            json!(BROWSER),
+            json!("Allow"),
+        ],
+    );
+    assert!(l.call().await.is_ok());
+    let tools = l.loaded.tools().await;
+    let echo = tools.iter().find(|t| t.name() == "docs__echo").unwrap();
+    stub.set(|c| {
+        c.valid = "expired".into();
+        c.refresh_refused = true;
+    });
+    let called = text(
+        &echo
+            .execute(json!({}), ToolContext::new("2", "docs__echo"))
+            .await,
+    );
+    assert!(called.contains(SIGN_IN_ENDED), "{called}");
+    assert!(!called.contains(&refresh(1)), "{called}");
+    // Seen gone at the first look, said once settled (`run`'s tick looks
+    // every 250 ms).
+    assert!(l.loaded.stopped().is_empty());
+    tokio::time::sleep(SETTLE + Duration::from_millis(100)).await;
+    let stopped = l.loaded.stopped();
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert!(
+        stopped[0].1.starts_with(&format!(
+            "{SIGN_IN_ENDED} (its token could not be refreshed: "
+        )),
+        "{stopped:?}"
+    );
+    assert!(!stopped[0].1.contains(&refresh(1)), "{stopped:?}");
+    assert!(l.loaded.tools().await.is_empty());
+}
+
+#[tokio::test]
+async fn a_sign_in_cancelled_or_blocked_is_remembered_and_said_in_fixed_words() {
+    // Cancel in the browser's question.
+    let stub = SignInStub::start().await;
+    let l = signing_in(&stub, vec![json!("Allow"), json!("Allow"), json!("cancel")]);
+    let said = text(&l.call().await);
+    assert_eq!(
+        said,
+        "load_plugin refused it: io.x/docs: the owner cancelled the sign-in: do not propose io.x/docs again this session"
+    );
+    assert!(l.blocked());
+    let notices = l.notices_until(|(_, m)| m.contains("was refused")).await;
+    assert!(
+        notices.contains(&(
+            NoticeLevel::Warning,
+            "The agent's plugin `io.x/docs` was refused: io.x/docs's sign-in: the owner cancelled the sign-in: do not propose io.x/docs again this session".into()
+        )),
+        "{notices:?}"
+    );
+    // Its registration's client is never revoked: no token came.
+    assert!(!stub.seen().iter().any(|s| s.starts_with("revoke")));
+
+    // Block at the question before it: nothing registered.
+    let stub = SignInStub::start().await;
+    let l = signing_in(&stub, vec![json!("Allow"), json!("Block")]);
+    let said = text(&l.call().await);
+    assert!(
+        said.contains("the owner blocked it (sign in to it)"),
+        "{said}"
+    );
+    assert!(l.blocked());
+    assert!(!stub.seen().iter().any(|s| s.starts_with("register")));
+    assert_eq!(titles(&l), [CONNECT, SIGN_IN]);
+}
+
+#[tokio::test]
+async fn a_sign_in_refused_before_anyone_is_asked_tells_the_agent_fixed_words() {
+    let stub = SignInStub::start().await;
+    stub.set(|c| c.authorization["code_challenge_methods_supported"] = json!(["plain"]));
+    let l = signing_in(&stub, vec![json!("Allow")]);
+    let said = text(&l.call().await);
+    assert_eq!(
+        said,
+        "load_plugin refused it: io.x/docs: its sign-in offers no PKCE, which yobuild requires"
+    );
+    assert_eq!(titles(&l), [CONNECT]);
+    let notices = l.notices_until(|(_, m)| m.contains("was refused")).await;
+    assert!(
+        notices
+            .iter()
+            .any(|(level, m)| *level == NoticeLevel::Warning
+                && m.contains(
+                    "io.x/docs's sign-in: its sign-in (127.0.0.1) offers no PKCE (`S256`)"
+                )),
+        "{notices:?}"
+    );
+    assert!(!l.blocked());
+}
+
+#[tokio::test]
+async fn a_run_stopped_during_the_sign_in_withdraws_it() {
+    let stub = SignInStub::start().await;
+    let l = signing_in(&stub, vec![json!("Allow"), json!("Allow"), json!(HOLD)]);
+    let ctx = ToolContext::new("1", LoadPlugin::TOOL);
+    let cancel = ctx.cancel.clone();
+    let waiting = async {
+        while l.questions().len() < 3 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        cancel.cancel();
+    };
+    let (result, _) = tokio::join!(l.call_with(json!({ "package": "io.x/docs" }), ctx), waiting);
+    assert_eq!(
+        text(&result),
+        "load_plugin refused it: io.x/docs: the run was stopped during the sign-in: it may be proposed again"
+    );
+    let withdrawn = async {
+        while l.seen.lock().unwrap().withdrawn == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), withdrawn)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_remote_answering_with_no_credential_is_closed_before_its_optional_header_is_asked() {
+    let (url, seen) = stub(Mode::Ok).await;
+    let l = loading(
+        &url,
+        vec![authorization(false)],
+        vec![json!("Allow"), json!(KEY), json!("Allow")],
+    );
+    assert!(l.call().await.is_ok());
+    let requests = seen.lock().unwrap().clone();
+    let first = requests
+        .iter()
+        .position(|r| r.starts_with("POST initialize auth=- "))
+        .unwrap();
+    let closed = requests
+        .iter()
+        .position(|r| r.starts_with("DELETE "))
+        .unwrap();
+    let again = requests
+        .iter()
+        .position(|r| r.starts_with(&format!("POST initialize auth=Bearer {SECRET} ")))
+        .unwrap();
+    assert!(first < closed && closed < again, "{requests:?}");
 }

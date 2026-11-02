@@ -218,9 +218,14 @@ MCP server it lacks and load it for the session. It works like this:
   computer, but each call sends its arguments to the server's host.
   When it takes a credential, you are asked between the two questions
   which environment variable holds it, never the value: the value goes
-  to that host only and is shown nowhere. A server that needs
-  you to sign in through a browser (OAuth) is refused: yobuild cannot do
-  that yet. The gallery's `docs-helper` connects to Context7 this way.
+  to that host only and is shown nowhere. A server that needs you to
+  sign in through a browser (OAuth) is signed in: you are asked whether
+  to sign in, then shown a link (on the page, or printed where yobuild
+  runs when the page is on your phone) that you open and finish in your
+  browser. The token is kept for this session only and the agent never
+  sees it; its sign-in must be on the server's own site. Such a server
+  cannot be written in `agent.toml` yet. The gallery's `docs-helper`
+  connects to Context7, which needs no sign-in, this way.
 
 [§14](design.md#14-agents-that-extend-themselves-m5-decided-2026-10-25)
 is the design.

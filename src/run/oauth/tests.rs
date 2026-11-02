@@ -15,59 +15,59 @@ use crate::frontend::{ClientMessage, Connection, ResolveReason, ServerMessage, S
 const WAIT: Duration = Duration::from_secs(10);
 
 /// How the stub answers; the tests change it as they go.
-struct Config {
+pub(crate) struct Config {
     /// The resource metadata (`null`: 404).
-    resource: Json,
+    pub(crate) resource: Json,
     /// The authorization server's metadata (`null`: 404).
-    authorization: Json,
+    pub(crate) authorization: Json,
     /// The registration's answer and status.
-    registration: (u16, Json),
+    pub(crate) registration: (u16, Json),
     /// The `iss` `/authorize` sends back (`None`: none).
-    iss: Option<String>,
+    pub(crate) iss: Option<String>,
     /// `/authorize` sends the browser back with this error instead.
-    error: Option<(String, String)>,
+    pub(crate) error: Option<(String, String)>,
     /// The token endpoint's answer to the code instead of tokens.
-    token_refusal: Option<(u16, String)>,
+    pub(crate) token_refusal: Option<(u16, String)>,
     /// Refresh refused.
-    refresh_refused: bool,
+    pub(crate) refresh_refused: bool,
     /// The access token the MCP server takes now.
-    valid: String,
+    pub(crate) valid: String,
     /// The refresh token the token endpoint takes now.
-    refresh: String,
+    pub(crate) refresh: String,
     /// Tokens issued so far.
-    issued: u32,
+    pub(crate) issued: u32,
     /// PKCE's challenge, as `/authorize` got it.
-    challenge: String,
+    pub(crate) challenge: String,
     /// The resource metadata's status when not 200 (302: to `/elsewhere`).
-    resource_status: u16,
+    pub(crate) resource_status: u16,
     /// The resource metadata at the root's well-known address (`null`: 404).
-    root_resource: Json,
+    pub(crate) root_resource: Json,
     /// OpenID Connect discovery's metadata (`null`: 404).
-    openid: Json,
+    pub(crate) openid: Json,
     /// The registration and the token endpoint wait this long first.
-    slow: Duration,
+    pub(crate) slow: Duration,
     /// A refresh rotates the refresh token.
-    rotate: bool,
+    pub(crate) rotate: bool,
     /// A refresh answered with this status instead (a passing trouble).
-    refresh_status: Option<u16>,
+    pub(crate) refresh_status: Option<u16>,
     /// The revocation endpoint's status.
-    revoke_status: u16,
+    pub(crate) revoke_status: u16,
 }
 
 /// An MCP server and its authorization server on this machine, recording
 /// what they get.
-struct Stub {
-    base: String,
+pub(crate) struct Stub {
+    pub(crate) base: String,
     seen: Arc<Mutex<Vec<String>>>,
     config: Arc<Mutex<Config>>,
 }
 
 const CODE: &str = "the-authorization-code-0123456789";
 
-fn access(n: u32) -> String {
+pub(crate) fn access(n: u32) -> String {
     format!("access-token-{n}-abcdefghijklmnop")
 }
-fn refresh(n: u32) -> String {
+pub(crate) fn refresh(n: u32) -> String {
     format!("refresh-token-{n}-qrstuvwxyz012345")
 }
 
@@ -78,7 +78,7 @@ fn form(body: &str) -> std::collections::HashMap<String, String> {
 }
 
 impl Stub {
-    async fn start() -> Stub {
+    pub(crate) async fn start() -> Stub {
         use axum::http::{HeaderMap, Method, StatusCode};
         use axum::response::IntoResponse;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -402,7 +402,7 @@ impl Stub {
         Stub { base, seen, config }
     }
 
-    fn server(&self) -> Url {
+    pub(crate) fn server(&self) -> Url {
         Url::parse(&format!("{}/mcp", self.base)).unwrap()
     }
 
@@ -413,11 +413,11 @@ impl Stub {
         )
     }
 
-    fn seen(&self) -> Vec<String> {
+    pub(crate) fn seen(&self) -> Vec<String> {
         self.seen.lock().unwrap().clone()
     }
 
-    fn set(&self, change: impl FnOnce(&mut Config)) {
+    pub(crate) fn set(&self, change: impl FnOnce(&mut Config)) {
         change(&mut self.config.lock().unwrap());
     }
 
@@ -434,7 +434,7 @@ impl Stub {
 }
 
 /// A browser's GET: the status and where it is sent on.
-async fn get(url: &str) -> Result<(u16, Option<String>), reqwest::Error> {
+pub(crate) async fn get(url: &str) -> Result<(u16, Option<String>), reqwest::Error> {
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -450,7 +450,7 @@ async fn get(url: &str) -> Result<(u16, Option<String>), reqwest::Error> {
 
 /// From the start link to the sign-in page and back: the callback's URL
 /// the authorization server sends the browser to.
-async fn to_callback(start: &str) -> String {
+pub(crate) async fn to_callback(start: &str) -> String {
     let (status, authorize) = get(start).await.unwrap();
     assert_eq!(status, 302);
     let (status, back) = get(&authorize.unwrap()).await.unwrap();

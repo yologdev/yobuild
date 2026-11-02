@@ -162,8 +162,46 @@ pub(crate) const HINTS: &[Hint] = &[
     Hint {
         id: "load-remote-refused",
         scope: Scope::Call,
-        pattern: "it needs a credential, or a sign-in (OAuth) yobuild cannot do yet",
-        fix: "when the server takes a key, set it in an environment variable and name that variable at the credential question (load it again); one that needs a sign-in cannot be connected yet",
+        pattern: "and offers no sign-in: it needs a credential yobuild was not given",
+        fix: "set the server's key in an environment variable and name that variable at the credential question (load it again)",
+    },
+    // A remote server's sign-in (run/oauth.rs `Refusal::for_agent`, said
+    // by run/load/remote.rs).
+    Hint {
+        id: "signin-no-pkce",
+        scope: Scope::Call,
+        pattern: "its sign-in offers no PKCE, which yobuild requires",
+        fix: "yobuild signs in only with PKCE (S256), which this server's sign-in does not offer: it cannot be signed in; find another server",
+    },
+    Hint {
+        id: "signin-no-registration",
+        scope: Scope::Call,
+        pattern: "its sign-in offers no way for yobuild to register",
+        fix: "its sign-in takes no new clients (dynamic registration), which yobuild needs: it cannot be signed in yet",
+    },
+    Hint {
+        id: "signin-other-site",
+        scope: Scope::Call,
+        pattern: "its sign-in is not on its own site, which a server the agent found must keep to",
+        fix: "if you trust both sites, add the server to agent.toml as an [[mcp]] entry with `auth = \"oauth\"`: a server you write in yourself may sign in anywhere",
+    },
+    Hint {
+        id: "signin-cancelled",
+        scope: Scope::Call,
+        pattern: "the owner cancelled the sign-in",
+        fix: "nothing, if meant: it is not proposed again this session",
+    },
+    Hint {
+        id: "signin-timed-out",
+        scope: Scope::Call,
+        pattern: "nobody signed in in time",
+        fix: "when it is loaded again, open the sign-in's link (on the page, or in the terminal) and finish within 10 minutes",
+    },
+    Hint {
+        id: "signin-ended",
+        scope: Scope::Call,
+        pattern: "its sign-in ended: it is not signed in again this session",
+        fix: "its token expired and could not be renewed: start yobuild again and let the agent load it again to sign in anew",
     },
     // Refused at start (check, run, and plugins stopping later).
     Hint {
@@ -411,8 +449,40 @@ mod tests {
             // yobuild: run/load/remote.rs `connect_failed`.
             (
                 Scope::Call,
-                "load_plugin refused it: io.github.upstash/context7 refused yobuild's request (HTTP 401): it needs a credential, or a sign-in (OAuth) yobuild cannot do yet (HTTP 401 Unauthorized from server on 'initialize')".into(),
+                "load_plugin refused it: io.github.upstash/context7 refused yobuild's request (HTTP 401) and offers no sign-in: it needs a credential yobuild was not given (HTTP 401 Unauthorized from server on 'initialize')".into(),
                 "load-remote-refused",
+            ),
+            // yobuild: run/oauth.rs `Refusal::for_agent`, run/load/remote.rs
+            // `sign_in_refused` (`<package>: <fixed words>[: …]`).
+            (
+                Scope::Call,
+                format!("load_plugin refused it: io.x/docs: {}", crate::run::oauth::Refusal::agent_words(crate::run::oauth::Why::NoPkce)),
+                "signin-no-pkce",
+            ),
+            (
+                Scope::Call,
+                format!("load_plugin refused it: io.x/docs: {}", crate::run::oauth::Refusal::agent_words(crate::run::oauth::Why::NoRegistration)),
+                "signin-no-registration",
+            ),
+            (
+                Scope::Call,
+                format!("load_plugin refused it: io.x/docs: {}", crate::run::oauth::Refusal::agent_words(crate::run::oauth::Why::OtherSite)),
+                "signin-other-site",
+            ),
+            (
+                Scope::Call,
+                format!("load_plugin refused it: io.x/docs: {}: do not propose io.x/docs again this session", crate::run::oauth::Refusal::agent_words(crate::run::oauth::Why::Cancelled)),
+                "signin-cancelled",
+            ),
+            (
+                Scope::Call,
+                format!("load_plugin refused it: io.x/docs: {}: it may be proposed again", crate::run::oauth::Refusal::agent_words(crate::run::oauth::Why::TimedOut)),
+                "signin-timed-out",
+            ),
+            (
+                Scope::Call,
+                format!("MCP call failed: Transport error: {}", crate::run::oauth::ENDED),
+                "signin-ended",
             ),
             // yobuild: run/check.rs, run.rs, frontend/host.rs.
             (

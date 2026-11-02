@@ -42,8 +42,9 @@ use yoagent::mcp::{AuthChallenge, AuthorizationSource, McpError};
 use crate::builtins::find_plugin::remote_address;
 use crate::frontend::{Session, UiRequest, Unanswered};
 
+/// Its tests, and the stub servers `load_plugin`'s sign-in tests use.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// How long each request of the sign-in may take.
 const REQUEST_TIME: Duration = Duration::from_secs(15);
@@ -176,7 +177,12 @@ impl Refusal {
 
     /// What the agent is told: fixed words, never the server's.
     pub(crate) fn for_agent(&self) -> &'static str {
-        match self.why {
+        Refusal::agent_words(self.why)
+    }
+
+    /// The agent's words for each kind (the hints match them).
+    pub(crate) fn agent_words(why: Why) -> &'static str {
+        match why {
             Why::Discovery => "the server's sign-in could not be used (the owner was told why)",
             Why::NoPkce => "its sign-in offers no PKCE, which yobuild requires",
             Why::NoRegistration => "its sign-in offers no way for yobuild to register",

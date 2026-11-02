@@ -5547,7 +5547,10 @@ account, so CI could run only the stub, which the tests already do.
    used by nothing yet, its tests in `src/run/oauth/tests.rs`);
 5. `load_plugin`'s remote signed in: the unauthenticated connect, the
    questions, cancellation, a sign-in that ends marking it stopped, the
-   block's `auth = "oauth"`, the hints;
+   block's `auth = "oauth"`, the hints (built 2026-11-03: the agent's
+   words for a failed sign-in are `Refusal::for_agent`'s, the owner's
+   Cancel remembered as a Block, the guide's and the skill's pages said
+   so; the block's `auth` read by the manifest only with step 6);
 6. the manifest's `auth = "oauth"`: signed in once a frontend attached,
    its tools through the late source, `allow` at sign-in, `check`,
    `--once`;
