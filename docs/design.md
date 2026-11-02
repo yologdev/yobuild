@@ -5386,10 +5386,8 @@ browser would and follows its redirect to yobuild's callback:
   tools from the next turn, its `allow` checked at sign-in; refused under
   `--once`; `check`'s note.
 
-**The demo.** The live servers need an account, so CI runs the stub
-only. A live run by the owner, with Linear or Notion, recorded in the
-README of a gallery agent (to choose: an agent that reads the owner's
-issues and drafts a status note, with `[extend] kinds = ["remote"]`).
+**The demo.** None in the gallery (decision 5): the live servers need an
+account, so CI could run only the stub, which the tests already do.
 
 **Decisions for review.**
 
@@ -5398,13 +5396,16 @@ issues and drafts a status note, with `[extend] kinds = ["remote"]`).
    document later, if a server needs it.
 2. Tokens kept for the session only, or across sessions (a 0600 file
    under `YOBUILD_HOME`, or the system's keychain; keyed by issuer,
-   resource and client, the same-site rule checked again)?
+   resource and client, the same-site rule checked again)? Decided
+   (2026-11-02): the session only; a person signs in each time yobuild
+   starts.
 3. Ask yoagent for the refreshing source (point 9), and ship with a fixed
    header until it comes? Decided (2026-11-02): asked (sent with the
    owner's approval, 2026-11-02); a fixed header until it comes.
 4. Phone mode: the link on yobuild's stderr, never over the LAN?
    Decided (2026-11-02): yes.
-5. The demo: Linear, Notion, or none in the gallery?
+5. The demo: Linear, Notion, or none in the gallery? Decided
+   (2026-11-02): none; the stub's tests cover it.
 6. A loaded server's sign-in on its own site only (a manifest's
    anywhere)? Decided (2026-11-02): yes.
 7. A manifest server's `allow` checked at sign-in (a name not offered
@@ -5427,4 +5428,4 @@ issues and drafts a status note, with `[extend] kinds = ["remote"]`).
    its tools through the late source, `allow` at sign-in, `check`,
    `--once`;
 6. refresh, once yoagent ships the source (asked 2026-11-02);
-7. the demo, the skill, the guide, `CLAUDE.md` and the roadmap.
+7. the skill, the guide, `CLAUDE.md` and the roadmap.
