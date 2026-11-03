@@ -165,6 +165,24 @@ pub(crate) const HINTS: &[Hint] = &[
         pattern: "and offers no sign-in: it needs a credential yobuild was not given",
         fix: "set the server's key in an environment variable and name that variable at the credential question (load it again)",
     },
+    Hint {
+        id: "load-remote-unlisted",
+        scope: Scope::Call,
+        pattern: "it needs a credential its registry entry lists no header for",
+        fix: "the MCP registry describes no header for its key: add it to agent.toml as an [[mcp]] entry with the `headers` its documentation names, the key read from an environment variable",
+    },
+    Hint {
+        id: "load-remote-key-refused",
+        scope: Scope::Call,
+        pattern: "refused the credential it was sent (HTTP 401)",
+        fix: "check that the variable you named holds the server's current key, then let the agent load it again",
+    },
+    Hint {
+        id: "load-remote-forbidden",
+        scope: Scope::Call,
+        pattern: "refused yobuild's request (HTTP 403)",
+        fix: "the server does not let this in: check the key's or the account's access with its provider",
+    },
     // A remote server's sign-in (run/oauth.rs `Refusal::for_agent`, said
     // by run/load/remote.rs).
     Hint {
@@ -183,7 +201,7 @@ pub(crate) const HINTS: &[Hint] = &[
         id: "signin-other-site",
         scope: Scope::Call,
         pattern: "its sign-in is not on its own site, which a server the agent found must keep to",
-        fix: "if you trust both sites, add the server to agent.toml as an [[mcp]] entry with `auth = \"oauth\"`: a server you write in yourself may sign in anywhere",
+        fix: "a server the agent finds must sign in on its own site; one you write in agent.toml yourself may sign in anywhere, with `auth = \"oauth\"`, which agent.toml reads from a later yobuild",
     },
     Hint {
         id: "signin-cancelled",
@@ -201,7 +219,7 @@ pub(crate) const HINTS: &[Hint] = &[
         id: "signin-ended",
         scope: Scope::Call,
         pattern: "its sign-in ended: it is not signed in again this session",
-        fix: "its token expired and could not be renewed: start yobuild again and let the agent load it again to sign in anew",
+        fix: "its token could not be renewed, or the server asked for another sign-in: start yobuild again and let the agent load it again to sign in anew",
     },
     // Refused at start (check, run, and plugins stopping later).
     Hint {
@@ -452,6 +470,21 @@ mod tests {
                 "load_plugin refused it: io.github.upstash/context7 refused yobuild's request (HTTP 401) and offers no sign-in: it needs a credential yobuild was not given (HTTP 401 Unauthorized from server on 'initialize')".into(),
                 "load-remote-refused",
             ),
+            (
+                Scope::Call,
+                "load_plugin refused it: io.x/docs refused yobuild's request (HTTP 401) and offers no sign-in: it needs a credential its registry entry lists no header for (HTTP 401)".into(),
+                "load-remote-unlisted",
+            ),
+            (
+                Scope::Call,
+                "load_plugin refused it: io.x/docs refused the credential it was sent (HTTP 401) and offers no sign-in (HTTP 401)".into(),
+                "load-remote-key-refused",
+            ),
+            (
+                Scope::Call,
+                "load_plugin refused it: io.x/docs refused yobuild's request (HTTP 403): it does not let yobuild in without a credential (HTTP 403)".into(),
+                "load-remote-forbidden",
+            ),
             // yobuild: run/oauth.rs `Refusal::for_agent`, run/load/remote.rs
             // `sign_in_refused` (`<package>: <fixed words>[: …]`).
             (
@@ -481,7 +514,8 @@ mod tests {
             ),
             (
                 Scope::Call,
-                format!("MCP call failed: Transport error: {}", crate::run::oauth::ENDED),
+                // As yoagent 0.26.6 says it (run/load/remote/tests.rs).
+                format!("MCP call failed: Transport error: the authorization source failed after HTTP 401 on 'tools/call': Transport error: {}", crate::run::oauth::ENDED),
                 "signin-ended",
             ),
             // yobuild: run/check.rs, run.rs, frontend/host.rs.

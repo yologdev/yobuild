@@ -127,7 +127,10 @@ pub(crate) struct Refusal {
 /// What kind of refusal, for the agent's fixed words and the owner's hints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Why {
-    /// Discovery found nothing usable, or something refused.
+    /// No sign-in published: no challenge named metadata, and none is at
+    /// the well-known addresses (a server that wants a credential instead).
+    NoSignIn,
+    /// Discovery found something it refuses, or could not look.
     Discovery,
     /// The authorization server offers no `S256`.
     NoPkce,
@@ -183,6 +186,7 @@ impl Refusal {
     /// The agent's words for each kind (the hints match them).
     pub(crate) fn agent_words(why: Why) -> &'static str {
         match why {
+            Why::NoSignIn => "it offers no sign-in",
             Why::Discovery => "the server's sign-in could not be used (the owner was told why)",
             Why::NoPkce => "its sign-in offers no PKCE, which yobuild requires",
             Why::NoRegistration => "its sign-in offers no way for yobuild to register",
@@ -248,7 +252,7 @@ impl Net {
             .https_only(true)
             .dns_resolver(Arc::new(PublicOnly::from_environment()))
             .build()
-            .map_err(|_| "the sign-in's HTTP client could not be made".to_owned())?;
+            .map_err(|e| format!("the sign-in's HTTP client could not be made: {e}"))?;
         Ok(Net {
             http,
             loopback: false,
@@ -802,7 +806,7 @@ pub(crate) async fn discover(
         }
     }
     let Some((metadata, resource)) = resource else {
-        return Err(at(format!(
+        return Err(refused(Why::NoSignIn, format!(
             "it names no resource metadata (RFC 9728; HTTP {} at its well-known addresses), so no sign-in",
             missing.unwrap_or(404)
         )));
@@ -1696,11 +1700,16 @@ impl Source {
     }
 
     /// Revokes the tokens where the metadata offers revocation (RFC 7009;
-    /// with none, nothing to do), the refresh token first. Returns what
-    /// failed, for the caller to say (a token that outlives the session at
-    /// its provider). The caller bounds it in time, after the server is
-    /// closed.
+    /// with none, nothing to do), the refresh token first, each request
+    /// within [`REQUEST_TIME`]. Returns what failed, for the caller to say
+    /// (a token that outlives the session at its provider). Called after
+    /// the server is closed.
     pub(crate) async fn revoke(&self) -> Vec<String> {
+        self.revoke_within(REQUEST_TIME).await
+    }
+
+    /// [`Source::revoke`], each request within `each`.
+    pub(crate) async fn revoke_within(&self, each: Duration) -> Vec<String> {
         self.closing();
         let Some(endpoint) = &self.revocation_endpoint else {
             return Vec::new();
@@ -1719,13 +1728,17 @@ impl Source {
                 ("token_type_hint", hint.to_owned()),
                 ("client_id", self.client_id.clone()),
             ];
-            match self.net.post(endpoint, Body::Form(form)).await {
-                Ok((status, _)) if (200..300).contains(&status) => {}
-                Ok((status, _)) => failures.push(format!(
+            match tokio::time::timeout(each, self.net.post(endpoint, Body::Form(form))).await {
+                Ok(Ok((status, _))) if (200..300).contains(&status) => {}
+                Ok(Ok((status, _))) => failures.push(format!(
                     "the sign-in's {what} was not revoked at {host} (HTTP {status})"
                 )),
-                Err(e) => failures.push(format!(
+                Ok(Err(e)) => failures.push(format!(
                     "the sign-in's {what} was not revoked at {host}: {e}"
+                )),
+                Err(_) => failures.push(format!(
+                    "the sign-in's {what} was not revoked at {host}: no answer within {} s",
+                    each.as_secs()
                 )),
             }
         }

@@ -52,6 +52,13 @@ pub(crate) struct Config {
     pub(crate) refresh_status: Option<u16>,
     /// The revocation endpoint's status.
     pub(crate) revoke_status: u16,
+    /// The MCP server lets `initialize` through unsigned and asks for the
+    /// sign-in at `tools/list`.
+    pub(crate) challenge_at_list: bool,
+    /// The MCP server's 401 carries its `WWW-Authenticate` challenge.
+    pub(crate) challenge_header: bool,
+    /// The resource metadata waits this long first.
+    pub(crate) slow_metadata: Duration,
 }
 
 /// An MCP server and its authorization server on this machine, recording
@@ -118,6 +125,9 @@ impl Stub {
             rotate: true,
             refresh_status: None,
             revoke_status: 200,
+            challenge_at_list: false,
+            challenge_header: true,
+            slow_metadata: Duration::ZERO,
         }));
         let challenge = format!(
             "Bearer realm=\"OAuth\", resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\", scope=\"read write\""
@@ -127,6 +137,8 @@ impl Stub {
             let c = c.clone();
             let s = s.clone();
             async move {
+                let slow = c.lock().unwrap().slow_metadata;
+                tokio::time::sleep(slow).await;
                 s.lock().unwrap().push("resource metadata".into());
                 let (json, status) = {
                     let c = c.lock().unwrap();
@@ -338,16 +350,31 @@ impl Stub {
                     .unwrap_or("-")
                     .to_owned();
                 let what = request["method"].as_str().unwrap_or("-").to_owned();
-                s.lock()
-                    .unwrap()
-                    .push(format!("{method} {what} auth={auth} session={session}"));
-                if auth != format!("Bearer {}", c.lock().unwrap().valid) {
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        [("www-authenticate", challenge)],
-                        "sign in",
-                    )
-                        .into_response();
+                // A header besides the token, when one is sent.
+                let org = headers
+                    .get("x-org")
+                    .and_then(|a| a.to_str().ok())
+                    .map(|o| format!(" org={o}"))
+                    .unwrap_or_default();
+                s.lock().unwrap().push(format!(
+                    "{method} {what} auth={auth} session={session}{org}"
+                ));
+                let (valid, at_list, with_challenge) = {
+                    let c = c.lock().unwrap();
+                    (c.valid.clone(), c.challenge_at_list, c.challenge_header)
+                };
+                let unsigned_through = at_list
+                    && auth == "-"
+                    && (what == "initialize" || what.starts_with("notifications/"));
+                if auth != format!("Bearer {valid}") && !unsigned_through {
+                    let mut refused = (StatusCode::UNAUTHORIZED, "sign in").into_response();
+                    if with_challenge {
+                        refused.headers_mut().insert(
+                            "www-authenticate",
+                            axum::http::HeaderValue::from_str(&challenge).unwrap(),
+                        );
+                    }
+                    return refused;
                 }
                 if method == Method::DELETE {
                     return StatusCode::OK.into_response();
@@ -684,7 +711,7 @@ async fn discovery_refuses_before_anyone_is_asked() {
     let cases: Vec<(Change, Why, &str)> = vec![
         (
             Box::new(|c| c.resource = Json::Null),
-            Why::Discovery,
+            Why::NoSignIn,
             "no resource metadata",
         ),
         (

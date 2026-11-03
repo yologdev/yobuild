@@ -35,24 +35,17 @@ const START_TIME: Duration = Duration::from_secs(30);
 /// otherwise hold the end of a run, or of the session, for minutes.
 const CLOSE_TIME: Duration = Duration::from_secs(5);
 
-/// Closes `client` within [`CLOSE_TIME`]; what fails is logged, not said
-/// (the server is left either way).
-/// Revokes a sign-in's tokens within [`CLOSE_TIME`]; what fails is logged
-/// (the session is ending: no one to tell).
+/// Revokes a sign-in's tokens, each request within [`CLOSE_TIME`]; what
+/// fails is logged (the server stopped or the session is ending; a load
+/// still going says it instead, `LoadPlugin::revoke_said`).
 async fn revoke_quietly(source: &super::oauth::Source, name: &str) {
-    match tokio::time::timeout(CLOSE_TIME, source.revoke()).await {
-        Ok(failures) => {
-            for failure in failures {
-                tracing::warn!("the loaded MCP server {name}: {failure}");
-            }
-        }
-        Err(_) => tracing::warn!(
-            "the loaded MCP server {name}: its sign-in was not revoked within {} s",
-            CLOSE_TIME.as_secs()
-        ),
+    for failure in source.revoke_within(CLOSE_TIME).await {
+        tracing::warn!("the loaded MCP server {name}: {failure}");
     }
 }
 
+/// Closes `client` within [`CLOSE_TIME`]; what fails is logged, not said
+/// (the server is left either way).
 async fn close_quietly(client: &McpClient, name: &str) {
     match tokio::time::timeout(CLOSE_TIME, client.close()).await {
         Ok(Ok(())) => {}
@@ -284,7 +277,7 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
         .any(|k| k.remote.as_ref().is_some_and(|r| r.signed_in))
     {
         text.push_str(
-            "\nA server with `auth = \"oauth\"` is signed in through your browser each session, as it was here: its token is never kept.\n",
+            "\nA server with `auth = \"oauth\"` is signed in through your browser each session, as it was here: its token is never kept. agent.toml reads `auth` from a later yobuild: until then, the agent loads it through [extend].\n",
         );
     }
     let mut sets: Vec<&str> = Vec::new();
@@ -456,6 +449,8 @@ struct Lists {
     /// Every server and package kept this session, stopped ones too: never
     /// shrinks, and holds each before its tools are offered (one lock).
     kept: Vec<Kept>,
+    /// The sign-ins of servers taken out as stopped, not revoked yet.
+    signed_out: Vec<(String, Arc<super::oauth::Source>)>,
 }
 
 #[derive(Default)]
@@ -671,7 +666,20 @@ impl Loaded {
     /// (the generation moved then). `run`'s tick asks every 250 ms, so a
     /// server that dies while idle is said within about a second.
     pub fn stopped(&self) -> Vec<(String, String)> {
-        self.take_stopped(|at| at.elapsed() >= SETTLE)
+        let stopped = self.take_stopped(|at| at.elapsed() >= SETTLE);
+        // A stopped server's sign-in revoked: its tokens may still be good
+        // (its session expired, or its challenge changed).
+        let signed_out = std::mem::take(&mut locked(&self.0.lists).signed_out);
+        if !signed_out.is_empty() {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    for (name, source) in signed_out {
+                        revoke_quietly(&source, &name).await;
+                    }
+                });
+            }
+        }
+        stopped
     }
 
     /// At the session's end: every server seen gone, once the reasons of
@@ -701,13 +709,18 @@ impl Loaded {
         let mut lists = locked(&self.0.lists);
         self.look(&lists);
         let mut out = Vec::new();
+        let mut signed_out = Vec::new();
         lists.servers.retain(|s| match s.gone() {
             Some((at, why)) if say(at) => {
                 out.push((s.name.clone(), why));
+                if let Some(source) = &s.signed_in {
+                    signed_out.push((s.name.clone(), source.clone()));
+                }
                 false
             }
             _ => true,
         });
+        lists.signed_out.extend(signed_out);
         for (name, why) in &out {
             if let Some(k) = lists.kept.iter_mut().find(|k| &k.name == name) {
                 k.stopped = Some(why.clone());
@@ -719,8 +732,19 @@ impl Loaded {
     /// Stops every server (yoagent's stdio `close` kills it; a remote's
     /// sends DELETE), each within [`CLOSE_TIME`].
     pub async fn close(&self) {
-        let servers = std::mem::take(&mut locked(&self.0.lists).servers);
+        let (servers, signed_out) = {
+            let mut lists = locked(&self.0.lists);
+            (
+                std::mem::take(&mut lists.servers),
+                std::mem::take(&mut lists.signed_out),
+            )
+        };
         self.0.generation.fetch_add(1, Ordering::SeqCst);
+        // Those already stopped (found so at the end): revoked only.
+        for (name, source) in signed_out {
+            source.closing();
+            revoke_quietly(&source, &name).await;
+        }
         for server in servers {
             // Closed first, with no refresh for its `DELETE`; then its
             // sign-in's tokens revoked.
@@ -903,6 +927,9 @@ pub(crate) struct LoadPlugin {
     /// The sign-in's requests: `oauth::Net::checked()` when first needed,
     /// or a test's.
     net: Arc<std::sync::OnceLock<super::oauth::Net>>,
+    /// How long the sign-in question waits: `SIGN_IN_TIMEOUT`, or a
+    /// test's.
+    sign_in_timeout: Duration,
     /// What a pi or DSH package runs on; `None` in `check`, which loads
     /// nothing.
     plugins: Option<Plugins>,
@@ -974,6 +1001,7 @@ impl LoadPlugin {
             lookup: remote::environment(),
             phone: manifest.frontend.phone,
             net: Arc::default(),
+            sign_in_timeout: crate::frontend::session::SIGN_IN_TIMEOUT,
             plugins,
             state: Arc::default(),
         }

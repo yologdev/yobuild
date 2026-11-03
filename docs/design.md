@@ -5239,8 +5239,11 @@ a token, an account, or a way to look like a server the owner trusts.
      `DELETE` ending the session it was given) before stage 3 asks its
      optional headers and connects again with them, since a transport's
      headers are fixed when it is built;
-   - **anything else** (a 401 without a challenge, a 403): as stage 3
-     has it, refused.
+   - **anything else** (a 401 without a challenge whose server
+     publishes no sign-in, another scheme's, a 403): as stage 3 has it —
+     its optional headers asked when it lists any, else refused (built:
+     the refusal says what it was given, `load-remote-unlisted`,
+     `-key-refused` and `-forbidden` hints).
    A server whose registry entry lists a required header goes as stage 3
    has it, its header asked first; a 401 with a `Bearer` challenge to that
    connect goes to the sign-in too.

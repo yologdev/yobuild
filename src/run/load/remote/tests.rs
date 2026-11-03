@@ -306,6 +306,10 @@ struct Seen {
     questions: Vec<(String, String)>,
     notices: Vec<(NoticeLevel, String)>,
     withdrawn: usize,
+    /// Each sign-in question's link (`None`: phone mode).
+    links: Vec<Option<String>>,
+    /// A browser's sign-in failed (and cancelled it).
+    browser_failed: bool,
 }
 
 /// A frontend answering each question in turn with `answers` (`HOLD`:
@@ -328,15 +332,31 @@ fn answering(session: &Session, answers: Vec<Json>) -> Arc<Mutex<Seen>> {
                         other => (format!("{other:?}"), String::new()),
                     };
                     record.lock().unwrap().questions.push((title, message));
+                    if let UiRequest::SignIn { url, .. } = &request {
+                        record.lock().unwrap().links.push(url.clone());
+                    }
                     let value = answers.next().unwrap_or(Json::Null);
                     match (&request, value == BROWSER) {
                         // Signed in as a browser would: the start link, the
                         // sign-in page, back to yobuild's callback.
                         (UiRequest::SignIn { url: Some(url), .. }, true) => {
-                            let url = url.clone();
+                            let (url, session, record) =
+                                (url.clone(), session.clone(), record.clone());
                             tokio::spawn(async move {
-                                let back = to_callback(&url).await;
-                                browse(&back).await.unwrap();
+                                let browsed = tokio::spawn(async move {
+                                    let back = to_callback(&url).await;
+                                    browse(&back).await.unwrap();
+                                })
+                                .await;
+                                // A browser that failed cancels the sign-in:
+                                // the test fails at once, not at its timeout.
+                                if browsed.is_err() {
+                                    record.lock().unwrap().browser_failed = true;
+                                    session.send(ClientMessage::UiResponse {
+                                        id,
+                                        value: json!("cancel"),
+                                    });
+                                }
                             });
                         }
                         _ if value == HOLD => {}
@@ -419,7 +439,8 @@ fn loading_with(url: &str, headers: Vec<RemoteHeader>, answers: Vec<Json>, env: 
         dir.path(),
         None,
     )
-    .with_lookup(env);
+    .with_lookup(env)
+    .with_net(Net::loopback());
     Loading {
         load,
         loaded,
@@ -876,7 +897,7 @@ async fn a_remote_that_refuses_its_credential_is_said_so_and_the_key_hidden() {
     for (mode, said) in [
         (
             Mode::Unauthorized,
-            "io.x/docs refused yobuild's request (HTTP 401) and offers no sign-in: it needs a credential yobuild was not given",
+            "io.x/docs refused the credential it was sent (HTTP 401) and offers no sign-in",
         ),
         (
             Mode::Forbidden,
@@ -1046,9 +1067,21 @@ async fn a_calls_error_hides_the_key_and_a_tools_own_words_end_nothing() {
 /// `load_plugin` with the sign-in stub's MCP server as its one remote
 /// candidate (no header listed), signing in on this machine.
 fn signing_in(stub: &SignInStub, answers: Vec<Json>) -> Loading {
-    let mut l = loading_with(stub.server().as_str(), Vec::new(), answers, with_key());
-    l.load = l.load.with_net(Net::loopback());
-    l
+    signing_in_with(stub, Vec::new(), answers)
+}
+
+fn signing_in_with(stub: &SignInStub, headers: Vec<RemoteHeader>, answers: Vec<Json>) -> Loading {
+    loading_with(stub.server().as_str(), headers, answers, with_key_and_org())
+}
+
+/// The call's result, failing at once when the browser's sign-in did.
+async fn signed(l: &Loading) -> Result<ToolResult, ToolError> {
+    let result = l.call().await;
+    assert!(
+        !l.seen.lock().unwrap().browser_failed,
+        "the browser's sign-in failed"
+    );
+    result
 }
 
 /// The titles of the questions asked.
@@ -1172,7 +1205,11 @@ async fn a_sign_in_that_ends_marks_the_server_stopped() {
             .execute(json!({}), ToolContext::new("2", "docs__echo"))
             .await,
     );
-    assert!(called.contains(SIGN_IN_ENDED), "{called}");
+    // As the `signin-ended` hint's case quotes it (hints.rs).
+    assert_eq!(
+        called,
+        format!("MCP call failed: Transport error: the authorization source failed after HTTP 401 on 'tools/call': Transport error: {SIGN_IN_ENDED}")
+    );
     assert!(!called.contains(&refresh(1)), "{called}");
     // Seen gone at the first look, said once settled (`run`'s tick looks
     // every 250 ms).
@@ -1238,12 +1275,8 @@ async fn a_sign_in_refused_before_anyone_is_asked_tells_the_agent_fixed_words() 
     assert_eq!(titles(&l), [CONNECT]);
     let notices = l.notices_until(|(_, m)| m.contains("was refused")).await;
     assert!(
-        notices
-            .iter()
-            .any(|(level, m)| *level == NoticeLevel::Warning
-                && m.contains(
-                    "io.x/docs's sign-in: its sign-in (127.0.0.1) offers no PKCE (`S256`)"
-                )),
+        notices.iter().any(|(level, m)| *level == NoticeLevel::Error
+            && m.contains("io.x/docs's sign-in: its sign-in (127.0.0.1) offers no PKCE (`S256`)")),
         "{notices:?}"
     );
     assert!(!l.blocked());
@@ -1299,4 +1332,288 @@ async fn a_remote_answering_with_no_credential_is_closed_before_its_optional_hea
         .position(|r| r.starts_with(&format!("POST initialize auth=Bearer {SECRET} ")))
         .unwrap();
     assert!(first < closed && closed < again, "{requests:?}");
+}
+
+#[tokio::test]
+async fn a_sign_in_asked_at_tools_list_or_with_no_challenge_is_signed_in_too() {
+    for (at_list, challenge) in [(true, true), (false, false)] {
+        let stub = SignInStub::start().await;
+        stub.set(|c| {
+            c.challenge_at_list = at_list;
+            c.challenge_header = challenge;
+        });
+        let l = signing_in(
+            &stub,
+            vec![
+                json!("Allow"),
+                json!("Allow"),
+                json!(BROWSER),
+                json!("Allow"),
+            ],
+        );
+        let said = text(&signed(&l).await);
+        assert!(
+            said.starts_with("Connected to io.x/docs"),
+            "{at_list} {challenge}: {said}"
+        );
+        let seen = stub.seen();
+        if at_list {
+            assert_eq!(seen[0], "POST initialize auth=- session=-");
+            assert!(
+                seen.contains(&"POST tools/list auth=- session=s-1".to_owned()),
+                "{seen:?}"
+            );
+        }
+        l.loaded.close().await;
+    }
+}
+
+#[tokio::test]
+async fn a_required_header_is_asked_first_and_sent_beside_the_sign_in() {
+    let stub = SignInStub::start().await;
+    let l = signing_in_with(
+        &stub,
+        vec![authorization(true), org()],
+        vec![
+            json!("Allow"),
+            json!(KEY),
+            json!(ORG),
+            json!("Allow"),
+            json!(BROWSER),
+            json!("Allow"),
+        ],
+    );
+    let result = signed(&l).await;
+    assert!(result.is_ok(), "{}", text(&result));
+    let questions = l.questions();
+    // The refused `Authorization` said where the sign-in is asked.
+    assert!(
+        questions[3].1.starts_with(&format!(
+            "Its `Authorization` header from `${{{KEY}}}`, refused: signed in instead."
+        )),
+        "{}",
+        questions[3].1
+    );
+    assert!(questions[5]
+        .1
+        .contains("Not sent: its `Authorization` header from"));
+    let seen = stub.seen();
+    // The key and the workspace first; then the token beside the
+    // workspace, never the key.
+    assert!(
+        seen.contains(&format!(
+            "POST initialize auth=Bearer {SECRET} session=- org={ORG_VALUE}"
+        )),
+        "{seen:?}"
+    );
+    assert!(
+        seen.contains(&format!(
+            "POST tools/list auth=Bearer {} session=s-1 org={ORG_VALUE}",
+            access(1)
+        )),
+        "{seen:?}"
+    );
+    let notices = l.notices_until(|(_, m)| m.contains("connected to")).await;
+    let kept = notices
+        .iter()
+        .find(|(_, m)| m.contains("connected to"))
+        .unwrap();
+    assert!(
+        kept.1
+            .contains(&format!("headers = {{ X-Org = \"${{{ORG}}}\" }}"))
+            && kept.1.contains("auth = \"oauth\""),
+        "{}",
+        kept.1
+    );
+    l.loaded.close().await;
+}
+
+#[tokio::test]
+async fn a_signed_in_server_not_kept_is_closed_and_revoked() {
+    let stub = SignInStub::start().await;
+    let l = signing_in(
+        &stub,
+        vec![
+            json!("Allow"),
+            json!("Allow"),
+            json!(BROWSER),
+            json!("Block"),
+        ],
+    );
+    let said = text(&signed(&l).await);
+    assert!(said.contains("the owner blocked it (keep it)"), "{said}");
+    let seen = stub.seen();
+    let closed = seen.iter().position(|s| s.starts_with("DELETE")).unwrap();
+    assert_eq!(
+        seen[closed..],
+        [
+            format!("DELETE - auth=Bearer {} session=s-1", access(1)),
+            format!("revoke refresh_token {}", refresh(1)),
+            format!("revoke access_token {}", access(1)),
+        ]
+    );
+    // A revocation refused is said to the owner.
+    let stub = SignInStub::start().await;
+    stub.set(|c| c.revoke_status = 500);
+    let l = signing_in(
+        &stub,
+        vec![
+            json!("Allow"),
+            json!("Allow"),
+            json!(BROWSER),
+            json!("Block"),
+        ],
+    );
+    signed(&l).await.unwrap_err();
+    let notices = l
+        .notices_until(|(_, m)| m.contains("was not revoked"))
+        .await;
+    assert!(
+        notices.iter().any(|(level, m)| *level == NoticeLevel::Warning
+            && m == "The agent's plugin `docs`: the sign-in's refresh token was not revoked at 127.0.0.1 (HTTP 500): it may stay valid at its provider until it expires."),
+        "{notices:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_stopped_signed_in_server_is_revoked() {
+    let stub = SignInStub::start().await;
+    let l = signing_in(
+        &stub,
+        vec![
+            json!("Allow"),
+            json!("Allow"),
+            json!(BROWSER),
+            json!("Allow"),
+        ],
+    );
+    assert!(signed(&l).await.is_ok());
+    let tools = l.loaded.tools().await;
+    let echo = tools.iter().find(|t| t.name() == "docs__echo").unwrap();
+    // Its sign-in ended (a refresh refused): what it still holds is
+    // revoked once it is said stopped.
+    stub.set(|c| {
+        c.valid = "expired".into();
+        c.refresh_refused = true;
+    });
+    echo.execute(json!({}), ToolContext::new("2", "docs__echo"))
+        .await
+        .unwrap_err();
+    assert!(l.loaded.stopped().is_empty());
+    tokio::time::sleep(SETTLE + Duration::from_millis(100)).await;
+    assert_eq!(l.loaded.stopped().len(), 1);
+    let revoked = async {
+        while !stub
+            .seen()
+            .contains(&format!("revoke refresh_token {}", refresh(1)))
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), revoked)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_sign_in_timed_out_is_not_remembered_and_phone_mode_shows_no_link() {
+    let stub = SignInStub::start().await;
+    let mut l = signing_in(&stub, vec![json!("Allow"), json!("Allow"), json!(HOLD)]);
+    l.load.sign_in_timeout = Duration::from_millis(300);
+    l.load.phone = true;
+    let said = text(&l.call().await);
+    assert_eq!(
+        said,
+        "load_plugin refused it: io.x/docs: nobody signed in in time: it may be proposed again"
+    );
+    assert!(!l.blocked());
+    assert_eq!(l.seen.lock().unwrap().links, [None]);
+}
+
+#[tokio::test]
+async fn a_run_stopped_while_the_sign_in_is_looked_up_is_said() {
+    let stub = SignInStub::start().await;
+    stub.set(|c| c.slow_metadata = Duration::from_secs(5));
+    let l = signing_in(&stub, vec![json!("Allow")]);
+    let ctx = ToolContext::new("1", LoadPlugin::TOOL);
+    let cancel = ctx.cancel.clone();
+    let stopping = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        cancel.cancel();
+    };
+    let (result, _) = tokio::join!(
+        l.call_with(json!({ "package": "io.x/docs" }), ctx),
+        stopping
+    );
+    assert_eq!(
+        text(&result),
+        "load_plugin refused it: the run was stopped while its sign-in was looked up: it may be proposed again"
+    );
+}
+
+#[tokio::test]
+async fn a_sign_in_failing_after_it_was_allowed_is_an_error_in_fixed_words() {
+    let stub = SignInStub::start().await;
+    stub.set(|c| {
+        c.token_refusal = Some((
+            400,
+            json!({ "error": "invalid_grant", "error_description": "no" }).to_string(),
+        ))
+    });
+    let l = signing_in(&stub, vec![json!("Allow"), json!("Allow"), json!(BROWSER)]);
+    let said = text(&signed(&l).await);
+    assert_eq!(
+        said,
+        "load_plugin refused it: io.x/docs: the sign-in's token could not be had (the owner was told why)"
+    );
+    let notices = l.notices_until(|(_, m)| m.contains("was refused")).await;
+    assert!(
+        notices.iter().any(|(level, m)| *level == NoticeLevel::Error
+            && m.contains("refused it (HTTP 400: invalid_grant — no)")),
+        "{notices:?}"
+    );
+}
+
+#[tokio::test]
+async fn optional_headers_are_asked_when_a_server_lets_nothing_in_unsigned() {
+    // No sign-in published, no challenge: its optional key is asked.
+    let (url, seen) = stub(Mode::Unauthorized).await;
+    let l = loading(
+        &url,
+        vec![authorization(false)],
+        vec![json!("Allow"), json!(KEY)],
+    );
+    let said = text(&l.call().await);
+    assert!(
+        said.contains(
+            "io.x/docs refused the credential it was sent (HTTP 401) and offers no sign-in"
+        ),
+        "{said}"
+    );
+    assert_eq!(l.questions().len(), 2, "{:?}", l.questions());
+    let requests = seen.lock().unwrap().clone();
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.starts_with(&format!("POST initialize auth=Bearer {SECRET} "))),
+        "{requests:?}"
+    );
+    // A server that lists no header: the registry's gap said.
+    let (url, _) = stub(Mode::Unauthorized).await;
+    let l = loading(&url, Vec::new(), vec![json!("Allow")]);
+    let said = text(&l.call().await);
+    assert!(
+        said.contains(
+            "offers no sign-in: it needs a credential its registry entry lists no header for"
+        ),
+        "{said}"
+    );
+    // A 403 with nothing given.
+    let (url, _) = stub(Mode::Forbidden).await;
+    let l = loading(&url, Vec::new(), vec![json!("Allow")]);
+    let said = text(&l.call().await);
+    assert!(
+        said.contains("(HTTP 403): it does not let yobuild in without a credential"),
+        "{said}"
+    );
 }
