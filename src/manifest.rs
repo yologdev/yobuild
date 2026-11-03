@@ -52,6 +52,9 @@ pub struct Manifest {
     pub extend: Option<Extend>,
     pub dsh: Dsh,
     pub frontend: Frontend,
+    /// `[session]`: whether the session is saved for `--resume` (design
+    /// §15).
+    pub session: SessionSaving,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -838,6 +841,20 @@ pub struct Frontend {
     pub terminal: bool,
 }
 
+/// `[session]` (design §15): `save = false` keeps the session's
+/// conversation off the disk (and `--resume` is refused). Saved by default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionSaving {
+    pub save: bool,
+}
+
+impl Default for SessionSaving {
+    fn default() -> Self {
+        Self { save: true }
+    }
+}
+
 /// What is wrong with a manifest, and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -880,6 +897,8 @@ struct Raw {
     dsh: RawDsh,
     #[serde(default)]
     frontend: RawFrontend,
+    #[serde(default)]
+    session: RawSession,
 }
 
 #[derive(Deserialize)]
@@ -973,6 +992,23 @@ struct RawExtend {
 struct RawDsh {
     #[serde(default)]
     host_services: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSession {
+    #[serde(default = "saved")]
+    save: bool,
+}
+
+impl Default for RawSession {
+    fn default() -> Self {
+        Self { save: true }
+    }
+}
+
+fn saved() -> bool {
+    true
 }
 
 #[derive(Deserialize, Default)]
@@ -1246,6 +1282,9 @@ impl Manifest {
                 host_services: raw.dsh.host_services,
             },
             frontend,
+            session: SessionSaving {
+                save: raw.session.save,
+            },
         })
     }
 }

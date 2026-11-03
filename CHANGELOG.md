@@ -23,6 +23,16 @@ locks it again (commit the new lock).
     `Authorization` header goes beside it.
   - **Hints** for what you can act on: no PKCE, no registration, a
     sign-in on another site, cancelled, timed out, ended.
+- **Sessions survive a restart** (design §15). Every session is saved
+  under yobuild's home (`sessions/`, one per agent and folder, readable
+  by you only; nothing in the project) after each run, and `yobuild run
+  agent.toml --resume` continues it: the conversation, the open
+  `ask_owner` questions (asked again, with their numbers) and what the
+  session spent (`session_budget_usd` still holds). A run without
+  `--resume` starts a new conversation, which replaces the saved one
+  once its first run ends. `[session] save = false` keeps an agent's
+  conversations off the disk. A scripted reply may say what the
+  conversation must hold (`sees`). The DSH base did not change.
 - **yoagent 0.26.6** (by way of 0.26.4 and 0.26.5). Three more models
   with their real limits and prices: `openai/gpt-6.1-terra`,
   `zai/glm-5.3-flashx` and `qwen/qwen3.8-omni-flash`; Meta's

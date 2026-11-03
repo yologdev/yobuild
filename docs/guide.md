@@ -15,6 +15,7 @@ links there rather than repeating it.
 - [Plugins and servers](#plugins-and-servers)
 - [Checking an agent](#checking-an-agent)
 - [Running an agent](#running-an-agent)
+- [Resuming a session](#resuming-a-session)
 - [Scripted runs](#scripted-runs)
 - [What keeps an agent in bounds](#what-keeps-an-agent-in-bounds)
 - [When something fails](#when-something-fails)
@@ -140,7 +141,7 @@ web = true
 ```
 
 - **The tables:** `[agent]`, `[limits]`, one `[[plugin]]` or `[[mcp]]` per
-  part, `[builtins]`, `[frontend]` (and `[dsh]`). Every key is in the
+  part, `[builtins]`, `[frontend]` (and `[dsh]`, `[session]`). Every key is in the
   [manifest reference](../skill/yobuild/reference/manifest.md), with
   patterns and how to write the prompt.
 - **Read strictly:** an unknown key or a range instead of a version is
@@ -283,12 +284,45 @@ DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml --once "a task"   # one task
   - a question gets no answer, and a call the gate would ask about is
     refused;
   - the exit code is 0 only if the run completed.
+- **`--resume`** continues the conversation this agent last had in this
+  folder ([below](#resuming-a-session)).
 - **`--measure`** says each plugin's time and each runtime's memory after
   each run, when the agent has plugins.
 - **Each run's cost** is shown as it ends: on the page's last line for
   the run (` · $0.0034`), and under `--once` as a line on stderr
   (`Cost: $0.0034 (…)`). With `facts`, a notice says what changed in the
   folder's git repository.
+
+## Resuming a session
+
+Every session is saved as it goes, so stopping yobuild (Ctrl+C, a closed
+terminal, a crash) loses at most the run in progress. To go on where it
+was, run it again from the same folder with `--resume`:
+
+```sh
+DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml --resume
+DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml --resume --once "and now the tests"
+```
+
+- **What comes back:** the agent's conversation, its open `ask_owner`
+  questions (asked again, with their numbers), and what the session has
+  spent, so `session_budget_usd` still holds.
+- **What does not:** what the page showed before (it starts empty; the
+  agent remembers), the plugins the agent loaded through `[extend]` (it
+  may load them again), sign-ins (you sign in again), facts' snapshot and
+  the plugins' own state. A notice says which apply.
+- **One saved session per agent and folder**, under yobuild's home
+  (`~/.yobuild/sessions/`, or `$YOBUILD_HOME/sessions/`), readable by you
+  only. Nothing is written in the project. A run without `--resume`
+  starts a new conversation, which replaces the saved one once its first
+  run ends (it says so as it starts).
+- **Another model, or an edited `agent.toml`:** the session resumes, with
+  a warning; the prompt is the manifest's as it is now.
+- **To keep conversations off the disk**, put `[session] save = false` in
+  the manifest.
+
+The saved file holds the conversation as the model saw it: what a tool
+showed is in it.
 
 ## Scripted runs
 

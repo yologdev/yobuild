@@ -144,6 +144,21 @@ pub struct Driver {
     ending: Ending,
     commands: mpsc::UnboundedReceiver<Command>,
     accept_quit: bool,
+    /// Told each time the agent is between runs with its history changed.
+    settled: Option<OnSettled>,
+}
+
+/// [`Driver::on_settled`]'s callback.
+type OnSettled = Box<dyn FnMut(&Agent, Settled) + Send>;
+
+/// Why [`Driver::on_settled`]'s callback is called.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Settled {
+    /// A run ended (its `RunEnd` is broadcast right after).
+    Run,
+    /// A reset while idle forgot the conversation.
+    Reset,
 }
 
 impl Session {
@@ -177,6 +192,7 @@ impl Session {
             },
             commands: rx,
             accept_quit,
+            settled: None,
         };
         (session, driver)
     }
@@ -699,6 +715,15 @@ impl Drop for Ending {
 }
 
 impl Driver {
+    /// Call `settled` with the agent each time a run ends — before its
+    /// `RunEnd` is broadcast, so a frontend that saw it end can rely on what
+    /// `settled` did — and after a reset while idle (a session saved as it
+    /// goes, design §15).
+    pub fn on_settled(mut self, settled: impl FnMut(&Agent, Settled) + Send + 'static) -> Self {
+        self.settled = Some(Box::new(settled));
+        self
+    }
+
     /// Run the agent until a frontend quits (with `accept_quit`) or every
     /// [`Session`] handle is gone. A prompt sent during a run is queued and
     /// runs next; steering and follow-ups go to the run in progress (or start
@@ -731,6 +756,9 @@ impl Driver {
                         }
                         Some(Command::Client(ClientMessage::Reset)) => {
                             inner.reset(&mut agent);
+                            if let Some(settled) = &mut self.settled {
+                                settled(&agent, Settled::Reset);
+                            }
                             continue;
                         }
                         Some(Command::Client(ClientMessage::Quit)) if self.accept_quit => break,
@@ -959,6 +987,9 @@ impl Driver {
                 (None, true, None) => (RunOutcome::Completed, None),
             };
             let total_cost_usd = stats.total_cost_usd();
+            if let Some(settled) = &mut self.settled {
+                settled(&agent, Settled::Run);
+            }
             inner.running.store(false, Ordering::SeqCst);
             self.ending.open_run = None;
             inner.broadcast(ServerMessage::RunEnd {

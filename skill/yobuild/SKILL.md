@@ -144,7 +144,11 @@ my-agent/
      meanwhile;
    - **a phone**: with `phone = true`, yobuild prints a link on the local
      network: open it on a phone on the same Wi-Fi;
-   - **the terminal UI**: questions are answered in its editor.
+   - **the terminal UI**: questions are answered in its editor;
+   - **after a restart**: `yobuild run agent.toml --resume`, from the same
+     folder, continues the saved conversation (open questions asked
+     again, the session budget's spend kept); without it a new one starts
+     (`[session] save = false`: nothing is saved).
 
    Keep `agent.toml`, `agent.lock`, the prompt and the reply files
    together (commit them, in a repository).

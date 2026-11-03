@@ -211,6 +211,24 @@ fn the_smallest_manifest_has_the_gate_on() {
 }
 
 #[test]
+fn a_session_is_saved_unless_the_manifest_says_not() {
+    assert!(read(MINIMAL).unwrap().session.save);
+    assert!(read(&with("[session]\n")).unwrap().session.save);
+    assert!(
+        !read(&with("[session]\nsave = false\n"))
+            .unwrap()
+            .session
+            .save
+    );
+    assert_eq!(
+        error(&with("[session]\nsave = \"no\"\n")),
+        "5:8: invalid type: string \"no\", expected a boolean"
+    );
+    assert!(error(&with("[session]\nresume = true\n"))
+        .starts_with("5:1: unknown field `resume`, expected `save`"));
+}
+
+#[test]
 fn an_error_is_shown_with_its_file_line_and_column() {
     let e = read(&with("[builtins]\ngat = \"off\"\n")).unwrap_err();
     assert_eq!(

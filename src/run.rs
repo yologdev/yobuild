@@ -23,6 +23,7 @@ pub(crate) mod oauth;
 pub mod plugin_log;
 pub(crate) mod plugins;
 pub(crate) mod script;
+pub(crate) mod spend;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -35,7 +36,7 @@ use rutis::Ctx;
 use yoagent::context::ExecutionLimits;
 use yoagent::extension::Budget;
 use yoagent::mcp::{HttpTransport, McpClient, McpToolAdapter};
-use yoagent::provider::{prices, MockProvider, ModelConfig};
+use yoagent::provider::{prices, ModelConfig};
 use yoagent::tools::{
     BashTool, EditFileTool, ListFilesTool, ReadFileTool, SearchTool, WriteFileTool,
 };
@@ -184,6 +185,10 @@ pub struct Options {
     /// yobuild's home, where pinned packages are installed (under
     /// `plugins/`; `None`: `YOBUILD_HOME`, else `~/.yobuild`).
     pub home: Option<PathBuf>,
+    /// Continue the session saved for this agent in this folder (design
+    /// §15); else a new one, which replaces the saved one when its first
+    /// run ends.
+    pub resume: bool,
 }
 
 impl Options {
@@ -198,6 +203,7 @@ impl Options {
             layout: Layout::default(),
             locked: false,
             home: None,
+            resume: false,
         }
     }
 }
@@ -237,6 +243,8 @@ pub struct Ended {
     /// The servers the agent loaded this session and the `[[mcp]]` blocks
     /// that would keep them (`[extend]`), to write once the session ends.
     pub loaded: Option<String>,
+    /// The saved session's file, when it holds a conversation (design §15).
+    pub saved: Option<PathBuf>,
 }
 
 /// Runs the agent: until the frontend ends the session (terminal; an error
@@ -263,6 +271,13 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         ..options
     };
     let checked = check(&options, &cwd)?;
+    // Where the session saves, and the one it resumes (design §15).
+    let opened = crate::sessions::open(
+        &options.manifest,
+        &cwd,
+        options.home.as_deref(),
+        options.resume,
+    )?;
     let Options {
         manifest,
         task,
@@ -282,6 +297,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     let (session, driver) = Session::new(terminal || once);
     // The runs plugins' wakes may start (design §12): none under `--once`.
     session.allow_wakes(if once { 0 } else { host::IDLE_WAKES });
+    for (level, note) in &opened.notes {
+        tracing::info!("{note}");
+        session.notice(*level, note.clone());
+    }
     // What loads only in part: a warning every frontend gets (kept in the
     // session's history for those that come later; `--once` prints it).
     for note in &checked.notes {
@@ -439,6 +458,28 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // The agent's own tools: never freed through a plugin's offer.
     let own: HashSet<String> = tools.from.iter().map(|(name, _)| name.clone()).collect();
 
+    // What a saved session carries over: its spend, its open questions, its
+    // conversation (below).
+    let resumed = opened.resumed.as_ref();
+    let spend = checked.cost.clone().map(|cost| {
+        let before = resumed.and_then(|s| s.spent_usd).unwrap_or_default();
+        spend::SessionSpend::new(
+            cost,
+            manifest.limits.session_budget_usd,
+            before,
+            SESSION_BUDGET,
+        )
+    });
+    if let Some(saved) = resumed {
+        let sha = &opened.manifest_sha256;
+        let budget = manifest.limits.session_budget_usd;
+        for (level, note) in crate::sessions::resumed_notes(saved, &manifest, sha, budget) {
+            tracing::info!("{note}");
+            session.notice(level, note);
+        }
+        crate::sessions::ask_again(saved, ask_owner.as_ref(), &session);
+    }
+
     let prompt = checked.prompt.fill(&cwd, scratch.as_ref());
     let mut agent = match checked.provider {
         Some(provider) => Agent::from_provider(provider, checked.config.clone()),
@@ -447,6 +488,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         }
     }
     .with_system_prompt(prompt)
+    .with_messages(resumed.map(|s| s.messages.clone()).unwrap_or_default())
     // The session's id, for logs (a label is informational in yoagent).
     .with_run_label(session.id())
     .with_tools(tools.list)
@@ -517,8 +559,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         }
         agent = agent.with_extension(facts);
     }
-    if let Some(budget) = checked.session_budget {
-        agent = agent.with_extension(budget);
+    // The session budget, from what a saved session spent; with no
+    // `session_budget_usd` it only counts, for the next resume.
+    if let Some(spend) = &spend {
+        agent = agent.with_extension(spend.clone());
     }
     if let Some(budget) = checked.budget {
         agent = agent.with_extension(budget);
@@ -589,6 +633,30 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             session.send(ClientMessage::Prompt { text: task });
         }
     }
+    // Saved after each run and reset, and as it ends (design §15).
+    let saver = opened.store.map(|store| {
+        let model = format!(
+            "{}/{}",
+            manifest.agent.model.provider(),
+            manifest.agent.model.id()
+        );
+        let saver = crate::sessions::Saver::new(
+            store,
+            session.clone(),
+            &opened.manifest,
+            &opened.manifest_sha256,
+            &opened.cwd,
+            model,
+            ask_owner.clone(),
+            spend.clone(),
+            opened.resumed.as_ref(),
+        );
+        Arc::new(std::sync::Mutex::new(saver))
+    });
+    let driver = match &saver {
+        Some(saver) => driver.on_settled(crate::sessions::on_settled(saver)),
+        None => driver,
+    };
     let mut driving = tokio::spawn(driver.run(agent));
     // The manifest's servers that sign in: started once a frontend is
     // there to ask, ended with the session.
@@ -735,7 +803,15 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             eprintln!("yobuild: {said}");
         }
     }
+    let saved = saver.and_then(|saver| {
+        let mut saver = saver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        saver.ending(agent.as_ref());
+        (saver.saved() > 0).then(|| saver.file())
+    });
     let mut ended = finish(seen, watching, agent, once, interrupted).await;
+    ended.saved = saved;
     // However it ended: what was loaded, and how to keep it (nothing is
     // written). Each was said as a notice when it was kept; the binary
     // writes this once the runtimes have stopped (the terminal UI may hold
@@ -960,10 +1036,11 @@ struct Checked {
     key: Option<String>,
     config: ModelConfig,
     /// `--scripted`'s replies.
-    provider: Option<MockProvider>,
+    provider: Option<script::Scripted>,
     budget: Option<Budget>,
-    /// The same across the session's runs.
-    session_budget: Option<Budget>,
+    /// The model's price, which the session's spend is counted at (the
+    /// session budget's, `spend::SessionSpend`); `None` when it has none.
+    cost: Option<yoagent::provider::CostConfig>,
     prompt: Prompt,
     plan: plugins::Plan,
     servers: HashMap<String, Launch>,
@@ -1025,8 +1102,7 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
     let session_budget = manifest
         .limits
         .session_budget_usd
-        .and_then(|usd| Budget::for_model(usd, &config))
-        .map(|b| b.across_runs().with_name(SESSION_BUDGET));
+        .and_then(|usd| Budget::for_model(usd, &config));
     let unpriced: Vec<&str> = [
         (manifest.limits.budget_usd.is_some() && budget.is_none()).then_some("budget_usd"),
         (manifest.limits.session_budget_usd.is_some() && session_budget.is_none())
@@ -1062,12 +1138,13 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
         cwd,
     )?;
     notes.extend(more);
+    let cost = config.cost.clone();
     Ok(Checked {
         key,
         config,
         provider,
         budget,
-        session_budget,
+        cost,
         prompt,
         plan,
         servers,
@@ -1699,6 +1776,7 @@ async fn finish(
         notices: seen.notices,
         agent,
         loaded: None,
+        saved: None,
     }
 }
 
@@ -3200,6 +3278,7 @@ mod tests {
         assert_eq!(what_to_do_at_start("Auth error: x"), None);
     }
     use super::*;
+    use yoagent::provider::MockProvider;
 
     #[test]
     fn the_dsh_host_is_refused_only_without_its_provider_saying_what_it_waits_for() {

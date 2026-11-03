@@ -5,19 +5,42 @@
 //! paths, a reply file runs in any folder. A call's `expect` — a string or
 //! a list — is what its result must contain (design §11 "pi-lens in the
 //! gallery"): carried in the call's `provider_metadata` (the mock's ids
-//! repeat each turn) and checked by `run/expect.rs`.
+//! repeat each turn) and checked by `run/expect.rs`. A reply's `sees` — a
+//! string or a list — is what the conversation it answers must hold (design
+//! §15: a resumed run's model sees the saved one); else the run fails.
 
+use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use serde::Deserialize;
+use tokio::sync::mpsc;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
-use yoagent::provider::MockProvider;
+use yoagent::provider::{MockProvider, ProviderError, StreamConfig, StreamEvent, StreamProvider};
+use yoagent::{Content, Message};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, untagged)]
 enum Reply {
-    Text { text: String },
-    Tools { tools: Vec<Call> },
+    Text {
+        text: String,
+        #[serde(default, deserialize_with = "given")]
+        sees: Option<Expect>,
+    },
+    Tools {
+        tools: Vec<Call>,
+        #[serde(default, deserialize_with = "given")]
+        sees: Option<Expect>,
+    },
+}
+
+impl Reply {
+    fn sees(&self) -> Option<&Expect> {
+        match self {
+            Reply::Text { sees, .. } | Reply::Tools { sees, .. } => sees.as_ref(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -51,6 +74,69 @@ impl Expect {
             Expect::All(texts) => texts,
         }
     }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Expect::One(text) => text.is_empty(),
+            Expect::All(texts) => texts.is_empty() || texts.iter().any(String::is_empty),
+        }
+    }
+}
+
+/// The file's replies, each checked for what it `sees` before it is given.
+pub(crate) struct Scripted {
+    replies: MockProvider,
+    sees: Mutex<VecDeque<Option<Vec<String>>>>,
+    given: AtomicUsize,
+}
+
+/// What a request's messages hold, as a reply's `sees` looks at it: each
+/// text, each call's arguments as JSON.
+fn conversation(messages: &[Message]) -> String {
+    let mut text = String::new();
+    for message in messages {
+        let content = match message {
+            Message::User { content, .. }
+            | Message::Assistant { content, .. }
+            | Message::ToolResult { content, .. } => content,
+        };
+        for block in content {
+            match block {
+                Content::Text { text: t } => text.push_str(t),
+                Content::ToolCall { arguments, .. } => text.push_str(&arguments.to_string()),
+                _ => {}
+            }
+            text.push('\n');
+        }
+    }
+    text
+}
+
+#[async_trait::async_trait]
+impl StreamProvider for Scripted {
+    async fn stream(
+        &self,
+        config: StreamConfig,
+        tx: mpsc::UnboundedSender<StreamEvent>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Message, ProviderError> {
+        let n = self.given.fetch_add(1, Ordering::SeqCst) + 1;
+        let sees = self
+            .sees
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front()
+            .flatten();
+        if let Some(texts) = sees {
+            let held = conversation(&config.messages);
+            if let Some(missing) = texts.iter().find(|t| !held.contains(t.as_str())) {
+                return Err(ProviderError::Other(format!(
+                    "the reply file's reply {n} expected the conversation to hold `{missing}`: it does not"
+                )));
+            }
+        }
+        self.replies.stream(config, tx, cancel).await
+    }
 }
 
 /// Every `{cwd}` in `value`'s text replaced by `cwd`.
@@ -68,26 +154,26 @@ fn fill(value: serde_json::Value, cwd: &str) -> serde_json::Value {
 
 /// A provider that answers with the file's replies, in order, `{cwd}` in
 /// their arguments filled with the agent's folder.
-pub(crate) fn provider(path: &Path, cwd: &Path) -> Result<MockProvider, String> {
+pub(crate) fn provider(path: &Path, cwd: &Path) -> Result<Scripted, String> {
     let cwd = cwd.display().to_string();
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let replies: Vec<Reply> = serde_json::from_str(&text).map_err(|e| {
+    let mut replies: Vec<Reply> = serde_json::from_str(&text).map_err(|e| {
         format!(
-            "{}: {e} (a list of {{ \"text\": … }} or {{ \"tools\": [{{ \"name\", \"arguments\", \"expect\"? }}] }})",
+            "{}: {e} (a list of {{ \"text\": …, \"sees\"? }} or {{ \"tools\": [{{ \"name\", \"arguments\", \"expect\"? }}], \"sees\"? }})",
             path.display()
         )
     })?;
-    for reply in &replies {
-        if let Reply::Tools { tools } = reply {
+    for (i, reply) in replies.iter().enumerate() {
+        if reply.sees().is_some_and(Expect::is_empty) {
+            return Err(format!(
+                "{}: reply {}'s `sees` is empty: give the text the conversation must hold",
+                path.display(),
+                i + 1
+            ));
+        }
+        if let Reply::Tools { tools, .. } = reply {
             for call in tools {
-                let empty = match &call.expect {
-                    Some(Expect::One(text)) => text.is_empty(),
-                    Some(Expect::All(texts)) => {
-                        texts.is_empty() || texts.iter().any(String::is_empty)
-                    }
-                    None => false,
-                };
-                if empty {
+                if call.expect.as_ref().is_some_and(Expect::is_empty) {
                     return Err(format!(
                         "{}: `{}`'s `expect` is empty: give the text its result must contain",
                         path.display(),
@@ -97,12 +183,18 @@ pub(crate) fn provider(path: &Path, cwd: &Path) -> Result<MockProvider, String> 
             }
         }
     }
-    Ok(MockProvider::new(
+    let sees = replies
+        .iter_mut()
+        .map(|reply| match reply {
+            Reply::Text { sees, .. } | Reply::Tools { sees, .. } => sees.take().map(Expect::texts),
+        })
+        .collect();
+    let replies = MockProvider::new(
         replies
             .into_iter()
             .map(|reply| match reply {
-                Reply::Text { text } => MockResponse::Text(text),
-                Reply::Tools { tools } => MockResponse::ToolCalls(
+                Reply::Text { text, .. } => MockResponse::Text(text),
+                Reply::Tools { tools, .. } => MockResponse::ToolCalls(
                     tools
                         .into_iter()
                         .map(|c| MockToolCall {
@@ -116,7 +208,12 @@ pub(crate) fn provider(path: &Path, cwd: &Path) -> Result<MockProvider, String> 
                 ),
             })
             .collect(),
-    ))
+    );
+    Ok(Scripted {
+        replies,
+        sees: Mutex::new(sees),
+        given: AtomicUsize::new(0),
+    })
 }
 
 #[cfg(test)]
@@ -174,6 +271,60 @@ mod tests {
     }
 
     #[test]
+    fn a_replys_sees_is_one_text_or_several_and_never_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("r.json");
+        let read = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            provider(&file, Path::new("/w")).map(|_| ())
+        };
+        for good in [
+            r#"[{ "text": "a", "sees": "x" }]"#,
+            r#"[{ "tools": [{ "name": "a" }], "sees": ["x", "y"] }]"#,
+        ] {
+            assert!(read(good).is_ok(), "{good}");
+        }
+        for (bad, says) in [
+            (
+                r#"[{ "text": "a", "sees": "" }]"#,
+                "reply 1's `sees` is empty",
+            ),
+            (
+                r#"[{ "text": "a" }, { "text": "b", "sees": [] }]"#,
+                "reply 2's `sees` is empty",
+            ),
+            (r#"[{ "text": "a", "sees": null }]"#, "a list of"),
+            (r#"[{ "text": "a", "see": "x" }]"#, "a list of"),
+        ] {
+            let e = read(bad).unwrap_err();
+            assert!(e.contains(says), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn what_a_reply_sees_is_each_text_and_each_calls_arguments() {
+        let messages = [
+            Message::user("the task"),
+            Message::assistant(
+                vec![Content::tool_call(
+                    "1",
+                    "ask_owner",
+                    serde_json::json!({ "question": "Q?" }),
+                )],
+                yoagent::StopReason::ToolUse,
+                "m",
+                "p",
+                yoagent::Usage::default(),
+            ),
+        ];
+        let held = conversation(&messages);
+        assert!(
+            held.contains("the task") && held.contains(r#""question":"Q?""#),
+            "{held}"
+        );
+    }
+
+    #[test]
     fn a_calls_expect_is_one_text_or_several_and_never_empty() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("r.json");
@@ -217,7 +368,7 @@ mod tests {
             assert!(e.contains(says), "{bad}: {e}");
         }
         // Carried in the call's metadata.
-        let Reply::Tools { tools } = serde_json::from_str::<Reply>(
+        let Reply::Tools { tools, .. } = serde_json::from_str::<Reply>(
             r#"{ "tools": [{ "name": "a", "expect": ["x", "y"] }] }"#,
         )
         .unwrap() else {

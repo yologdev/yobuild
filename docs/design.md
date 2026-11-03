@@ -1329,7 +1329,7 @@ whatever wraps them.
 | report | `[Extension failed: report] the answer was still not accepted after 3 continues` | `Error` | the last answer never named every required section (checked anywhere in it, any case; the prompt already asks for them) | a model that follows the prompt better; fewer, plainer section names (`report = ["Done", "Next"]`); or remove `report`. Scripted: the last reply must name them |
 | limits | `[Agent stopped: Max turns reached (50/50)]` (also `Max tokens reached`, `Max duration reached`) | `Stopped` | the run hit its limit — yoagent's defaults (50 turns, 1M tokens, 10 min) when `[limits]` sets none | send "continue": a new run, with fresh limits (not under `--once`, which ends after one run); or raise `max_turns`/`max_tokens`/`max_minutes` |
 | budget | `[Agent stopped: budget of $1.00 spent ($1.0012)]` | `Stopped` | the run's `budget_usd` | as limits: each run has its own |
-| session budget | `[Agent stopped: session budget of $2.00 spent (…)]` | `Stopped` | all the session's runs together | "continue" stops at once (the session's total stays spent); restart — which starts a new conversation: the history lives in the process — or raise `session_budget_usd` |
+| session budget | `[Agent stopped: session budget of $2.00 spent (…)]` | `Stopped` | all the session's runs together | "continue" stops at once (the session's total stays spent); restart without `--resume` — a new conversation: a resumed one keeps its spend (§15) — or raise `session_budget_usd` |
 | loop | `[Agent stopped: repeated tool call — X was called repeatedly with identical arguments after being asked to change approach.]` | `Stopped` | the agent called one tool with the same arguments over and over | change the prompt, or what the tool returns; send "continue" |
 | ask_owner | a question open (with `facts`: `; 1 question(s) waiting on you`) | the facts line | the owner has not answered | answer in the page or the terminal: during a run the answer steers it; when idle it starts the next run |
 | facts | `Stopped early: <reason>.` | a Warning Notice | any `Stopped` run (it had no report) | `What to do: …` follows it (#33: facts no longer gives the fix itself) |
@@ -5575,3 +5575,172 @@ account, so CI could run only the stub, which the tests already do.
    waiting `ENDING` (16 s) and saying one it cut short, a stopped
    server said as agent.toml's, a 401's words naming agent.toml);
 7. the skill, the guide, `CLAUDE.md` and the roadmap.
+
+## 15. Sessions that survive a restart (M6; proposed 2026-11-03)
+
+**Why.** A session's conversation lives in the process. Ctrl+C, a closed
+terminal, a crash or a laptop put away for the night ends it, and the
+next `yobuild run` starts an agent that remembers nothing: what it read,
+what it decided, the questions it left with the owner. An agent you keep
+(M6) must be able to go on where it was.
+
+**What is decided.**
+
+1. **Every session is saved; resuming is asked for.** `yobuild run
+   agent.toml --resume` continues the saved session; a plain `yobuild
+   run` starts a new conversation, as before. Saving needs no flag: the
+   session a crash ends is the one most worth resuming, and nobody passes
+   a flag before a crash. An agent whose conversations should never reach
+   the disk says so in its manifest, `[session] save = false`; then
+   `--resume` is refused ("agent.toml's `[session] save = false`: no
+   session is saved to resume") and nothing is written.
+2. **One saved session per agent and folder.** The agent is its manifest
+   (canonical path); the folder is the one it works in (the process's,
+   canonical). The same `agent.toml` run in two projects keeps two
+   sessions; a copy of it elsewhere is another agent.
+3. **Kept under yobuild's home, never in the project.**
+   `<home>/sessions/<agent name>-<16 hex>/session.json`, the hex the first
+   16 of a sha256 over the manifest's and the folder's canonical paths;
+   `<home>` is `install::home()` (`YOBUILD_HOME`, else `~/.yobuild`). The
+   folder is made 0700 and the file 0600 (the conversation holds what the
+   agent read). A project folder may be a repository others see: nothing
+   is written there unasked.
+4. **Written after each run, whole.** The driver calls back
+   (`Driver::on_settled`) after each run ends, before its
+   `runEnd` reaches the frontends (a frontend that saw a run end can rely
+   on it being saved); after a reset; and as the session ends (the driver
+   returning the agent). A temp file in the same folder, then a rename: a
+   crash mid-write leaves the last whole one. A run that Ctrl+C, a crash
+   or a kill cuts short is lost: what is saved is the session as it was
+   when the run before it ended (the driver owns the agent while it runs,
+   and yoagent hands a run's messages back only when its loop returns).
+5. **A new session replaces the saved one when its first run ends**, not
+   when it starts: opening the page and closing it again loses nothing.
+   Said as it starts (Info): "A session of this agent in this folder was
+   saved <time> (<N> messages): this new session replaces it when its
+   first run ends; `--resume` continues it instead."
+6. **What is saved** (JSON, `version` 1):
+   - `manifest`, `cwd`: the canonical paths it is keyed by, for a person
+     reading the folder;
+   - `manifestSha256`: of the manifest's text, to say it changed;
+   - `model`: `provider/id` as the manifest names it;
+   - `saved`: when, `YYYY-MM-DDTHH:MM:SSZ`;
+   - `messages`: the agent's history, yoagent's `AgentMessage` as serde
+     writes it (yoagent 0.26.6: `Message` and `CustomMessage` derive
+     `Serialize`/`Deserialize` and skip no field — what
+     `Agent::save_messages` writes), given back with `Agent::with_messages`;
+   - `spentUsd`: what the session has spent, as its session budget counts
+     it (`null` for a model with no price: a scripted run);
+   - `questions`: `{ next, open: [{ n, question, why, options }] }`, the
+     `ask_owner` questions not answered, and the last number used.
+   Never saved: the API key (it is not in the history), an OAuth token
+   (the sign-ins hide every token as `${oauth}` in what a tool returns),
+   a filled credential (a server's results and errors show it as its
+   `${NAME}`, `run::Hiding`). What a tool printed is in the conversation
+   as the model saw it — a key a `bash` call printed too: the file's mode
+   is what keeps it the owner's.
+7. **The session budget holds across a resume.** yoagent's `Budget` keeps
+   its total private, with no way to start from a sum (asking yoagent for
+   one was not needed: a wrapper does it). `run/spend.rs`'s `SessionSpend`
+   holds yoagent's `Budget` across runs with no limit, counting exactly
+   as before; it adds what was spent before the resume and stops a turn
+   when the sum reaches `session_budget_usd`, in yoagent's words
+   ("session budget of $1.00 spent ($1.0012)"), so the hint for a spent
+   session budget still matches. With no `session_budget_usd` it only
+   counts (for the next resume). Said on resume (Info): "This session has
+   spent $0.4312 so far (its budget: $1.00)." A session saved with its
+   budget spent stops at the resumed run's first request, as a run in the
+   same process would.
+8. **Open questions are asked again, with their numbers.** Each open
+   `ask_owner` question is put to the frontends again as the session
+   starts, `#N` kept, so an answer reaches the agent as `[Owner's answer
+   to #N] …`, matching the "Asked the owner as #N" in its history; the
+   next question is numbered after the saved ones. A question is open in
+   the file until it is answered, skipped or withdrawn by a reset: one
+   still open as the session ends (nobody answered, or `--once`) is saved
+   open. Said (Info), one per question: "Asked again: #2 Which branch
+   should I use?".
+9. **What does not come back**, said as one Info notice on resume, naming
+   only what applies: "Resumed the session saved <time> (<N> messages).
+   Not resumed: what the page showed before; the plugins the agent loaded
+   (it may load them again); the sign-ins (each signs in again); facts'
+   snapshot (taken again at this session's first run); the plugins' own
+   state." The page and the terminal UI start empty — the history a
+   frontend is replayed is the process's (§5) — while the agent has its
+   whole conversation.
+10. **Another model or a changed manifest: resumed, with a Warning.**
+    yoagent's history is the same for every provider, so a conversation
+    can go on with another model: "This session was saved with
+    deepseek/deepseek-flash; it goes on with openai/gpt-5." A changed
+    manifest (another sha256): "agent.toml changed since this session was
+    saved: it goes on under agent.toml as it is now." The system prompt
+    is not saved (yoagent keeps it apart from the history): the one the
+    manifest gives now applies.
+11. **Refused**, before anything starts, the file left as it is:
+    - a file that does not read: "cannot resume <path>: <why>: move it
+      aside, or run without --resume (a new session then replaces it when
+      its first run ends)", where a file saved by a later yobuild's why
+      is "saved by a later yobuild (session format 2; this one reads 1)";
+    - another yobuild running this agent in this folder (it holds the
+      folder's `session.lock`, an advisory `flock` kept for its session):
+      "another yobuild runs this agent in this folder: stop it first, or
+      run without --resume (this session is then not saved)". A run
+      without `--resume` starts unsaved then, with a Warning: "Another
+      yobuild runs this agent in this folder: this session is not saved
+      (that one is)."
+    `--resume` with nothing saved starts a new session, said (Info): "No
+    session of this agent in this folder was saved: a new one starts."
+    A script that always passes `--resume` works the first time too.
+12. **A failed save is a Warning, not the session's end**: "This session
+    could not be saved: <why>." — once a session per text. A home that
+    cannot be found (no `HOME`, no `YOBUILD_HOME`): the session runs
+    unsaved, said (Warning) as it starts.
+13. **`--once --resume`** continues a conversation unattended: its task is
+    the next run's prompt. Open questions are asked again with nobody
+    there; they stay open and are saved open again.
+14. **A reset is saved**: the page's Reset forgets the conversation, and
+    a later `--resume` starts from that. Its spend is kept: a reset does
+    not refund the session budget in the process either.
+15. **Plugins and wakes are as in any session**: a resumed session is new
+    to its plugins (they start again); a plugin's wake starts no run
+    before the owner's first one (§12), resumed or not.
+
+**Said at the end.** When the session was saved with a conversation in
+it, `yobuild run` adds on stderr, after the run's own lines: "yobuild: the
+conversation is saved: `yobuild run <manifest> --resume` continues it".
+
+**A reply file's `sees`** (`run/script.rs`). The scripted model ignored
+what it was sent, so no test could show that a resumed run's model sees
+the earlier conversation. A reply may now carry `sees`, a text or a list
+as a call's `expect`, that must appear in what the model is sent (each
+message's text, a call's arguments as JSON, a result's text). A reply
+whose `sees` is missing fails the run: "the reply file's reply 2 expected
+the conversation to hold `X`: it does not". Useful beyond resuming: a
+reply can check that the agent got an owner's answer or a plugin's wake.
+
+**Tests.**
+- Unit (`src/sessions.rs`): the key (another folder, another key), a save
+  read back (messages, spend, questions), the modes (0700, 0600), no temp
+  file left, a later version and a broken file refused in their words,
+  the lock held by another refused, `save = false`.
+- Unit (`run/spend.rs`): stopping at the sum of the saved and the counted
+  spend, in yoagent's words; counting with no limit.
+- `builtins_test` (a real session and driver): a question asked again
+  keeps its number, its answer steers as `#N` and the next is numbered
+  after it; the open list as an answer and a reset change it; a question
+  open as the session closes kept.
+- Unit (`run/script.rs`): `sees` read strictly.
+- `cli_test`: a scripted `--once` run, then `--resume --once` whose
+  scripted model must see the first run's task (`sees`), and the same
+  reply file without `--resume` failing; an `ask_owner` question left
+  open, asked again on resume with its number, the next one `#2`;
+  `[session] save = false` refusing `--resume` and writing nothing.
+
+**Not done (later).** Several saved sessions per agent and folder, and
+choosing one (`--resume <name>`); a page that shows the earlier
+conversation (the history replayed as events, with its tool cards);
+saving the run in progress (yoagent would have to hand back a cut-short
+loop's messages); encrypting the file at rest.
+
+**Order of PRs.** One: this design, the code, the tests, the guide, the
+skill, `CLAUDE.md`.

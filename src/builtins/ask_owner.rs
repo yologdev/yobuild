@@ -1,7 +1,8 @@
 //! `ask_owner`: questions that do not block the run.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{json, Value as Json};
 use yoagent::{AgentTool, Content, ToolContext, ToolError, ToolResult};
@@ -129,7 +130,8 @@ impl Drop for Open {
 /// - `[Owner skipped #N] <question>` (a blank answer)
 ///
 /// A question withdrawn by a reset, or still open when the session ends,
-/// sends nothing.
+/// sends nothing. One still open as the session ends stays among
+/// [`AskOwner::open`] (a saved session asks it again, design §15).
 ///
 /// Make one per session and clone it: clones share the numbering and the
 /// count, so the tool and a host service do not both ask a "#1".
@@ -138,6 +140,8 @@ pub struct AskOwner {
     session: Session,
     next: Arc<AtomicU64>,
     open: Arc<AtomicUsize>,
+    /// The questions not answered yet, by number.
+    asked: Arc<Mutex<BTreeMap<u64, Question>>>,
 }
 
 impl AskOwner {
@@ -155,7 +159,32 @@ impl AskOwner {
             session,
             next: Arc::default(),
             open: Arc::default(),
+            asked: Arc::default(),
         }
+    }
+
+    /// The questions not answered, skipped or withdrawn yet, by number:
+    /// those still open as the session ended among them.
+    pub fn open(&self) -> Vec<(u64, Question)> {
+        let asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
+        asked.iter().map(|(n, q)| (*n, q.clone())).collect()
+    }
+
+    /// The last number given (0 before any question).
+    pub fn last_number(&self) -> u64 {
+        self.next.load(Ordering::Relaxed)
+    }
+
+    /// Asks `question` again as `#n` (a resumed session's, design §15),
+    /// numbering the next ones after it.
+    pub fn ask_again(&self, n: u64, question: Question) {
+        self.continue_after(n);
+        self.ask_as(n, question);
+    }
+
+    /// Numbers the next questions after `last` (a resumed session's last).
+    pub fn continue_after(&self, last: u64) {
+        self.next.fetch_max(last, Ordering::Relaxed);
     }
 
     /// The count of questions not answered yet.
@@ -167,6 +196,16 @@ impl AskOwner {
     /// be called within a Tokio runtime (the answer is awaited on a task).
     pub fn ask(&self, question: Question) -> u64 {
         let n = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        self.ask_as(n, question);
+        n
+    }
+
+    fn ask_as(&self, n: u64, question: Question) {
+        self.asked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(n, question.clone());
+        let asked = self.asked.clone();
         let Question {
             question,
             why,
@@ -194,6 +233,14 @@ impl AskOwner {
         tokio::spawn(async move {
             let answer = session.ask_later(request).await;
             drop(open);
+            // Still open for a later session when this one ended unanswered;
+            // else answered, or withdrawn (a reset).
+            if answer.is_some() || !session.is_closed() {
+                asked
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&n);
+            }
             // Withdrawn (a reset forgot the conversation it belongs to) or the
             // session ended: nothing to tell the agent.
             let Some(answer) = answer else { return };
@@ -212,7 +259,6 @@ impl AskOwner {
                 );
             }
         });
-        n
     }
 }
 

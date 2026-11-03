@@ -122,6 +122,32 @@ async fn finished(run: tokio::task::JoinHandle<Agent>) -> Agent {
     tokio::time::timeout(WAIT, run).await.unwrap().unwrap()
 }
 
+/// What a saved session relies on (design §15): the callback sees each run's
+/// messages before that run's `RunEnd` reaches a frontend, and an idle
+/// reset's empty history.
+#[tokio::test]
+async fn on_settled_is_told_before_a_runs_end_and_after_a_reset() {
+    use yobuild::frontend::Settled;
+    let (session, driver) = Session::new(true);
+    let told = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let driver = driver.on_settled({
+        let told = told.clone();
+        move |agent: &Agent, why: Settled| told.lock().unwrap().push((agent.messages().len(), why))
+    });
+    let mut owner = session.connect();
+    let run = tokio::spawn(driver.run(agent(vec![MockResponse::Text("hi".into())])));
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    until_run_end(&mut owner).await;
+    assert_eq!(*told.lock().unwrap(), [(2, Settled::Run)]);
+    session.send(ClientMessage::Reset);
+    session.send(ClientMessage::Quit);
+    finished(run).await;
+    assert_eq!(
+        *told.lock().unwrap(),
+        [(2, Settled::Run), (0, Settled::Reset)]
+    );
+}
+
 #[tokio::test]
 async fn every_frontend_gets_hello_the_run_and_its_end() {
     let (session, driver) = Session::new(true);

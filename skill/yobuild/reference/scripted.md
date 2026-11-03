@@ -26,7 +26,20 @@ or a list of texts that must all appear):
 { "tools": [{ "name": "files__read_text_file", "arguments": { "path": "{cwd}/notes.md" }, "expect": "groceries" }] }
 ```
 
-Nothing else: an unknown key is an error, and an empty `expect` too.
+A reply may say what the conversation it answers must hold, with `sees`
+(a text or a list, on a `text` or a `tools` reply): each message's text,
+a call's arguments as JSON, a result's text. Missing, the run fails
+(``Error: the reply file's reply 2 expected the conversation to hold
+`X`: it does not``). It shows that a resumed session's model sees the
+earlier one (`yobuild run agent.toml --resume`), or that an answer
+arrived:
+
+```json
+{ "sees": "Remember the word heliotrope", "text": "The word was heliotrope." }
+```
+
+Nothing else: an unknown key is an error, and an empty `expect` or
+`sees` too.
 `{cwd}` in an argument's text is
 the folder the run starts in, as in the prompt — for a tool that takes
 absolute paths (`"{cwd}/src/index.ts"`), so the reply file runs in any
@@ -93,7 +106,9 @@ found. Nobody is there to answer:
   asked, whole, then the answer on a line of its own:
   `[Owner's answer to #1] <the question>⏎<the answer>`. Unlike a real
   answer, this run has none of the first run's history: the model sees
-  only that message.
+  only that message — unless it runs with `--resume`, which continues
+  the session the first run saved (its open question asked again, as
+  `#1`, and left open), so the model sees both runs (`sees` can check it).
 - A tool that runs and fails (a search engine down, a rate limit, a page
   not found) prints `✗ <its own error>` — not `Tool call denied: …`. That
   is the tool's day, not the manifest: run again, or script around it.
@@ -116,6 +131,11 @@ found. Nobody is there to answer:
   `✓` with a false "clean": a tool that cannot do its work may say it
   found nothing. Give it a file with a known problem and look for that
   finding — on the page, or in a live run's answer — before relying on it.
+
+Each run saves its session under yobuild's home (one per agent and
+folder): the next run there says, as an Info, that one was saved and that
+it starts a new one (`--resume` would continue it), and stderr ends with
+`yobuild: the conversation is saved: …`.
 
 ## The traps
 

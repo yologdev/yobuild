@@ -1,7 +1,7 @@
 //! `yobuild`: run an agent from its manifest, or check it.
 //!
 //! ```text
-//! yobuild run <agent.toml> [--scripted FILE] [--once] [--measure] [--web ADDR] [--locked] [--] [TASK…]
+//! yobuild run <agent.toml> [--scripted FILE] [--once] [--measure] [--web ADDR] [--locked] [--resume] [--] [TASK…]
 //! yobuild check <agent.toml> [--locked] [--json]
 //! yobuild new <folder> [--from <agent>]
 //! yobuild new --list
@@ -144,6 +144,7 @@ fn start() -> Result<ExitCode, BoxError> {
             "--once" => options.once = true,
             "--measure" => options.measure = true,
             "--locked" => options.locked = true,
+            "--resume" => options.resume = true,
             "--web" => {
                 let addr = args.next().ok_or(USAGE)?;
                 options.addr = Some(addr.parse().map_err(|e| format!("--web {addr}: {e}"))?);
@@ -215,6 +216,12 @@ fn start() -> Result<ExitCode, BoxError> {
                 // UI among them) have stopped: how to keep it.
                 if let Some(loaded) = &ended.loaded {
                     eprintln!("{loaded}");
+                }
+                if ended.saved.is_some() {
+                    eprintln!(
+                        "yobuild: the conversation is saved: `yobuild run {} --resume` continues it",
+                        path.display()
+                    );
                 }
                 match ended.outcome {
                     Some(RunOutcome::Completed) | None => ExitCode::SUCCESS,
