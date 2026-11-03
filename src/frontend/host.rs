@@ -593,24 +593,28 @@ pub struct PluginHostBuilder {
 }
 
 /// What every runtime's environment loses ([`PluginHostBuilder::withhold`],
-/// [`PluginHostBuilder::inherit`]): kept by the host, so a runtime added
+/// [`PluginHostBuilder::inherit`]) and what confines it
+/// ([`PluginHostBuilder::sandbox`]): kept by the host, so a runtime added
 /// while it runs ([`PluginHost::add_runtime`]) starts as the others did.
 #[derive(Clone, Default)]
 struct Launch {
     withhold: Vec<OsString>,
     inherit: Option<Inherit>,
+    sandbox: Option<Arc<crate::sandbox::Sandbox>>,
 }
 
 impl Launch {
     /// How to start the runtime `name` on `dir`: `env` set on top of what
     /// it inherits, and what neither `keep` (names, or prefixes ending in
-    /// `*`) nor `env` keeps taken out.
+    /// `*`) nor `env` keeps taken out; `confined` by the sandbox, when there
+    /// is one.
     fn launcher(
         &self,
         name: &str,
         dir: &Path,
         env: &[(&OsString, &OsString)],
         keep: &[&OsString],
+        confined: bool,
     ) -> Result<Launcher, BoxError> {
         // Kept for this runtime: an entry of `keep`, or set by its launch
         // (`env -u` removes a name whoever set it).
@@ -631,7 +635,14 @@ impl Launch {
             ),
             |launcher, (key, value)| launcher.env(key, value),
         );
-        Ok(without(launcher, &withheld).map_err(|e| format!("runtime `{name}`: {e}"))?)
+        let mut launcher =
+            without(launcher, &withheld).map_err(|e| format!("runtime `{name}`: {e}"))?;
+        if let Some(sandbox) = self.sandbox.as_ref().filter(|_| confined) {
+            let program = std::mem::take(&mut launcher.program);
+            let args = std::mem::take(&mut launcher.args);
+            (launcher.program, launcher.args) = sandbox.wrap(program, args);
+        }
+        Ok(launcher)
     }
 
     /// What [`PluginHostBuilder::inherit`] takes out of a runtime's
@@ -722,6 +733,15 @@ impl PluginHostBuilder {
         self
     }
 
+    /// Start every runtime confined by `sandbox` (design §17): its command
+    /// — `env -u …` and rutis's — wrapped in the sandbox's. Not the
+    /// [`terminal`](Self::terminal) runtime, which runs yobuild's own
+    /// terminal UI; a runtime added while the host runs is confined too.
+    pub fn sandbox(mut self, sandbox: Arc<crate::sandbox::Sandbox>) -> Self {
+        self.launch.sandbox = Some(sandbox);
+        self
+    }
+
     /// A host service plugins may inject (`yoagent`, `frontend`, `ui`, …).
     pub fn share(mut self, service: impl Into<String>) -> Self {
         self.shared.push(service.into());
@@ -797,7 +817,12 @@ impl PluginHostBuilder {
                 .filter(|(r, _)| r == name)
                 .map(|(_, key)| key)
                 .collect();
-            launchers.push((name, dir, self.launch.launcher(name, dir, &env, &keep)?));
+            let confined = self.terminal.as_ref() != Some(name);
+            launchers.push((
+                name,
+                dir,
+                self.launch.launcher(name, dir, &env, &keep, confined)?,
+            ));
         }
         // A row naming no runtime runs on the first one.
         let first = self.runtimes.first().map(|(name, _)| name.as_str());
@@ -1298,7 +1323,7 @@ impl PluginHost {
             )
             .into());
         }
-        let launcher = self.launch.launcher(&name, &dir, &[], &[])?;
+        let launcher = self.launch.launcher(&name, &dir, &[], &[], true)?;
         let catalog = added_catalog(shared, &self.shared, &self.local);
         let runtime = SpawnPlugin::new(&name, launcher, dir.join("package.json"));
         let (handle, processes) = (runtime.handle(), runtime.processes());

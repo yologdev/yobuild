@@ -625,7 +625,7 @@ impl LoadPlugin {
                     false => Ok(Taken::LeftOff(None)),
                 };
             }
-            let secret = match credential(answer, &self.keys, &*self.lookup) {
+            let secret = match credential(answer, &self.keys.keys, &*self.lookup) {
                 Ok(secret) => secret,
                 Err(problem) => {
                     why = Some(problem);

@@ -38,6 +38,24 @@ locks it again (commit the new lock).
   did: a value from `${NAME}` in its URL or headers, and a sign-in's
   token, echoed back in a result's text is shown as `${NAME}` (or
   `${oauth}`), so neither the model nor a saved session sees it.
+- **An opt-in sandbox** (design §17). With a `[sandbox]` table, every
+  plugin runtime (not the terminal UI's), every stdio MCP server — one
+  the agent loads too — and the helpers that read a package start
+  confined: bubblewrap on Linux (`bwrap` must be on `PATH`; on Ubuntu
+  23.10 and later unprivileged user namespaces must be allowed),
+  `sandbox-exec` on macOS. They write only to the agent's folder (not its
+  repository's `.git`), temp and the folders `write` names; they cannot
+  read `~/.ssh`, `~/.gnupg`, the cloud, GitHub and AI tools' logins,
+  `~/.npmrc`, `~/.netrc`, the keychains, the shell profiles and
+  histories, nor what `hide` names; they cannot reach the terminal; the
+  network stays open. The agent's own tools are not confined, what is not
+  hidden can still be read and sent, and what a plugin writes in the
+  agent's folder runs unconfined when your tools or a build use it. The
+  facts' git now runs no fsmonitor, hook, external diff or textconv a
+  repository's config names. `check` says which entries are confined, and with the
+  sandbox checks pi and DSH plugins together only (`--json` report
+  version 5: `confined` on each entry, `agent.sandbox`). Without the
+  table nothing changes.
 - **A run log, and unattended runs** (design §16). Every run is logged
   as it ends, under `~/.yobuild/logs/` (yours alone): when, its task,
   how it ended, its cost, the tools it called, the facts, the

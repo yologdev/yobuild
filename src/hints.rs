@@ -334,6 +334,18 @@ pub(crate) const HINTS: &[Hint] = &[
         fix: "install `env` at /usr/bin/env, which a minimal image may lack (and /bin/sh, needed for a program whose path holds `=`): yobuild starts every plugin runtime and stdio server through it, with the kept environment",
     },
     Hint {
+        id: "no-bwrap",
+        scope: Scope::Start,
+        pattern: "[sandbox] needs bubblewrap (`bwrap`)",
+        fix: "install bubblewrap (`apt install bubblewrap`, `dnf install bubblewrap`, `pacman -S bubblewrap`): `[sandbox]` confines plugins through it on Linux; or leave out [sandbox], and they run unconfined",
+    },
+    Hint {
+        id: "sandbox-cannot-start",
+        scope: Scope::Start,
+        pattern: crate::sandbox::CANNOT_START,
+        fix: "on Linux bubblewrap needs unprivileged user namespaces, which Ubuntu 23.10 and later restrict through AppArmor: give `bwrap` an AppArmor profile that allows them (a file in /etc/apparmor.d naming /usr/bin/bwrap with `userns,`; Ubuntu ships `bwrap-userns-restrict` as an example), or, for the whole system, `sysctl kernel.apparmor_restrict_unprivileged_userns=0`; a container must allow them too; on macOS sandbox-exec cannot start inside another sandbox (run yobuild outside it); or leave out [sandbox], and plugins run unconfined",
+    },
+    Hint {
         id: "mcp-no-tools",
         scope: Scope::Start,
         pattern: "the server lists no tools",
@@ -634,6 +646,17 @@ mod tests {
                     crate::frontend::host::no_env(std::path::Path::new("node"), "/usr/bin/env")
                 ),
                 "no-env",
+            ),
+            // `sandbox::Tool::here`'s on Linux, and `Sandbox::new`'s trial
+            // (bubblewrap's own words after it).
+            (Scope::Start, crate::sandbox::NO_BWRAP.into(), "no-bwrap"),
+            (
+                Scope::Start,
+                format!(
+                    "{}bwrap exit status: 1: bwrap: setting up uid map: Permission denied",
+                    crate::sandbox::CANNOT_START
+                ),
+                "sandbox-cannot-start",
             ),
             (Scope::Start, "mcp files: the server lists no tools".into(), "mcp-no-tools"),
             (

@@ -964,8 +964,12 @@ pub(crate) struct LoadPlugin {
     cwd: PathBuf,
     /// The credentials set here, taken out of its environment.
     withheld: Arc<Vec<String>>,
-    /// The credentials yoagent reads (the helper scripts' environment).
-    keys: Arc<Vec<String>>,
+    /// What the helper scripts run with: the credentials yoagent reads and
+    /// the sandbox.
+    keys: Arc<super::plugins::Helpers>,
+    /// What confines a server it starts and a package's runtime (that
+    /// through the host), with `[sandbox]` (design §17).
+    sandbox: Option<Arc<crate::sandbox::Sandbox>>,
     /// How a remote's credential is read from the environment.
     lookup: remote::Lookup,
     /// Each credential taken, `(variable, value)`: the run log hides them.
@@ -1046,7 +1050,11 @@ impl LoadPlugin {
             home,
             cwd: cwd.to_path_buf(),
             withheld: Arc::new(super::withheld(manifest)),
-            keys: Arc::new(manifest.key_variables()),
+            keys: Arc::new(super::plugins::Helpers {
+                keys: manifest.key_variables(),
+                sandbox: None,
+            }),
+            sandbox: None,
             lookup: remote::environment(),
             credentials_taken: Default::default(),
             phone: manifest.frontend.phone,
@@ -1055,6 +1063,18 @@ impl LoadPlugin {
             plugins,
             state: Arc::default(),
         }
+    }
+
+    /// What it starts confined by `sandbox` (design §17): the servers, and
+    /// the helpers reading a package (a package's runtime is the host's to
+    /// confine).
+    pub fn with_sandbox(mut self, sandbox: Option<Arc<crate::sandbox::Sandbox>>) -> Self {
+        self.keys = Arc::new(super::plugins::Helpers {
+            keys: self.keys.keys.clone(),
+            sandbox: sandbox.clone(),
+        });
+        self.sandbox = sandbox;
+        self
     }
 
     /// Where each credential it takes is put, for the run log to hide.
@@ -1493,8 +1513,11 @@ impl LoadPlugin {
         let did_not = |e: &dyn std::fmt::Display| {
             failed(format!("{package} did not start: {}", said(&e.to_string())))
         };
-        let (program, argv, env) =
-            super::without(bin, args, &HashMap::new(), &self.withheld).map_err(|e| did_not(&e))?;
+        let (program, argv, env) = super::confined(
+            self.sandbox.as_deref(),
+            super::without(bin, args, &HashMap::new(), &self.withheld),
+        )
+        .map_err(|e| did_not(&e))?;
         let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
         // `stdio_options`: a process group of its own.
         let inner = yoagent::mcp::StdioTransport::with_options(

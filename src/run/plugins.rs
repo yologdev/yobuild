@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{json, Value as Json};
 
@@ -13,6 +14,7 @@ use super::Layout;
 use crate::frontend::host::{rows_from_file, rows_from_json, Row};
 use crate::install::{Installed, Set};
 use crate::manifest::{ExecGrant, Manifest, Package, Plugin, PluginKind, Runtime, Source};
+use crate::sandbox::Sandbox;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -72,6 +74,9 @@ impl Plan {
 #[derive(Debug, Default)]
 pub(crate) struct Plan {
     pub rows: Vec<Row>,
+    /// What confines every runtime but the terminal UI's, with `[sandbox]`
+    /// (design §17).
+    pub sandbox: Option<Arc<Sandbox>>,
     /// Start the `pi` runtime (`adapters/pi`).
     pub pi: bool,
     /// Start the `dsh` runtime, in `dsh_dir`.
@@ -181,6 +186,15 @@ pub(crate) fn in_set(sets: &Installed, set: Set, package: &Package) -> Result<Pa
     installed(package, &dir.join("node_modules"), &fix)
 }
 
+/// What the helper scripts run with: the credentials yoagent reads (taken
+/// out off unix) and, with `[sandbox]`, the sandbox (`inspect-package.mjs`
+/// imports a package's code).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Helpers {
+    pub keys: Vec<String>,
+    pub sandbox: Option<Arc<Sandbox>>,
+}
+
 /// `command`'s environment: on unix only what of `vars` (this process's)
 /// the kept set holds; elsewhere every variable but `keys`.
 fn kept_only(
@@ -208,16 +222,23 @@ const HELPER_TIME: std::time::Duration = std::time::Duration::from_secs(60);
 /// Runs one of the adapters' helper scripts with Node; its JSON output, an
 /// object (its stderr goes to the debug log). `inspect-package.mjs`
 /// imports a plugin's code, so on unix it gets only the kept environment
-/// (design §12 "Step 5"; no grants); elsewhere `keys` (the credentials
-/// yoagent reads) are removed — Node on Windows needs variables the kept
-/// set does not hold.
-fn node_json(script: &Path, args: &[&Path], keys: &[String]) -> Result<Helper, BoxError> {
+/// (design §12 "Step 5"; no grants), confined by the sandbox when there is
+/// one (design §17); elsewhere `keys` (the credentials yoagent reads) are
+/// removed — Node on Windows needs variables the kept set does not hold.
+fn node_json(script: &Path, args: &[&Path], helpers: &Helpers) -> Result<Helper, BoxError> {
     use std::io::Read;
     let failed = |e: &dyn std::fmt::Display| format!("node {}: {e}", script.display());
-    let mut command = std::process::Command::new("node");
-    kept_only(&mut command, std::env::vars_os(), keys);
+    let args: Vec<std::ffi::OsString> = std::iter::once(script.as_os_str())
+        .chain(args.iter().map(|a| a.as_os_str()))
+        .map(Into::into)
+        .collect();
+    let (program, args) = match &helpers.sandbox {
+        Some(sandbox) => sandbox.wrap("node".into(), args),
+        None => ("node".into(), args),
+    };
+    let mut command = std::process::Command::new(program);
+    kept_only(&mut command, std::env::vars_os(), &helpers.keys);
     let mut child = command
-        .arg(script)
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -362,10 +383,15 @@ pub(crate) fn plan(
     sets: &Installed,
     cwd: &Path,
     lookup: &dyn Fn(&str) -> Option<String>,
+    sandbox: Option<Arc<Sandbox>>,
 ) -> Result<Plan, BoxError> {
     let suffix = uuid::Uuid::new_v4().simple().to_string();
-    let keys = manifest.key_variables();
+    let keys = Helpers {
+        keys: manifest.key_variables(),
+        sandbox: sandbox.clone(),
+    };
     let mut plan = Plan {
+        sandbox,
         pi_handler: format!("pi-extensions-{suffix}"),
         dsh_handler: format!("dsh-tools-{suffix}"),
         dsh_dir: sets
@@ -619,7 +645,7 @@ fn pi_extensions(
     sets: &Installed,
     plugin: &Plugin,
     source: &Source,
-    keys: &[String],
+    keys: &Helpers,
 ) -> Result<PiFound, BoxError> {
     let dir = match source {
         Source::Package(p) => in_set(sets, Set::Pi, p)?,
@@ -652,7 +678,7 @@ pub(crate) fn pi_package(
     adapters: &Path,
     dir: &Path,
     who: &str,
-    keys: &[String],
+    keys: &Helpers,
 ) -> Result<PiFound, BoxError> {
     let found = node_json(&adapters.join("pi/resolve-package.mjs"), &[dir], keys)?;
     let extensions = found.list("extensions")?.clone();
@@ -716,7 +742,7 @@ fn dsh_rows_of(
     plugin: &Plugin,
     source: &Source,
     config: Option<serde_json::Map<String, Json>>,
-    keys: &[String],
+    keys: &Helpers,
 ) -> Result<(Vec<Row>, Vec<String>), BoxError> {
     let id = row_id(&plugin.name);
     let p = match source {
@@ -752,7 +778,7 @@ pub(crate) fn dsh_package(
     dir: &Path,
     id: &str,
     config: Option<serde_json::Map<String, Json>>,
-    keys: &[String],
+    keys: &Helpers,
 ) -> Result<(Vec<Row>, Vec<String>), BoxError> {
     let inspected = node_json(
         &adapters.join("dsh/inspect-package.mjs"),
@@ -958,6 +984,7 @@ mod tests {
             &Installed::default(),
             dir,
             &|_: &str| None,
+            None,
         )
         .map_err(|e| e.to_string())
     }
@@ -1161,6 +1188,7 @@ mod tests {
             &Installed::with(Set::Dsh, set.path()),
             dir.path(),
             &|_: &str| None,
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -1679,9 +1707,12 @@ mod tests {
         .unwrap();
         // On unix no name to drop is needed: only the kept set gets there.
         // Elsewhere only the names given are removed.
-        let keys: Vec<String> = match cfg!(unix) {
-            true => Vec::new(),
-            false => vec!["CARGO_PKG_NAME".to_owned()],
+        let keys = Helpers {
+            keys: match cfg!(unix) {
+                true => Vec::new(),
+                false => vec!["CARGO_PKG_NAME".to_owned()],
+            },
+            sandbox: None,
         };
         let found = node_json(&script, &[], &keys).unwrap();
         assert_eq!(found.field("name").unwrap(), "unset");
