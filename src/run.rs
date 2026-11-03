@@ -270,7 +270,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         manifest: options.manifest.with_builtins(&options.layout.frontend)?,
         ..options
     };
-    let checked = check(&options, &cwd)?;
+    // The sandbox first, raced against Ctrl+C: its trial may take a while.
+    let sandbox = stops.until(sandbox_of(&options.manifest, &cwd)).await?;
+    let checked = check(&options, &cwd, sandbox)?;
     // Where the session saves, and the one it resumes (design §15).
     let opened = crate::sessions::open(
         &options.manifest,
@@ -1051,7 +1053,23 @@ struct Checked {
     installed: install::Installed,
 }
 
-fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
+/// The sandbox `[sandbox]` asks for (design §17), made and tried before
+/// anything is installed or started; `None` without the table.
+pub(crate) async fn sandbox_of(
+    manifest: &Manifest,
+    cwd: &Path,
+) -> Result<Option<Arc<crate::sandbox::Sandbox>>, BoxError> {
+    Ok(match &manifest.sandbox {
+        Some(settings) => Some(Arc::new(crate::sandbox::Sandbox::new(settings, cwd).await?)),
+        None => None,
+    })
+}
+
+fn check(
+    options: &Options,
+    cwd: &Path,
+    sandbox: Option<Arc<crate::sandbox::Sandbox>>,
+) -> Result<Checked, BoxError> {
     let manifest = &options.manifest;
     if options.once && options.task.as_deref().is_none_or(|t| t.trim().is_empty()) {
         return Err("a once run needs a task".into());
@@ -1138,6 +1156,7 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
         options.home.as_deref(),
         options.locked,
         cwd,
+        sandbox,
     )?;
     notes.extend(more);
     let cost = config.cost.clone();
@@ -1357,6 +1376,7 @@ fn prepare(
     home: Option<&Path>,
     locked: bool,
     cwd: &Path,
+    sandbox: Option<Arc<crate::sandbox::Sandbox>>,
 ) -> Result<Prepared, BoxError> {
     let lookup = |name: &str| std::env::var(name).ok();
     // The MCP registry only for an agent that finds MCP servers, stdio or
@@ -1368,16 +1388,9 @@ fn prepare(
         None => None,
     };
     let mut notes = Vec::new();
-    // The sandbox (design §17) first: refused here when it cannot start,
-    // before anything is installed or started.
-    let sandbox = match &manifest.sandbox {
-        Some(settings) => {
-            let sandbox = crate::sandbox::Sandbox::new(settings, cwd)?;
-            notes.extend(sandbox.notes().iter().cloned());
-            Some(Arc::new(sandbox))
-        }
-        None => None,
-    };
+    if let Some(sandbox) = &sandbox {
+        notes.extend(sandbox.notes().iter().cloned());
+    }
     // Nothing judging calls is allowed (an agent in a sandbox), but said.
     if manifest.builtins.gate == GateMode::Off && !manifest.plugins.iter().any(|p| p.policy) {
         notes.push(

@@ -72,6 +72,7 @@ min_age_days = 7                      # 0 to 365: newer versions are not taken
 
 [session]
 save = true                           # the default: saved for `yobuild run --resume`; false: nothing written
+
 [sandbox]                             # optional: plugins and stdio servers confined (Linux: bwrap; macOS: sandbox-exec)
 write = ["~/.cache/acme"]             # more folders they may write (./, ../, / or ~/)
 hide  = ["~/.config/acme"]            # more they may not read
@@ -329,19 +330,23 @@ defaults). Every plugin runtime (not the terminal UI's), every stdio MCP
 server (a loaded one too) and the helpers that read a package start
 confined — on Linux through bubblewrap (`bwrap` on `PATH`), on macOS
 through `sandbox-exec`; elsewhere refused. They write only to the agent's
-folder (where `yobuild run` starts), the temp folders and what `write`
-adds; they read everything but the usual places of secrets under the
-home folder (`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`,
-`~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.config/gh`, `~/.netrc`,
-`~/.git-credentials`, `~/.npmrc`, `~/.pypirc`, the cargo and password
-stores, the keychains, the shell profiles) and what `hide` adds; the
-network stays open. Each path begins `./` or `../` (from the manifest's
+folder (where `yobuild run` starts; not its repository's `.git`), the
+temp folders and what `write` adds; they read everything but the usual
+places of secrets under the home folder (`~/.ssh`, `~/.gnupg`, `~/.aws`,
+`~/.azure`, `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.config/gh`,
+`~/.netrc`, `~/.git-credentials`, `~/.npmrc`, `~/.pypirc`, the cargo,
+Vault, Terraform and password stores, the keychains, Claude Code's,
+Codex's and pi's logins, the shell profiles and histories) and what
+`hide` adds; they cannot reach the terminal; the network stays open. Each path begins `./` or `../` (from the manifest's
 folder), `/` or `~/`; not the whole home folder or `/`. Refused at start:
 an agent run in the home folder itself, a `write` folder that is not
 there or holds the home folder, a `hide` holding the agent's folder.
 Not confined: the agent's own tools (`bash` included; the gate judges
 them). It does not stop a plugin reading what is not hidden (another
-project, the folder's `.env`) and sending it. A plugin that writes
+project, the folder's `.env`) and sending it, and what a plugin writes
+in the agent's folder (sources, build files, `node_modules`) runs
+unconfined when the person's tools or the builds the gate allows use it:
+say so to the person. A plugin that writes
 outside — its own cache or data folder under the home folder — fails in
 its own words ("EPERM", "read-only file system"): give that folder in
 `write`, after telling the person. With it, `check` does not probe pi

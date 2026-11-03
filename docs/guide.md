@@ -378,10 +378,12 @@ and the agent's tools reach your files. What yobuild does:
   still readable, unless the sandbox hides them.
 - **The sandbox**, on request: with a `[sandbox]` table, every plugin
   runtime and stdio MCP server starts confined (bubblewrap on Linux,
-  `sandbox-exec` on macOS). They write only to the agent's folder, temp
-  and the folders `write` names, and cannot read your SSH keys, GnuPG,
-  cloud and GitHub logins, `~/.npmrc`, `~/.netrc`, the keychains and
-  your shell profiles, nor what `hide` names; the network stays open.
+  `sandbox-exec` on macOS). They write only to the agent's folder (not
+  its repository's `.git`), temp and the folders `write` names; they
+  cannot read your SSH keys, GnuPG, cloud, GitHub and AI tools' logins,
+  `~/.npmrc`, `~/.netrc`, the keychains, your shell profiles and
+  histories, nor what `hide` names; they cannot reach your terminal; the
+  network stays open.
 
   ```toml
   [sandbox]
@@ -391,8 +393,12 @@ and the agent's tools reach your files. What yobuild does:
 
   It does not confine the agent's own tools (the gate judges those), and
   it does not stop a plugin reading what is not hidden and sending it.
+  What a plugin writes in the agent's folder — sources, build files,
+  `node_modules` — runs unconfined when your tools or the builds and tests
+  the gate allows use it: look at what changed before you build.
   On Linux install bubblewrap first (`apt install bubblewrap`); on
-  Ubuntu 23.10 and later it also needs
+  Ubuntu 23.10 and later it also needs unprivileged user namespaces
+  allowed for it: an AppArmor profile for `bwrap`, or
   `sysctl kernel.apparmor_restrict_unprivileged_userns=0`. `check` says
   which entries are confined.
 - **Budgets and limits**, per run and per session; a run that would spend

@@ -297,6 +297,8 @@ pub struct SandboxSaid {
     pub tool: String,
     /// The folders a confined process may write.
     pub write: Vec<String>,
+    /// The git folders it may not write, in a writable folder.
+    pub read_only: Vec<String>,
     /// What it may not read.
     pub hide: Vec<String>,
 }
@@ -307,6 +309,11 @@ impl From<&crate::sandbox::Sandbox> for SandboxSaid {
             tool: sandbox.tool().to_owned(),
             write: sandbox
                 .writable()
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+            read_only: sandbox
+                .read_only()
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect(),
@@ -539,13 +546,14 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     let manifest = manifest.with_builtins(&layout.frontend)?;
     // What `run` reads before anything starts, the key and budgets aside.
     Prompt::read(&manifest)?;
+    let sandbox = super::sandbox_of(&manifest, &cwd).await?;
     let Prepared {
         installed,
         plan,
         servers,
         sources,
         notes,
-    } = prepare(&manifest, &layout, home.as_deref(), locked, &cwd)?;
+    } = prepare(&manifest, &layout, home.as_deref(), locked, &cwd, sandbox)?;
     let gate_off = manifest.builtins.gate == GateMode::Off;
     let allowed_or_asks = |allowed: bool| match allowed {
         true => ToolKind::Allowed,

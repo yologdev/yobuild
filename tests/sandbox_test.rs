@@ -48,9 +48,23 @@ fn required(dir: &Path, setup: &str) -> bool {
 }
 
 /// What each plugin and the server found, one JSON line per load: writing
-/// in the agent's folder, in the folder `write` names and outside both, and
-/// reading the hidden file.
-const SEEN: [&str; 4] = ["inside", "allowed", "outside", "secret"];
+/// in the agent's folder, in the folder `write` names, outside both, and in
+/// the agent's folder's repository's config; reading the file `hide` names
+/// and a key in the home folder's `.ssh`.
+const SEEN: [&str; 6] = ["inside", "allowed", "outside", "git", "hidden", "ssh"];
+
+/// The version of `name` the DSH base pins (its adapter's lock).
+fn dsh_base_version(name: &str) -> String {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("adapters/dsh/node_modules")
+        .join(name)
+        .join("package.json");
+    let text = std::fs::read_to_string(file).unwrap();
+    serde_json::from_str::<serde_json::Value>(&text).unwrap()["version"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
 
 #[test]
 fn plugins_and_servers_write_only_where_the_sandbox_lets_them() {
@@ -73,28 +87,45 @@ fn plugins_and_servers_write_only_where_the_sandbox_lets_them() {
         return;
     }
     // Not under the system's temp folder, which the sandbox lets them
-    // write: yobuild is given a temp folder of its own beside the others.
+    // write: yobuild is given a temp folder and a home folder of its own
+    // beside the others.
     let base = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let base: PathBuf = std::fs::canonicalize(base.path()).unwrap();
-    let [project, tmp, allowed, outside, secret] =
-        ["project", "tmp", "allowed", "outside", "secret"].map(|f| base.join(f));
-    for folder in [&project, &tmp, &allowed, &outside, &secret] {
+    let [project, tmp, allowed, outside, secret, home] =
+        ["project", "tmp", "allowed", "outside", "secret", "home"].map(|f| base.join(f));
+    for folder in [&project, &tmp, &allowed, &outside, &secret, &home] {
         std::fs::create_dir(folder).unwrap();
     }
     std::fs::write(secret.join("key.txt"), "sk-secret\n").unwrap();
+    // The home folder's secrets: an SSH key, and pi's login, which a pi
+    // extension running under yobuild does without.
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    std::fs::write(home.join(".ssh/id"), "key\n").unwrap();
+    std::fs::create_dir_all(home.join(".pi/agent")).unwrap();
+    std::fs::write(home.join(".pi/agent/auth.json"), "{}\n").unwrap();
+    // The agent's folder is a repository: its config is the owner's git's.
+    let git = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&project)
+        .status()
+        .unwrap();
+    assert!(git.success());
+    let config = std::fs::read_to_string(project.join(".git/config")).unwrap();
     let at = |p: &Path| p.display().to_string();
     // Each plugin's own lines, by its name: what writing and reading gave.
     let probe = |name: &str| {
         format!(
             "import {{ appendFileSync, writeFileSync, readFileSync }} from 'node:fs'\n\
-             const write = (p) => {{ try {{ writeFileSync(p, 'x'); return 'written' }} catch (e) {{ return e.code }} }}\n\
+             const write = (p, f = writeFileSync) => {{ try {{ f(p, 'x'); return 'written' }} catch (e) {{ return e.code }} }}\n\
              const read = (p) => {{ try {{ readFileSync(p, 'utf8'); return 'read' }} catch (e) {{ return e.code }} }}\n\
-             const seen = () => appendFileSync({seen:?}, JSON.stringify([write({inside:?}), write({allowed:?}), write({outside:?}), read({secret:?})]) + '\\n')\n",
+             const seen = () => appendFileSync({seen:?}, JSON.stringify([write({inside:?}), write({allowed:?}), write({outside:?}), write({git:?}, appendFileSync), read({secret:?}), read({ssh:?})]) + '\\n')\n",
             seen = at(&project.join(format!("{name}.seen"))),
             inside = at(&project.join(format!("{name}.in"))),
             allowed = at(&allowed.join(name)),
             outside = at(&outside.join(name)),
+            git = at(&project.join(".git/config")),
             secret = at(&secret.join("key.txt")),
+            ssh = at(&home.join(".ssh/id")),
         )
     };
     std::fs::write(
@@ -128,14 +159,16 @@ fn plugins_and_servers_write_only_where_the_sandbox_lets_them() {
         &server,
         format!(
             "#!/usr/bin/env bash\n\
-             w() {{ (echo x > \"$1\") 2>/dev/null && echo written || echo refused; }}\n\
+             w() {{ (echo x >> \"$1\") 2>/dev/null && echo written || echo refused; }}\n\
              r() {{ cat \"$1\" >/dev/null 2>&1 && echo read || echo refused; }}\n\
-             printf '[\"%s\",\"%s\",\"%s\",\"%s\"]\\n' \"$(w {inside:?})\" \"$(w {allowed:?})\" \"$(w {outside:?})\" \"$(r {secret:?})\" >> {seen:?}\n\
+             printf '[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]\\n' \"$(w {inside:?})\" \"$(w {allowed:?})\" \"$(w {outside:?})\" \"$(w {git:?})\" \"$(r {secret:?})\" \"$(r {ssh:?})\" >> {seen:?}\n\
              exec bash {FIXTURE}/server.sh\n",
             inside = at(&project.join("mcp.in")),
             allowed = at(&allowed.join("mcp")),
             outside = at(&outside.join("mcp")),
+            git = at(&project.join(".git/config")),
             secret = at(&secret.join("key.txt")),
+            ssh = at(&home.join(".ssh/id")),
             seen = at(&project.join("mcp.seen")),
         ),
     )
@@ -144,11 +177,11 @@ fn plugins_and_servers_write_only_where_the_sandbox_lets_them() {
     std::fs::write(
         project.join("agent.toml"),
         "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-flash\"\n\
-         [[plugin]]\npi = \"./pi.ts\"\n\
-         [[plugin]]\ndsh = \"./dsh.ts\"\n\
-         [[plugin]]\nname = \"plug\"\nrutis = \"./r/plug.ts\"\nruntime = \"node\"\n\
-         [[mcp]]\nname = \"server\"\nnpm = \"./server.sh\"\n\
-         [sandbox]\nwrite = [\"../allowed\"]\nhide = [\"../secret\"]\n",
+             [[plugin]]\npi = \"./pi.ts\"\n\
+             [[plugin]]\ndsh = \"./dsh.ts\"\n\
+             [[plugin]]\nname = \"plug\"\nrutis = \"./r/plug.ts\"\nruntime = \"node\"\n\
+             [[mcp]]\nname = \"server\"\nnpm = \"./server.sh\"\n\
+             [sandbox]\nwrite = [\"../allowed\"]\nhide = [\"../secret\"]\n",
     )
     .unwrap();
     std::fs::write(project.join("script.json"), r#"[{ "text": "done" }]"#).unwrap();
@@ -159,31 +192,35 @@ fn plugins_and_servers_write_only_where_the_sandbox_lets_them() {
         }
         command
             .env("YOBUILD_HOME", CACHE)
+            .env("HOME", &home)
             .env("TMPDIR", &tmp)
             .env_remove("RUST_LOG")
+            .env_remove("YOAGENT_DSH_HOME")
             .args(args)
             .current_dir(&project)
             .output()
             .unwrap()
     };
     // Each entry's lines, the file removed for the next command: written
-    // inside and where `write` says, refused elsewhere (a read-only file
-    // system, or the sandbox's refusal), the hidden file not read (not
-    // there in bubblewrap's empty folder, refused by sandbox-exec).
+    // inside and where `write` says; refused elsewhere and in the git folder
+    // (a read-only file system, or the sandbox's refusal); the hidden files
+    // not read (empty, or not there, under bubblewrap: an empty folder over
+    // a hidden one, `/dev/null` over a hidden file; refused by sandbox-exec).
     let lines = |name: &str, said: &str| -> usize {
         let file = project.join(format!("{name}.seen"));
         let read = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{name}: {e}\n{said}"));
         std::fs::remove_file(&file).unwrap();
         for line in read.lines() {
             let seen: Vec<String> = serde_json::from_str(line).unwrap();
-            let [inside, allowed, outside, secret] = <[String; 4]>::try_from(seen).unwrap();
+            let [inside, allowed, outside, git, hidden, ssh] =
+                <[String; 6]>::try_from(seen).unwrap();
             assert_eq!(
                 (inside.as_str(), allowed.as_str()),
                 ("written", "written"),
-                "{name}: {line}\n{said}"
+                "{name} {SEEN:?}: {line}\n{said}"
             );
             assert!(
-                outside != "written" && secret != "read",
+                outside != "written" && git != "written" && hidden != "read" && ssh != "read",
                 "{name} {SEEN:?}: {line}\n{said}"
             );
         }
@@ -198,6 +235,10 @@ fn plugins_and_servers_write_only_where_the_sandbox_lets_them() {
         assert_eq!(lines(name, &stderr), 1, "{name}");
     }
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(project.join(".git/config")).unwrap(),
+        config
+    );
     let tool = match cfg!(target_os = "macos") {
         true => "sandbox-exec",
         false => "bwrap",
@@ -212,18 +253,21 @@ fn plugins_and_servers_write_only_where_the_sandbox_lets_them() {
     let report: serde_json::Value =
         serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {stderr}"));
     assert_eq!(report["ok"], true, "{report}");
-    assert_eq!(report["agent"]["sandbox"]["tool"], tool, "{report}");
-    let write = report["agent"]["sandbox"]["write"].as_array().unwrap();
-    assert!(write.contains(&serde_json::json!(at(&project))), "{report}");
-    assert!(write.contains(&serde_json::json!(at(&allowed))), "{report}");
+    let sandbox = &report["agent"]["sandbox"];
+    assert_eq!(sandbox["tool"], tool, "{report}");
+    let has = |key: &str, path: &Path| {
+        sandbox[key]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(at(path)))
+    };
+    assert!(has("write", &project) && has("write", &allowed), "{report}");
+    assert!(!has("write", &outside), "{report}");
+    assert!(has("readOnly", &project.join(".git")), "{report}");
     assert!(
-        !write.contains(&serde_json::json!(at(&outside))),
+        has("hide", &secret) && has("hide", &home.join(".ssh")),
         "{report}"
     );
-    assert!(report["agent"]["sandbox"]["hide"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!(at(&secret))));
     for entry in report["entries"].as_array().unwrap() {
         assert_eq!(entry["confined"], true, "{entry}");
         let alone = !matches!(entry["ecosystem"].as_str(), Some("pi" | "dsh"));
@@ -235,6 +279,29 @@ fn plugins_and_servers_write_only_where_the_sandbox_lets_them() {
     }
     assert_eq!(lines("rutis", &stderr), 2);
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+
+    // A DSH package, pinned: the helper that reads its bundle starts
+    // confined too, and it loads and runs as it would unconfined.
+    let ask = "@deepseek-ai/dsh-tool-ask-user";
+    let questions = "@deepseek-ai/dsh-user-questions";
+    std::fs::write(
+        project.join("agent.toml"),
+        format!(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/deepseek-flash\"\n\
+             [[plugin]]\ndsh = \"{ask}@{}\"\n\
+             [[plugin]]\ndsh = \"{questions}@{}\"\n\
+             [sandbox]\n",
+            dsh_base_version(ask),
+            dsh_base_version(questions),
+        ),
+    )
+    .unwrap();
+    let out = yobuild(&[
+        "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(stderr.matches(&note).count(), 1, "{stderr}");
 
     // What would undo it is refused before anything starts.
     std::fs::write(

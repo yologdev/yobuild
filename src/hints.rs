@@ -343,7 +343,7 @@ pub(crate) const HINTS: &[Hint] = &[
         id: "sandbox-cannot-start",
         scope: Scope::Start,
         pattern: crate::sandbox::CANNOT_START,
-        fix: "on Linux bubblewrap needs unprivileged user namespaces: Ubuntu 23.10 and later restrict them through AppArmor (`sysctl kernel.apparmor_restrict_unprivileged_userns=0` lifts it, or an AppArmor profile for `bwrap`), and a container must allow them; on macOS sandbox-exec cannot start inside another sandbox (run yobuild outside it); or leave out [sandbox], and plugins run unconfined",
+        fix: "on Linux bubblewrap needs unprivileged user namespaces, which Ubuntu 23.10 and later restrict through AppArmor: give `bwrap` an AppArmor profile that allows them (a file in /etc/apparmor.d naming /usr/bin/bwrap with `userns,`; Ubuntu ships `bwrap-userns-restrict` as an example), or, for the whole system, `sysctl kernel.apparmor_restrict_unprivileged_userns=0`; a container must allow them too; on macOS sandbox-exec cannot start inside another sandbox (run yobuild outside it); or leave out [sandbox], and plugins run unconfined",
     },
     Hint {
         id: "mcp-no-tools",

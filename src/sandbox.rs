@@ -1,10 +1,11 @@
 //! The sandbox (design §17): with `[sandbox]` in a manifest, every plugin
 //! runtime but the terminal UI's, every stdio MCP server (a manifest's or
 //! one `load_plugin` starts) and the helper scripts that import a package's
-//! code start confined — they write only to the agent's folder, temp and
-//! what `[sandbox] write` adds, and read everything but the owner's secrets
-//! ([`HIDDEN`] and `[sandbox] hide`). The network stays open. On Linux
-//! through bubblewrap (`bwrap`), on macOS through `sandbox-exec`; elsewhere
+//! code start confined — they write only to the agent's folder (never its
+//! repository's git folder), temp and what `[sandbox] write` adds, read
+//! everything but the owner's secrets ([`HIDDEN`] and `[sandbox] hide`),
+//! and cannot reach the terminal. The network stays open. On Linux through
+//! bubblewrap (`bwrap`), on macOS through `sandbox-exec`; elsewhere
 //! refused. Not confined: the terminal UI's runtime (yobuild's own code),
 //! the agent's own tools (the gate judges them) and npm (it runs no
 //! package's scripts); `check` probes no pi or DSH plugin alone with
@@ -12,23 +13,29 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::manifest;
 
 /// What the sandbox hides beside `[sandbox] hide`, under the home folder:
 /// where keys, tokens and passwords are kept by the tools that keep them —
-/// SSH, GnuPG, the clouds' command lines, GitHub's and npm's logins, git's
-/// stored credentials, the password stores, the keychains — and the shell
-/// profiles, where keys are often exported. Each one that is there.
+/// SSH, GnuPG, the clouds' and cluster tools' command lines, GitHub's, npm's
+/// and git's logins, the password stores, Vault and Terraform, the
+/// keychains, AI coding tools' logins — the shell profiles, where keys are
+/// often exported, and the shells' and REPLs' histories, where they are
+/// often typed. Each one that is there.
 #[rustfmt::skip]
 pub const HIDDEN: &[&str] = &[
     ".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud", ".kube", ".docker",
-    ".config/gh", ".netrc", ".git-credentials", ".npmrc", ".yarnrc.yml", ".pypirc",
-    ".cargo/credentials", ".cargo/credentials.toml", ".password-store", ".config/op",
+    ".config/gh", ".config/hub", ".netrc", ".git-credentials", ".config/git/credentials",
+    ".npmrc", ".yarnrc.yml", ".pypirc", ".cargo/credentials", ".cargo/credentials.toml",
+    ".password-store", ".config/op", ".vault-token", ".terraform.d/credentials.tfrc.json",
     ".local/share/keyrings", "Library/Keychains",
+    ".claude/.credentials.json", ".codex/auth.json", ".pi/agent/auth.json",
     ".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc", ".zprofile",
     ".zshenv", ".zlogin", ".config/fish",
+    ".bash_history", ".zsh_history", ".local/share/fish/fish_history", ".python_history",
+    ".node_repl_history", ".psql_history", ".mysql_history",
 ];
 
 /// How long [`Sandbox::new`]'s trial may take.
@@ -100,8 +107,9 @@ fn executable(path: &Path) -> bool {
     path.is_file()
 }
 
-/// A path the sandbox hides, and whether it is a folder (bubblewrap covers
-/// a folder with an empty one, a file with `/dev/null`).
+/// A path the sandbox hides or keeps read-only, and whether it is a folder
+/// (bubblewrap covers a hidden folder with an empty one, a hidden file
+/// with `/dev/null`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Hidden {
     path: PathBuf,
@@ -113,21 +121,45 @@ struct Hidden {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Rules {
     write: Vec<PathBuf>,
+    /// The agent's folder's repository's git folders (and a worktree's
+    /// `.git` file): read-only though in a writable folder, since the
+    /// owner's git and the facts read their config, which can name programs
+    /// to run.
+    readonly: Vec<PathBuf>,
+    /// `<agent's folder>/.git`, there or not: `sandbox-exec` denies writing
+    /// it even when a plugin would make it (bubblewrap can only cover what
+    /// is there).
+    own_git: PathBuf,
+    /// Linux's per-user runtime folder (`XDG_RUNTIME_DIR`: the session bus,
+    /// agents' sockets), covered by an empty one.
+    runtime: Option<PathBuf>,
     hide: Vec<Hidden>,
-    /// `[sandbox] hide` entries not there: nothing hidden for them.
+    /// What is said beside the sandbox: `[sandbox] hide` entries not there.
     notes: Vec<String>,
+}
+
+/// The places [`Rules::of`] is given beside the manifest's.
+#[derive(Debug, Default)]
+struct Around {
+    /// The temp folders.
+    temp: Vec<PathBuf>,
+    /// `YOAGENT_DSH_HOME`, made already: writable, as `write` is.
+    dsh_home: Option<PathBuf>,
+    /// `XDG_RUNTIME_DIR`, on Linux.
+    runtime: Option<PathBuf>,
 }
 
 impl Rules {
     /// The rules for an agent working in `cwd`, `home` the home folder:
-    /// writable `cwd`, `temp` and `settings.write` (each there, a folder,
-    /// not holding `home`); hidden [`HIDDEN`] and `settings.hide`, each
+    /// writable `cwd`, the temp folders, `YOAGENT_DSH_HOME` and
+    /// `settings.write` (each there, a folder, not holding `home`) but the
+    /// repository's git folders; hidden [`HIDDEN`] and `settings.hide`, each
     /// that is there, none holding a writable folder. All canonical.
     fn of(
         settings: &manifest::Sandbox,
         cwd: &Path,
         home: &Path,
-        temp: &[PathBuf],
+        around: &Around,
     ) -> Result<Rules, String> {
         let home = canonical(home).map_err(|e| format!("the sandbox: the home folder {e}"))?;
         let cwd = canonical(cwd).map_err(|e| format!("the sandbox: the agent's folder {e}"))?;
@@ -138,20 +170,27 @@ impl Rules {
             ));
         }
         let mut write = vec![cwd.clone()];
-        for folder in temp {
+        for folder in &around.temp {
             if let Ok(folder) = canonical(folder) {
                 write.push(folder);
             }
         }
-        for place in &settings.write {
-            let given = place.under(&home);
-            let path = canonical(&given).map_err(|e| format!("[sandbox] write {e}"))?;
+        let given = settings
+            .write
+            .iter()
+            .map(|place| ("[sandbox] write", place.under(&home)));
+        let dsh = around
+            .dsh_home
+            .iter()
+            .map(|d| ("YOAGENT_DSH_HOME", d.clone()));
+        for (what, given) in given.chain(dsh) {
+            let path = canonical(&given).map_err(|e| format!("{what} {e}"))?;
             if !path.is_dir() {
-                return Err(format!("[sandbox] write {}: not a folder", given.display()));
+                return Err(format!("{what} {}: not a folder", given.display()));
             }
             if home.starts_with(&path) {
                 return Err(format!(
-                    "[sandbox] write {}: it holds your home folder: name the folders plugins need",
+                    "{what} {}: it holds your home folder, which plugins could then write: name a folder of its own",
                     given.display()
                 ));
             }
@@ -163,8 +202,8 @@ impl Rules {
         let mut hide: Vec<Hidden> = Vec::new();
         let mut notes = Vec::new();
         let defaults = HIDDEN.iter().map(|rest| (home.join(rest), false));
-        let given = settings.hide.iter().map(|place| (place.under(&home), true));
-        for (path, named) in defaults.chain(given) {
+        let named = settings.hide.iter().map(|place| (place.under(&home), true));
+        for (path, named) in defaults.chain(named) {
             let Ok(real) = canonical(&path) else {
                 if named {
                     notes.push(format!(
@@ -191,8 +230,51 @@ impl Rules {
                 });
             }
         }
-        Ok(Rules { write, hide, notes })
+        // The runtime folder, unless something writable is in it (then
+        // covering it would cover that too).
+        let runtime = around
+            .runtime
+            .as_deref()
+            .and_then(|r| canonical(r).ok())
+            .filter(|r| r.is_dir() && !write.iter().any(|w| w.starts_with(r)));
+        Ok(Rules {
+            readonly: git_dirs(&cwd),
+            own_git: cwd.join(".git"),
+            runtime,
+            write,
+            hide,
+            notes,
+        })
     }
+}
+
+/// The git folders of the repository holding `cwd` (the first `.git` in it
+/// or above): a `.git` folder; or a `.git` file (a worktree, a submodule)
+/// and the folder it names, and that folder's common one (`commondir`, the
+/// main repository's, which holds the config). Canonical, those that are
+/// there.
+fn git_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let Some(at) = cwd.ancestors().find(|a| a.join(".git").exists()) else {
+        return dirs;
+    };
+    let dot = at.join(".git");
+    dirs.extend(canonical(&dot).ok());
+    if dot.is_file() {
+        let named = std::fs::read_to_string(&dot).ok().and_then(|text| {
+            let line = text.lines().next()?;
+            Some(at.join(line.strip_prefix("gitdir:")?.trim()))
+        });
+        if let Some(Ok(gitdir)) = named.map(|n| canonical(&n)) {
+            if let Ok(common) = std::fs::read_to_string(gitdir.join("commondir")) {
+                dirs.extend(canonical(&gitdir.join(common.trim())).ok());
+            }
+            dirs.push(gitdir);
+        }
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 /// `path` canonical and UTF-8, or why not ("<path>: not there", …).
@@ -211,20 +293,10 @@ fn canonical(path: &Path) -> Result<PathBuf, String> {
 }
 
 /// The temp folders a confined process may write: `TMPDIR` (Rust's
-/// `temp_dir`), `/tmp` and `/var/tmp`, and on macOS the per-user folder
-/// holding `TMPDIR` (`/var/folders/…/T`: its `C` sibling is the user's
-/// cache folder there).
+/// `temp_dir`; on macOS the per-user `/var/folders/…/T`, not its `C`
+/// sibling, the user's cache), `/tmp` and `/var/tmp`.
 fn temp_folders() -> Vec<PathBuf> {
-    let temp = std::env::temp_dir();
-    let mut folders = vec![temp.clone(), "/tmp".into(), "/var/tmp".into()];
-    if cfg!(target_os = "macos") {
-        if let Ok(real) = std::fs::canonicalize(&temp) {
-            if real.starts_with("/private/var/folders") && real.ends_with("T") {
-                folders.extend(real.parent().map(Path::to_path_buf));
-            }
-        }
-    }
-    folders
+    vec![std::env::temp_dir(), "/tmp".into(), "/var/tmp".into()]
 }
 
 /// The sandbox an agent's plugins and stdio servers start in: made once,
@@ -238,33 +310,46 @@ pub struct Sandbox {
 
 impl Sandbox {
     /// The sandbox `[sandbox]` (`settings`) asks for, for an agent working
-    /// in `cwd`: its folders found, this system's tool found and tried (a
-    /// shell that does nothing, started through it), or why not — said
-    /// before anything starts.
-    pub fn new(settings: &manifest::Sandbox, cwd: &Path) -> Result<Sandbox, String> {
+    /// in `cwd`: its folders found (`YOAGENT_DSH_HOME` made, as the DSH
+    /// runtime would make it, so it is checked as `write` is), this
+    /// system's tool found and tried (a shell that does nothing, started
+    /// through it, waited for without blocking: a Ctrl+C meanwhile is
+    /// heard), or why not — said before anything starts.
+    pub async fn new(settings: &manifest::Sandbox, cwd: &Path) -> Result<Sandbox, String> {
         let tool = Tool::here()?;
         let home = std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(PathBuf::from)
             .ok_or("the sandbox needs the home folder (HOME), and HOME is not set")?;
-        let mut rules = Rules::of(settings, cwd, &home, &temp_folders())?;
-        // DSH's own home, when the owner named one (and it is there): the
-        // DSH host's session log is written there.
-        let dsh = std::env::var_os("YOAGENT_DSH_HOME").filter(|h| !h.is_empty());
-        if let Some(folder) = dsh.and_then(|d| canonical(Path::new(&d)).ok()) {
-            if !rules.write.contains(&folder) {
-                rules.write.push(folder);
+        let dsh_home = match crate::frontend::host::DshHome::chosen() {
+            Some(dsh) => {
+                let dsh = PathBuf::from(dsh);
+                std::fs::create_dir_all(&dsh)
+                    .map_err(|e| format!("YOAGENT_DSH_HOME {}: {e}", dsh.display()))?;
+                Some(dsh)
             }
-        }
+            None => None,
+        };
+        let around = Around {
+            temp: temp_folders(),
+            dsh_home,
+            runtime: match tool {
+                Tool::Bwrap(_) => std::env::var_os("XDG_RUNTIME_DIR")
+                    .filter(|r| !r.is_empty())
+                    .map(PathBuf::from),
+                Tool::SandboxExec => None,
+            },
+        };
+        let rules = Rules::of(settings, cwd, &home, &around)?;
         let sandbox = Sandbox { tool, rules };
-        sandbox.tried()?;
+        sandbox.tried().await?;
         Ok(sandbox)
     }
 
     /// `program args` confined: bubblewrap's or `sandbox-exec`'s command
     /// line, which execs it (`sandbox-exec` in the same process; bubblewrap
-    /// as its child, in a pid namespace of its own that ends with it, and
-    /// itself ending with its parent).
+    /// as its child, in a session and a pid namespace of its own that ends
+    /// with it, and itself ending with its parent).
     pub fn wrap(&self, program: OsString, args: Vec<OsString>) -> (OsString, Vec<OsString>) {
         let mut wrapped: Vec<OsString> = match &self.tool {
             Tool::Bwrap(_) => bwrap_args(&self.rules),
@@ -300,6 +385,12 @@ impl Sandbox {
         &self.rules.write
     }
 
+    /// The git folders it may not write, though they are in a writable
+    /// folder.
+    pub fn read_only(&self) -> &[PathBuf] {
+        &self.rules.readonly
+    }
+
     /// The folders and files it may not read.
     pub fn hidden(&self) -> Vec<&Path> {
         self.rules.hide.iter().map(|h| h.path.as_path()).collect()
@@ -322,7 +413,7 @@ impl Sandbox {
             false => hide.join(", "),
         };
         format!(
-            "the sandbox ({}) confines every plugin runtime and stdio MCP server: they write only to {}; they read everything else but {hide}; the network is open to them",
+            "the sandbox ({}) confines every plugin runtime and stdio MCP server: they write only to {} (not the repository's git folder); they read everything else but {hide}; the terminal is out of their reach and the network open to them; what they write in the agent's folder runs unconfined when your tools or the builds the gate allows use it",
             self.tool(),
             write.join(", ")
         )
@@ -336,47 +427,36 @@ impl Sandbox {
     /// A shell that does nothing, started confined within [`TRIAL`]: the
     /// sandbox works here (an unprivileged user namespace may be refused, a
     /// sandbox may not nest), or why not.
-    fn tried(&self) -> Result<(), String> {
+    async fn tried(&self) -> Result<(), String> {
         let (program, args) = self.wrap("/bin/sh".into(), vec!["-c".into(), ":".into()]);
         let cannot = |why: String| format!("{CANNOT_START}{why}");
-        let mut child = std::process::Command::new(&program)
+        let child = tokio::process::Command::new(&program)
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| cannot(format!("{}: {e}", self.tool())))?;
-        let deadline = Instant::now() + TRIAL;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(20))
-                }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(cannot(format!(
-                        "{} did not start a shell within {} s",
-                        self.tool(),
-                        TRIAL.as_secs()
-                    )));
-                }
-                Err(e) => return Err(cannot(format!("{}: {e}", self.tool()))),
+        let out = match tokio::time::timeout(TRIAL, child.wait_with_output()).await {
+            Ok(out) => out.map_err(|e| cannot(format!("{}: {e}", self.tool())))?,
+            Err(_) => {
+                return Err(cannot(format!(
+                    "{} did not start a shell within {} s",
+                    self.tool(),
+                    TRIAL.as_secs()
+                )))
             }
         };
-        if status.success() {
+        if out.status.success() {
             return Ok(());
         }
-        let mut stderr = String::new();
-        if let Some(mut out) = child.stderr.take() {
-            use std::io::Read;
-            let _ = out.read_to_string(&mut stderr);
-        }
+        let stderr = String::from_utf8_lossy(&out.stderr);
         let first = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
         Err(cannot(format!(
-            "{} {status}: {}",
+            "{} {}: {}",
             self.tool(),
+            out.status,
             match first.is_empty() {
                 true => "it said nothing",
                 false => first.trim(),
@@ -385,23 +465,31 @@ impl Sandbox {
     }
 }
 
-/// bubblewrap's options for `rules`: the whole file system read-only, a
-/// device and a process folder of its own, each writable folder bound
-/// writable over it, then each hidden folder covered by an empty read-only
-/// one and each hidden file by `/dev/null` (after the writable folders, so
-/// a hidden one inside them stays hidden). It ends with its parent, and in
-/// a pid namespace of its own: what the confined process started ends with
-/// it.
+/// bubblewrap's options for `rules`: a session of its own (no terminal to
+/// push input into), the whole file system read-only, a device and a
+/// process folder of its own, each writable folder bound writable over it,
+/// the repository's git folders bound read-only over that, the runtime
+/// folder covered by an empty one, then each hidden folder covered by an
+/// empty read-only one and each hidden file by `/dev/null` (after the
+/// writable folders, so a hidden one inside them stays hidden). It ends
+/// with its parent, and in a pid namespace of its own: what the confined
+/// process started ends with it.
 fn bwrap_args(rules: &Rules) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
-        "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc",
-        "/proc",
+        "--new-session", "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--dev",
+        "/dev", "--proc", "/proc",
     ]
     .into_iter()
     .map(Into::into)
     .collect();
     for folder in &rules.write {
         args.extend(["--bind".into(), folder.into(), folder.into()]);
+    }
+    for git in &rules.readonly {
+        args.extend(["--ro-bind".into(), git.into(), git.into()]);
+    }
+    if let Some(runtime) = &rules.runtime {
+        args.extend(["--tmpfs".into(), runtime.into()]);
     }
     for hidden in &rules.hide {
         let path: OsString = hidden.path.clone().into();
@@ -414,9 +502,12 @@ fn bwrap_args(rules: &Rules) -> Vec<OsString> {
 }
 
 /// `sandbox-exec`'s profile for `rules`: everything allowed but writing,
-/// which only the writable folders and the terminal's and null devices
-/// take; then reading and writing the hidden paths denied (the last rule
-/// that matches decides).
+/// which only the writable folders and the null and descriptor devices
+/// take; then writing the repository's git folders (and the agent folder's
+/// `.git`, there or not) denied, the terminal devices denied whole —
+/// opened, or pushed input into through one inherited (`TIOCSTI`) — the
+/// hidden paths denied, and the per-user launchd sockets (the SSH agent's)
+/// not connected to (the last rule that matches decides).
 fn profile(rules: &Rules) -> String {
     let quoted = |path: &Path| {
         let text = path.to_string_lossy();
@@ -428,11 +519,19 @@ fn profile(rules: &Rules) -> String {
         profile.push_str(&format!("\n  (subpath {})", quoted(folder)));
     }
     for device in [
-        "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/tty", "/dev/dtracehelper",
+        "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/dtracehelper",
     ] {
         profile.push_str(&format!("\n  (literal \"{device}\")"));
     }
-    profile.push_str("\n  (regex #\"^/dev/ttys[0-9]+$\")\n  (regex #\"^/dev/fd/[0-9]+$\"))\n");
+    profile.push_str("\n  (regex #\"^/dev/fd/[0-9]+$\"))\n(deny file-write*");
+    let own = Some(&rules.own_git).filter(|g| !rules.readonly.contains(g));
+    for git in rules.readonly.iter().chain(own) {
+        profile.push_str(&format!("\n  (subpath {})", quoted(git)));
+    }
+    profile.push_str(")\n");
+    profile.push_str(
+        "(deny file-read* file-write* file-ioctl\n  (literal \"/dev/tty\")\n  (regex #\"^/dev/ttys[0-9]+$\"))\n",
+    );
     if !rules.hide.is_empty() {
         profile.push_str("(deny file-read* file-write*");
         for hidden in &rules.hide {
@@ -440,6 +539,9 @@ fn profile(rules: &Rules) -> String {
         }
         profile.push_str(")\n");
     }
+    profile.push_str(
+        "(deny network-outbound\n  (remote unix-socket (path-regex #\"^/private/tmp/com\\.apple\\.launchd\\.[^/]+/Listeners$\")))\n",
+    );
     profile
 }
 

@@ -3,7 +3,8 @@
 
 use super::*;
 
-/// A home folder, an agent's folder and folders around them, all real.
+/// A home folder, an agent's folder (a repository) and folders around
+/// them, all real.
 struct Places {
     _root: tempfile::TempDir,
     root: PathBuf,
@@ -16,10 +17,17 @@ fn places() -> Places {
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let home = root.join("home");
     let cwd = root.join("work");
-    for folder in [&home, &cwd, &home.join(".ssh"), &root.join("out")] {
+    for folder in [
+        &home,
+        &cwd,
+        &home.join(".ssh"),
+        &root.join("out"),
+        &cwd.join(".git"),
+    ] {
         std::fs::create_dir_all(folder).unwrap();
     }
     std::fs::write(home.join(".netrc"), "machine x password p\n").unwrap();
+    std::fs::write(cwd.join(".git/config"), "[core]\n").unwrap();
     Places {
         _root: dir,
         root,
@@ -49,11 +57,19 @@ fn settings(write: &[&str], hide: &[&str]) -> manifest::Sandbox {
         .unwrap()
 }
 
+/// Nothing around but these temp folders.
+fn temp(folders: &[PathBuf]) -> Around {
+    Around {
+        temp: folders.to_vec(),
+        ..Around::default()
+    }
+}
+
 #[test]
 fn the_agents_folder_and_temp_are_written_and_the_secrets_there_are_hidden() {
     let p = places();
-    let temp = p.root.join("tmp");
-    std::fs::create_dir(&temp).unwrap();
+    let temp_dir = p.root.join("tmp");
+    std::fs::create_dir(&temp_dir).unwrap();
     let inside = p.cwd.join("sub");
     std::fs::create_dir(&inside).unwrap();
     let out = p.root.join("out");
@@ -65,7 +81,7 @@ fn the_agents_folder_and_temp_are_written_and_the_secrets_there_are_hidden() {
         &p.cwd,
         &p.home,
         // One not there is left out.
-        &[temp.clone(), inside, p.root.join("gone")],
+        &temp(&[temp_dir.clone(), inside, p.root.join("gone")]),
     );
     // `~/.cache` is not there.
     assert_eq!(
@@ -76,6 +92,7 @@ fn the_agents_folder_and_temp_are_written_and_the_secrets_there_are_hidden() {
         )
     );
     std::fs::create_dir(p.home.join(".cache")).unwrap();
+    std::fs::write(p.home.join(".zsh_history"), "export KEY=x\n").unwrap();
     let rules = Rules::of(
         &settings(
             &[&out.display().to_string(), "~/.cache"],
@@ -83,20 +100,23 @@ fn the_agents_folder_and_temp_are_written_and_the_secrets_there_are_hidden() {
         ),
         &p.cwd,
         &p.home,
-        &[temp.clone(), p.cwd.join("sub"), temp.clone()],
+        &temp(&[temp_dir.clone(), p.cwd.join("sub"), temp_dir.clone()]),
     )
     .unwrap();
     // Each once, sorted; one inside another kept, so the note names it.
     let mut write = vec![
         p.cwd.clone(),
         p.cwd.join("sub"),
-        temp,
+        temp_dir,
         out,
         p.home.join(".cache"),
     ];
     write.sort();
     assert_eq!(rules.write, write);
-    // The defaults that are there: a folder and a file.
+    // The repository's git folder, read-only though in the agent's folder.
+    assert_eq!(rules.readonly, [p.cwd.join(".git")]);
+    assert_eq!(rules.own_git, p.cwd.join(".git"));
+    // The defaults that are there: a folder, a login file, a history.
     assert_eq!(
         rules.hide,
         [
@@ -106,6 +126,10 @@ fn the_agents_folder_and_temp_are_written_and_the_secrets_there_are_hidden() {
             },
             Hidden {
                 path: p.home.join(".netrc"),
+                folder: false
+            },
+            Hidden {
+                path: p.home.join(".zsh_history"),
                 folder: false
             },
         ]
@@ -120,13 +144,34 @@ fn the_agents_folder_and_temp_are_written_and_the_secrets_there_are_hidden() {
 }
 
 #[test]
+fn a_worktrees_git_file_its_folder_and_the_main_repository_are_read_only() {
+    let p = places();
+    // The agent works in a folder of a worktree whose git folder is in the
+    // main repository's (`commondir`).
+    let main = p.root.join("main/.git");
+    let gitdir = main.join("worktrees/w");
+    std::fs::create_dir_all(&gitdir).unwrap();
+    std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+    let tree = p.root.join("w");
+    std::fs::create_dir_all(tree.join("src")).unwrap();
+    std::fs::write(tree.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+    assert_eq!(
+        git_dirs(&tree.join("src")),
+        [main.clone(), gitdir, tree.join(".git")]
+    );
+    // No repository: nothing.
+    assert!(git_dirs(&p.root.join("out")).is_empty());
+}
+
+#[test]
 fn what_would_undo_the_sandbox_is_refused() {
     let p = places();
     let none = settings(&[], &[]);
+    let nothing = Around::default();
     // The agent working in the home folder, or above it.
     for cwd in [&p.home, &p.root] {
         assert_eq!(
-            Rules::of(&none, cwd, &p.home, &[]).unwrap_err(),
+            Rules::of(&none, cwd, &p.home, &nothing).unwrap_err(),
             format!(
                 "the sandbox: the agent's folder {} holds your home folder, which plugins could then write: run the agent in a folder of its own",
                 cwd.display()
@@ -136,18 +181,38 @@ fn what_would_undo_the_sandbox_is_refused() {
     // A writable folder holding the home folder; one that is a file.
     let root = p.root.display().to_string();
     assert_eq!(
-        Rules::of(&settings(&[&root], &[]), &p.cwd, &p.home, &[]).unwrap_err(),
-        format!("[sandbox] write {root}: it holds your home folder: name the folders plugins need")
+        Rules::of(&settings(&[&root], &[]), &p.cwd, &p.home, &nothing).unwrap_err(),
+        format!("[sandbox] write {root}: it holds your home folder, which plugins could then write: name a folder of its own")
     );
     let netrc = p.home.join(".netrc").display().to_string();
     assert_eq!(
-        Rules::of(&settings(&[&netrc], &[]), &p.cwd, &p.home, &[]).unwrap_err(),
+        Rules::of(&settings(&[&netrc], &[]), &p.cwd, &p.home, &nothing).unwrap_err(),
         format!("[sandbox] write {netrc}: not a folder")
+    );
+    // `YOAGENT_DSH_HOME` checked as `write` is: holding the home folder, or
+    // inside a hidden one.
+    let dsh = |path: &Path| Around {
+        dsh_home: Some(path.to_owned()),
+        ..Around::default()
+    };
+    assert_eq!(
+        Rules::of(&none, &p.cwd, &p.home, &dsh(&p.root)).unwrap_err(),
+        format!("YOAGENT_DSH_HOME {root}: it holds your home folder, which plugins could then write: name a folder of its own")
+    );
+    let in_ssh = p.home.join(".ssh/dsh");
+    std::fs::create_dir(&in_ssh).unwrap();
+    assert_eq!(
+        Rules::of(&none, &p.cwd, &p.home, &dsh(&in_ssh)).unwrap_err(),
+        format!(
+            "[sandbox] hide {}: it holds {}, which plugins may write: hide what is inside it instead",
+            p.home.join(".ssh").display(),
+            in_ssh.display()
+        )
     );
     // Hiding the agent's folder, or a folder plugins may write.
     let cwd = p.cwd.display().to_string();
     assert_eq!(
-        Rules::of(&settings(&[], &[&cwd]), &p.cwd, &p.home, &[]).unwrap_err(),
+        Rules::of(&settings(&[], &[&cwd]), &p.cwd, &p.home, &nothing).unwrap_err(),
         format!(
             "[sandbox] hide {cwd}: it holds the agent's folder: hide what is inside it instead"
         )
@@ -155,17 +220,43 @@ fn what_would_undo_the_sandbox_is_refused() {
     let out = p.root.join("out");
     let shown = out.display().to_string();
     assert_eq!(
-        Rules::of(&settings(&[&shown], &[&root]), &p.cwd, &p.home, &[]).unwrap_err(),
+        Rules::of(&settings(&[&shown], &[&root]), &p.cwd, &p.home, &nothing).unwrap_err(),
         format!(
             "[sandbox] hide {root}: it holds {shown}, which plugins may write: hide what is inside it instead"
         )
     );
 }
 
-/// Rules of one writable folder and one hidden folder and file.
+#[test]
+fn the_runtime_folder_is_covered_unless_something_writable_is_in_it() {
+    let p = places();
+    let runtime = p.root.join("run-user");
+    std::fs::create_dir(&runtime).unwrap();
+    let around = |temp: Vec<PathBuf>| Around {
+        temp,
+        runtime: Some(runtime.clone()),
+        ..Around::default()
+    };
+    let rules = Rules::of(&settings(&[], &[]), &p.cwd, &p.home, &around(Vec::new())).unwrap();
+    assert_eq!(rules.runtime.as_deref(), Some(runtime.as_path()));
+    let rules = Rules::of(
+        &settings(&[], &[]),
+        &p.cwd,
+        &p.home,
+        &around(vec![runtime.clone()]),
+    )
+    .unwrap();
+    assert_eq!(rules.runtime, None);
+}
+
+/// Rules of one writable folder, a git folder in it, the runtime folder,
+/// and one hidden folder and file.
 fn small() -> Rules {
     Rules {
         write: vec!["/w/a \"b\"".into()],
+        readonly: vec!["/w/a \"b\"/.git".into()],
+        own_git: "/w/a \"b\"/.git".into(),
+        runtime: Some("/run/user/1000".into()),
         hide: vec![
             Hidden {
                 path: "/h/.ssh".into(),
@@ -181,7 +272,7 @@ fn small() -> Rules {
 }
 
 #[test]
-fn bubblewraps_command_binds_the_writable_folders_then_covers_the_hidden() {
+fn bubblewraps_command_binds_the_writable_folders_then_covers_the_rest() {
     let sandbox = Sandbox {
         tool: Tool::Bwrap("/usr/bin/bwrap".into()),
         rules: small(),
@@ -191,9 +282,11 @@ fn bubblewraps_command_binds_the_writable_folders_then_covers_the_hidden() {
     assert_eq!(
         args,
         [
-            "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc",
-            "/proc", "--bind", "/w/a \"b\"", "/w/a \"b\"", "--tmpfs", "/h/.ssh", "--remount-ro",
-            "/h/.ssh", "--ro-bind", "/dev/null", "/h/.netrc", "--", "node", "x.js",
+            "--new-session", "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--dev",
+            "/dev", "--proc", "/proc", "--bind", "/w/a \"b\"", "/w/a \"b\"", "--ro-bind",
+            "/w/a \"b\"/.git", "/w/a \"b\"/.git", "--tmpfs", "/run/user/1000", "--tmpfs",
+            "/h/.ssh", "--remount-ro", "/h/.ssh", "--ro-bind", "/dev/null", "/h/.netrc", "--",
+            "node", "x.js",
         ]
     );
 }
@@ -222,13 +315,18 @@ fn sandbox_execs_profile_allows_writing_only_where_it_says() {
   (literal "/dev/zero")
   (literal "/dev/random")
   (literal "/dev/urandom")
-  (literal "/dev/tty")
   (literal "/dev/dtracehelper")
-  (regex #"^/dev/ttys[0-9]+$")
   (regex #"^/dev/fd/[0-9]+$"))
+(deny file-write*
+  (subpath "/w/a \"b\"/.git"))
+(deny file-read* file-write* file-ioctl
+  (literal "/dev/tty")
+  (regex #"^/dev/ttys[0-9]+$"))
 (deny file-read* file-write*
   (subpath "/h/.ssh")
   (subpath "/h/.netrc"))
+(deny network-outbound
+  (remote unix-socket (path-regex #"^/private/tmp/com\.apple\.launchd\.[^/]+/Listeners$")))
 "#
     );
 }
@@ -250,8 +348,8 @@ pub(crate) fn available() -> bool {
 }
 
 #[cfg(unix)]
-#[test]
-fn a_confined_shell_writes_only_where_the_rules_say_and_reads_nothing_hidden() {
+#[tokio::test]
+async fn a_confined_shell_writes_only_where_the_rules_say_and_reaches_nothing_hidden() {
     if !available() {
         return;
     }
@@ -260,12 +358,15 @@ fn a_confined_shell_writes_only_where_the_rules_say_and_reads_nothing_hidden() {
     let out = p.root.join("out");
     let sandbox = Sandbox {
         tool: Tool::here().unwrap(),
-        rules: Rules::of(&settings(&[], &[]), &p.cwd, &p.home, &[]).unwrap(),
+        rules: Rules::of(&settings(&[], &[]), &p.cwd, &p.home, &Around::default()).unwrap(),
     };
-    sandbox.tried().unwrap();
+    sandbox.tried().await.unwrap();
     let script = format!(
         "echo in > {cwd}/in.txt && echo wrote-in; echo out > {out}/out.txt && echo wrote-out; \
+         echo '[core] fsmonitor = ./x.sh' >> {cwd}/.git/config && echo wrote-git-config; \
+         echo h > {cwd}/.git/hooks-new && echo wrote-git; \
          cat {home}/.ssh/id && echo read-ssh; cat {home}/.netrc && echo read-netrc; \
+         (: < /dev/tty) && echo read-tty; \
          echo null > /dev/null && echo devnull",
         cwd = p.cwd.display(),
         out = out.display(),
@@ -278,15 +379,27 @@ fn a_confined_shell_writes_only_where_the_rules_say_and_reads_nothing_hidden() {
         .output()
         .unwrap();
     let said = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         said.lines().collect::<Vec<_>>(),
         ["wrote-in", "devnull"],
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        "{stderr}"
     );
     assert_eq!(
         std::fs::read_to_string(p.cwd.join("in.txt")).unwrap(),
         "in\n"
     );
     assert!(!out.join("out.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(p.cwd.join(".git/config")).unwrap(),
+        "[core]\n"
+    );
+    // The terminal refused by the sandbox (macOS), or not there in a
+    // session of its own (bubblewrap).
+    if cfg!(target_os = "macos") {
+        assert!(
+            stderr.contains("/dev/tty: Operation not permitted"),
+            "{stderr}"
+        );
+    }
 }
