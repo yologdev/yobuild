@@ -572,3 +572,13 @@ async fn a_sign_in_waits_for_another_before_its_browser_question() {
     );
     loaded.close().await;
 }
+
+#[test]
+fn a_notice_names_ten_tools_and_counts_the_rest() {
+    let names: Vec<String> = (1..=12).map(|n| format!("t{n}")).collect();
+    assert_eq!(
+        super::listed(&names),
+        "t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, and 2 more"
+    );
+    assert_eq!(super::listed(&names[..2]), "t1, t2");
+}
