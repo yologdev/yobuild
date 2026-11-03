@@ -2281,3 +2281,46 @@ async fn a_plugin_of_another_runtime_cannot_wake_as_a_granted_pi_extension() {
     let messages = format!("{:?}", ended.agent.as_ref().unwrap().messages());
     assert!(!messages.contains("spoofed"), "{messages}");
 }
+
+/// A server that signs in (`auth = "oauth"`) answering 401: `check`,
+/// which signs nothing in, notes it and lists none of its tools; the agent
+/// is still checked together.
+#[tokio::test(flavor = "multi_thread")]
+async fn check_notes_a_server_that_needs_a_sign_in() {
+    let app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::any(|| async {
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                [("www-authenticate", "Bearer realm=\"OAuth\"")],
+                "sign in",
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        format!(
+            "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[mcp]]\nname = \"docs\"\nurl = \"{url}\"\nauth = \"oauth\"\nallow = [\"search\"]\n"
+        ),
+    )
+    .unwrap();
+    let report = check_dir(dir.path()).await;
+    assert!(report.ok, "{}", report.text());
+    let docs = &report.entries[0];
+    assert!(
+        docs.problems.is_empty() && docs.tools.is_empty(),
+        "{}",
+        report.text()
+    );
+    assert!(
+        docs.notes
+            .iter()
+            .any(|n| n.starts_with("it needs a sign-in (`auth = \"oauth\"`)")),
+        "{:?}",
+        docs.notes
+    );
+}

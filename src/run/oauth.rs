@@ -20,10 +20,6 @@
 //! only to public addresses ([`PublicOnly`]), and what a server says is
 //! never quoted to the agent ([`Refusal::for_agent`]).
 
-// Used by `load_plugin`'s remote and the manifest's `auth = "oauth"`, the
-// next steps (design §14, "Order of PRs"); until then only its tests call it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -689,16 +685,19 @@ pub(crate) struct Found {
 
 impl Found {
     /// The MCP server's URL.
+    #[cfg(test)]
     pub(crate) fn server(&self) -> &Url {
         &self.server
     }
 
     /// The authorization server's issuer.
+    #[cfg(test)]
     pub(crate) fn issuer(&self) -> &str {
         &self.issuer
     }
 
     /// The scopes asked for, within the caps.
+    #[cfg(test)]
     pub(crate) fn scopes(&self) -> &[String] {
         &self.scopes
     }

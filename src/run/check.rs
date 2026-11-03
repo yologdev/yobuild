@@ -957,7 +957,15 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                 }
                 server_tools.extend(entry.tools.iter().cloned());
             }
+            Err(e) if e.downcast_ref::<super::SignInNeeded>().is_some() => entry.notes.push(
+                "it needs a sign-in (`auth = \"oauth\"`): `run` signs it in once the page or the terminal UI is open; `check` does not, so its tools are not listed here, and its `allow` is checked at sign-in".into(),
+            ),
             Err(e) => entry.problems.push(Problem::new(e.to_string())),
+        }
+        if server.oauth && !entry.tools.is_empty() {
+            entry.notes.push(
+                "it answered without a sign-in, though agent.toml says it signs in (`auth = \"oauth\"`)".into(),
+            );
         }
         entries.push(entry);
     }

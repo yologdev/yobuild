@@ -5556,5 +5556,8 @@ account, so CI could run only the stub, which the tests already do.
    so; the block's `auth` read by the manifest only with step 6);
 6. the manifest's `auth = "oauth"`: signed in once a frontend attached,
    its tools through the late source, `allow` at sign-in, `check`,
-   `--once`;
+   `--once` (built 2026-11-03, `run/load/signs_in.rs`: a server that
+   answers unsigned is offered as it is; the sign-ins one at a time
+   with `load_plugin`'s; a refused one is a notice and offers nothing;
+   `check` notes a 401 as needing a sign-in);
 7. the skill, the guide, `CLAUDE.md` and the roadmap.

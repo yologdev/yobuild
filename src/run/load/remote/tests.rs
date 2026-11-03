@@ -1155,6 +1155,14 @@ async fn a_remote_that_asks_for_a_sign_in_is_signed_in_kept_and_revoked_at_the_e
         assert!(!m.contains(&access(1)) && !m.contains(&refresh(1)), "{m}");
     }
     assert!(!said.contains(&access(1)));
+    // The block reads back as a server that signs in.
+    let manifest = format!(
+        "[agent]\nname = \"t\"\nmodel = \"deepseek/deepseek-flash\"\n{}",
+        l.loaded.kept()[0].block()
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let read = Manifest::parse(&manifest, &dir.path().join("a.toml"), dir.path()).unwrap();
+    assert!(read.mcp[0].oauth && read.mcp[0].name == "docs");
 
     // Its tool, its token renewed on a 401.
     let tools = l.loaded.tools().await;

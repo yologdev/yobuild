@@ -201,7 +201,7 @@ pub(crate) const HINTS: &[Hint] = &[
         id: "signin-other-site",
         scope: Scope::Call,
         pattern: "its sign-in is not on its own site, which a server the agent found must keep to",
-        fix: "a server the agent finds must sign in on its own site; one you write in agent.toml yourself may sign in anywhere, with `auth = \"oauth\"`, which agent.toml reads from a later yobuild",
+        fix: "a server the agent finds must sign in on its own site; if you trust both, write it in agent.toml yourself as an [[mcp]] with `auth = \"oauth\"`, which may sign in anywhere",
     },
     Hint {
         id: "signin-cancelled",

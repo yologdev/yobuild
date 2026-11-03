@@ -530,8 +530,13 @@ pub struct Mcp {
     pub name: String,
     pub transport: Transport,
     /// Its tools the gate lets run without asking (`allow`), as the server
-    /// names them (the agent sees each as `<name>__<tool>`).
+    /// names them (the agent sees each as `<name>__<tool>`). For a server
+    /// that signs in, checked once its tools are listed.
     pub allow: Vec<String>,
+    /// `auth = "oauth"` (an HTTP server only, design §14 "Stage 4", point
+    /// 11): signed in through the owner's browser once a frontend is
+    /// attached; its tools reach the agent from the next turn.
+    pub oauth: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -929,6 +934,7 @@ struct RawMcp {
     #[serde(default)]
     headers: BTreeMap<String, Spanned<String>>,
     allow: Option<Spanned<Vec<Spanned<String>>>>,
+    auth: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -2058,6 +2064,9 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
             if !raw.headers.is_empty() {
                 return Err((span, "headers are for an HTTP server (url)".into()));
             }
+            if let Some(auth) = &raw.auth {
+                return Err((auth.span(), "auth is for an HTTP server (url)".into()));
+            }
             if npm.get_ref().starts_with("yobuild:") {
                 let m = "`yobuild:` names yobuild's own plugins, and an MCP server is none: give a package (`name@1.2.3`) or a path";
                 return Err((span, m.into()));
@@ -2077,6 +2086,20 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
             if !raw.args.is_empty() || !raw.env.is_empty() || raw.bin.is_some() {
                 let m = "args, env and bin are for a stdio server (npm)";
                 return Err((span, m.into()));
+            }
+            if let Some(auth) = &raw.auth {
+                if auth.get_ref() != "oauth" {
+                    let m = "auth: \"oauth\" is the one sign-in yobuild does (the owner's, in a browser)";
+                    return Err((auth.span(), m.into()));
+                }
+                if raw
+                    .headers
+                    .keys()
+                    .any(|h| h.eq_ignore_ascii_case("authorization"))
+                {
+                    let m = "an `Authorization` header and `auth = \"oauth\"` together: the sign-in gives that header";
+                    return Err((auth.span(), m.into()));
+                }
             }
             let (url, default) = server_url(url)?;
             let transport = Transport::Http {
@@ -2107,6 +2130,7 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
             name,
             transport,
             allow,
+            oauth: raw.auth.is_some(),
         },
         name_span,
     ))

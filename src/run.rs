@@ -422,7 +422,14 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tools.add(FindPlugin::TOOL, vec![Box::new(find)]);
         tools.add(load::LoadPlugin::TOOL, vec![Box::new(load)]);
     }
+    // A server that signs in is signed in once a frontend is attached
+    // (below); its tools come through `loaded` from the next turn.
+    let mut signs_in = Vec::new();
     for server in &manifest.mcp {
+        if server.oauth {
+            signs_in.push(signs_in_of(server, &checked.servers[&server.name])?);
+            continue;
+        }
         let found = stops
             .until(mcp(server, &checked.servers[&server.name]))
             .await?;
@@ -578,6 +585,12 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         }
     }
     let mut driving = tokio::spawn(driver.run(agent));
+    // The manifest's servers that sign in: started once a frontend is
+    // there to ask, ended with the session.
+    let signing_stop = tokio_util::sync::CancellationToken::new();
+    let _signing_stopped = signing_stop.clone().drop_guard();
+    let mut signs_in = Some(signs_in).filter(|s| !s.is_empty());
+    let mut signing = None;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut reported = std::collections::HashSet::new();
     let mut quitting = false;
@@ -604,6 +617,20 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                 if task.is_some() && session.frontends() > 0 {
                     let text = task.take().expect("a task");
                     session.send(ClientMessage::Prompt { text });
+                }
+                if signs_in.is_some() && session.frontends() > 0 {
+                    let servers = signs_in.take().expect("servers that sign in");
+                    signing = Some(tokio::spawn(load::sign_in_all(
+                        load::Signing {
+                            session: session.clone(),
+                            loaded: loaded.clone(),
+                            phone: manifest.frontend.phone,
+                            net: None,
+                            timeout: crate::frontend::session::SIGN_IN_TIMEOUT,
+                            stop: signing_stop.clone(),
+                        },
+                        servers,
+                    )));
                 }
                 // A loaded server gone, its reason settled: said, and marked
                 // stopped (its tools left when it was first seen gone).
@@ -676,6 +703,12 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         }
     };
     drop(served);
+    // A sign-in still going ends here (its question withdrawn, its
+    // listener closed); one signed in meanwhile is closed with the rest.
+    signing_stop.cancel();
+    if let Some(signing) = signing {
+        let _ = tokio::time::timeout(Duration::from_secs(5), signing).await;
+    }
     let mut ended = finish(seen, watching, agent, once, interrupted).await;
     // However it ended: what was loaded, and how to keep it (nothing is
     // written). Each was said as a notice when it was kept; the binary
@@ -917,6 +950,18 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
     let manifest = &options.manifest;
     if options.once && options.task.as_deref().is_none_or(|t| t.trim().is_empty()) {
         return Err("a once run needs a task".into());
+    }
+    if let Some(server) = manifest
+        .mcp
+        .iter()
+        .find(|s| s.oauth)
+        .filter(|_| options.once)
+    {
+        return Err(format!(
+            "mcp {}: it signs in (`auth = \"oauth\"`), which needs the page or the terminal UI: not under --once",
+            server.name
+        )
+        .into());
     }
     let mut notes = Vec::new();
 
@@ -2488,6 +2533,58 @@ fn launch(
     })
 }
 
+/// A server that signs in (`auth = "oauth"`) answering 401 when connected
+/// as it is: what `check`, which signs nothing in, notes instead of a
+/// problem.
+#[derive(Debug)]
+pub(crate) struct SignInNeeded;
+
+impl std::fmt::Display for SignInNeeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("it needs a sign-in")
+    }
+}
+
+impl std::error::Error for SignInNeeded {}
+
+/// [`SignInNeeded`], when `e` is a 401 from a server that signs in.
+fn unsigned(server: &Mcp, e: &yoagent::mcp::McpError) -> Option<BoxError> {
+    (server.oauth && e.http_status() == Some(401)).then(|| Box::new(SignInNeeded) as BoxError)
+}
+
+/// A server that signs in, as `load::sign_in_all` takes it: its URL and
+/// headers filled in (`launch`), each header as written beside.
+fn signs_in_of(server: &Mcp, launch: &Launch) -> Result<load::SignsIn, BoxError> {
+    let (
+        Transport::Http {
+            headers: written, ..
+        },
+        Launch::Http { url, headers, hide },
+    ) = (&server.transport, launch)
+    else {
+        return Err(format!("mcp {}: only an HTTP server signs in", server.name).into());
+    };
+    let url =
+        url::Url::parse(url).map_err(|_| format!("mcp {}: its URL is not one", server.name))?;
+    let headers = headers
+        .iter()
+        .map(|(name, filled)| {
+            let as_written = written
+                .get(name)
+                .map(|v| v.as_str().to_owned())
+                .unwrap_or_default();
+            (name.clone(), as_written, filled.clone())
+        })
+        .collect();
+    Ok(load::SignsIn {
+        name: server.name.clone(),
+        url,
+        headers,
+        hide: hide.clone(),
+        allow: server.allow.clone(),
+    })
+}
+
 /// An HTTP server's header values, as written.
 fn server_headers(server: &Mcp) -> impl Iterator<Item = &crate::manifest::Value> {
     match &server.transport {
@@ -2802,7 +2899,7 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
             }
             McpClient::connect_http_with(transport)
                 .await
-                .map_err(|e| failed(&e))?
+                .map_err(|e| unsigned(server, &e).unwrap_or_else(|| failed(&e).into()))?
         }
     };
     let client = Arc::new(tokio::sync::Mutex::new(client));
@@ -2810,7 +2907,7 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
     // named like a built-in, do not meet.
     let tools = McpToolAdapter::from_client_with_prefix(client, server.name.clone())
         .await
-        .map_err(|e| failed(&e))?;
+        .map_err(|e| unsigned(server, &e).unwrap_or_else(|| failed(&e).into()))?;
     if tools.is_empty() {
         return Err(failed(&"the server lists no tools").into());
     }

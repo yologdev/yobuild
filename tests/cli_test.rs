@@ -2369,3 +2369,23 @@ fn an_http_servers_filled_url_is_never_said() {
         "something connected"
     );
 }
+
+#[test]
+fn a_server_that_signs_in_is_refused_under_once() {
+    let dir = project(
+        "[[mcp]]\nname = \"docs\"\nurl = \"https://docs.example.com/mcp\"\nauth = \"oauth\"\n",
+        r#"[{ "text": "done" }]"#,
+    );
+    let out = yobuild(
+        &[
+            "run", "agent.toml", "--scripted", "script.json", "--once", "--", "hi",
+        ],
+        dir.path(),
+    );
+    assert!(!out.status.success());
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("mcp docs: it signs in (`auth = \"oauth\"`), which needs the page or the terminal UI: not under --once"),
+        "{stderr}"
+    );
+}
