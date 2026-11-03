@@ -69,6 +69,9 @@ kinds        = ["mcp"]                # "mcp", "pi", "dsh", "remote": what find_
 max_loads    = 2                      # 1 to 5
 max_attempts = 4                      # 1 to 10
 min_age_days = 7                      # 0 to 365: newer versions are not taken
+
+[session]
+save = true                           # the default: saved for `yobuild run --resume`; false: nothing written
 ```
 
 ## The keys
@@ -281,6 +284,15 @@ inside the agent's folder).
 **`[frontend]`**: `web`, `phone` (needs `web`), `terminal` (not with
 `web`). Nothing set: the web page. `yobuild run --web ADDR` sets where it
 listens.
+
+**`[session]`**: `save` (default `true`): each session — the
+conversation, the open `ask_owner` questions, what it spent — is saved
+under yobuild's home (`sessions/`, one per agent and folder, readable by
+the person only) after each run, and `yobuild run agent.toml --resume`
+continues it (the session budget counting what was spent before).
+`false` for an agent whose conversations must not reach the disk: then
+`--resume` is refused. A run without `--resume` starts a new
+conversation, which replaces the saved one once its first run ends.
 
 **`[extend]`**: off unless the table is there (empty, it takes the
 defaults). The agent gets `find_plugin(need, kind?)`, which the gate

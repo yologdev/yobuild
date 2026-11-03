@@ -1003,8 +1003,8 @@ pub(super) fn default_name(registry: &str) -> String {
 pub(super) struct Ending {
     inner: McpToolAdapter,
     ended: Arc<Mutex<Option<String>>>,
-    /// Its credentials, shown as their names in what a call's error says
-    /// (a server may echo the key it refused).
+    /// Its credentials, shown as their names in what a call returns or its
+    /// error says (a server may echo the key it got).
     hide: Arc<Vec<(String, String)>>,
     /// Its sign-in: each token it handed out shown as `${oauth}` too.
     signed_in: Option<Arc<Source>>,
@@ -1057,16 +1057,26 @@ impl AgentTool for Ending {
                 locked(&self.ended).get_or_insert_with(|| ENDED.into());
                 Err(ToolError::Failed(ENDED.into()))
             }
-            Err(ToolError::Failed(why)) => {
-                let mut hide = self.hide.to_vec();
-                if let Some(source) = &self.signed_in {
-                    hide.extend(source.hidden());
-                    hide.sort_by_key(|(value, _)| std::cmp::Reverse(value.len()));
-                }
-                Err(ToolError::Failed(super::super::hidden(&why, &hide)))
-            }
+            Err(ToolError::Failed(why)) => Err(ToolError::Failed(super::super::hidden(
+                &why,
+                &self.hidden(),
+            ))),
+            Ok(result) => Ok(super::super::hidden_result(result, &self.hidden())),
             out => out,
         }
+    }
+}
+
+impl Ending {
+    /// What is hidden: its credentials, and each token its sign-in handed
+    /// out, the longest first.
+    fn hidden(&self) -> Vec<(String, String)> {
+        let mut hide = self.hide.to_vec();
+        if let Some(source) = &self.signed_in {
+            hide.extend(source.hidden());
+            hide.sort_by_key(|(value, _)| std::cmp::Reverse(value.len()));
+        }
+        hide
     }
 }
 

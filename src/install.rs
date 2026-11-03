@@ -310,7 +310,7 @@ fn base_pin<'a>(
     }
 }
 
-fn sha256_hex(parts: &[&[u8]]) -> String {
+pub(crate) fn sha256_hex(parts: &[&[u8]]) -> String {
     let mut hash = Sha256::new();
     for part in parts {
         // Each part's length first: no two lists of parts hash alike.

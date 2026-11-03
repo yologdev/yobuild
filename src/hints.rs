@@ -58,7 +58,7 @@ pub(crate) const HINTS: &[Hint] = &[
         id: "session-budget",
         scope: Scope::Stop,
         pattern: "[Agent stopped: session budget of",
-        fix: "\"continue\" stops again at once (the session's total stays spent): restart, which starts a new conversation, or raise [limits] session_budget_usd",
+        fix: "\"continue\" stops again at once (the session's total stays spent): restart without --resume, which starts a new conversation (a resumed one keeps its spend), or raise [limits] session_budget_usd",
     },
     Hint {
         id: "budget",

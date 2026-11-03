@@ -671,6 +671,207 @@ fn facts_count_the_questions_left_open() {
     );
 }
 
+/// Design §15: a session saved under its home, resumed with `--resume` —
+/// the scripted model sees the earlier conversation (`sees`), the open
+/// question is asked again with its number and the next is `#2` — and a new
+/// session that does not see it; `[session] save = false` refusing.
+#[test]
+fn a_resumed_session_goes_on_from_its_conversation() {
+    let dir = project(
+        "[builtins]\nask_owner = true\n",
+        r#"[{ "tools": [{ "name": "ask_owner", "arguments": { "question": "Which colour?" } }] }, { "text": "noted" }]"#,
+    );
+    std::fs::write(
+        dir.path().join("again.json"),
+        r#"[{ "sees": ["Remember the word heliotrope", "Asked the owner as #1"],
+              "tools": [{ "name": "ask_owner", "arguments": { "question": "And the size?" }, "expect": "Asked the owner as #2" }] },
+            { "text": "heliotrope" }]"#,
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        bin()
+            .env("YOBUILD_HOME", home.path())
+            .args(args)
+            .current_dir(dir.path())
+            .env_remove("RUST_LOG")
+            .output()
+            .unwrap()
+    };
+    let out = run(&[
+        "run", "agent.toml", "--scripted", "script.json", "--once", "Remember the word heliotrope",
+    ]);
+    let stderr = text(&out.stderr);
+    assert_eq!(text(&out.stdout), "noted\nCompleted\n", "{stderr}");
+    assert!(
+        stderr.ends_with(
+            "yobuild: the conversation is saved: `yobuild run agent.toml --resume` continues it\n"
+        ),
+        "{stderr}"
+    );
+    let sessions: Vec<_> = std::fs::read_dir(home.path().join("sessions"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    let [folder] = &sessions[..] else {
+        panic!("one session: {sessions:?}")
+    };
+    assert!(folder
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("a-"));
+    let saved = || -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(folder.join("session.json")).unwrap())
+            .unwrap()
+    };
+    let open = |saved: &serde_json::Value| -> Vec<u64> {
+        saved["questions"]["open"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|q| q["n"].as_u64().unwrap())
+            .collect()
+    };
+    assert_eq!(open(&saved()), [1]);
+
+    // Resumed: the model sees the first run's task and the question it
+    // asked; the question is asked again, and the next is #2.
+    let out = run(&[
+        "run", "agent.toml", "--scripted", "again.json", "--once", "--resume", "What was the word?",
+    ]);
+    let stderr = text(&out.stderr);
+    assert_eq!(text(&out.stdout), "heliotrope\nCompleted\n", "{stderr}");
+    assert!(
+        stderr.contains("\n  Info: Resumed the session saved "),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("\n  Info: Asked again: #1 Which colour?\n"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("\n  ask_owner ✓\n"), "{stderr}");
+    let after = saved();
+    assert_eq!(open(&after), [1, 2]);
+    assert_eq!(after["questions"]["next"], 2);
+    assert_eq!(after["model"], "deepseek/x");
+    let said = after["messages"].to_string();
+    assert!(
+        said.contains("Remember the word heliotrope") && said.contains("What was the word?"),
+        "{said}"
+    );
+
+    // Under another model, with the gate off, a run stopped with Ctrl+C
+    // mid-run: lost, but what was spent before and the question it asked
+    // are saved over the last save's conversation. (A scripted model has no
+    // price: the spend is set in the file, as a priced run would leave it.)
+    let mut edited = saved();
+    edited["spentUsd"] = serde_json::json!(0.5);
+    std::fs::write(folder.join("session.json"), edited.to_string()).unwrap();
+    let before = edited["messages"].clone();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/y\"\n[builtins]\nask_owner = true\ngate = \"off\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("slow.json"),
+        r#"[{ "tools": [{ "name": "ask_owner", "arguments": { "question": "Third?" } }, { "name": "bash", "arguments": { "command": "sleep 30" } }] }, { "text": "done" }]"#,
+    )
+    .unwrap();
+    let child = bin()
+        .env("YOBUILD_HOME", home.path())
+        .args([
+            "run", "agent.toml", "--scripted", "slow.json", "--once", "--resume", "slow",
+        ])
+        .current_dir(dir.path())
+        .env_remove("RUST_LOG")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = text(&out.stderr);
+    assert_eq!(
+        text(&out.stdout).lines().last(),
+        Some("Aborted: stopped with Ctrl+C"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "\n  Warning: This session was saved with deepseek/x; it goes on with deepseek/y.\n"
+        ) && stderr.contains("\n  Warning: agent.toml changed since this session was saved: it goes on under agent.toml as it is now.\n"),
+        "{stderr}"
+    );
+    let after = saved();
+    assert_eq!(after["spentUsd"], 0.5);
+    assert_eq!(open(&after), [1, 2, 3]);
+    assert_eq!(after["questions"]["next"], 3);
+    assert_eq!(after["messages"], before);
+
+    // A new session does not see it (and replaces it once its run ended,
+    // keeping it as session.prev.json).
+    let out = run(&[
+        "run", "agent.toml", "--scripted", "again.json", "--once", "What was the word?",
+    ]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("\n  Info: A session of this agent in this folder was saved ")
+            && stderr.contains(
+                "/session.prev.json (renamed to session.json, `--resume` continues it).\n"
+            ),
+        "{stderr}"
+    );
+    assert!(
+        text(&out.stdout).contains(
+            "the reply file's reply 1 expected the conversation to hold `Remember the word heliotrope`: it does not"
+        ),
+        "{}",
+        text(&out.stdout)
+    );
+    // The first session's answer is gone from the file.
+    let replaced = saved()["messages"].to_string();
+    assert!(!replaced.contains("noted"), "{replaced}");
+    let previous = std::fs::read_to_string(folder.join("session.prev.json")).unwrap();
+    assert!(previous.contains("noted"), "{previous}");
+
+    // An agent that saves nothing has nothing to resume.
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n\n[session]\nsave = false\n",
+    )
+    .unwrap();
+    let out = run(&[
+        "run", "agent.toml", "--scripted", "script.json", "--once", "--resume", "go",
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "yobuild: agent.toml's `[session] save = false`: no session is saved to resume\n"
+    );
+    // And writes nothing: no sessions folder in a home of its own.
+    let empty = tempfile::tempdir().unwrap();
+    let out = bin()
+        .env("YOBUILD_HOME", empty.path())
+        .args([
+            "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+        ])
+        .current_dir(dir.path())
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!text(&out.stderr).contains("the conversation is saved"));
+    assert!(!empty.path().join("sessions").exists());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_task_waits_for_the_page_so_its_question_reaches_the_owner() {
     // Its first call asks (a file outside the project). Started before the

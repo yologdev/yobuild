@@ -414,6 +414,71 @@ async fn a_reset_withdraws_the_question_and_its_answer_goes_nowhere() {
     assert!(!texts(&agent).iter().any(|t| t.contains("[Owner")));
 }
 
+/// The questions `ask` holds open, by number, once they settle (an answer
+/// or a withdrawal is taken off on the question's own task).
+async fn open_becomes(ask: &AskOwner, want: &[u64]) {
+    let numbers = || ask.open().into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+    tokio::time::timeout(WAIT, async {
+        while numbers() != want {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("open questions stayed {:?}, not {want:?}", numbers()));
+}
+
+/// A resumed session's question (design §15): asked again as `#N`, its
+/// answer steering as `#N`, the next numbered after it; open until
+/// answered or withdrawn, and kept open when the session ends unanswered.
+#[tokio::test]
+async fn a_question_asked_again_keeps_its_number_and_stays_open_past_the_end() {
+    let ask = std::sync::Mutex::new(None);
+    let (session, mut owner, run) = drive(|session| {
+        *ask.lock().unwrap() = Some(AskOwner::new(session.clone()));
+        agent(vec![MockResponse::Text("noted".into())])
+    });
+    let ask = ask.into_inner().unwrap().unwrap();
+    ask.continue_after(4);
+    ask.ask_again(
+        3,
+        yobuild::builtins::Question::new("Branch?", "", Vec::new()).unwrap(),
+    );
+    let seen = until_all(&mut owner, &[is_question]).await;
+    let [(id, UiRequest::Input { title, .. })] = &questions(&seen)[..] else {
+        panic!("one question: {seen:?}");
+    };
+    assert_eq!(title, "#3 Branch?");
+    assert_eq!(
+        ask.open()
+            .into_iter()
+            .map(|(n, q)| (n, q.question().to_owned()))
+            .collect::<Vec<_>>(),
+        [(3, "Branch?".to_owned())]
+    );
+    session.send(ClientMessage::UiResponse {
+        id: *id,
+        value: json!("main"),
+    });
+    let seen = until_run_end(&mut owner).await;
+    assert_eq!(prompts(&seen), ["[Owner's answer to #3] Branch?\nmain"]);
+    open_becomes(&ask, &[]).await;
+    // Numbered after the saved session's last.
+    let q = |text: &str| yobuild::builtins::Question::new(text, "", Vec::new()).unwrap();
+    assert_eq!(ask.ask(q("Next?")), 5);
+    open_becomes(&ask, &[5]).await;
+    session.send(ClientMessage::Reset);
+    open_becomes(&ask, &[]).await;
+    assert_eq!(ask.ask(q("Later?")), 6);
+    until_all(&mut owner, &[is_question]).await;
+    quit(&session, run).await;
+    // The session ended with it unanswered: still open, for a later one.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        ask.open().into_iter().map(|(n, _)| n).collect::<Vec<_>>(),
+        [6]
+    );
+}
+
 #[tokio::test]
 /// What a closed session would do with a late steer cannot be seen from
 /// here; this checks the question is counted off.

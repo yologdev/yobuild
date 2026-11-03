@@ -492,6 +492,7 @@ async fn an_http_server_gets_its_headers_with_their_values_filled_in() {
         r#"[
   { "tools": [{ "name": "web__echo", "arguments": { "text": "hi" } }] },
   { "tools": [{ "name": "web__echo", "arguments": { "text": "leak" } }] },
+  { "tools": [{ "name": "web__echo", "arguments": { "text": "Bearer t0ken-0123456789 acme-workspace-42" } }] },
   { "text": "done" }
 ]"#,
     )
@@ -519,6 +520,14 @@ async fn an_http_server_gets_its_headers_with_their_values_filled_in() {
             && !echoed.contains("t0ken-0123456789")
             && !echoed.contains("acme-workspace-42"),
         "{echoed}"
+    );
+    // A result echoing them: each shown as its name, to the model too.
+    assert_eq!(
+        results[2],
+        (
+            "web echoed Bearer ${YOBUILD_RUN_TEST_TOKEN} ${YOBUILD_RUN_TEST_WORKSPACE}".to_string(),
+            false
+        )
     );
     let seen = seen.lock().unwrap().clone();
     assert!(

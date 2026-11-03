@@ -15,6 +15,7 @@
 //! - [`runtime`]: yobuild's own runtime files, installed into the cache.
 //! - [`agents`]: `yobuild new` — a starter, or a built-in agent copied.
 //! - [`skill`]: `yobuild skill install` — the skill where a coding agent reads it.
+//! - [`sessions`]: each session saved, and resumed with `yobuild run --resume`.
 //!
 //! Not published yet and without an API promise.
 
@@ -27,6 +28,7 @@ pub mod install;
 pub mod manifest;
 pub mod run;
 pub mod runtime;
+pub mod sessions;
 pub mod skill;
 #[doc(hidden)]
 pub mod stops;

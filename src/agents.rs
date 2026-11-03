@@ -232,6 +232,11 @@ web = true                  # the web page, at 127.0.0.1:8787
 # [extend]
 # max_loads    = 2          # servers a session
 # min_age_days = 7          # only versions published at least this many days ago
+
+# Each session is saved (under ~/.yobuild/sessions/) for `yobuild run
+# agent.toml --resume`; this keeps its conversations off the disk.
+# [session]
+# save = false
 "##;
 
 const STARTER_PROMPT: &str = "You are NAME, an agent working in {cwd}.
@@ -480,7 +485,7 @@ mod tests {
         }
         assert!(tried >= 8, "{tried}");
         // The blocks, whole.
-        for block in ["# [[plugin]]", "# [[mcp]]", "# [extend]"] {
+        for block in ["# [[plugin]]", "# [[mcp]]", "# [extend]", "# [session]"] {
             let start = lines.iter().position(|l| *l == block).unwrap();
             let mut changed: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
             for line in changed.iter_mut().skip(start) {
@@ -503,6 +508,9 @@ mod tests {
             if block == "# [extend]" {
                 let extend = m.extend.expect("[extend]");
                 assert_eq!((extend.max_loads, extend.min_age_days), (3, 9));
+            }
+            if block == "# [session]" {
+                assert!(!m.session.save);
             }
         }
         // Its demo is a reply file.
