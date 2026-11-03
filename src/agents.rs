@@ -237,6 +237,7 @@ web = true                  # the web page, at 127.0.0.1:8787
 # agent.toml --resume`; this keeps its conversations off the disk.
 # [session]
 # save = false
+
 # Plugins and stdio MCP servers confined (Linux: bubblewrap; macOS:
 # sandbox-exec): they write only to this folder and temp, and cannot read
 # your SSH keys, cloud logins and shell profiles; the network stays open.
@@ -492,7 +493,9 @@ mod tests {
         }
         assert!(tried >= 8, "{tried}");
         // The blocks, whole.
-        for block in ["# [[plugin]]", "# [[mcp]]", "# [extend]", "# [session]", "# [sandbox]"] {
+        for block in [
+            "# [[plugin]]", "# [[mcp]]", "# [extend]", "# [session]", "# [sandbox]",
+        ] {
             let start = lines.iter().position(|l| *l == block).unwrap();
             let mut changed: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
             for line in changed.iter_mut().skip(start) {

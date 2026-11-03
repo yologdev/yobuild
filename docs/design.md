@@ -5778,6 +5778,7 @@ loop's messages); encrypting the file at rest.
 
 **Order of PRs.** One: this design, the code, the tests, the guide, the
 skill, `CLAUDE.md`.
+
 ## 17. An opt-in sandbox for plugins and servers (M6; built 2026-11-03)
 
 **Why.** Every page so far says it: yobuild is not a sandbox. Step 5

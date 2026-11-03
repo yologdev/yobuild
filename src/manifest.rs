@@ -855,6 +855,9 @@ pub struct SessionSaving {
 impl Default for SessionSaving {
     fn default() -> Self {
         Self { save: true }
+    }
+}
+
 /// `[sandbox]` (design §17): what plugins and stdio MCP servers may write
 /// and read beyond `yobuild::sandbox`'s own rule — the agent's folder and
 /// temp writable, the owner's secrets (`sandbox::HIDDEN`) unreadable.

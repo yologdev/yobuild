@@ -29,8 +29,8 @@ pub mod install;
 pub mod manifest;
 pub mod run;
 pub mod runtime;
-pub mod sessions;
 pub mod sandbox;
+pub mod sessions;
 pub mod skill;
 #[doc(hidden)]
 pub mod stops;
