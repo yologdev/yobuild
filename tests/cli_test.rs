@@ -2446,6 +2446,8 @@ async fn a_server_that_signs_in_is_offered_once_the_page_is_open() {
             == "agent.toml's [[mcp]] docs: it answered without a sign-in; its tools are the agent's from its next step: docs__echo, docs__other"),
         "{notices:?}"
     );
+    // The two calls run at once: in either order.
+    ran.sort();
     assert_eq!(
         ran,
         [

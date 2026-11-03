@@ -316,8 +316,23 @@ async fn offer(
     ));
     Ok(format!(
         "its tools are the agent's from its next step: {}",
-        names.join(", ")
+        listed(&names)
     ))
+}
+
+/// How many tools a notice names: a server may offer a hundred.
+const NAMED: usize = 10;
+
+/// `names` for a notice: the first [`NAMED`], and how many more.
+fn listed(names: &[String]) -> String {
+    match names.len() > NAMED {
+        true => format!(
+            "{}, and {} more",
+            names[..NAMED].join(", "),
+            names.len() - NAMED
+        ),
+        false => names.join(", "),
+    }
 }
 
 /// A sign-in whose server is not offered, revoked; each failure a Warning
