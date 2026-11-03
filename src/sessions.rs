@@ -32,6 +32,9 @@ const FILE: &str = "session.json";
 /// Held while a session saves into its folder.
 const LOCK: &str = "session.lock";
 
+/// The session a new one replaced, kept once (design §15).
+const PREVIOUS: &str = "session.prev.json";
+
 /// What is saved.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -119,6 +122,9 @@ fn read(file: &Path) -> Result<Option<Saved>, String> {
 pub(crate) struct Store {
     dir: PathBuf,
     _lock: File,
+    /// A new session's: the saved one is moved to `session.prev.json`
+    /// before its first save replaces it.
+    keep_previous: bool,
 }
 
 impl Store {
@@ -126,14 +132,32 @@ impl Store {
         self.dir.join(FILE)
     }
 
-    /// `saved` written whole: a temp file (0600) in the folder, renamed.
-    pub(crate) fn write(&self, saved: &Saved) -> Result<(), String> {
+    /// Where the session a new one replaced is kept.
+    pub(crate) fn previous(&self) -> PathBuf {
+        self.dir.join(PREVIOUS)
+    }
+
+    /// `saved` written whole: a temp file (0600) in the folder, flushed to
+    /// the disk, renamed — a crash leaves the last whole one. A new
+    /// session's first save keeps the one it replaces as
+    /// `session.prev.json`.
+    pub(crate) fn write(&mut self, saved: &Saved) -> Result<(), String> {
+        use std::io::Write;
         let file = self.file();
         let failed = |e: &dyn std::fmt::Display| format!("{}: {e}", file.display());
         let text = serde_json::to_vec(saved).map_err(|e| failed(&e))?;
-        let temp = tempfile::NamedTempFile::new_in(&self.dir).map_err(|e| failed(&e))?;
+        let mut temp = tempfile::NamedTempFile::new_in(&self.dir).map_err(|e| failed(&e))?;
         private(temp.path(), 0o600).map_err(|e| failed(&e))?;
-        std::fs::write(temp.path(), text).map_err(|e| failed(&e))?;
+        temp.write_all(&text).map_err(|e| failed(&e))?;
+        temp.as_file().sync_all().map_err(|e| failed(&e))?;
+        if self.keep_previous {
+            match std::fs::rename(&file, self.previous()) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(format!("{}: {e}", self.previous().display()))
+                }
+                _ => self.keep_previous = false,
+            }
+        }
         temp.persist(&file).map_err(|e| failed(&e.error))?;
         Ok(())
     }
@@ -271,20 +295,27 @@ pub(crate) fn open(
         (Ok(Some(saved)), false) => opened.notes.push((
             NoticeLevel::Info,
             format!(
-                "A session of this agent in this folder was saved {} ({} messages): this new session replaces it when its first run ends; `--resume` continues it instead.",
+                "A session of this agent in this folder was saved {} ({} messages): `--resume` continues it instead. This new session replaces it when its first run ends, keeping it as {} (renamed to session.json, `--resume` continues it).",
                 saved.saved,
-                saved.messages.len()
+                saved.messages.len(),
+                dir.join(PREVIOUS).display()
             ),
         )),
         (Err(e), false) => opened.notes.push((
             NoticeLevel::Info,
             format!(
-                "A session of this agent in this folder was saved, and does not read ({e}): this new session replaces it when its first run ends."
+                "A session of this agent in this folder was saved, and does not read ({e}): this new session replaces it when its first run ends, keeping it as {}.",
+                dir.join(PREVIOUS).display()
             ),
         )),
         (Ok(None), false) => {}
     }
-    opened.store = Some(Store { dir, _lock: lock });
+    let keep_previous = !resume && file.exists();
+    opened.store = Some(Store {
+        dir,
+        _lock: lock,
+        keep_previous,
+    });
     Ok(opened)
 }
 
@@ -394,10 +425,16 @@ pub(crate) struct Saver {
     spend: Option<SessionSpend>,
     /// A resumed session's spend, when this one has no price to count with.
     spent_before: Option<f64>,
+    /// A resumed session's last question number, when this one has no
+    /// `ask_owner` to go on numbering: never given twice.
+    next_before: u64,
     /// Resumed, or a run of this session ended.
     live: bool,
-    /// The messages in the last save.
-    saved: usize,
+    /// The messages in the last save (a resumed session's, until then):
+    /// what a session ended mid-run is saved with.
+    last: Vec<AgentMessage>,
+    /// Whether the last save was written.
+    written: bool,
     /// Failures said, once each.
     said: HashSet<String>,
 }
@@ -425,8 +462,10 @@ impl Saver {
             ask,
             spend,
             spent_before: resumed.and_then(|s| s.spent_usd),
+            next_before: resumed.map_or(0, |s| s.questions.next),
             live: resumed.is_some(),
-            saved: resumed.map_or(0, |s| s.messages.len()),
+            last: resumed.map(|s| s.messages.clone()).unwrap_or_default(),
+            written: false,
             said: HashSet::new(),
         }
     }
@@ -436,33 +475,48 @@ impl Saver {
         self.store.file()
     }
 
-    /// The messages in the last save (a resumed session's, until then).
-    pub(crate) fn saved(&self) -> usize {
-        self.saved
+    /// The saved file, when this session's last save was written with a
+    /// conversation in it.
+    pub(crate) fn saved(&self) -> Option<PathBuf> {
+        (self.written && !self.last.is_empty()).then(|| self.file())
     }
 
-    /// The driver's callback: saved once this session is live.
+    /// The driver's callback: saved once this session is live. A reset
+    /// (idle, or ending a run) withdraws the open questions: they are
+    /// taken off here, not left to each question's own task.
     pub(crate) fn settled(&mut self, agent: &Agent, why: Settled) {
-        if why == Settled::Run {
-            self.live = true;
+        match why {
+            Settled::Run => self.live = true,
+            Settled::Reset => {
+                if let Some(ask) = &self.ask {
+                    ask.forget_open();
+                }
+            }
         }
         if self.live {
-            self.save(agent.messages());
+            self.save(agent.messages().to_vec());
         }
     }
 
-    /// As the session ends, with the agent the driver returned (none after
-    /// Ctrl+C: the last save stands).
+    /// As the session ends, with the agent the driver returned. None (Ctrl+C,
+    /// SIGHUP or SIGTERM mid-run, a failed task): the run in progress is
+    /// lost, but what it spent and the questions open now are saved over
+    /// the last save's conversation.
     pub(crate) fn ending(&mut self, agent: Option<&Agent>) {
-        if let (true, Some(agent)) = (self.live, agent) {
-            self.save(agent.messages());
+        if !self.live {
+            return;
         }
+        let messages = match agent {
+            Some(agent) => agent.messages().to_vec(),
+            None => self.last.clone(),
+        };
+        self.save(messages);
     }
 
-    fn save(&mut self, messages: &[AgentMessage]) {
+    fn save(&mut self, messages: Vec<AgentMessage>) {
         let questions = match &self.ask {
             Some(ask) => Questions {
-                next: ask.last_number(),
+                next: ask.last_number().max(self.next_before),
                 open: ask
                     .open()
                     .into_iter()
@@ -474,7 +528,10 @@ impl Saver {
                     })
                     .collect(),
             },
-            None => Questions::default(),
+            None => Questions {
+                next: self.next_before,
+                open: Vec::new(),
+            },
         };
         let saved = Saved {
             version: FORMAT,
@@ -483,7 +540,7 @@ impl Saver {
             manifest_sha256: self.manifest_sha256.clone(),
             model: self.model.clone(),
             saved: now(),
-            messages: messages.to_vec(),
+            messages,
             spent_usd: self
                 .spend
                 .as_ref()
@@ -491,18 +548,32 @@ impl Saver {
                 .or(self.spent_before),
             questions,
         };
-        match self.store.write(&saved) {
-            Ok(()) => self.saved = messages.len(),
-            Err(e) => {
-                tracing::warn!("saving the session: {e}");
-                if self.said.insert(e.clone()) {
-                    self.session.notice(
-                        NoticeLevel::Warning,
-                        format!("This session could not be saved: {e}."),
-                    );
-                }
+        let store = &mut self.store;
+        let written = blocking(|| store.write(&saved));
+        self.written = written.is_ok();
+        self.last = saved.messages;
+        if let Err(e) = written {
+            tracing::warn!("saving the session: {e}");
+            if self.said.insert(e.clone()) {
+                self.session.notice(
+                    NoticeLevel::Warning,
+                    format!("This session could not be saved: {e}."),
+                );
             }
         }
+    }
+}
+
+/// `write` off the runtime's async threads where it has others to run
+/// them (`block_in_place` on a multi-thread runtime: `yobuild run`'s),
+/// else in place (a current-thread runtime, as some tests have: the write
+/// then holds it, which only a test sees). The driver calls back on its
+/// own task, so saves keep its order either way.
+fn blocking<T>(write: impl FnOnce() -> T) -> T {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(write),
+        _ => write(),
     }
 }
 

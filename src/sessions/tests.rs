@@ -1,5 +1,6 @@
 use super::*;
 
+use yoagent::extension::Extension;
 use yoagent::provider::ModelConfig;
 use yoagent::Message;
 
@@ -107,7 +108,7 @@ async fn a_session_is_saved_once_a_run_ended_and_read_back_whole() {
     kept.ending(Some(&agent(&[])));
     assert!(!file.exists());
     kept.settled(&agent(&["remember heliotrope"]), Settled::Run);
-    assert_eq!(kept.saved(), 1);
+    assert_eq!(kept.saved(), Some(file.clone()));
     drop(kept);
 
     #[cfg(unix)]
@@ -132,9 +133,8 @@ async fn a_session_is_saved_once_a_run_ended_and_read_back_whole() {
     assert_eq!(*level, NoticeLevel::Info);
     assert!(
         note.starts_with("A session of this agent in this folder was saved ")
-            && note.ends_with(
-                " (1 messages): this new session replaces it when its first run ends; `--resume` continues it instead."
-            ),
+            && note.contains(" (1 messages): `--resume` continues it instead. This new session replaces it when its first run ends, keeping it as ")
+            && note.ends_with("/session.prev.json (renamed to session.json, `--resume` continues it)."),
         "{note}"
     );
     drop(again);
@@ -397,4 +397,114 @@ fn another_model_and_a_changed_manifest_are_said() {
             ),
         ]
     );
+}
+
+#[tokio::test]
+async fn a_new_session_keeps_the_one_it_replaces() {
+    let f = fixture("");
+    let (session, _driver) = Session::new(false);
+    let mut first = saver(opened(&f, false).unwrap(), &session);
+    first.settled(&agent(&["first"]), Settled::Run);
+    drop(first);
+    let mut second = saver(opened(&f, false).unwrap(), &session);
+    let file = second.file();
+    let previous = file.with_file_name("session.prev.json");
+    assert!(!previous.exists());
+    second.settled(&agent(&["second"]), Settled::Run);
+    second.settled(&agent(&["second", "more"]), Settled::Run);
+    drop(second);
+    // Moved aside once, at the first save; the later ones replace only the
+    // new session's own.
+    let read =
+        |p: &Path| serde_json::from_str::<Saved>(&std::fs::read_to_string(p).unwrap()).unwrap();
+    assert_eq!(texts(&read(&previous)), ["first"]);
+    assert_eq!(texts(&read(&file)), ["second", "more"]);
+    // A resumed session replaces nothing aside.
+    let mut third = saver(opened(&f, true).unwrap(), &session);
+    third.settled(&agent(&["third"]), Settled::Run);
+    drop(third);
+    assert_eq!(texts(&read(&previous)), ["first"]);
+}
+
+#[tokio::test]
+async fn a_reset_saves_no_question_and_an_interrupted_session_keeps_its_spend() {
+    let f = fixture("");
+    let (session, _driver) = Session::new(false);
+    let opened_ = opened(&f, false).unwrap();
+    let ask = AskOwner::new(session.clone());
+    let spend = SessionSpend::new(
+        yoagent::provider::CostConfig::new(1_000_000.0, 0.0),
+        None,
+        0.25,
+        "session budget",
+    );
+    let mut kept = Saver::new(
+        opened_.store.unwrap(),
+        session.clone(),
+        &opened_.manifest,
+        &opened_.manifest_sha256,
+        &opened_.cwd,
+        "deepseek/deepseek-flash".into(),
+        Some(ask.clone()),
+        Some(spend.clone()),
+        None,
+    );
+    let file = kept.file();
+    let read = || serde_json::from_str::<Saved>(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    ask.ask(Question::new("Q?", "", Vec::new()).unwrap());
+    kept.settled(&agent(&["a"]), Settled::Run);
+    assert_eq!(read().questions.open.len(), 1);
+    // A reset: the file holds no question at once.
+    kept.settled(&agent(&[]), Settled::Reset);
+    assert_eq!(read().questions.open, []);
+    assert_eq!(read().questions.next, 1);
+    kept.settled(&agent(&["b"]), Settled::Run);
+    // A run spends, then is stopped (no agent back): its spend and a
+    // question it asked are saved over the last save's conversation.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let run = spend
+        .start_run(&yoagent::extension::RunContext::new("r", &[], &cancel))
+        .await
+        .unwrap();
+    run.on_event(&yoagent::AgentEvent::MessageEnd {
+        message: AgentMessage::Llm(Message::assistant(
+            Vec::new(),
+            yoagent::StopReason::Stop,
+            "m",
+            "p",
+            yoagent::Usage {
+                input: 1,
+                ..yoagent::Usage::default()
+            },
+        )),
+    });
+    ask.ask(Question::new("Later?", "", Vec::new()).unwrap());
+    kept.ending(None);
+    let saved = read();
+    assert_eq!(saved.spent_usd, Some(1.25));
+    assert_eq!(texts(&saved), ["b"]);
+    assert_eq!(
+        saved.questions.open.iter().map(|q| q.n).collect::<Vec<_>>(),
+        [2]
+    );
+    assert_eq!(kept.saved(), Some(file.clone()));
+}
+
+#[tokio::test]
+async fn with_ask_owner_off_the_numbering_is_carried() {
+    let f = fixture("");
+    let (session, _driver) = Session::new(false);
+    let mut first = saver(opened(&f, false).unwrap(), &session);
+    first.settled(&agent(&["a"]), Settled::Run);
+    drop(first);
+    // As if a session with `ask_owner` had numbered up to #4.
+    let file = opened(&f, true).unwrap().store.unwrap().file();
+    let mut saved: Saved = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    saved.questions.next = 4;
+    std::fs::write(&file, serde_json::to_string(&saved).unwrap()).unwrap();
+    let mut resumed = saver(opened(&f, true).unwrap(), &session);
+    resumed.settled(&agent(&["a", "b"]), Settled::Run);
+    drop(resumed);
+    let saved: Saved = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(saved.questions.next, 4);
 }

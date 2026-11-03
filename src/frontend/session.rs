@@ -157,7 +157,8 @@ type OnSettled = Box<dyn FnMut(&Agent, Settled) + Send>;
 pub enum Settled {
     /// A run ended (its `RunEnd` is broadcast right after).
     Run,
-    /// A reset while idle forgot the conversation.
+    /// A reset forgot the conversation: while idle, or ending the run in
+    /// progress (then instead of `Run`).
     Reset,
 }
 
@@ -717,8 +718,9 @@ impl Drop for Ending {
 impl Driver {
     /// Call `settled` with the agent each time a run ends — before its
     /// `RunEnd` is broadcast, so a frontend that saw it end can rely on what
-    /// `settled` did — and after a reset while idle (a session saved as it
-    /// goes, design §15).
+    /// `settled` did; [`Settled::Reset`] when a reset ended it — and after a
+    /// reset while idle (a session saved as it goes, design §15). It runs on
+    /// the driver's task: a slow callback holds the session.
     pub fn on_settled(mut self, settled: impl FnMut(&Agent, Settled) + Send + 'static) -> Self {
         self.settled = Some(Box::new(settled));
         self
@@ -988,7 +990,11 @@ impl Driver {
             };
             let total_cost_usd = stats.total_cost_usd();
             if let Some(settled) = &mut self.settled {
-                settled(&agent, Settled::Run);
+                let why = match reset {
+                    true => Settled::Reset,
+                    false => Settled::Run,
+                };
+                settled(&agent, why);
             }
             inner.running.store(false, Ordering::SeqCst);
             self.ending.open_run = None;

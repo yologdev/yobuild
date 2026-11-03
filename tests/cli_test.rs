@@ -762,14 +762,71 @@ fn a_resumed_session_goes_on_from_its_conversation() {
         "{said}"
     );
 
-    // A new session does not see it (and replaces it once its run ended).
+    // Under another model, with the gate off, a run stopped with Ctrl+C
+    // mid-run: lost, but what was spent before and the question it asked
+    // are saved over the last save's conversation. (A scripted model has no
+    // price: the spend is set in the file, as a priced run would leave it.)
+    let mut edited = saved();
+    edited["spentUsd"] = serde_json::json!(0.5);
+    std::fs::write(folder.join("session.json"), edited.to_string()).unwrap();
+    let before = edited["messages"].clone();
+    std::fs::write(
+        dir.path().join("agent.toml"),
+        "[agent]\nname = \"a\"\nmodel = \"deepseek/y\"\n[builtins]\nask_owner = true\ngate = \"off\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("slow.json"),
+        r#"[{ "tools": [{ "name": "ask_owner", "arguments": { "question": "Third?" } }, { "name": "bash", "arguments": { "command": "sleep 30" } }] }, { "text": "done" }]"#,
+    )
+    .unwrap();
+    let child = bin()
+        .env("YOBUILD_HOME", home.path())
+        .args([
+            "run", "agent.toml", "--scripted", "slow.json", "--once", "--resume", "slow",
+        ])
+        .current_dir(dir.path())
+        .env_remove("RUST_LOG")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = text(&out.stderr);
+    assert_eq!(
+        text(&out.stdout).lines().last(),
+        Some("Aborted: stopped with Ctrl+C"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "\n  Warning: This session was saved with deepseek/x; it goes on with deepseek/y.\n"
+        ) && stderr.contains("\n  Warning: agent.toml changed since this session was saved: it goes on under agent.toml as it is now.\n"),
+        "{stderr}"
+    );
+    let after = saved();
+    assert_eq!(after["spentUsd"], 0.5);
+    assert_eq!(open(&after), [1, 2, 3]);
+    assert_eq!(after["questions"]["next"], 3);
+    assert_eq!(after["messages"], before);
+
+    // A new session does not see it (and replaces it once its run ended,
+    // keeping it as session.prev.json).
     let out = run(&[
         "run", "agent.toml", "--scripted", "again.json", "--once", "What was the word?",
     ]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(
-        stderr.contains("\n  Info: A session of this agent in this folder was saved "),
+        stderr.contains("\n  Info: A session of this agent in this folder was saved ")
+            && stderr.contains(
+                "/session.prev.json (renamed to session.json, `--resume` continues it).\n"
+            ),
         "{stderr}"
     );
     assert!(
@@ -782,6 +839,8 @@ fn a_resumed_session_goes_on_from_its_conversation() {
     // The first session's answer is gone from the file.
     let replaced = saved()["messages"].to_string();
     assert!(!replaced.contains("noted"), "{replaced}");
+    let previous = std::fs::read_to_string(folder.join("session.prev.json")).unwrap();
+    assert!(previous.contains("noted"), "{previous}");
 
     // An agent that saves nothing has nothing to resume.
     std::fs::write(
@@ -797,6 +856,20 @@ fn a_resumed_session_goes_on_from_its_conversation() {
         text(&out.stderr),
         "yobuild: agent.toml's `[session] save = false`: no session is saved to resume\n"
     );
+    // And writes nothing: no sessions folder in a home of its own.
+    let empty = tempfile::tempdir().unwrap();
+    let out = bin()
+        .env("YOBUILD_HOME", empty.path())
+        .args([
+            "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+        ])
+        .current_dir(dir.path())
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!text(&out.stderr).contains("the conversation is saved"));
+    assert!(!empty.path().join("sessions").exists());
 }
 
 #[tokio::test(flavor = "multi_thread")]

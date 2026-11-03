@@ -170,6 +170,15 @@ impl AskOwner {
         asked.iter().map(|(n, q)| (*n, q.clone())).collect()
     }
 
+    /// Takes every question off [`AskOwner::open`] at once: a reset withdrew
+    /// them (each one's own task takes it off too, later).
+    pub fn forget_open(&self) {
+        self.asked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
     /// The last number given (0 before any question).
     pub fn last_number(&self) -> u64 {
         self.next.load(Ordering::Relaxed)

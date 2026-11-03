@@ -591,6 +591,14 @@ async fn a_remote_is_connected_with_the_credential_the_owner_names() {
         .execute(json!({ "text": "hi" }), ToolContext::new("2", "docs__echo"))
         .await;
     assert_eq!(text(&echoed), "echoed hi");
+    // A result echoing the key: shown as its variable, to the model too.
+    let echoed = echo
+        .execute(
+            json!({ "text": SECRET }),
+            ToolContext::new("3", "docs__echo"),
+        )
+        .await;
+    assert_eq!(text(&echoed), format!("echoed ${{{KEY}}}"));
     // The block read back.
     let block = l.loaded.kept()[0].block();
     let manifest = format!(

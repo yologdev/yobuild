@@ -808,7 +808,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         saver.ending(agent.as_ref());
-        (saver.saved() > 0).then(|| saver.file())
+        saver.saved()
     });
     let mut ended = finish(seen, watching, agent, once, interrupted).await;
     ended.saved = saved;
@@ -2738,6 +2738,33 @@ fn hidden(text: &str, hide: &[(String, String)]) -> String {
     })
 }
 
+/// `result` with each of `hide`'s values replaced, as [`hidden`] does, in
+/// its text blocks (what the model sees, and what a saved session keeps)
+/// and every string of its details (what the frontends show).
+pub(crate) fn hidden_result(
+    mut result: yoagent::ToolResult,
+    hide: &[(String, String)],
+) -> yoagent::ToolResult {
+    fn strings(value: &mut serde_json::Value, hide: &[(String, String)]) {
+        match value {
+            serde_json::Value::String(text) => *text = hidden(text, hide),
+            serde_json::Value::Array(items) => items.iter_mut().for_each(|v| strings(v, hide)),
+            serde_json::Value::Object(map) => map.values_mut().for_each(|v| strings(v, hide)),
+            _ => {}
+        }
+    }
+    if hide.is_empty() {
+        return result;
+    }
+    for block in &mut result.content {
+        if let Content::Text { text } = block {
+            *text = hidden(text, hide);
+        }
+    }
+    strings(&mut result.details, hide);
+    result
+}
+
 /// A server's URL filled in, checked again as an endpoint (design §14,
 /// "Stage 3", point 10): when read, each reference stood in as `x`, so
 /// `https://${HOST}/mcp` could become anything. A reference filled empty
@@ -3069,11 +3096,13 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
         .collect())
 }
 
-/// An HTTP server's tool whose call errors show each value filled into its
-/// URL or headers as its `${NAME}` ([`hide`]): yoagent redacts the URL's
-/// key-like parts in what a server says, and since 0.26.6 a credential
-/// header's value (of 8 characters or more); another header's value (an
-/// `X-Workspace`), which a server may echo, is left to this.
+/// An HTTP server's tool whose results and call errors show each value
+/// filled into its URL or headers as its `${NAME}` ([`hide`],
+/// [`hidden_result`]): yoagent redacts the URL's key-like parts in what a
+/// server says in an error, and since 0.26.6 a credential header's value
+/// (of 8 characters or more); a result, and another header's value (an
+/// `X-Workspace`), which a server may echo, are left to this — so the
+/// model never sees a filled value, nor does a saved session (design §15).
 struct Hiding {
     inner: McpToolAdapter,
     hide: Arc<Vec<(String, String)>>,
@@ -3098,10 +3127,13 @@ impl AgentTool for Hiding {
         params: serde_json::Value,
         ctx: yoagent::ToolContext,
     ) -> Result<yoagent::ToolResult, yoagent::ToolError> {
-        self.inner.execute(params, ctx).await.map_err(|e| match e {
-            yoagent::ToolError::Failed(why) => yoagent::ToolError::Failed(hidden(&why, &self.hide)),
-            other => other,
-        })
+        match self.inner.execute(params, ctx).await {
+            Ok(result) => Ok(hidden_result(result, &self.hide)),
+            Err(yoagent::ToolError::Failed(why)) => {
+                Err(yoagent::ToolError::Failed(hidden(&why, &self.hide)))
+            }
+            Err(other) => Err(other),
+        }
     }
 }
 
@@ -3863,6 +3895,34 @@ mod tests {
             std::iter::empty()
         )
         .is_empty());
+    }
+
+    /// A result is hidden as an error is: each text block, each string of
+    /// its details; other blocks left as they are.
+    #[test]
+    fn a_result_hides_what_was_filled_in() {
+        let hide = vec![("sk-live-123456".to_owned(), "${KEY}".to_owned())];
+        let result = yoagent::ToolResult {
+            content: vec![
+                Content::Text {
+                    text: "got sk-live-123456".into(),
+                },
+                Content::Image {
+                    data: "sk-live-123456".into(),
+                    mime_type: "image/png".into(),
+                },
+            ],
+            details: serde_json::json!({ "echo": ["sk-live-123456", 1], "n": 2 }),
+        };
+        let shown = super::hidden_result(result, &hide);
+        assert!(matches!(&shown.content[0], Content::Text { text } if text == "got ${KEY}"));
+        assert!(
+            matches!(&shown.content[1], Content::Image { data, .. } if data == "sk-live-123456")
+        );
+        assert_eq!(
+            shown.details,
+            serde_json::json!({ "echo": ["${KEY}", 1], "n": 2 })
+        );
     }
 
     /// A stdio server has the credentials set here taken out but those its

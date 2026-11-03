@@ -32,7 +32,12 @@ locks it again (commit the new lock).
   `--resume` starts a new conversation, which replaces the saved one
   once its first run ends. `[session] save = false` keeps an agent's
   conversations off the disk. A scripted reply may say what the
-  conversation must hold (`sees`). The DSH base did not change.
+  conversation must hold (`sees`). A new session keeps the one it
+  replaces as `session.prev.json`.
+- **An HTTP MCP server's results hide what was filled in**, as its errors
+  did: a value from `${NAME}` in its URL or headers, and a sign-in's
+  token, echoed back in a result's text is shown as `${NAME}` (or
+  `${oauth}`), so neither the model nor a saved session sees it.
 - **yoagent 0.26.6** (by way of 0.26.4 and 0.26.5). Three more models
   with their real limits and prices: `openai/gpt-6.1-terra`,
   `zai/glm-5.3-flashx` and `qwen/qwen3.8-omni-flash`; Meta's
