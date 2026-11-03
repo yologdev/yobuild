@@ -370,7 +370,13 @@ Later: rutis plugins (§14, "Later steps"), once some are published.
 - **Tests:** against a stub MCP server and its authorization server on
   this machine, the browser played by the test; the manifest's server on
   the page in `cli_test`.
-- **Next:** a live sign-in to a real server, then a release.
+- **Live (2026-11-03):** agent.toml's `[[mcp]] linear` (`auth =
+  "oauth"`, Linear's MCP server) signed in through the owner's browser
+  on the page; the task started once it was signed in and answered from
+  `linear__whoami`, `linear__list_teams` and `linear__list_issues`. Seen:
+  the "signed in" notice lists every tool (about 90 for Linear), and the
+  page shows no cost (the run log, M6, will).
+- **Next:** a release.
 
 ## M6 — 1.0: an agent you keep (proposed 2026-11-03)
 
@@ -379,7 +385,7 @@ without you, keeps a record, and can be confined. Each part is its own
 PR with its design section.
 
 - **Loose ends:** the README's status; a live sign-in to a real OAuth
-  server (Linear or Notion; needs the owner's account); a local model
+  server (done 2026-11-03, Linear: stage 4 above); a local model
   run (Ollama); the Linux tarballs checked by hand; 0.3.0.
 - **Sessions that survive a restart:** the conversation, the open
   questions and the session's spend saved per agent and resumed.
