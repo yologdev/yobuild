@@ -386,8 +386,14 @@ PR with its design section.
 
 - **Loose ends:** the README's status; a live sign-in to a real OAuth
   server (done 2026-11-03, Linear: stage 4 above); a local model
-  run (Ollama); the Linux tarballs checked by hand; 0.3.0 (prepared
-  2026-11-03).
+  run (Ollama); the Linux tarballs checked by hand (done 2026-11-03:
+  0.3.0's aarch64 and x86_64 tarballs in clean `node:24-bookworm-slim`
+  containers — the skill, `new --from web-research` and `--from coding`
+  checked and their demos `Completed`, `--report` and `yobuild log`, the
+  page and its token, `[sandbox]` under bubblewrap where the container
+  allows user namespaces and refused with its hint where not; a closed
+  pipe's panic and the sandbox notice's wording fixed after); 0.3.0
+  (released 2026-11-03).
 - **Sessions that survive a restart** (built, #115; design §15): the
   conversation, the open questions and the session's spend saved per
   agent and folder, and resumed with `--resume`.
