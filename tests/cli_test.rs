@@ -131,7 +131,7 @@ fn a_missing_key_stops_the_run_before_it_starts() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         text(&out.stderr),
-        "yobuild: deepseek/deepseek-flash needs its key in DEEPSEEK_API_KEY\n"
+        "yobuild: deepseek/deepseek-flash needs its key in DEEPSEEK_API_KEY\n  what to do: set that variable to your key where you run yobuild (`export NAME=…`); or try the agent without a key on its reply file, `--scripted scripts/demo.json`\n"
     );
 }
 
@@ -2984,4 +2984,45 @@ fn a_reader_gone_is_no_panic() {
         assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
         assert!(out.status.success(), "{args:?}: {stderr}");
     }
+}
+
+/// A scripted run says nothing of a key, whatever `RUST_LOG` the person
+/// has set; a manifest not where it is looked for says where it was looked
+/// for; a missing key says what to do.
+#[test]
+fn a_newcomers_first_mistakes_and_runs_are_said_plainly() {
+    let dir = project("", r#"[{ "text": "done" }]"#);
+    for log in ["warn", "info", ""] {
+        let out = bin()
+            .args([
+                "run", "agent.toml", "--scripted", "script.json", "--once", "--", "hi",
+            ])
+            .current_dir(dir.path())
+            .env("RUST_LOG", log)
+            .output()
+            .unwrap();
+        let stderr = text(&out.stderr);
+        assert!(out.status.success(), "RUST_LOG={log:?}: {stderr}");
+        assert!(
+            !stderr.contains("no API key found"),
+            "RUST_LOG={log:?}: {stderr}"
+        );
+    }
+    let elsewhere = tempfile::tempdir().unwrap();
+    let out = yobuild(&["check", "agent.toml"], elsewhere.path());
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("agent.toml: no such file in ")
+            && stderr.contains(
+                ": give the manifest's path (`path/to/agent.toml`), from the folder the agent should work in"
+            ),
+        "{stderr}"
+    );
+    let out = yobuild(&["run", "agent.toml", "--once", "--", "hi"], dir.path());
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("yobuild: deepseek/x needs its key in DEEPSEEK_API_KEY")
+            && stderr.contains("  what to do: set that variable to your key"),
+        "{stderr}"
+    );
 }

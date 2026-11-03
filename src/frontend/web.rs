@@ -75,6 +75,20 @@ struct App {
     runs: Option<PastRuns>,
 }
 
+/// The page, naming `agent` in its title and header when there is one.
+fn index(agent: Option<&str>) -> String {
+    let named = agent.map(|name| {
+        let name = name
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;");
+        format!("{name} · ")
+    });
+    INDEX.replace("<!--agent-->", named.as_deref().unwrap_or(""))
+}
+
 /// What `GET /runs` answers, read each time it is asked (off the async
 /// threads): a JSON value the page shows as its past runs.
 pub type PastRuns = std::sync::Arc<dyn Fn() -> serde_json::Value + Send + Sync>;
@@ -82,15 +96,18 @@ pub type PastRuns = std::sync::Arc<dyn Fn() -> serde_json::Value + Send + Sync>;
 /// Serve the browser frontend for `session` on `addr`, with a new random
 /// token, until the returned [`Served`] is stopped or dropped.
 pub async fn serve(session: Session, addr: SocketAddr) -> std::io::Result<Served> {
-    serve_with(session, addr, None).await
+    serve_with(session, addr, None, None).await
 }
 
-/// [`serve`], with the past runs `GET /runs` answers.
+/// [`serve`], with the past runs `GET /runs` answers and the agent's name
+/// on the page.
 pub async fn serve_with(
     session: Session,
     addr: SocketAddr,
     runs: Option<PastRuns>,
+    agent: Option<&str>,
 ) -> std::io::Result<Served> {
+    let page = Html(index(agent));
     let token = uuid::Uuid::new_v4().simple().to_string();
     let state = App {
         session,
@@ -98,7 +115,7 @@ pub async fn serve_with(
         runs,
     };
     let app = Router::new()
-        .route("/", get(|| async { Html(INDEX) }))
+        .route("/", get(move || async move { page }))
         .route("/app.js", get(|| async { javascript(APP.to_owned()) }))
         .route("/lib.js", get(|| async { javascript(LIB.to_owned()) }))
         .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))

@@ -621,7 +621,12 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             .clone()
             .map(|log| Arc::new(move || past_runs(&log)) as web::PastRuns);
         let web = stops
-            .until(web::serve_with(session.clone(), addr, runs))
+            .until(web::serve_with(
+                session.clone(),
+                addr,
+                runs,
+                Some(&manifest.agent.name),
+            ))
             .await?;
         // Every interface: a link the phone can open.
         let url = match (web.addr().ip().is_unspecified(), lan_ip()) {

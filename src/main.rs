@@ -440,10 +440,11 @@ fn new(args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
         return Ok(ExitCode::SUCCESS);
     }
     if args == ["--list"] {
+        let width = BUILTIN.iter().map(|a| a.name.len()).max().unwrap_or(0);
         for kind in ["gallery", "example"] {
             out!("{kind}:");
             for agent in BUILTIN.iter().filter(|a| a.kind == kind) {
-                out!("  {:<18} {}", agent.name, agent.summary);
+                out!("  {:<width$} {}", agent.name, agent.summary);
             }
         }
         return Ok(ExitCode::SUCCESS);
@@ -610,14 +611,25 @@ fn logging(agent: Option<&str>) -> Result<Option<PathBuf>, BoxError> {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::EnvFilter;
     // The registry warns of no key for `--scripted`'s mock provider, which
-    // needs none.
-    let default = "warn,yoagent::provider::registry=error";
+    // needs none (a real provider's missing key `run` refuses first): kept
+    // quiet under a `RUST_LOG` of the person's too, unless it names the
+    // registry itself.
+    const REGISTRY: &str = "yoagent::provider::registry";
+    let quiet = format!("{REGISTRY}=error");
+    let default = format!("warn,{quiet}");
     let filter = match std::env::var("RUST_LOG") {
-        Ok(set) => EnvFilter::try_new(&set).unwrap_or_else(|e| {
-            eprintln!("yobuild: RUST_LOG={set:?} is not a log filter ({e}); using {default:?}");
-            EnvFilter::new(default)
-        }),
-        Err(_) => EnvFilter::new(default),
+        Ok(set) if set.trim().is_empty() => EnvFilter::new(&default),
+        Ok(set) => {
+            let with = match set.contains(REGISTRY) {
+                true => set.clone(),
+                false => format!("{set},{quiet}"),
+            };
+            EnvFilter::try_new(&with).unwrap_or_else(|e| {
+                eprintln!("yobuild: RUST_LOG={set:?} is not a log filter ({e}); using {default:?}");
+                EnvFilter::new(&default)
+            })
+        }
+        Err(_) => EnvFilter::new(&default),
     };
     // Beside the log, whatever its filter: what plugins log that the
     // session says (`run::plugin_log`).

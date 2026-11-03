@@ -342,8 +342,23 @@ pub(crate) const HINTS: &[Hint] = &[
     Hint {
         id: "sandbox-cannot-start",
         scope: Scope::Start,
-        pattern: crate::sandbox::CANNOT_START,
-        fix: "on Linux bubblewrap needs unprivileged user namespaces, which Ubuntu 23.10 and later restrict through AppArmor: give `bwrap` an AppArmor profile that allows them (a file in /etc/apparmor.d naming /usr/bin/bwrap with `userns,`; Ubuntu ships `bwrap-userns-restrict` as an example), or, for the whole system, `sysctl kernel.apparmor_restrict_unprivileged_userns=0`; a container must allow them too; on macOS sandbox-exec cannot start inside another sandbox (run yobuild outside it); or leave out [sandbox], and plugins run unconfined",
+        // `Sandbox::tried`'s on Linux: the tool's name after the prefix.
+        pattern: "the sandbox cannot start here: bwrap",
+        fix: "bubblewrap needs unprivileged user namespaces, which Ubuntu 23.10 and later restrict through AppArmor: give `bwrap` an AppArmor profile that allows them (a file in /etc/apparmor.d naming /usr/bin/bwrap with `userns,`; Ubuntu ships `bwrap-userns-restrict` as an example), or, for the whole system, `sysctl kernel.apparmor_restrict_unprivileged_userns=0`; in a container, the container must allow them too; or leave out [sandbox], and plugins run unconfined",
+    },
+    Hint {
+        id: "sandbox-cannot-start-macos",
+        scope: Scope::Start,
+        // `Sandbox::tried`'s on macOS.
+        pattern: "the sandbox cannot start here: sandbox-exec",
+        fix: "sandbox-exec cannot start inside another sandbox (a coding agent's, an app's): run yobuild outside it; or leave out [sandbox], and plugins run unconfined",
+    },
+    Hint {
+        id: "no-key",
+        scope: Scope::Start,
+        // `run::check`'s, for the model's key.
+        pattern: " needs its key in ",
+        fix: "set that variable to your key where you run yobuild (`export NAME=…`); or try the agent without a key on its reply file, `--scripted scripts/demo.json`",
     },
     Hint {
         id: "mcp-no-tools",
@@ -657,6 +672,20 @@ mod tests {
                     crate::sandbox::CANNOT_START
                 ),
                 "sandbox-cannot-start",
+            ),
+            (
+                Scope::Start,
+                format!(
+                    "{}sandbox-exec exit status: 71: sandbox-exec: sandbox_apply: Operation not permitted",
+                    crate::sandbox::CANNOT_START
+                ),
+                "sandbox-cannot-start-macos",
+            ),
+            // `run::check`'s, as it makes it.
+            (
+                Scope::Start,
+                "deepseek/deepseek-flash needs its key in DEEPSEEK_API_KEY".into(),
+                "no-key",
             ),
             (Scope::Start, "mcp files: the server lists no tools".into(), "mcp-no-tools"),
             (

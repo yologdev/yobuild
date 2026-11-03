@@ -1,7 +1,7 @@
 # The yobuild guide
 
 How to make, run and trust an agent with yobuild. The README's
-[Start](../README.md#start) gets one running in a minute; this guide is
+[Start](../README.md#start) gets one running in a minute once yobuild is installed; this guide is
 the rest. What you can build with yobuild, and why, is in
 [What you can build](use-cases.md). Every manifest key, as yobuild
 reads it, is in the skill's
@@ -46,7 +46,10 @@ the folder `yobuild run` starts in.
 
 Download yobuild for your machine from the
 [releases page](https://github.com/yologdev/yobuild/releases): unpack the
-`.tar.gz` and put `yobuild` on your PATH. Or build it:
+`.tar.gz` and put `yobuild` on your PATH. With
+[cargo-binstall](https://github.com/cargo-bins/cargo-binstall),
+`cargo binstall yobuild` does that for you. Or build it from source,
+which takes 10 to 15 minutes:
 
 ```sh
 cargo install yobuild
@@ -81,6 +84,10 @@ Three ways, from least to most work.
 | `code-reviewer` | reviews a TypeScript project's code quality, read-only |
 | `spreadsheet-clerk` | turns a bank's CSV export into a spreadsheet with totals |
 | `code-health` | finds a TypeScript project's type errors and outlines it, read-only |
+| `self-extending-reviewer` | reviews a JavaScript or TypeScript project, loading a linter it finds when you allow it |
+| `project-notebook` | answers questions about a project and remembers your decisions, loading a memory package it finds |
+| `docs-helper` | answers how to use a library at the version a project depends on, from docs it connects to |
+| `release-notes` | drafts release notes from the commits since the last version tag, with a small tool of its own |
 | `handoff` | takes a task and works on it alone, asking without waiting, ending with a report |
 | `coding` | a coding agent in the terminal, a pi policy judging its commands |
 | `minimal` | the smallest: reads its folder, no plugins, no Node |
@@ -89,7 +96,7 @@ Three ways, from least to most work.
 yobuild new my-research --from web-research
 ```
 
-The first five are the [gallery](../gallery/): each was built by a coding
+All but the last three are the [gallery](../gallery/): each was built by a coding
 agent through the skill, and is checked and run in yobuild's CI. The copy
 is the agent as built, with two changes `new` prints:
 - its `[agent] name` becomes the folder's name;
@@ -448,6 +455,25 @@ and the agent's tools reach your files. What yobuild does:
   deleting or replacing what you have, files outside the project, an
   unknown program or option, and a plugin's tool not allowed by name.
   `allow = [...]` on an entry frees its harmless tools.
+
+  **To be asked before every write**, new files too: give the agent
+  `tools = "read-only"` (yoagent's readers, no writer), and its writing
+  through a tool it asks for, such as the filesystem MCP server with
+  only its readers allowed:
+
+  ```toml
+  [builtins]
+  tools = "read-only"
+
+  [[mcp]]
+  name  = "files"
+  npm   = "@modelcontextprotocol/server-filesystem@1.0.0"
+  args  = ["."]
+  allow = ["read_text_file", "list_directory"]   # its writers ask
+  ```
+
+  `check` lists each writer as `(asks)`; with nobody there (`--once`) a
+  write is refused, and the run goes on.
 - **Grants**, per plugin, off unless given:
   - `workspace`: the agent's folder;
   - `trust`: the project is trusted;
@@ -491,7 +517,11 @@ and the agent's tools reach your files. What yobuild does:
   On Linux install bubblewrap first (`apt install bubblewrap`); on
   Ubuntu 23.10 and later it also needs unprivileged user namespaces
   allowed for it: an AppArmor profile for `bwrap`, or
-  `sysctl kernel.apparmor_restrict_unprivileged_userns=0`. `check` says
+  `sysctl kernel.apparmor_restrict_unprivileged_userns=0`; in a
+  container, the container must allow them. On macOS, `sandbox-exec`
+  cannot start inside another sandbox: run yobuild yourself, not from
+  inside a coding agent's or an app's sandbox. Either way yobuild tries
+  it before anything starts and refuses with what to do. `check` says
   which entries are confined.
 - **Budgets and limits**, per run and per session; a run that would spend
   more stops, and says which limit.
@@ -514,7 +544,7 @@ explain each, and what each does not cover.
   one yobuild gives, what it means and what to do.
 
 Some common ones:
-- **"needs its key in …":** export the model's key.
+- **"needs its key in …":** export the model's key, or run the agent's reply file (`--scripted`), which needs none.
 - **"yobuild needs Node 22.19+ and npm 11.19+: found …":** update Node or
   npm.
 - **A plugin failing with an authentication error:** it may want a
