@@ -151,7 +151,6 @@ phone = true
                     env: [("MODE".into(), Value::new("fast").unwrap())].into(),
                 },
                 allow: Vec::new(),
-                oauth: false,
             },
             Mcp {
                 name: "mcp.example.com".into(),
@@ -165,9 +164,9 @@ phone = true
                         ),
                     ]
                     .into(),
+                    oauth: false,
                 },
                 allow: Vec::new(),
-                oauth: false,
             },
         ]
     );
@@ -662,7 +661,7 @@ fn a_server_signs_in_with_auth_oauth_over_http_only() {
         Path::new("/a"),
     )
     .unwrap();
-    assert!(m.mcp[0].oauth);
+    assert!(m.mcp[0].oauth());
     assert_eq!(m.mcp[0].allow, ["list_issues"]);
     assert_eq!(
         error(&with(
@@ -679,6 +678,12 @@ fn a_server_signs_in_with_auth_oauth_over_http_only() {
             "[[mcp]]\nurl = \"https://x.example/mcp\"\nauth = \"oauth\"\nheaders = { authorization = \"Bearer ${K}\" }\n"
         )),
         "6:8: an `Authorization` header and `auth = \"oauth\"` together: the sign-in gives that header"
+    );
+    assert_eq!(
+        error(&with(
+            "[[mcp]]\nurl = \"https://x.example/mcp?key=${K}\"\nauth = \"oauth\"\n"
+        )),
+        "6:8: a URL holding `${…}` and `auth = \"oauth\"` together: the sign-in sends the server's URL to its authorization server"
     );
 }
 

@@ -571,6 +571,16 @@ fn public_v6(ip: Ipv6Addr) -> bool {
         || (s[0] & 0xffc0) == 0xfec0)
 }
 
+/// Whether a 401 (its `WWW-Authenticate`, if any) may offer a sign-in:
+/// its `Bearer` challenge — or, with no credential `sent`, no challenge at
+/// all, as its well-known metadata may still say how. Anything else is a
+/// credential refused. `remote::connect` and `check` judge a 401 by it.
+pub(crate) fn may_sign_in(www_authenticate: Option<&str>, sent: bool) -> bool {
+    www_authenticate
+        .map(|c| Challenge::parse(c).bearer().is_some())
+        .unwrap_or(!sent)
+}
+
 /// A `WWW-Authenticate` value read into its challenges: each scheme
 /// (lowercase) with its parameters (names lowercase).
 #[derive(Debug, Default, PartialEq, Eq)]

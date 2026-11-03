@@ -66,7 +66,7 @@ mod package;
 mod remote;
 mod signs_in;
 pub(crate) use package::Plugins;
-pub(crate) use signs_in::{sign_in_all, Signing, SignsIn};
+pub(crate) use signs_in::{sign_in_all, ManifestHeader, Signing, SignsIn, ENDING};
 
 /// A server or package the owner kept this session, as the end of the
 /// session says it. Made only by `load` once both questions were allowed:
@@ -453,6 +453,9 @@ struct Lists {
     kept: Vec<Kept>,
     /// The sign-ins of servers taken out as stopped, not revoked yet.
     signed_out: Vec<(String, Arc<super::oauth::Source>)>,
+    /// The names of agent.toml's servers among `servers` (`add_server`),
+    /// kept once they stop.
+    manifests: std::collections::HashSet<String>,
 }
 
 #[derive(Default)]
@@ -668,14 +671,40 @@ impl Loaded {
     /// turn, as a loaded one is, but not the agent's (not in `kept`: its
     /// tools follow the manifest's `allow`, and it is in no block).
     fn add_server(&self, server: Server) {
-        locked(&self.0.lists).servers.push(server);
+        let mut lists = locked(&self.0.lists);
+        lists.manifests.insert(server.name.clone());
+        lists.servers.push(server);
+        drop(lists);
         self.0.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// One sign-in at a time in a session (design §14 "Stage 4", point 1):
-    /// held while the browser's question is open.
-    async fn one_sign_in(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.0.signing.lock().await
+    /// held from the owner's Allow until the browser's question is
+    /// answered. Another holding it, `waiting` is called and the wait
+    /// raced against `stop`: `None` once it is cancelled first.
+    async fn one_sign_in(
+        &self,
+        stop: &tokio_util::sync::CancellationToken,
+        waiting: impl FnOnce(),
+    ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        if let Ok(one) = self.0.signing.try_lock() {
+            return Some(one);
+        }
+        waiting();
+        tokio::select! {
+            _ = stop.cancelled() => None,
+            one = self.0.signing.lock() => Some(one),
+        }
+    }
+
+    /// How a server `stopped` names is said: one of agent.toml's
+    /// ([`Loaded::add_server`]) as the manifest names it, else as the
+    /// agent's.
+    pub fn who(&self, server: &str) -> String {
+        match locked(&self.0.lists).manifests.contains(server) {
+            true => format!("agent.toml's [[mcp]] {server}"),
+            false => format!("The loaded MCP server `{server}`"),
+        }
     }
 
     /// The servers seen gone for at least [`SETTLE`] (so the reason is

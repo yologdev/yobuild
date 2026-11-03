@@ -533,10 +533,14 @@ pub struct Mcp {
     /// names them (the agent sees each as `<name>__<tool>`). For a server
     /// that signs in, checked once its tools are listed.
     pub allow: Vec<String>,
-    /// `auth = "oauth"` (an HTTP server only, design §14 "Stage 4", point
-    /// 11): signed in through the owner's browser once a frontend is
-    /// attached; its tools reach the agent from the next turn.
-    pub oauth: bool,
+}
+
+impl Mcp {
+    /// Whether it signs in (`auth = "oauth"`, [`Transport::Http`]'s
+    /// `oauth`).
+    pub fn oauth(&self) -> bool {
+        matches!(self.transport, Transport::Http { oauth: true, .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -554,6 +558,10 @@ pub enum Transport {
     Http {
         url: Value,
         headers: BTreeMap<String, Value>,
+        /// `auth = "oauth"` (design §14 "Stage 4", point 11): signed in
+        /// through the owner's browser once a frontend is attached; its
+        /// tools reach the agent from then. Its URL holds no reference.
+        oauth: bool,
     },
 }
 
@@ -2102,9 +2110,18 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
                 }
             }
             let (url, default) = server_url(url)?;
+            if let Some(auth) = &raw.auth {
+                // The sign-in names the server by its URL to an
+                // authorization server (`resource`), on any site.
+                if !url.references().is_empty() {
+                    let m = "a URL holding `${…}` and `auth = \"oauth\"` together: the sign-in sends the server's URL to its authorization server";
+                    return Err((auth.span(), m.into()));
+                }
+            }
             let transport = Transport::Http {
                 url,
                 headers: values(raw.headers)?,
+                oauth: raw.auth.is_some(),
             };
             (transport, span, default)
         }
@@ -2130,7 +2147,6 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
             name,
             transport,
             allow,
-            oauth: raw.auth.is_some(),
         },
         name_span,
     ))

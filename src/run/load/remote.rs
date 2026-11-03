@@ -56,15 +56,29 @@ enum Taken {
     LeftOff(Option<String>),
 }
 
-/// A header the owner named a variable for, or one sent as listed.
+/// A header the owner named a variable for, one sent as listed, or one
+/// agent.toml writes ([`Header::as_written`]).
 pub(super) struct Header {
-    pub(super) name: String,
+    name: String,
     /// As the block writes it: `Bearer ${CTX_KEY}`.
-    pub(super) written: String,
+    written: String,
     /// Filled in from the environment: what is sent.
-    pub(super) filled: String,
+    filled: String,
     /// The variable, when one was named, and its value.
-    pub(super) variable: Option<(String, String)>,
+    variable: Option<(String, String)>,
+}
+
+impl Header {
+    /// A header as agent.toml writes it and as `run` filled it in (its
+    /// values hidden by the caller's `hide`, not by a variable named).
+    pub(super) fn as_written(name: String, written: String, filled: String) -> Header {
+        Header {
+            name,
+            written,
+            filled,
+            variable: None,
+        }
+    }
 }
 
 /// A connection made: the client and the tools it listed.
@@ -105,8 +119,8 @@ struct Connection {
 }
 
 /// A sign-in's tokens until its server is kept: revoked if it is not —
-/// by [`LoadPlugin::close_unkept`], or, the call dropped meanwhile, on a
-/// task of its own.
+/// by [`LoadPlugin::close_unkept`] or `signs_in::revoke`, or, dropped
+/// first, on a task of its own.
 pub(super) struct Unkept {
     source: Option<Arc<Source>>,
     name: String,
@@ -217,19 +231,7 @@ impl LoadPlugin {
         let source = signed_in.and_then(Unkept::keep);
         let client = Arc::new(tokio::sync::Mutex::new(client));
         let ended: Arc<Mutex<Option<String>>> = Arc::default();
-        let tools: Vec<Arc<dyn AgentTool>> = listed
-            .into_iter()
-            .map(|info| {
-                Arc::new(Ending {
-                    inner: McpToolAdapter::new(client.clone(), info)
-                        .with_prefix(name.to_owned())
-                        .with_call_timeout(Some(McpToolAdapter::DEFAULT_CALL_TIMEOUT)),
-                    ended: ended.clone(),
-                    hide: hide.clone(),
-                    signed_in: source.clone(),
-                }) as Arc<dyn AgentTool>
-            })
-            .collect();
+        let tools = Ending::tools(&client, listed, name, &ended, &hide, &source);
         let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_owned()).collect();
         let kept = Kept {
             kind: ExtendKind::Remote,
@@ -466,7 +468,17 @@ impl LoadPlugin {
             printed: self.phone.then_some(&print as &(dyn Fn(&str) + Sync)),
         };
         // One sign-in at a time in a session: a second waits for the first.
-        let one = self.loaded.one_sign_in().await;
+        let waiting = || {
+            self.session.notice(
+                NoticeLevel::Info,
+                format!("{package}'s sign-in waits for another sign-in to end."),
+            )
+        };
+        let Some(one) = self.loaded.one_sign_in(&ctx.cancel, waiting).await else {
+            return Err(NotSignedIn::Refused(refused(
+                "the run was stopped while its sign-in waited for another: it may be proposed again",
+            )));
+        };
         let source = oauth::sign_in(&net, &found, ask, &ctx.cancel)
             .await
             .map_err(|no| NotSignedIn::Refused(self.sign_in_refused(package, &no)))?;
@@ -648,7 +660,8 @@ impl LoadPlugin {
         }
     }
 
-    /// Step 6 for `remote` (`connect`).
+    /// Step 6 for `remote` ([`connect`], its registry entry's headers
+    /// telling a 401's words).
     async fn connect(
         &self,
         package: &str,
@@ -662,7 +675,7 @@ impl LoadPlugin {
         connect(
             package,
             remote.url(),
-            listed,
+            Origin::Registry { listed },
             headers,
             source,
             hide,
@@ -672,7 +685,7 @@ impl LoadPlugin {
     }
 }
 
-/// Step 6: connected to `url` over streamable HTTP, following no redirect,
+/// Connected to `url` over streamable HTTP, following no redirect,
 /// `initialize` and `tools/list` each within [`START_TIME`], with
 /// `headers` and, signed in, `source`'s token. What fails is said with
 /// each credential as its `${NAME}`, each token as `${oauth}`.
@@ -680,7 +693,7 @@ impl LoadPlugin {
 pub(super) async fn connect(
     package: &str,
     url: &url::Url,
-    listed: bool,
+    origin: Origin,
     headers: &[Header],
     source: Option<Arc<Source>>,
     hide: &[(String, String)],
@@ -695,19 +708,13 @@ pub(super) async fn connect(
     let given = Given {
         signed_in: source.is_some(),
         sent: !headers.is_empty(),
-        listed,
+        origin,
     };
     let did_not = |e: &McpError| {
         let no = failed(connect_failed(package, e, given, &hidden));
         match e.http_status() {
             Some(401) if !given.signed_in => {
-                // With nothing sent, a 401 with no challenge may still
-                // have its sign-in published; with a credential, only
-                // a `Bearer` challenge offers one.
-                let bearer = e
-                    .www_authenticate()
-                    .map(|c| oauth::Challenge::parse(c).bearer().is_some());
-                if bearer.unwrap_or(!given.sent) {
+                if oauth::may_sign_in(e.www_authenticate(), given.sent) {
                     Connect::SignIn {
                         challenge: e.www_authenticate().map(str::to_owned),
                         otherwise: no,
@@ -773,14 +780,23 @@ pub(super) async fn connect(
     listed.map(|listed| (client, listed))
 }
 
+/// Where a server comes from, for the words of a 401 refusing it.
+#[derive(Clone, Copy)]
+pub(super) enum Origin {
+    /// Found in the MCP registry: whether its entry lists a header it
+    /// would send.
+    Registry { listed: bool },
+    /// agent.toml's `[[mcp]]`.
+    Manifest,
+}
+
 /// What a connection was given, for the words of its refusal.
 #[derive(Clone, Copy)]
 struct Given {
     signed_in: bool,
     /// A header was sent.
     sent: bool,
-    /// Its registry entry lists a header it would send.
-    listed: bool,
+    origin: Origin,
 }
 
 /// Why a connection failed, in words the owner can act on: a 401 says
@@ -804,14 +820,20 @@ fn connect_failed(
         Some(401) if given.sent => format!(
             "{package} refused the credential it was sent (HTTP 401) and offers no sign-in ({said})"
         ),
-        Some(401) if given.listed => refused(
-            401,
-            " and offers no sign-in: it needs a credential yobuild was not given",
-        ),
-        Some(401) => refused(
-            401,
-            " and offers no sign-in: it needs a credential its registry entry lists no header for",
-        ),
+        Some(401) => match given.origin {
+            Origin::Registry { listed: true } => refused(
+                401,
+                " and offers no sign-in: it needs a credential yobuild was not given",
+            ),
+            Origin::Registry { listed: false } => refused(
+                401,
+                " and offers no sign-in: it needs a credential its registry entry lists no header for",
+            ),
+            Origin::Manifest => refused(
+                401,
+                " and offers no sign-in: it needs a credential, which agent.toml gives as a header in place of `auth = \"oauth\"`",
+            ),
+        },
         Some(403) if !given.signed_in && !given.sent => {
             refused(403, ": it does not let yobuild in without a credential")
         }
@@ -974,17 +996,45 @@ pub(super) fn default_name(registry: &str) -> String {
     name.replace('.', "-")
 }
 
-/// A remote server's tool: as yoagent's adapter, but a call that finds the
-/// server ended the session marks the server gone, since every later call
-/// would fail too (it is not reconnected).
+/// An HTTP server's tool, loaded or agent.toml's signed in: as yoagent's
+/// adapter, but a call that finds the server ended the session marks the
+/// server gone, since every later call would fail too (it is not
+/// reconnected).
 pub(super) struct Ending {
-    pub(super) inner: McpToolAdapter,
-    pub(super) ended: Arc<Mutex<Option<String>>>,
+    inner: McpToolAdapter,
+    ended: Arc<Mutex<Option<String>>>,
     /// Its credentials, shown as their names in what a call's error says
     /// (a server may echo the key it refused).
-    pub(super) hide: Arc<Vec<(String, String)>>,
+    hide: Arc<Vec<(String, String)>>,
     /// Its sign-in: each token it handed out shown as `${oauth}` too.
-    pub(super) signed_in: Option<Arc<Source>>,
+    signed_in: Option<Arc<Source>>,
+}
+
+impl Ending {
+    /// The tools `listed` by `client`, each `<name>__<tool>`, sharing
+    /// `ended`, `hide` and the sign-in.
+    pub(super) fn tools(
+        client: &Arc<tokio::sync::Mutex<McpClient>>,
+        listed: Vec<McpToolInfo>,
+        name: &str,
+        ended: &Arc<Mutex<Option<String>>>,
+        hide: &Arc<Vec<(String, String)>>,
+        signed_in: &Option<Arc<Source>>,
+    ) -> Vec<Arc<dyn AgentTool>> {
+        listed
+            .into_iter()
+            .map(|info| {
+                Arc::new(Ending {
+                    inner: McpToolAdapter::new(client.clone(), info)
+                        .with_prefix(name.to_owned())
+                        .with_call_timeout(Some(McpToolAdapter::DEFAULT_CALL_TIMEOUT)),
+                    ended: ended.clone(),
+                    hide: hide.clone(),
+                    signed_in: signed_in.clone(),
+                }) as Arc<dyn AgentTool>
+            })
+            .collect()
+    }
 }
 
 #[async_trait::async_trait]

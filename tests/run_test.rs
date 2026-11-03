@@ -2287,28 +2287,74 @@ async fn a_plugin_of_another_runtime_cannot_wake_as_a_granted_pi_extension() {
 /// is still checked together.
 #[tokio::test(flavor = "multi_thread")]
 async fn check_notes_a_server_that_needs_a_sign_in() {
-    let app = axum::Router::new().route(
-        "/mcp",
-        axum::routing::any(|| async {
-            (
-                axum::http::StatusCode::UNAUTHORIZED,
-                [("www-authenticate", "Bearer realm=\"OAuth\"")],
-                "sign in",
-            )
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, app).await });
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("agent.toml"),
-        format!(
-            "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[mcp]]\nname = \"docs\"\nurl = \"{url}\"\nauth = \"oauth\"\nallow = [\"search\"]\n"
-        ),
-    )
-    .unwrap();
-    let report = check_dir(dir.path()).await;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use serde_json::{json, Value};
+    /// How the server answers.
+    #[derive(Clone, Copy, Debug)]
+    enum Answers {
+        /// 401 with a `Bearer` challenge.
+        Bearer,
+        /// 401 with a `Basic` challenge.
+        Basic,
+        Forbidden,
+        /// Without a sign-in.
+        Open,
+    }
+    async fn serve(answers: Answers) -> String {
+        let app = axum::Router::new().route(
+            "/mcp",
+            axum::routing::any(move |_: HeaderMap, body: String| async move {
+                let refused = |status: StatusCode, challenge: &'static str| {
+                    (status, [("www-authenticate", challenge)], "no").into_response()
+                };
+                match answers {
+                    Answers::Bearer => return refused(StatusCode::UNAUTHORIZED, "Bearer realm=\"OAuth\""),
+                    Answers::Basic => return refused(StatusCode::UNAUTHORIZED, "Basic realm=\"x\""),
+                    Answers::Forbidden => return StatusCode::FORBIDDEN.into_response(),
+                    Answers::Open => {}
+                }
+                let request: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+                let Some(id) = request.get("id").cloned() else {
+                    return StatusCode::ACCEPTED.into_response();
+                };
+                let result = match request["method"].as_str() {
+                    Some("initialize") => json!({
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "docs", "version": "1" }
+                    }),
+                    _ => json!({ "tools": [{ "name": "echo", "inputSchema": { "type": "object" } }] }),
+                };
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string(),
+                )
+                    .into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        url
+    }
+    /// What `check` makes of a server answering so.
+    async fn checked(answers: Answers, more: &str) -> yobuild::run::check::Report {
+        let url = serve(answers).await;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("agent.toml"),
+            format!(
+                "[agent]\nname = \"a\"\nmodel = \"deepseek/x\"\n[[mcp]]\nname = \"docs\"\nurl = \"{url}\"\n{more}"
+            ),
+        )
+        .unwrap();
+        check_dir(dir.path()).await
+    }
+    let signs = "auth = \"oauth\"\nallow = [\"echo\", \"search\"]\n";
+
+    // A 401 that may offer a sign-in: a note, its tools unlisted.
+    let report = checked(Answers::Bearer, signs).await;
     assert!(report.ok, "{}", report.text());
     let docs = &report.entries[0];
     assert!(
@@ -2323,4 +2369,39 @@ async fn check_notes_a_server_that_needs_a_sign_in() {
         "{:?}",
         docs.notes
     );
+
+    // One answering without: its tools, and the `allow` it does not offer
+    // noted, as `run` warns of it.
+    let report = checked(Answers::Open, signs).await;
+    assert!(report.ok, "{}", report.text());
+    let docs = &report.entries[0];
+    assert_eq!(docs.tools.len(), 1, "{}", report.text());
+    assert_eq!(
+        docs.notes,
+        [
+            "it answered without a sign-in, though agent.toml says it signs in (`auth = \"oauth\"`)",
+            "it allows `search`, which it does not offer (it offers: echo): `run` warns of it, and nothing of that name runs",
+        ]
+    );
+
+    // What `run` would refuse stays a problem: a 403, a credential
+    // refused (a `Basic` challenge to a header sent), and a 401 from a
+    // server that does not sign in.
+    for (answers, more) in [
+        (Answers::Forbidden, signs.to_owned()),
+        (
+            Answers::Basic,
+            format!("{signs}headers = {{ X-Team = \"t1\" }}\n"),
+        ),
+        (Answers::Bearer, String::new()),
+    ] {
+        let report = checked(answers, &more).await;
+        assert!(!report.ok, "{answers:?}: {}", report.text());
+        assert_eq!(
+            report.entries[0].problems.len(),
+            1,
+            "{answers:?}: {}",
+            report.text()
+        );
+    }
 }

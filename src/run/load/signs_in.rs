@@ -10,25 +10,37 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use yoagent::mcp::{McpClient, McpToolAdapter};
-use yoagent::AgentTool;
+use yoagent::mcp::McpClient;
 
-use super::remote::{connect, Connect, Ending, Header, Unkept};
-use super::{close_quietly, tools_problem, Loaded, Server, CLOSE_TIME};
-use crate::frontend::session::UI_TIMEOUT;
+use super::remote::{connect, Connect, Ending, Header, Origin, Unkept};
+use super::{close_quietly, tools_problem, Loaded, Refused, Server, CLOSE_TIME};
+use crate::frontend::session::{Unanswered, UI_TIMEOUT};
 use crate::frontend::{NoticeLevel, Session, UiRequest};
 use crate::run::host::clip;
 use crate::run::oauth::{self, Site, Source, Why};
+
+/// How long the session's end waits for a sign-in it stopped: a close
+/// and a revocation of two tokens, each within [`CLOSE_TIME`], and a
+/// second to spare.
+pub(crate) const ENDING: Duration = Duration::from_secs(CLOSE_TIME.as_secs() * 3 + 1);
 
 /// A manifest server that signs in, as `run` filled it in.
 pub(crate) struct SignsIn {
     pub name: String,
     pub url: url::Url,
-    /// Each header: its name, its value as written, and as filled.
-    pub headers: Vec<(String, String, String)>,
+    pub headers: Vec<ManifestHeader>,
     /// What each filled value is shown as (`run::hidden`).
     pub hide: Vec<(String, String)>,
     pub allow: Vec<String>,
+}
+
+/// One of its headers.
+pub(crate) struct ManifestHeader {
+    pub name: String,
+    /// As agent.toml writes it.
+    pub written: String,
+    /// As `run` filled it in: what is sent.
+    pub filled: String,
 }
 
 /// How the sign-ins go: phone mode prints the link here; `net` and
@@ -43,15 +55,30 @@ pub(crate) struct Signing {
     pub stop: CancellationToken,
 }
 
-/// Signs in each of `servers` in turn, each outcome a notice.
+/// Signs in each of `servers` in turn, each outcome a notice. A server
+/// whose question found no frontend (the page reloaded, closed a moment)
+/// waits for one and is asked again.
 pub(crate) async fn sign_in_all(signing: Signing, servers: Vec<SignsIn>) {
     for server in servers {
-        if signing.stop.is_cancelled() {
-            return;
-        }
-        let (level, said) = match sign_in(&signing, &server).await {
+        let outcome = loop {
+            if !frontend(&signing).await {
+                return;
+            }
+            match sign_in(&signing, &server).await {
+                Err(Not::Again) => {
+                    tracing::info!(
+                        "agent.toml's [[mcp]] {}: no frontend to ask: asked again once one is there",
+                        server.name
+                    );
+                    tokio::time::sleep(TICK).await;
+                }
+                outcome => break outcome,
+            }
+        };
+        let (level, said) = match outcome {
             Ok(said) => (NoticeLevel::Info, said),
-            Err(no) => no,
+            Err(Not::Said(level, said)) => (level, said),
+            Err(Not::Again) => unreachable!("asked again above"),
         };
         signing.session.notice(
             level,
@@ -60,37 +87,74 @@ pub(crate) async fn sign_in_all(signing: Signing, servers: Vec<SignsIn>) {
     }
 }
 
-/// What did not come about: the notice's level and words.
-type Not = (NoticeLevel, String);
+/// How often a frontend is looked for.
+const TICK: Duration = Duration::from_millis(250);
+
+/// Waits until a frontend is attached: `false` once the session ends.
+async fn frontend(signing: &Signing) -> bool {
+    loop {
+        if signing.stop.is_cancelled() || signing.session.is_closed() {
+            return false;
+        }
+        if signing.session.frontends() > 0 {
+            return true;
+        }
+        tokio::select! {
+            _ = signing.stop.cancelled() => return false,
+            _ = tokio::time::sleep(TICK) => {}
+        }
+    }
+}
+
+/// What did not come about.
+enum Not {
+    /// The notice's level and words.
+    Said(NoticeLevel, String),
+    /// No frontend was there to ask: asked again once one is.
+    Again,
+}
 
 fn error(said: impl Into<String>) -> Not {
-    (NoticeLevel::Error, said.into())
+    Not::Said(NoticeLevel::Error, said.into())
 }
 
 fn warning(said: impl Into<String>) -> Not {
-    (NoticeLevel::Warning, said.into())
+    Not::Said(NoticeLevel::Warning, said.into())
+}
+
+const SESSION_ENDED: &str = "not signed in: the session ended";
+
+/// A connection's refusal, as said: the session's end in its own words
+/// (`connect` says a run was stopped), else with what `hide` names hidden.
+fn refused(stop: &CancellationToken, no: Refused, hide: &[(String, String)]) -> Not {
+    match stop.is_cancelled() {
+        true => warning(SESSION_ENDED),
+        false => Not::Said(no.level, crate::run::hidden(&no.message, hide)),
+    }
 }
 
 /// One server: connected as it is first (one answering needs no sign-in),
-/// then — its 401 offering one — discovered (`Site::Any`), the owner
-/// asked, signed in, connected with its token, its tools judged and its
-/// `allow` checked, and offered.
+/// then — a 401 that may offer one (`oauth::may_sign_in`) — discovered
+/// (`Site::Any`), the owner asked, signed in, connected with its token,
+/// its tools judged and its `allow` checked, and offered. Each refusal of
+/// the sign-in's is said with the filled values hidden.
 async fn sign_in(signing: &Signing, server: &SignsIn) -> Result<String, Not> {
     let Signing { session, stop, .. } = signing;
     let name = &server.name;
+    let hide = &server.hide;
     let headers: Vec<Header> = server
         .headers
         .iter()
-        .map(|(header, written, filled)| Header {
-            name: header.clone(),
-            written: written.clone(),
-            filled: filled.clone(),
-            variable: None,
-        })
+        .map(|h| Header::as_written(h.name.clone(), h.written.clone(), h.filled.clone()))
         .collect();
-    let listed = !headers.is_empty();
     let (challenge, otherwise) = match connect(
-        name, &server.url, listed, &headers, None, &server.hide, stop,
+        name,
+        &server.url,
+        Origin::Manifest,
+        &headers,
+        None,
+        hide,
+        stop,
     )
     .await
     {
@@ -103,20 +167,21 @@ async fn sign_in(signing: &Signing, server: &SignsIn) -> Result<String, Not> {
             challenge,
             otherwise,
         }) => (challenge, otherwise),
-        Err(Connect::Denied(no) | Connect::Refused(no)) => return Err((no.level, no.message)),
+        Err(Connect::Denied(no) | Connect::Refused(no)) => return Err(refused(stop, no, hide)),
     };
     let net = match &signing.net {
         Some(net) => net.clone(),
         None => oauth::Net::checked().map_err(error)?,
     };
     let found = tokio::select! {
-        _ = stop.cancelled() => return Err(warning("not signed in: the session ended")),
+        _ = stop.cancelled() => return Err(warning(SESSION_ENDED)),
         found = oauth::discover(&net, &server.url, challenge.as_deref(), Site::Any) => found,
     };
+    let owners = |no: &oauth::Refusal| crate::run::hidden(no.for_owner(), hide);
     let found = match found {
         Ok(found) => found,
-        Err(no) if no.why() == Why::NoSignIn => return Err((otherwise.level, otherwise.message)),
-        Err(no) => return Err(error(format!("not signed in: {}", no.for_owner()))),
+        Err(no) if no.why() == Why::NoSignIn => return Err(refused(stop, otherwise, hide)),
+        Err(no) => return Err(error(format!("not signed in: {}", owners(&no)))),
     };
     let host = server.url.host_str().unwrap_or_default();
     let link = found.link_host();
@@ -127,17 +192,19 @@ async fn sign_in(signing: &Signing, server: &SignsIn) -> Result<String, Not> {
         multiple: false,
     };
     let answer = tokio::select! {
-        _ = stop.cancelled() => return Err(warning("not signed in: the session ended")),
-        answer = session.ask(request, UI_TIMEOUT) => answer,
+        _ = stop.cancelled() => return Err(warning(SESSION_ENDED)),
+        answer = session.ask_or_why(request, UI_TIMEOUT) => answer,
     };
-    match answer.as_str() {
-        Some("Allow") => {}
-        Some(_) => {
+    match answer {
+        Ok(answer) if answer.as_str() == Some("Allow") => {}
+        Ok(answer) if answer.is_string() => {
             return Err(warning(
                 "not signed in: the owner blocked it, so it offers no tools this session",
             ))
         }
-        None => return Err(warning(
+        Err(Unanswered::NoFrontend) => return Err(Not::Again),
+        Err(Unanswered::SessionEnded) => return Err(warning(SESSION_ENDED)),
+        Ok(_) | Err(Unanswered::TimedOut) => return Err(warning(
             "not signed in: nobody answered whether to sign in, so it offers no tools this session",
         )),
     }
@@ -152,23 +219,29 @@ async fn sign_in(signing: &Signing, server: &SignsIn) -> Result<String, Not> {
         timeout: signing.timeout,
         printed: signing.phone.then_some(&print as &(dyn Fn(&str) + Sync)),
     };
-    let one = signing.loaded.one_sign_in().await;
+    let waiting = || {
+        session.notice(
+            NoticeLevel::Info,
+            format!("agent.toml's [[mcp]] {name}: its sign-in waits for another sign-in to end."),
+        )
+    };
+    let Some(one) = signing.loaded.one_sign_in(stop, waiting).await else {
+        return Err(warning(SESSION_ENDED));
+    };
     let source = oauth::sign_in(&net, &found, ask, stop)
         .await
         .map_err(|no| {
             let level = match no.why() {
-                Why::Cancelled
-                | Why::TimedOut
-                | Why::NoFrontend
-                | Why::Stopped
-                | Why::SessionEnded => NoticeLevel::Warning,
+                Why::NoFrontend => return Not::Again,
+                Why::Stopped | Why::SessionEnded => return warning(SESSION_ENDED),
+                Why::Cancelled | Why::TimedOut => NoticeLevel::Warning,
                 _ => NoticeLevel::Error,
             };
-            (
+            Not::Said(
                 level,
                 format!(
                     "not signed in: {}: it offers no tools this session",
-                    no.for_owner()
+                    owners(&no)
                 ),
             )
         })?;
@@ -177,10 +250,10 @@ async fn sign_in(signing: &Signing, server: &SignsIn) -> Result<String, Not> {
     match connect(
         name,
         &server.url,
-        listed,
+        Origin::Manifest,
         &headers,
         Some(source.clone()),
-        &server.hide,
+        hide,
         stop,
     )
     .await
@@ -190,13 +263,13 @@ async fn sign_in(signing: &Signing, server: &SignsIn) -> Result<String, Not> {
             .map(|said| format!("signed in; {said}")),
         Err(Connect::Refused(no) | Connect::Denied(no) | Connect::SignIn { otherwise: no, .. }) => {
             revoke(signing, unkept, name).await;
-            Err((no.level, no.message))
+            Err(refused(stop, no, hide))
         }
     }
 }
 
 /// Its tools judged, its `allow` checked against them (a name it does not
-/// offer is a Warning: it asks, as any tool does), and offered.
+/// offer is a Warning: no tool of that name comes from it), and offered.
 async fn offer(
     signing: &Signing,
     server: &SignsIn,
@@ -232,19 +305,7 @@ async fn offer(
     let client = Arc::new(tokio::sync::Mutex::new(client));
     let ended: Arc<Mutex<Option<String>>> = Arc::default();
     let hide = Arc::new(server.hide.clone());
-    let offered: Vec<Arc<dyn AgentTool>> = tools
-        .into_iter()
-        .map(|info| {
-            Arc::new(Ending {
-                inner: McpToolAdapter::new(client.clone(), info)
-                    .with_prefix(name.to_owned())
-                    .with_call_timeout(Some(McpToolAdapter::DEFAULT_CALL_TIMEOUT)),
-                ended: ended.clone(),
-                hide: hide.clone(),
-                signed_in: source.clone(),
-            }) as Arc<dyn AgentTool>
-        })
-        .collect();
+    let offered = Ending::tools(&client, tools, name, &ended, &hide, &source);
     let names: Vec<String> = offered.iter().map(|t| t.name().to_owned()).collect();
     signing.loaded.add_server(Server::remote(
         name.to_owned(),
@@ -259,19 +320,23 @@ async fn offer(
     ))
 }
 
-/// A sign-in whose server is not offered, revoked; each failure a Warning.
+/// A sign-in whose server is not offered, revoked; each failure a Warning
+/// and logged (at the session's end nobody may be there to read it), and
+/// written on stderr then.
 async fn revoke(signing: &Signing, unkept: Unkept, name: &str) {
     let Some(source) = unkept.keep() else {
         return;
     };
     source.closing();
     for failure in source.revoke_within(CLOSE_TIME).await {
-        signing.session.notice(
-            NoticeLevel::Warning,
-            format!(
-                "agent.toml's [[mcp]] {name}: {failure}: it may stay valid at its provider until it expires."
-            ),
+        let said = format!(
+            "agent.toml's [[mcp]] {name}: {failure}: it may stay valid at its provider until it expires."
         );
+        tracing::warn!("{said}");
+        if signing.stop.is_cancelled() {
+            eprintln!("yobuild: {said}");
+        }
+        signing.session.notice(NoticeLevel::Warning, said);
     }
 }
 
