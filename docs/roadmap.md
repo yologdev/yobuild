@@ -370,7 +370,41 @@ Later: rutis plugins (§14, "Later steps"), once some are published.
 - **Tests:** against a stub MCP server and its authorization server on
   this machine, the browser played by the test; the manifest's server on
   the page in `cli_test`.
-- **Next:** a live sign-in to a real server, then a release.
+- **Live (2026-11-03):** agent.toml's `[[mcp]] linear` (`auth =
+  "oauth"`, Linear's MCP server) signed in through the owner's browser
+  on the page; the task started once it was signed in and answered from
+  `linear__whoami`, `linear__list_teams` and `linear__list_issues`. Seen:
+  the "signed in" notice lists every tool (about 90 for Linear), and the
+  page shows no cost (the run log, M6, will).
+- **Next:** a release.
+
+## M6 — 1.0: an agent you keep (proposed 2026-11-03)
+
+What real users need before 1.0: an agent that survives a restart, runs
+without you, keeps a record, and can be confined. Each part is its own
+PR with its design section.
+
+- **Loose ends:** the README's status; a live sign-in to a real OAuth
+  server (done 2026-11-03, Linear: stage 4 above); a local model
+  run (Ollama); the Linux tarballs checked by hand; 0.3.0.
+- **Sessions that survive a restart:** the conversation, the open
+  questions and the session's spend saved per agent and resumed.
+- **A run log, and unattended runs:** each run's facts, cost, outcome
+  and report kept in a local log, shown on the page; a run started on a
+  schedule or a trigger (cron, launchd) whose report is saved and whose
+  questions wait for the owner.
+- **An opt-in sandbox** for plugin runtimes and stdio MCP servers
+  (Linux: bubblewrap; macOS: `sandbox-exec`).
+- **The newcomer test:** someone who has not seen yobuild builds an
+  agent from the docs alone; what they trip on is fixed.
+- **1.0**, with open question 2 (the library's API) decided.
+
+**Done when** each part is built and tested, a newcomer has an agent
+of their own running from the docs alone, and 1.0 is released.
+
+After 1.0: Windows (open question 7), M3c, rutis plugins through
+`[extend]`, a sign-in kept across sessions (design §14 "Stage 4",
+decision 2).
 
 ## Open questions (for review)
 

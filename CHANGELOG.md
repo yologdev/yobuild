@@ -7,6 +7,22 @@ locks it again (commit the new lock).
 
 ## Unreleased
 
+- **A sign-in for remote MCP servers** (OAuth in your browser; design
+  §14 "Stage 4"):
+  - **A server the agent loads** (`[extend] kinds = ["remote"]`) that
+    answers 401 with a sign-in is signed in: you are asked whether to
+    sign in, then shown a link to open in your browser (printed where
+    yobuild runs in phone mode). Its sign-in must be on the server's own
+    site. The token is kept for the session only, never shown to the
+    agent, and revoked at the end. The block printed at the end carries
+    `auth = "oauth"`.
+  - **In `agent.toml`:** an `[[mcp]]` with `url` and `auth = "oauth"`
+    is signed in each session once the page or the terminal UI is open,
+    its sign-in on any site, and the task waits for it. Not under
+    `--once`; `check` notes it. Its URL may hold no `${…}`, and no
+    `Authorization` header goes beside it.
+  - **Hints** for what you can act on: no PKCE, no registration, a
+    sign-in on another site, cancelled, timed out, ended.
 - **yoagent 0.26.6** (by way of 0.26.4 and 0.26.5). Three more models
   with their real limits and prices: `openai/gpt-6.1-terra`,
   `zai/glm-5.3-flashx` and `qwen/qwen3.8-omni-flash`; Meta's
