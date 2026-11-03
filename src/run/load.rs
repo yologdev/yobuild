@@ -64,7 +64,9 @@ const DAY: i64 = 24 * 60 * 60;
 
 mod package;
 mod remote;
+mod signs_in;
 pub(crate) use package::Plugins;
+pub(crate) use signs_in::{sign_in_all, ManifestHeader, Signing, SignsIn, ENDING};
 
 /// A server or package the owner kept this session, as the end of the
 /// session says it. Made only by `load` once both questions were allowed:
@@ -277,7 +279,7 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
         .any(|k| k.remote.as_ref().is_some_and(|r| r.signed_in))
     {
         text.push_str(
-            "\nA server with `auth = \"oauth\"` is signed in through your browser each session, as it was here: its token is never kept. agent.toml reads `auth` from a later yobuild: until then, the agent loads it through [extend].\n",
+            "\nA server with `auth = \"oauth\"` is signed in through your browser each session, as it was here: its token is never kept.\n",
         );
     }
     let mut sets: Vec<&str> = Vec::new();
@@ -451,11 +453,16 @@ struct Lists {
     kept: Vec<Kept>,
     /// The sign-ins of servers taken out as stopped, not revoked yet.
     signed_out: Vec<(String, Arc<super::oauth::Source>)>,
+    /// The names of agent.toml's servers among `servers` (`add_server`),
+    /// kept once they stop.
+    manifests: std::collections::HashSet<String>,
 }
 
 #[derive(Default)]
 struct Shared {
     lists: Mutex<Lists>,
+    /// Held by the sign-in in progress.
+    signing: tokio::sync::Mutex<()>,
     /// Moves on each load, each server or package found gone and the
     /// close; only forward.
     generation: AtomicU64,
@@ -658,6 +665,46 @@ impl Loaded {
         lists.kept.push(kept);
         lists.servers.push(server);
         self.0.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A manifest's server signed in (`signs_in`): offered from the next
+    /// turn, as a loaded one is, but not the agent's (not in `kept`: its
+    /// tools follow the manifest's `allow`, and it is in no block).
+    fn add_server(&self, server: Server) {
+        let mut lists = locked(&self.0.lists);
+        lists.manifests.insert(server.name.clone());
+        lists.servers.push(server);
+        drop(lists);
+        self.0.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// One sign-in at a time in a session (design §14 "Stage 4", point 1):
+    /// held from the owner's Allow until the browser's question is
+    /// answered. Another holding it, `waiting` is called and the wait
+    /// raced against `stop`: `None` once it is cancelled first.
+    async fn one_sign_in(
+        &self,
+        stop: &tokio_util::sync::CancellationToken,
+        waiting: impl FnOnce(),
+    ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        if let Ok(one) = self.0.signing.try_lock() {
+            return Some(one);
+        }
+        waiting();
+        tokio::select! {
+            _ = stop.cancelled() => None,
+            one = self.0.signing.lock() => Some(one),
+        }
+    }
+
+    /// How a server `stopped` names is said: one of agent.toml's
+    /// ([`Loaded::add_server`]) as the manifest names it, else as the
+    /// agent's.
+    pub fn who(&self, server: &str) -> String {
+        match locked(&self.0.lists).manifests.contains(server) {
+            true => format!("agent.toml's [[mcp]] {server}"),
+            false => format!("The loaded MCP server `{server}`"),
+        }
     }
 
     /// The servers seen gone for at least [`SETTLE`] (so the reason is

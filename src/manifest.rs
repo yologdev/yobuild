@@ -530,8 +530,17 @@ pub struct Mcp {
     pub name: String,
     pub transport: Transport,
     /// Its tools the gate lets run without asking (`allow`), as the server
-    /// names them (the agent sees each as `<name>__<tool>`).
+    /// names them (the agent sees each as `<name>__<tool>`). For a server
+    /// that signs in, checked once its tools are listed.
     pub allow: Vec<String>,
+}
+
+impl Mcp {
+    /// Whether it signs in (`auth = "oauth"`, [`Transport::Http`]'s
+    /// `oauth`).
+    pub fn oauth(&self) -> bool {
+        matches!(self.transport, Transport::Http { oauth: true, .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,6 +558,10 @@ pub enum Transport {
     Http {
         url: Value,
         headers: BTreeMap<String, Value>,
+        /// `auth = "oauth"` (design §14 "Stage 4", point 11): signed in
+        /// through the owner's browser once a frontend is attached; its
+        /// tools reach the agent from then. Its URL holds no reference.
+        oauth: bool,
     },
 }
 
@@ -929,6 +942,7 @@ struct RawMcp {
     #[serde(default)]
     headers: BTreeMap<String, Spanned<String>>,
     allow: Option<Spanned<Vec<Spanned<String>>>>,
+    auth: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -2058,6 +2072,9 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
             if !raw.headers.is_empty() {
                 return Err((span, "headers are for an HTTP server (url)".into()));
             }
+            if let Some(auth) = &raw.auth {
+                return Err((auth.span(), "auth is for an HTTP server (url)".into()));
+            }
             if npm.get_ref().starts_with("yobuild:") {
                 let m = "`yobuild:` names yobuild's own plugins, and an MCP server is none: give a package (`name@1.2.3`) or a path";
                 return Err((span, m.into()));
@@ -2078,10 +2095,33 @@ fn server(raw: RawMcp, table: Range<usize>, dir: &Path) -> Result<(Mcp, Range<us
                 let m = "args, env and bin are for a stdio server (npm)";
                 return Err((span, m.into()));
             }
+            if let Some(auth) = &raw.auth {
+                if auth.get_ref() != "oauth" {
+                    let m = "auth: \"oauth\" is the one sign-in yobuild does (the owner's, in a browser)";
+                    return Err((auth.span(), m.into()));
+                }
+                if raw
+                    .headers
+                    .keys()
+                    .any(|h| h.eq_ignore_ascii_case("authorization"))
+                {
+                    let m = "an `Authorization` header and `auth = \"oauth\"` together: the sign-in gives that header";
+                    return Err((auth.span(), m.into()));
+                }
+            }
             let (url, default) = server_url(url)?;
+            if let Some(auth) = &raw.auth {
+                // The sign-in names the server by its URL to an
+                // authorization server (`resource`), on any site.
+                if !url.references().is_empty() {
+                    let m = "a URL holding `${…}` and `auth = \"oauth\"` together: the sign-in sends the server's URL to its authorization server";
+                    return Err((auth.span(), m.into()));
+                }
+            }
             let transport = Transport::Http {
                 url,
                 headers: values(raw.headers)?,
+                oauth: raw.auth.is_some(),
             };
             (transport, span, default)
         }

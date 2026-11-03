@@ -359,12 +359,18 @@ servers"):**
 
 Later: rutis plugins (§14, "Later steps"), once some are published.
 
-**Proposed (stage 4, a sign-in for remote servers; §14, "Stage 4: remote
-servers that need a sign-in"):** OAuth in the owner's browser for a
-remote server that answers 401 with a Bearer challenge (Linear, Notion),
-loaded or in the manifest (`auth = "oauth"`); a loaded server's sign-in
-on its own site only; the token kept for the session, never shown to the
-agent, revoked at the end.
+**Built, not yet tried live (stage 4, a sign-in for remote servers; §14,
+"Stage 4: remote servers that need a sign-in"):**
+- **What it does:** OAuth in the owner's browser for a remote server that
+  answers 401 with a Bearer challenge (Linear, Notion), loaded by the
+  agent or in the manifest (`auth = "oauth"`). A loaded server's sign-in
+  is on its own site only; a manifest's, which the owner wrote, on any.
+  The token is kept for the session, never shown to the agent, and
+  revoked at the end.
+- **Tests:** against a stub MCP server and its authorization server on
+  this machine, the browser played by the test; the manifest's server on
+  the page in `cli_test`.
+- **Next:** a live sign-in to a real server, then a release.
 
 ## Open questions (for review)
 

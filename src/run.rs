@@ -422,7 +422,14 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         tools.add(FindPlugin::TOOL, vec![Box::new(find)]);
         tools.add(load::LoadPlugin::TOOL, vec![Box::new(load)]);
     }
+    // A server that signs in is signed in once a frontend is attached
+    // (below); its tools come through `loaded` from the next turn.
+    let mut signs_in = Vec::new();
     for server in &manifest.mcp {
+        if server.oauth() {
+            signs_in.push(signs_in_of(server, &checked.servers[&server.name])?);
+            continue;
+        }
         let found = stops
             .until(mcp(server, &checked.servers[&server.name]))
             .await?;
@@ -561,7 +568,12 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         // end the agent (`println!` would panic on a closed pipe).
         let _ = writeln!(std::io::stdout(), "{name}: {url}  (Ctrl+C to stop)");
         if task.is_some() {
-            eprintln!("{name}: the task starts when the page is open");
+            match signs_in.is_empty() {
+                true => eprintln!("{name}: the task starts when the page is open"),
+                false => eprintln!(
+                    "{name}: the task starts when the page is open and agent.toml's servers that sign in are signed in (or not)"
+                ),
+            }
         }
         served = Some(web);
     }
@@ -578,6 +590,12 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         }
     }
     let mut driving = tokio::spawn(driver.run(agent));
+    // The manifest's servers that sign in: started once a frontend is
+    // there to ask, ended with the session.
+    let signing_stop = tokio_util::sync::CancellationToken::new();
+    let _signing_stopped = signing_stop.clone().drop_guard();
+    let mut signs_in = Some(signs_in).filter(|s| !s.is_empty());
+    let mut signing = None;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     let mut reported = std::collections::HashSet::new();
     let mut quitting = false;
@@ -601,18 +619,45 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                 }
             }
             _ = tick.tick() => {
-                if task.is_some() && session.frontends() > 0 {
+                if signs_in.is_some() && session.frontends() > 0 {
+                    let servers = signs_in.take().expect("servers that sign in");
+                    let signs = load::sign_in_all(
+                        load::Signing {
+                            session: session.clone(),
+                            loaded: loaded.clone(),
+                            phone: manifest.frontend.phone,
+                            net: None,
+                            timeout: crate::frontend::session::SIGN_IN_TIMEOUT,
+                            stop: signing_stop.clone(),
+                        },
+                        servers,
+                    );
+                    let session = session.clone();
+                    // A panic said, not lost with a handle looked at only at
+                    // the end.
+                    signing = Some(tokio::spawn(async move {
+                        if let Err(e) = tokio::spawn(signs).await {
+                            tracing::error!("the manifest's sign-ins failed: {e}");
+                            session.notice(
+                                NoticeLevel::Error,
+                                format!("The sign-ins of agent.toml's servers failed: {e}: those not signed in offer no tools this session"),
+                            );
+                        }
+                    }));
+                }
+                // The task waits for the manifest's sign-ins too: its
+                // first run then has their tools.
+                let signed = signing.as_ref().is_none_or(|s| s.is_finished());
+                if task.is_some() && session.frontends() > 0 && signs_in.is_none() && signed {
                     let text = task.take().expect("a task");
                     session.send(ClientMessage::Prompt { text });
                 }
                 // A loaded server gone, its reason settled: said, and marked
                 // stopped (its tools left when it was first seen gone).
                 for (server, why) in loaded.stopped() {
-                    tracing::error!("the loaded MCP server {server} stopped: {why}");
-                    session.notice(
-                        NoticeLevel::Error,
-                        format!("The loaded MCP server `{server}` stopped: {why}"),
-                    );
+                    let who = loaded.who(&server);
+                    tracing::error!("{who} stopped: {why}");
+                    session.notice(NoticeLevel::Error, format!("{who} stopped: {why}"));
                 }
                 // The host is `load_plugin`'s while it starts a package (up
                 // to a minute or so): what needs it is looked at a later
@@ -676,6 +721,20 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         }
     };
     drop(served);
+    // A sign-in still going is stopped here (its question withdrawn, its
+    // listener closed, what it got revoked) and waited for; one signed in
+    // meanwhile is closed with the rest.
+    signing_stop.cancel();
+    if let Some(signing) = signing {
+        if tokio::time::timeout(load::ENDING, signing).await.is_err() {
+            let said = format!(
+                "a sign-in of agent.toml's servers was still ending after {} s: what it got may stay valid at its provider until it expires",
+                load::ENDING.as_secs()
+            );
+            tracing::warn!("{said}");
+            eprintln!("yobuild: {said}");
+        }
+    }
     let mut ended = finish(seen, watching, agent, once, interrupted).await;
     // However it ended: what was loaded, and how to keep it (nothing is
     // written). Each was said as a notice when it was kept; the binary
@@ -684,7 +743,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // server gone since the last tick is marked stopped in it (a Ctrl+C
     // never reaches one: each runs in a process group of its own).
     for (server, why) in loaded.stopped_at_end().await {
-        tracing::error!("the loaded MCP server {server} stopped: {why}");
+        tracing::error!("{} stopped: {why}", loaded.who(&server));
     }
     for stopped in loaded.packages_stopped(&*host.lock().await) {
         let label = stopped.kind.label();
@@ -917,6 +976,18 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
     let manifest = &options.manifest;
     if options.once && options.task.as_deref().is_none_or(|t| t.trim().is_empty()) {
         return Err("a once run needs a task".into());
+    }
+    if let Some(server) = manifest
+        .mcp
+        .iter()
+        .find(|s| s.oauth())
+        .filter(|_| options.once)
+    {
+        return Err(format!(
+            "mcp {}: it signs in (`auth = \"oauth\"`), which needs the page or the terminal UI: not under --once",
+            server.name
+        )
+        .into());
     }
     let mut notes = Vec::new();
 
@@ -2468,7 +2539,7 @@ fn launch(
                 withheld: withheld.to_vec(),
             }
         }
-        Transport::Http { url, headers } => {
+        Transport::Http { url, headers, .. } => {
             let filled = filled_url(url, lookup).map_err(|e| failed(&e))?;
             let headers = headers
                 .iter()
@@ -2485,6 +2556,64 @@ fn launch(
                 headers,
             }
         }
+    })
+}
+
+/// A server that signs in (`auth = "oauth"`) answering 401 when connected
+/// as it is: what `check`, which signs nothing in, notes instead of a
+/// problem.
+#[derive(Debug)]
+pub(crate) struct SignInNeeded;
+
+impl std::fmt::Display for SignInNeeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("it needs a sign-in")
+    }
+}
+
+impl std::error::Error for SignInNeeded {}
+
+/// [`SignInNeeded`], when `e` is a 401 from a server that signs in that
+/// may offer a sign-in, as `run` judges it (`oauth::may_sign_in`; `sent`:
+/// a header was): a credential refused stays a problem.
+fn unsigned(server: &Mcp, sent: bool, e: &yoagent::mcp::McpError) -> Option<BoxError> {
+    (server.oauth()
+        && e.http_status() == Some(401)
+        && oauth::may_sign_in(e.www_authenticate(), sent))
+    .then(|| Box::new(SignInNeeded) as BoxError)
+}
+
+/// A server that signs in, as `load::sign_in_all` takes it: its URL and
+/// headers filled in (`launch`), each header as written beside.
+fn signs_in_of(server: &Mcp, launch: &Launch) -> Result<load::SignsIn, BoxError> {
+    let (
+        Transport::Http {
+            headers: written, ..
+        },
+        Launch::Http { url, headers, hide },
+    ) = (&server.transport, launch)
+    else {
+        return Err(format!("mcp {}: only an HTTP server signs in", server.name).into());
+    };
+    let url =
+        url::Url::parse(url).map_err(|_| format!("mcp {}: its URL is not one", server.name))?;
+    let headers = headers
+        .iter()
+        .map(|(name, filled)| load::ManifestHeader {
+            name: name.clone(),
+            written: written
+                .get(name)
+                .map(|v| v.as_str().to_owned())
+                .unwrap_or_default(),
+            filled: filled.clone(),
+        })
+        .collect();
+    Ok(load::SignsIn {
+        name: server.name.clone(),
+        url,
+        headers,
+        hide: hide.clone(),
+        allow: server.allow.clone(),
     })
 }
 
@@ -2639,7 +2768,7 @@ pub(crate) fn keys_given(
                         .filter(|r| set(r)),
                 )
                 .collect(),
-            Transport::Http { url, headers } => std::iter::once(url)
+            Transport::Http { url, headers, .. } => std::iter::once(url)
                 .chain(headers.values())
                 .flat_map(|v| v.references())
                 .filter(|r| set(r))
@@ -2779,6 +2908,7 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
     let failed = |e: &dyn std::fmt::Display| {
         format!("mcp {}: {}", server.name, hidden(&e.to_string(), shown))
     };
+    let sent = matches!(launch, Launch::Http { headers, .. } if !headers.is_empty());
     let client = match launch {
         Launch::Stdio {
             command,
@@ -2802,7 +2932,7 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
             }
             McpClient::connect_http_with(transport)
                 .await
-                .map_err(|e| failed(&e))?
+                .map_err(|e| unsigned(server, sent, &e).unwrap_or_else(|| failed(&e).into()))?
         }
     };
     let client = Arc::new(tokio::sync::Mutex::new(client));
@@ -2810,7 +2940,7 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
     // named like a built-in, do not meet.
     let tools = McpToolAdapter::from_client_with_prefix(client, server.name.clone())
         .await
-        .map_err(|e| failed(&e))?;
+        .map_err(|e| unsigned(server, sent, &e).unwrap_or_else(|| failed(&e).into()))?;
     if tools.is_empty() {
         return Err(failed(&"the server lists no tools").into());
     }
@@ -2830,12 +2960,18 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
         return Err(failed(&why).into());
     }
     // What it allows must be among what it offers (a typo, or a server
-    // whose tools changed, is refused here, not left asking).
+    // whose tools changed, is refused here, not left asking). One that
+    // signs in is only warned at sign-in (`check` notes it), as `run`
+    // finds its tools only then.
     let offered: Vec<&str> = tools
         .iter()
         .map(|t| &t.name()[server.name.len() + 2..])
         .collect();
-    if let Some(gone) = server.allow.iter().find(|a| !offered.contains(&a.as_str())) {
+    let gone = server
+        .allow
+        .iter()
+        .find(|a| !server.oauth() && !offered.contains(&a.as_str()));
+    if let Some(gone) = gone {
         return Err(failed(&format!(
             "its `allow` names {gone:?}, which it does not offer (it offers: {})",
             offered.join(", ")
@@ -3150,6 +3286,41 @@ mod tests {
             dir,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_server_that_signs_in_gets_its_headers_as_written_and_filled() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = manifest(
+            dir.path(),
+            "[[mcp]]\nname = \"docs\"\nurl = \"https://docs.example.com/mcp\"\nauth = \"oauth\"\nheaders = { X-Org = \"org ${ORG}\" }\nallow = [\"search\"]\n",
+        );
+        let launch = super::launch(
+            &m.mcp[0],
+            &install::Installed::default(),
+            &|_: &str| Some("acme-secret-1234".to_owned()),
+            &[],
+        )
+        .unwrap();
+        let signs = super::signs_in_of(&m.mcp[0], &launch).unwrap();
+        assert_eq!(signs.name, "docs");
+        assert_eq!(signs.url.as_str(), "https://docs.example.com/mcp");
+        assert_eq!(signs.allow, ["search"]);
+        let [header] = signs.headers.as_slice() else {
+            panic!("one header")
+        };
+        assert_eq!(
+            (
+                header.name.as_str(),
+                header.written.as_str(),
+                header.filled.as_str()
+            ),
+            ("X-Org", "org ${ORG}", "org acme-secret-1234")
+        );
+        assert_eq!(
+            super::hidden("said org acme-secret-1234", &signs.hide),
+            "said org ${ORG}"
+        );
     }
 
     #[test]

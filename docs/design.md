@@ -5440,22 +5440,31 @@ a token, an account, or a way to look like a server the owner trusts.
     `revocation_endpoint`, all within `CLOSE_TIME`. Keeping a sign-in
     across sessions is decision 2.
 11. **The manifest: `auth = "oauth"`.** On an `[[mcp]] url` (no
-    `headers` naming `Authorization`):
+    `headers` naming `Authorization`, and no `${…}` in the URL: the
+    sign-in sends the URL to the authorization server as its `resource`,
+    on any site):
     - **When:** after the agent starts and a frontend is attached (as the
       task waits for one), each such server in turn, its sign-in asked
       as a loaded server's is. Its tools are not known at start, so they
       reach the agent through the late source `Loaded` already is (a
-      kept server), from the next turn, prefixed as any server's; until
-      then, and after a refused sign-in, it offers none.
+      kept server), prefixed as any server's; until then, and after a
+      refused sign-in, it offers none. The task waits for these
+      sign-ins too, so its first run has their tools. A question that
+      finds no frontend (the page reloading) is asked again once one is
+      there, not taken for the owner's silence.
     - **Its `allow`:** checked once its tools are listed: a name it does
-      not offer is a Warning notice and that name asks, as `AllowedCheck`
-      says a plugin's.
-    - **`--once`:** refused ("a sign-in needs the page or the terminal
-      UI").
-    - **`check`:** probes it without signing in: a Bearer challenge is a
-      note ("it needs a sign-in: its tools are not listed by `check`, and
-      its `allow` is checked at sign-in"), not a problem; `together`
-      leaves it out.
+      not offer is a Warning notice ("nothing of that name runs").
+    - **`--once`:** refused ("mcp x: it signs in (`auth = "oauth"`),
+      which needs the page or the terminal UI: not under --once").
+    - **`check`:** probes it without signing in: a 401 that may offer a
+      sign-in as `run` judges it (a `Bearer` challenge, or none with no
+      header sent: `oauth::may_sign_in`) is a note ("it needs a sign-in
+      …: `run` signs it in once the page or the terminal UI is open;
+      `check` does not, so its tools are not listed here, and its
+      `allow` is checked at sign-in"), not a problem; a credential
+      refused or a 403 stays one. One answering unsigned has its tools
+      listed, a note saying so, and its `allow` naming a tool it does not
+      offer noted, as `run` warns of it; `together` leaves it out.
     - **The block** of a loaded server signed in carries `auth =
       "oauth"`; the cross-site rule of point 3 does not apply to it once
       the owner puts it in the manifest.
@@ -5547,7 +5556,7 @@ account, so CI could run only the stub, which the tests already do.
    registration, PKCE, the callback and its short start link, the
    exchange, the source and its refresh, revocation, the hidden values,
    against the stub (built 2026-11-02: `discover`, `sign_in`, `Source`;
-   used by nothing yet, its tests in `src/run/oauth/tests.rs`);
+   used by steps 5 and 6, its tests in `src/run/oauth/tests.rs`);
 5. `load_plugin`'s remote signed in: the unauthenticated connect, the
    questions, cancellation, a sign-in that ends marking it stopped, the
    block's `auth = "oauth"`, the hints (built 2026-11-03: the agent's
@@ -5556,5 +5565,13 @@ account, so CI could run only the stub, which the tests already do.
    so; the block's `auth` read by the manifest only with step 6);
 6. the manifest's `auth = "oauth"`: signed in once a frontend attached,
    its tools through the late source, `allow` at sign-in, `check`,
-   `--once`;
+   `--once` (built 2026-11-03, `run/load/signs_in.rs`: a server that
+   answers unsigned is offered as it is; the sign-ins one at a time
+   with `load_plugin`'s; a refused one is a notice and offers nothing;
+   `check` notes a 401 as needing a sign-in; after its review: a URL
+   holding `${…}` refused, the task waiting for the sign-ins, a question
+   with no frontend asked again, the wait for the sign-in lock raced
+   against a stop (said when it waits) in both, the session's end
+   waiting `ENDING` (16 s) and saying one it cut short, a stopped
+   server said as agent.toml's, a 401's words naming agent.toml);
 7. the skill, the guide, `CLAUDE.md` and the roadmap.

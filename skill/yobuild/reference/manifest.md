@@ -207,7 +207,13 @@ And optionally:
   with `args`, `env` (secrets as `${NAME}`), and `bin` when the package
   has several.
 - `url = "https://…"`: an HTTP server, with `headers` (secrets as
-  `${NAME}`, a scheme word allowed).
+  `${NAME}`, a scheme word allowed), and `auth = "oauth"` for one that
+  needs the person to sign in through a browser (no `Authorization`
+  header beside it, no `${…}` in its URL): `run` signs it in once the
+  page or the terminal UI is open, the task waiting for it, its `allow`
+  checked then (a name it does not offer is a Warning); not under
+  `--once`; `check` notes it and does not list its tools (one that
+  answers without a sign-in is listed as any server).
 
 And `name`: its tools are named `<name>__<tool>`. The default is the
 package's name without its scope, or the URL's host — whose dots no tool

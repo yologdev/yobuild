@@ -359,8 +359,8 @@ the agent never sees it, and a sign-in that cannot be renewed marks the
 server stopped. The agent is told a failed sign-in in fixed words; the
 person's notice says why. The block printed at the end is an `[[mcp]]`
 with `url` and, for a credential, `headers` naming its variable, or
-`auth = "oauth"` for a server signed in (`agent.toml` cannot read that
-key yet: such a server is loaded through `[extend]` each session).
+`auth = "oauth"` for a server signed in: put in `agent.toml`, it is
+signed in each session once the page or the terminal UI is open.
 
 - Context7 (`io.github.upstash/context7` at
   `https://mcp.context7.com/mcp`, checked 2026-10-30): up-to-date

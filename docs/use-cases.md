@@ -63,9 +63,8 @@ An agent is any mix of parts that load. There are four kinds:
   there are servers for many services and file types. yobuild runs most
   of them:
   - local ones, from npm or a program on your computer;
-  - remote ones, by address with fixed headers; ones that need you to
-    sign in through a browser only when the agent finds them itself
-    (`[extend]`), not yet from `agent.toml`.
+  - remote ones, by address with fixed headers, or signed in through
+    your browser (`auth = "oauth"`).
 - **pi packages:** extensions for pi, an open-source coding agent,
   published on npm. For example: sub-agents, a wiki of notes, web search
   with paid engines, code health.

@@ -164,6 +164,7 @@ phone = true
                         ),
                     ]
                     .into(),
+                    oauth: false,
                 },
                 allow: Vec::new(),
             },
@@ -649,6 +650,40 @@ fn servers_are_stdio_or_http_not_both() {
             "[[mcp]]\nnpm = \"s@1.0.0\"\nheaders = { Accept = \"x\" }\n"
         )),
         "5:7: headers are for an HTTP server (url)"
+    );
+}
+
+#[test]
+fn a_server_signs_in_with_auth_oauth_over_http_only() {
+    let m = Manifest::parse(
+        &with("[[mcp]]\nname = \"linear\"\nurl = \"https://mcp.linear.app/mcp\"\nauth = \"oauth\"\nallow = [\"list_issues\"]\n"),
+        Path::new("/a/agent.toml"),
+        Path::new("/a"),
+    )
+    .unwrap();
+    assert!(m.mcp[0].oauth());
+    assert_eq!(m.mcp[0].allow, ["list_issues"]);
+    assert_eq!(
+        error(&with(
+            "[[mcp]]\nurl = \"https://x.example/mcp\"\nauth = \"basic\"\n"
+        )),
+        "6:8: auth: \"oauth\" is the one sign-in yobuild does (the owner's, in a browser)"
+    );
+    assert_eq!(
+        error(&with("[[mcp]]\nnpm = \"s@1.0.0\"\nauth = \"oauth\"\n")),
+        "6:8: auth is for an HTTP server (url)"
+    );
+    assert_eq!(
+        error(&with(
+            "[[mcp]]\nurl = \"https://x.example/mcp\"\nauth = \"oauth\"\nheaders = { authorization = \"Bearer ${K}\" }\n"
+        )),
+        "6:8: an `Authorization` header and `auth = \"oauth\"` together: the sign-in gives that header"
+    );
+    assert_eq!(
+        error(&with(
+            "[[mcp]]\nurl = \"https://x.example/mcp?key=${K}\"\nauth = \"oauth\"\n"
+        )),
+        "6:8: a URL holding `${…}` and `auth = \"oauth\"` together: the sign-in sends the server's URL to its authorization server"
     );
 }
 

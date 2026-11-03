@@ -59,6 +59,16 @@ pub(crate) struct Config {
     pub(crate) challenge_header: bool,
     /// The resource metadata waits this long first.
     pub(crate) slow_metadata: Duration,
+    /// The MCP server lets every request through unsigned.
+    pub(crate) open: bool,
+    /// The MCP server answers an unsigned request with this status
+    /// instead of its 401.
+    pub(crate) unsigned_status: Option<u16>,
+    /// The MCP server answers a signed request with this status, its body
+    /// echoing the `X-Org` header.
+    pub(crate) signed_status: Option<u16>,
+    /// The tools it lists.
+    pub(crate) tools: Json,
 }
 
 /// An MCP server and its authorization server on this machine, recording
@@ -128,6 +138,10 @@ impl Stub {
             challenge_at_list: false,
             challenge_header: true,
             slow_metadata: Duration::ZERO,
+            open: false,
+            unsigned_status: None,
+            signed_status: None,
+            tools: json!([{ "name": "echo", "inputSchema": { "type": "object" } }]),
         }));
         let challenge = format!(
             "Bearer realm=\"OAuth\", resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\", scope=\"read write\""
@@ -359,14 +373,33 @@ impl Stub {
                 s.lock().unwrap().push(format!(
                     "{method} {what} auth={auth} session={session}{org}"
                 ));
-                let (valid, at_list, with_challenge) = {
+                let (valid, at_list, with_challenge, open, unsigned_status, signed_status, tools) = {
                     let c = c.lock().unwrap();
-                    (c.valid.clone(), c.challenge_at_list, c.challenge_header)
+                    (
+                        c.valid.clone(),
+                        c.challenge_at_list,
+                        c.challenge_header,
+                        c.open,
+                        c.unsigned_status,
+                        c.signed_status,
+                        c.tools.clone(),
+                    )
                 };
-                let unsigned_through = at_list
-                    && auth == "-"
-                    && (what == "initialize" || what.starts_with("notifications/"));
-                if auth != format!("Bearer {valid}") && !unsigned_through {
+                let unsigned_through = open
+                    || at_list
+                        && auth == "-"
+                        && (what == "initialize" || what.starts_with("notifications/"));
+                let signed = auth == format!("Bearer {valid}");
+                if let (Some(status), false, false) = (unsigned_status, signed, open) {
+                    return (StatusCode::from_u16(status).unwrap(), "not you").into_response();
+                }
+                if let (Some(status), true, false) =
+                    (signed_status, signed, method == Method::DELETE)
+                {
+                    let said = format!("not with {}", org.trim_start());
+                    return (StatusCode::from_u16(status).unwrap(), said).into_response();
+                }
+                if !signed && !unsigned_through {
                     let mut refused = (StatusCode::UNAUTHORIZED, "sign in").into_response();
                     if with_challenge {
                         refused.headers_mut().insert(
@@ -388,9 +421,7 @@ impl Stub {
                         "capabilities": { "tools": {} },
                         "serverInfo": { "name": "docs", "version": "1" }
                     }),
-                    "tools/list" => {
-                        json!({ "tools": [{ "name": "echo", "inputSchema": { "type": "object" } }] })
-                    }
+                    "tools/list" => json!({ "tools": tools }),
                     _ => json!({ "content": [{ "type": "text", "text": "echoed" }] }),
                 };
                 (

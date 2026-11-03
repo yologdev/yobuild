@@ -2369,3 +2369,115 @@ fn an_http_servers_filled_url_is_never_said() {
         "something connected"
     );
 }
+
+/// An MCP server on this machine that answers without a sign-in,
+/// offering `echo` and `other`.
+async fn open_mcp() -> String {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use serde_json::{json, Value};
+    let app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::any(|body: String| async move {
+            let request: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+            let Some(id) = request.get("id").cloned() else {
+                return StatusCode::ACCEPTED.into_response();
+            };
+            let result = match request["method"].as_str() {
+                Some("initialize") => json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": { "tools": {} },
+                    "serverInfo": { "name": "docs", "version": "1" }
+                }),
+                Some("tools/list") => json!({ "tools": [
+                    { "name": "echo", "inputSchema": { "type": "object" } },
+                    { "name": "other", "inputSchema": { "type": "object" } }
+                ] }),
+                _ => json!({ "content": [{ "type": "text", "text": "echoed" }] }),
+            };
+            (
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string(),
+            )
+                .into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    url
+}
+
+/// agent.toml's server that signs in, once the page is open: its tools
+/// there for the task's first turn, the manifest's `allow` freeing one and
+/// the other asking; in no block at the end.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_that_signs_in_is_offered_once_the_page_is_open() {
+    let url = open_mcp().await;
+    let dir = project(
+        &format!(
+            "[[mcp]]\nname = \"docs\"\nurl = \"{url}\"\nauth = \"oauth\"\nallow = [\"echo\"]\n"
+        ),
+        r#"[{ "tools": [{ "name": "docs__echo", "arguments": {} }, { "name": "docs__other", "arguments": {} }] }, { "text": "done" }]"#,
+    );
+    let mut page = web::Page::open(dir.path(), "go").await;
+    let (mut notices, mut asked, mut ran) = (Vec::new(), Vec::new(), Vec::new());
+    loop {
+        let m = page.next().await;
+        match m["type"].as_str() {
+            Some("notice") => notices.push(m["message"].as_str().unwrap().to_owned()),
+            Some("uiRequest") => {
+                asked.push(m["request"]["title"].as_str().unwrap_or("").to_owned());
+                page.send(
+                    serde_json::json!({ "type": "uiResponse", "id": m["id"], "value": "Block" }),
+                )
+                .await;
+            }
+            Some("event") if m["event"]["type"] == "toolExecutionEnd" => ran.push((
+                m["event"]["toolName"].as_str().unwrap().to_owned(),
+                m["event"]["isError"] == true,
+            )),
+            Some("runEnd") => break,
+            _ => {}
+        }
+    }
+    assert!(
+        notices.iter().any(|n| n
+            == "agent.toml's [[mcp]] docs: it answered without a sign-in; its tools are the agent's from its next step: docs__echo, docs__other"),
+        "{notices:?}"
+    );
+    assert_eq!(
+        ran,
+        [
+            ("docs__echo".to_owned(), false),
+            ("docs__other".to_owned(), true)
+        ]
+    );
+    assert!(
+        matches!(asked.as_slice(), [t] if t.contains("docs__other")),
+        "{asked:?}"
+    );
+    let (code, stderr) = page.interrupt();
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(!stderr.contains("[[mcp]]"), "{stderr}");
+}
+
+#[test]
+fn a_server_that_signs_in_is_refused_under_once() {
+    let dir = project(
+        "[[mcp]]\nname = \"docs\"\nurl = \"https://docs.example.com/mcp\"\nauth = \"oauth\"\n",
+        r#"[{ "text": "done" }]"#,
+    );
+    let out = yobuild(
+        &[
+            "run", "agent.toml", "--scripted", "script.json", "--once", "--", "hi",
+        ],
+        dir.path(),
+    );
+    assert!(!out.status.success());
+    let stderr = text(&out.stderr);
+    assert!(
+        stderr.contains("mcp docs: it signs in (`auth = \"oauth\"`), which needs the page or the terminal UI: not under --once"),
+        "{stderr}"
+    );
+}

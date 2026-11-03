@@ -1155,6 +1155,14 @@ async fn a_remote_that_asks_for_a_sign_in_is_signed_in_kept_and_revoked_at_the_e
         assert!(!m.contains(&access(1)) && !m.contains(&refresh(1)), "{m}");
     }
     assert!(!said.contains(&access(1)));
+    // The block reads back as a server that signs in.
+    let manifest = format!(
+        "[agent]\nname = \"t\"\nmodel = \"deepseek/deepseek-flash\"\n{}",
+        l.loaded.kept()[0].block()
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let read = Manifest::parse(&manifest, &dir.path().join("a.toml"), dir.path()).unwrap();
+    assert!(read.mcp[0].oauth() && read.mcp[0].name == "docs");
 
     // Its tool, its token renewed on a 401.
     let tools = l.loaded.tools().await;
@@ -1307,6 +1315,38 @@ async fn a_run_stopped_during_the_sign_in_withdraws_it() {
     tokio::time::timeout(Duration::from_secs(5), withdrawn)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn a_run_stopped_while_its_sign_in_waits_for_another_ends_the_load() {
+    let stub = SignInStub::start().await;
+    let l = signing_in(&stub, vec![json!("Allow"), json!("Allow")]);
+    let held = l
+        .loaded
+        .one_sign_in(&tokio_util::sync::CancellationToken::new(), || {})
+        .await
+        .unwrap();
+    let ctx = ToolContext::new("1", LoadPlugin::TOOL);
+    let cancel = ctx.cancel.clone();
+    let waiting = async {
+        while l.questions().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        // Waiting, with no browser's question shown.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(l.questions().len(), 2);
+        cancel.cancel();
+    };
+    let (result, _) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(l.call_with(json!({ "package": "io.x/docs" }), ctx), waiting)
+    })
+    .await
+    .expect("ended within 5 s");
+    drop(held);
+    assert_eq!(
+        text(&result),
+        "load_plugin refused it: the run was stopped while its sign-in waited for another: it may be proposed again"
+    );
 }
 
 #[tokio::test]

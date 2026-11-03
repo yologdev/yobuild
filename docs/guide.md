@@ -223,8 +223,12 @@ MCP server it lacks and load it for the session. It works like this:
   to sign in, then shown a link (on the page, or printed where yobuild
   runs when the page is on your phone) that you open and finish in your
   browser. The token is kept for this session only and the agent never
-  sees it; its sign-in must be on the server's own site. Such a server
-  cannot be written in `agent.toml` yet. The gallery's `docs-helper`
+  sees it; its sign-in must be on the server's own site. In `agent.toml`
+  such a server is an `[[mcp]]` with `url` and `auth = "oauth"` (the
+  block printed at the end says it; its URL may hold no `${…}`, as the
+  sign-in sends it on): it is signed in each session once the page or
+  the terminal UI is open, its sign-in on any site, and the task waits
+  for it, so the agent has its tools from the start. The gallery's `docs-helper`
   connects to Context7, which needs no sign-in, this way.
 
 [§14](design.md#14-agents-that-extend-themselves-m5-decided-2026-10-25)
