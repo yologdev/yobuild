@@ -25,7 +25,8 @@ use common::registry::{self, stub, Packages, Packed};
 
 /// An MCP stdio server in Node offering `tools`: `echo` answers
 /// `echoed <text>`, and exits when the text is `die` (at once) or
-/// `die-soon` (0.3 s after answering, idle). As it starts it
+/// `die-soon` (0.3 s after answering, idle); `write <path>` writes the
+/// file and answers `written`, or the error's code. As it starts it
 /// leaves `echo-<pid>.pid` in its home, so a test can tell it stopped.
 fn server_js(tools: &Value) -> String {
     format!(
@@ -44,6 +45,12 @@ require("readline").createInterface({{ input: process.stdin }}).on("line", (line
   }} else if (m.method === "tools/call") {{
     const text = m.params.arguments.text;
     if (text === "die") {{ process.stderr.write("dying as asked\n"); process.exit(3); }}
+    if (text.startsWith("write ")) {{
+      let said = "written";
+      try {{ require("fs").writeFileSync(text.slice(6), "x"); }} catch (e) {{ said = e.code; }}
+      say({{ jsonrpc: "2.0", id: m.id, result: {{ content: [{{ type: "text", text: said }}] }} }});
+      return;
+    }}
     if (text === "die-soon") setTimeout(() => {{ process.stderr.write("dying idle\n"); process.exit(4); }}, 300);
     say({{ jsonrpc: "2.0", id: m.id, result: {{ content: [{{ type: "text", text: "echoed " + text }}] }} }});
   }} else {{
@@ -169,6 +176,11 @@ struct Seen {
 
 impl Page {
     async fn open(dir: &Path, port: u16) -> Page {
+        Page::open_in(dir, &dir.join("home"), port).await
+    }
+
+    /// `yobuild run` in `dir`, its home `home`.
+    async fn open_in(dir: &Path, home: &Path, port: u16) -> Page {
         let mut command = Command::new(env!("CARGO_BIN_EXE_yobuild"));
         for key in yobuild::manifest::KEY_VARIABLES {
             command.env_remove(key);
@@ -179,8 +191,8 @@ impl Page {
             ])
             .current_dir(dir)
             .env_remove("RUST_LOG")
-            .env("HOME", dir.join("home"))
-            .env("YOBUILD_HOME", dir.join("home/.yobuild"))
+            .env("HOME", home)
+            .env("YOBUILD_HOME", home.join(".yobuild"))
             .env("YOBUILD_MCP_REGISTRY", format!("http://127.0.0.1:{port}"))
             // The checkout's adapters: the cache's would be installed from
             // the stub registry, which has none of their packages.
@@ -465,6 +477,109 @@ async fn a_server_allowed_twice_is_offered_from_the_next_turn_each_call_asking()
 /// A loaded server that dies while idle, between runs: said by the
 /// watcher's tick with no call made, its tool gone from the next run (still
 /// asked by its name, then not found), and the block at the end marking it.
+/// This system's sandbox tool is here (design §17); else skipped (said),
+/// or a failure with `YOBUILD_REQUIRE_SANDBOX=1`.
+fn sandbox_here() -> bool {
+    let found = match cfg!(target_os = "macos") {
+        true => Path::new("/usr/bin/sandbox-exec").is_file(),
+        false => Command::new("sh")
+            .args(["-c", "command -v bwrap"])
+            .output()
+            .is_ok_and(|o| o.status.success()),
+    };
+    if !found && std::env::var_os("YOBUILD_REQUIRE_SANDBOX").is_some_and(|v| v == "1") {
+        panic!("YOBUILD_REQUIRE_SANDBOX=1: no sandbox tool here (bwrap on Linux)");
+    }
+    if !found {
+        eprintln!("SKIPPED: no sandbox tool here (install bubblewrap on Linux)");
+    }
+    found
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loaded_server_runs_in_the_sandbox() {
+    // With `[sandbox]` (design §17) the server `load_plugin` starts is
+    // confined as a manifest's: it writes in the agent's folder, not
+    // outside it (a folder outside the system's temp folder, which it may
+    // write).
+    if !sandbox_here() {
+        return;
+    }
+    let packages: Packages = Arc::new(BTreeMap::from([(
+        "echo-mcp".to_owned(),
+        vec![pack("echo-mcp", "1.0.0", 60, Some(echo_tools()), json!({}))],
+    )]));
+    let port = stub(packages, &[]).port;
+    let outside = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let outside = std::fs::canonicalize(outside.path()).unwrap().join("x.txt");
+    let dir = project(
+        "\n[sandbox]\n",
+        &json!([
+            call("find_plugin", json!({ "need": "echo text" })),
+            call("load_plugin", json!({ "package": "echo-mcp", "name": "talk" })),
+            call("talk__echo", json!({ "text": "write inside.txt" })),
+            call("talk__echo", json!({ "text": format!("write {}", outside.display()) })),
+            { "text": "done" }
+        ]),
+    );
+    // The agent's folder may not hold the home folder: a folder of its own.
+    let home = dir.path().join("home");
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    for file in ["agent.toml", "script.json"] {
+        std::fs::rename(dir.path().join(file), work.join(file)).unwrap();
+    }
+    let mut page = Page::open_in(&work, &home, port).await;
+    let asked = "Run `talk__echo`, a tool the agent loaded this session?";
+    let seen = page
+        .drive(
+            &[
+                (
+                    "Start the MCP server echo-mcp@1.0.0 as talk?",
+                    json!("Allow"),
+                ),
+                ("Keep the MCP server talk?", json!("Allow")),
+                (asked, json!("Allow")),
+                (asked, json!("Allow")),
+            ],
+            &[],
+            Duration::from_millis(300),
+        )
+        .await;
+    assert_eq!(seen.calls[2], "talk__echo ✓ written", "{seen:#?}");
+    assert!(
+        matches!(
+            seen.calls[3].as_str(),
+            "talk__echo ✓ EPERM" | "talk__echo ✓ EROFS" | "talk__echo ✓ EACCES"
+        ),
+        "{seen:#?}"
+    );
+    assert!(work.join("inside.txt").exists());
+    assert!(!outside.exists());
+    // The pid the server left is its namespace's under bubblewrap
+    // (`--unshare-pid`: 2, another process here): the server is looked for
+    // by its program's path instead, which only it (and bubblewrap, around
+    // it) has on its command line, from this test's own home.
+    let program = home.join(".yobuild").display().to_string();
+    let running = || {
+        let found = Command::new("pgrep")
+            .args(["-f", &program])
+            .output()
+            .unwrap();
+        !found.stdout.is_empty()
+    };
+    assert!(running(), "the server is not seen running by its path");
+    page.interrupt();
+    let gone = (0..100).any(|_| {
+        if !running() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        false
+    });
+    assert!(gone, "the server still runs 10 s after yobuild stopped");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_that_dies_while_idle_is_said_with_no_call_made() {
     let packages: Packages = Arc::new(BTreeMap::from([(

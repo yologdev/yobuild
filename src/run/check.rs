@@ -50,7 +50,10 @@ const SETTLE: Duration = Duration::from_secs(3);
 const STILL: Duration = Duration::from_millis(500);
 
 /// The report's shape, for whoever reads `--json`.
-const REPORT_VERSION: u32 = 4;
+const REPORT_VERSION: u32 = 5;
+
+/// A pi or DSH plugin's note with `[sandbox]`: not probed alone.
+const UNCONFINED_PROBE: &str = "not probed alone: with [sandbox] nothing runs outside it, and its probe alone would (yoagent-rutis starts it); checked with the agent together, confined";
 
 /// The run id `check` starts its one run with.
 const RUN: &str = "yobuild-check";
@@ -236,6 +239,10 @@ pub struct Entry {
     /// names.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub environment: Vec<String>,
+    /// Whether its process runs in the sandbox (`[sandbox]`, design §17):
+    /// a plugin's runtime or a stdio server, with the table; never an HTTP
+    /// server (nothing of it runs here).
+    pub confined: bool,
 }
 
 /// Whether the agent was started together.
@@ -277,6 +284,46 @@ pub struct Agent {
     pub left_out: Vec<String>,
     /// `[extend]` as the manifest sets it; `null` without it.
     pub extend: Option<Extend>,
+    /// The sandbox, with `[sandbox]`; `null` without it.
+    pub sandbox: Option<SandboxSaid>,
+}
+
+/// The sandbox, as `check --json` says it (design §17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct SandboxSaid {
+    /// `bwrap` or `sandbox-exec`.
+    pub tool: String,
+    /// The folders a confined process may write.
+    pub write: Vec<String>,
+    /// The git folders it may not write, in a writable folder.
+    pub read_only: Vec<String>,
+    /// What it may not read.
+    pub hide: Vec<String>,
+}
+
+impl From<&crate::sandbox::Sandbox> for SandboxSaid {
+    fn from(sandbox: &crate::sandbox::Sandbox) -> Self {
+        Self {
+            tool: sandbox.tool().to_owned(),
+            write: sandbox
+                .writable()
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+            read_only: sandbox
+                .read_only()
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+            hide: sandbox
+                .hidden()
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
+        }
+    }
 }
 
 /// What `[extend]` lets the agent do, as `check`'s agent note says it.
@@ -428,6 +475,9 @@ impl Report {
             if !entry.grants.is_empty() {
                 out.push_str(&format!("  grants: {}\n", entry.grants.join(", ")));
             }
+            if entry.confined {
+                out.push_str("  confined by the sandbox\n");
+            }
             if !entry.environment.is_empty() {
                 out.push_str(&format!(
                     "  environment beyond the kept set: {}\n",
@@ -496,13 +546,14 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     let manifest = manifest.with_builtins(&layout.frontend)?;
     // What `run` reads before anything starts, the key and budgets aside.
     Prompt::read(&manifest)?;
+    let sandbox = super::sandbox_of(&manifest, &cwd).await?;
     let Prepared {
         installed,
         plan,
         servers,
         sources,
         notes,
-    } = prepare(&manifest, &layout, home.as_deref(), locked, &cwd)?;
+    } = prepare(&manifest, &layout, home.as_deref(), locked, &cwd, sandbox)?;
     let gate_off = manifest.builtins.gate == GateMode::Off;
     let allowed_or_asks = |allowed: bool| match allowed {
         true => ToolKind::Allowed,
@@ -560,10 +611,12 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     // (design §12, "Step 4"): one that needs a key fails at its first call,
     // which this says before then.
     let withheld = super::withheld(&manifest);
-    let probed = manifest
-        .plugins
-        .iter()
-        .any(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_)));
+    // Not with `[sandbox]`: nothing is probed alone then.
+    let probed = plan.sandbox.is_none()
+        && manifest
+            .plugins
+            .iter()
+            .any(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_)));
     // Each entry's, when they differ: a plugin whose `config` refers to one
     // still gets it there (beside "it is given"), and a pi or DSH plugin's
     // probe alone gets them empty.
@@ -583,7 +636,9 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                 filled.join(", ")
             ));
         }
-        if plugin.is_some_and(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_))) {
+        if probed
+            && plugin.is_some_and(|p| matches!(p.kind, PluginKind::Pi(_) | PluginKind::Dsh(_)))
+        {
             note.push_str("; its probe alone gets them empty");
         }
         // Its code reading one is said here, not in a note of its own.
@@ -617,6 +672,9 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     agent_notes.extend(super::proxy_note(&manifest, std::env::vars_os()));
     if let Some(extend) = &manifest.extend {
         agent_notes.push(extend_note(extend));
+    }
+    if let Some(sandbox) = &plan.sandbox {
+        agent_notes.push(sandbox.said());
     }
     // An entry's own code reads a variable it does not get, or its grant
     // hands over one that looks like a secret or loads code: on the entry.
@@ -786,34 +844,47 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                 .find(|e| e.name() == plugin.name)
                 .map(|e| e.environment())
                 .unwrap_or_default(),
+            confined: plan.sandbox.is_some(),
         };
+        // With `[sandbox]` nothing runs outside it: the pi and DSH probes
+        // alone, which yoagent-rutis starts, cannot be confined.
+        let unconfined_probe =
+            plan.sandbox.is_some() && matches!(plugin.kind, PluginKind::Pi(_) | PluginKind::Dsh(_));
+        if unconfined_probe {
+            entry.checked_alone = false;
+            entry.notes.push(UNCONFINED_PROBE.into());
+        }
         let names = match &plugin.kind {
             PluginKind::Pi(source) => {
                 if let Source::Package(p) = source {
                     entry.install_scripts = scripts.of(Set::Pi, p.name());
                 }
-                let files: Vec<String> = plan
-                    .pi_files
-                    .iter()
-                    .filter(|(name, _)| *name == plugin.name)
-                    .flat_map(|(_, files)| files.iter().map(|f| f.display().to_string()))
-                    .collect();
-                let report = yoagent_rutis::probe::pi_with(
-                    &layout.adapters,
-                    &cwd,
-                    &files,
-                    &[],
-                    None,
-                    &probe_options(plugin),
-                )
-                .await;
-                entry.problems.extend(report.problem().map(Problem::new));
-                for builtin in &report.without {
-                    entry.problems.push(Problem::new(format!(
+                if unconfined_probe {
+                    Vec::new()
+                } else {
+                    let files: Vec<String> = plan
+                        .pi_files
+                        .iter()
+                        .filter(|(name, _)| *name == plugin.name)
+                        .flat_map(|(_, files)| files.iter().map(|f| f.display().to_string()))
+                        .collect();
+                    let report = yoagent_rutis::probe::pi_with(
+                        &layout.adapters,
+                        &cwd,
+                        &files,
+                        &[],
+                        None,
+                        &probe_options(plugin),
+                    )
+                    .await;
+                    entry.problems.extend(report.problem().map(Problem::new));
+                    for builtin in &report.without {
+                        entry.problems.push(Problem::new(format!(
                         "its tool `{builtin}` is named like yoagent's built-in: `run` refuses it"
                     )));
+                    }
+                    report.tools
                 }
-                report.tools
             }
             PluginKind::Dsh(source) => {
                 if let Source::Package(p) = source {
@@ -835,7 +906,9 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                     .filter_map(|row| row["name"].as_str())
                     .filter(|name| dsh_probe_base.iter().any(|b| b == name))
                     .collect();
-                if in_base.is_empty() {
+                if unconfined_probe {
+                    Vec::new()
+                } else if in_base.is_empty() {
                     let report = yoagent_rutis::probe::dsh_with(
                         &layout.adapters,
                         &plan.dsh_dir,
@@ -933,6 +1006,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             install_scripts: Vec::new(),
             grants: Vec::new(),
             environment: super::Starts::Server(server).environment(),
+            confined: plan.sandbox.is_some() && ecosystem == Ecosystem::Stdio,
         };
         if let Transport::Stdio {
             source: Source::Package(p),
@@ -1007,6 +1081,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         install_scripts: scripts.base.clone(),
         left_out,
         extend: manifest.extend.as_ref().map(Extend::from),
+        sandbox: plan.sandbox.as_deref().map(SandboxSaid::from),
         ..Agent::default()
     };
     if entries.iter().all(|e| e.problems.is_empty()) {
@@ -1584,6 +1659,7 @@ mod tests {
             install_scripts: Vec::new(),
             grants: Vec::new(),
             environment: Vec::new(),
+            confined: false,
         }
     }
 
@@ -1605,6 +1681,7 @@ mod tests {
         let mut rutis = entry("r", Ecosystem::Rutis);
         rutis.handlers = Some(vec!["a".into(), "b".into()]);
         rutis.grants = vec!["workspace".into(), "wake".into()];
+        rutis.confined = true;
         let mut empty = entry("e", Ecosystem::Rutis);
         empty.handlers = Some(Vec::new());
         let agent = Agent {
@@ -1628,6 +1705,7 @@ mod tests {
              plugin r  rutis ./r.ts  ok\n\
              \x20 handlers: a, b\n\
              \x20 grants: workspace, wake\n\
+             \x20 confined by the sandbox\n\
              plugin e  rutis ./e.ts  ok\n\
              \x20 handlers: none (it offers no tool)\n\
              agent x: ok\n\
@@ -1696,8 +1774,10 @@ mod tests {
             },
         );
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["version"], 4);
+        assert_eq!(json["version"], 5);
         assert_eq!(json["agent"]["extend"], serde_json::Value::Null);
+        assert_eq!(json["agent"]["sandbox"], serde_json::Value::Null);
+        assert_eq!(json["entries"][0]["confined"], false);
         assert_eq!(json["ok"], true);
         assert_eq!(json["agent"]["together"], "started");
         assert_eq!(json["entries"][0]["kind"], "plugin");

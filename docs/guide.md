@@ -342,8 +342,8 @@ run checks what a tool found, not only that it ran. The format, what
 
 ## What keeps an agent in bounds
 
-Not a sandbox: a plugin has Node's whole power, and the agent's tools
-reach your files. What yobuild does:
+Not a sandbox, unless you ask for one: a plugin has Node's whole power,
+and the agent's tools reach your files. What yobuild does:
 
 - **The gate**, an allow-list. Free:
   - reading;
@@ -375,14 +375,40 @@ reach your files. What yobuild does:
   truly needs is handed over on purpose, and `check` notes it. The agent's
   own `bash` (with `tools = "coding"`) keeps your whole environment, the
   model's key included. Your files (a `~/.aws/credentials`, a `.env`) are
-  still readable.
+  still readable, unless the sandbox hides them.
+- **The sandbox**, on request: with a `[sandbox]` table, every plugin
+  runtime and stdio MCP server starts confined (bubblewrap on Linux,
+  `sandbox-exec` on macOS). They write only to the agent's folder (not
+  its repository's `.git`), temp and the folders `write` names; they
+  cannot read your SSH keys, GnuPG, cloud, GitHub and AI tools' logins,
+  `~/.npmrc`, `~/.netrc`, the keychains, your shell profiles and
+  histories, nor what `hide` names; they cannot reach your terminal; the
+  network stays open.
+
+  ```toml
+  [sandbox]
+  write = ["~/.cache/acme"]   # a plugin's own cache, if it needs one
+  hide  = ["~/.config/acme"]  # your other secrets
+  ```
+
+  It does not confine the agent's own tools (the gate judges those), and
+  it does not stop a plugin reading what is not hidden and sending it.
+  What a plugin writes in the agent's folder — sources, build files,
+  `node_modules` — runs unconfined when your tools or the builds and tests
+  the gate allows use it: look at what changed before you build.
+  On Linux install bubblewrap first (`apt install bubblewrap`); on
+  Ubuntu 23.10 and later it also needs unprivileged user namespaces
+  allowed for it: an AppArmor profile for `bwrap`, or
+  `sysctl kernel.apparmor_restrict_unprivileged_userns=0`. `check` says
+  which entries are confined.
 - **Budgets and limits**, per run and per session; a run that would spend
   more stops, and says which limit.
 - **Questions that do not block:** the agent asks with `ask_owner` and
   carries on. Your answer reaches it mid-run, or starts the next run.
 
-The design's [§6](design.md#6-safety-model) and
+The design's [§6](design.md#6-safety-model),
 [§12](design.md#12-the-host-layer-what-a-plugins-own-app-gives-it-proposed-2026-10-19)
+and [§17](design.md#17-an-opt-in-sandbox-for-plugins-and-servers-m6-built-2026-11-03)
 explain each, and what each does not cover.
 
 ## When something fails

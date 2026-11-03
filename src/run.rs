@@ -270,7 +270,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         manifest: options.manifest.with_builtins(&options.layout.frontend)?,
         ..options
     };
-    let checked = check(&options, &cwd)?;
+    // The sandbox first, raced against Ctrl+C: its trial may take a while.
+    let sandbox = stops.until(sandbox_of(&options.manifest, &cwd)).await?;
+    let checked = check(&options, &cwd, sandbox)?;
     // Where the session saves, and the one it resumes (design §15).
     let opened = crate::sessions::open(
         &options.manifest,
@@ -331,7 +333,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         .chain(dsh_home_note(
             &checked.plan,
             std::env::var_os("YOAGENT_DSH_HOME"),
-        ));
+        ))
+        .chain(checked.plan.sandbox.as_ref().map(|s| s.said()));
     for note in notes {
         tracing::info!("{note}");
         session.notice(NoticeLevel::Info, note);
@@ -437,7 +440,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                 bridge: bridge.clone(),
                 adapters: layout.adapters.clone(),
             }),
-        );
+        )
+        .with_sandbox(plan.sandbox.clone());
         tools.add(FindPlugin::TOOL, vec![Box::new(find)]);
         tools.add(load::LoadPlugin::TOOL, vec![Box::new(load)]);
     }
@@ -1049,7 +1053,23 @@ struct Checked {
     installed: install::Installed,
 }
 
-fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
+/// The sandbox `[sandbox]` asks for (design §17), made and tried before
+/// anything is installed or started; `None` without the table.
+pub(crate) async fn sandbox_of(
+    manifest: &Manifest,
+    cwd: &Path,
+) -> Result<Option<Arc<crate::sandbox::Sandbox>>, BoxError> {
+    Ok(match &manifest.sandbox {
+        Some(settings) => Some(Arc::new(crate::sandbox::Sandbox::new(settings, cwd).await?)),
+        None => None,
+    })
+}
+
+fn check(
+    options: &Options,
+    cwd: &Path,
+    sandbox: Option<Arc<crate::sandbox::Sandbox>>,
+) -> Result<Checked, BoxError> {
     let manifest = &options.manifest;
     if options.once && options.task.as_deref().is_none_or(|t| t.trim().is_empty()) {
         return Err("a once run needs a task".into());
@@ -1136,6 +1156,7 @@ fn check(options: &Options, cwd: &Path) -> Result<Checked, BoxError> {
         options.home.as_deref(),
         options.locked,
         cwd,
+        sandbox,
     )?;
     notes.extend(more);
     let cost = config.cost.clone();
@@ -1355,6 +1376,7 @@ fn prepare(
     home: Option<&Path>,
     locked: bool,
     cwd: &Path,
+    sandbox: Option<Arc<crate::sandbox::Sandbox>>,
 ) -> Result<Prepared, BoxError> {
     let lookup = |name: &str| std::env::var(name).ok();
     // The MCP registry only for an agent that finds MCP servers, stdio or
@@ -1366,6 +1388,9 @@ fn prepare(
         None => None,
     };
     let mut notes = Vec::new();
+    if let Some(sandbox) = &sandbox {
+        notes.extend(sandbox.notes().iter().cloned());
+    }
     // Nothing judging calls is allowed (an agent in a sandbox), but said.
     if manifest.builtins.gate == GateMode::Off && !manifest.plugins.iter().any(|p| p.policy) {
         notes.push(
@@ -1389,14 +1414,14 @@ fn prepare(
         ));
     }
     let installed = install::install(manifest, &layout.adapters, home, locked)?;
-    let plan = plugins::plan(manifest, layout, &installed, cwd, &lookup)?;
+    let plan = plugins::plan(manifest, layout, &installed, cwd, &lookup, sandbox.clone())?;
     let withheld = withheld(manifest);
     notes.extend(plan.notes.iter().cloned());
     let servers = manifest
         .mcp
         .iter()
         .map(|server| {
-            let launch = launch(server, &installed, &lookup, &withheld)?;
+            let launch = launch(server, &installed, &lookup, &withheld, sandbox.as_ref())?;
             Ok((server.name.clone(), launch))
         })
         .collect::<Result<_, BoxError>>()?;
@@ -1522,6 +1547,9 @@ pub(crate) fn kept_environment(
     runtimes: &[(String, PathBuf)],
 ) -> PluginHostBuilder {
     builder = builder.inherit(crate::environment::inherit());
+    if let Some(sandbox) = &plan.sandbox {
+        builder = builder.sandbox(sandbox.clone());
+    }
     let withheld = withheld(manifest);
     tracing::debug!(
         "withheld from plugin runtimes: {withheld:?}; granted: {:?}",
@@ -2554,6 +2582,8 @@ enum Launch {
         /// The credentials set here ([`withheld`]); [`without`] leaves
         /// out those its `env` sets.
         withheld: Vec<String>,
+        /// What confines it, with `[sandbox]` (design §17).
+        sandbox: Option<Arc<crate::sandbox::Sandbox>>,
     },
     Http {
         url: String,
@@ -2566,12 +2596,14 @@ enum Launch {
 
 /// How to start `server`; a stdio server has each of `withheld` (the
 /// credentials set here) taken out of its environment, unless its own `env`
-/// sets it — and on unix every name not in the kept set ([`without`]).
+/// sets it — and on unix every name not in the kept set ([`without`]);
+/// confined by `sandbox`, when there is one.
 fn launch(
     server: &Mcp,
     installed: &install::Installed,
     lookup: &dyn Fn(&str) -> Option<String>,
     withheld: &[String],
+    sandbox: Option<&Arc<crate::sandbox::Sandbox>>,
 ) -> Result<Launch, BoxError> {
     let failed =
         |e: &dyn std::fmt::Display| -> BoxError { format!("mcp {}: {e}", server.name).into() };
@@ -2615,6 +2647,7 @@ fn launch(
                     .collect::<Result<_, crate::manifest::Unset>>()
                     .map_err(|e| failed(&e))?,
                 withheld: withheld.to_vec(),
+                sandbox: sandbox.cloned(),
             }
         }
         Transport::Http { url, headers, .. } => {
@@ -2987,6 +3020,22 @@ fn without_from(
     ))
 }
 
+/// A stdio server's command ([`without`]'s) wrapped in `sandbox`'s, when
+/// there is one (design §17).
+pub(crate) fn confined(
+    sandbox: Option<&crate::sandbox::Sandbox>,
+    command: Result<StdioCommand, BoxError>,
+) -> Result<StdioCommand, BoxError> {
+    let (program, args, env) = command?;
+    Ok(match sandbox {
+        Some(sandbox) => {
+            let (program, args) = sandbox.wrap_text(program, args);
+            (program, args, env)
+        }
+        None => (program, args, env),
+    })
+}
+
 /// No `env` to exec through: the variables are set empty instead (but the
 /// names its own `env` sets).
 #[cfg(not(unix))]
@@ -3020,9 +3069,11 @@ async fn mcp(server: &Mcp, launch: &Launch) -> Result<Vec<Box<dyn AgentTool>>, B
             args,
             env,
             withheld,
+            sandbox,
         } => {
             let (command, args, env) =
-                without(command, args, env, withheld).map_err(|e| failed(&e))?;
+                confined(sandbox.as_deref(), without(command, args, env, withheld))
+                    .map_err(|e| failed(&e))?;
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             McpClient::connect_stdio_with(&command, &args, Some(env), stdio_options())
                 .await
@@ -3411,6 +3462,7 @@ mod tests {
             &install::Installed::default(),
             &|_: &str| Some("acme-secret-1234".to_owned()),
             &[],
+            None,
         )
         .unwrap();
         let signs = super::signs_in_of(&m.mcp[0], &launch).unwrap();
@@ -3811,6 +3863,7 @@ mod tests {
                 &install::Installed::default(),
                 &move |_: &str| value.map(str::to_owned),
                 &[],
+                None,
             )
         };
         let launch = |host: &'static str| launch_with("https://${HOST}/mcp", Some(host));
@@ -3952,6 +4005,7 @@ mod tests {
             &install::Installed::default(),
             &|_: &str| Some("v".to_owned()),
             &withheld,
+            None,
         )
         .unwrap();
         let Launch::Stdio {
@@ -3959,6 +4013,7 @@ mod tests {
             args,
             env,
             withheld,
+            ..
         } = launch
         else {
             panic!("stdio")

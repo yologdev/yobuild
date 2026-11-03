@@ -117,7 +117,8 @@ and ask Claude Code to change it.
 ## Why yobuild
 
 First, what it is not: **not a sandbox.** Its parts run with your rights
-on your computer (more [below](#when-yobuild-is-not-the-right-tool)).
+on your computer; an opt-in `[sandbox]` narrows what plugins may write and
+read, no more (more [below](#when-yobuild-is-not-the-right-tool)).
 Within that:
 
 - **No code to write.** An agent is a short settings file and a prompt.
@@ -213,8 +214,12 @@ drawn.
 - **You need a sandbox.** yobuild is not one. Plugins run with your
   rights, and anything the agent can read it can also send. The gate
   guards against the agent deleting or replacing your files, not against
-  a plugin you shouldn't have trusted. For a guarantee, run it in a
-  container or on a copy of your files.
+  a plugin you shouldn't have trusted. A `[sandbox]` table confines
+  plugins and servers on Linux and macOS — they write only to the agent's
+  folder and cannot read your SSH keys and cloud logins — but what is not
+  hidden they can still read and send, and the agent's own tools are not
+  confined. For a guarantee, run it in a container or on a copy of your
+  files.
 - **You use Windows.** Not supported yet.
 - **You want a hosted service** for many users, with accounts. yobuild
   runs one person's agents on one computer.

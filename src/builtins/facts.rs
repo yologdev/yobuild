@@ -212,7 +212,10 @@ impl Snapshot {
             // tree instead. Edits not staged on top of it cannot be told apart.
             None => {
                 let tree = git.run(&["write-tree"]).await?.trim().to_owned();
-                let unstaged = git.run(&["diff", "--quiet"]).await.is_err();
+                let unstaged = git
+                    .run(&["diff", "--quiet", "--no-ext-diff", "--no-textconv"])
+                    .await
+                    .is_err();
                 (tree, !unstaged)
             }
             // Empty output: nothing uncommitted, `head` is the tree.
@@ -266,7 +269,8 @@ impl Start {
         let git = Git::at(&self.root).with_index_copy().await?;
         let diff = git
             .run(&[
-                "diff", "--no-relative", "--no-ext-diff", "--shortstat", &self.tree,
+                "diff", "--no-relative", "--no-ext-diff", "--no-textconv", "--shortstat",
+                &self.tree,
             ])
             .await?;
         let diff = match diff.trim() {
@@ -340,8 +344,18 @@ fn names(what: &str, files: Vec<&String>) -> String {
     }
 }
 
+/// What every git the facts run is given first: no fsmonitor and no
+/// hooks, so no program a repository's config names runs — what a plugin
+/// wrote in the agent's folder must not run outside its sandbox (design
+/// §17) — whatever the config says.
+const NO_PROGRAMS: [&str; 4] = [
+    "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+];
+
 /// Runs git for the facts: in `dir`, in the C locale, with no repository
-/// chosen by the environment, and — once [`with_index_copy`](Git::with_index_copy)
+/// chosen by the environment, running no program its config names
+/// ([`NO_PROGRAMS`], and `--no-ext-diff --no-textconv` on each diff), and
+/// — once [`with_index_copy`](Git::with_index_copy)
 /// — on a private copy of the index, so a git killed at a time limit leaves
 /// no lock in the owner's repository and their index is never written.
 struct Git {
@@ -381,6 +395,7 @@ impl Git {
     fn command(&self, args: &[&str]) -> tokio::process::Command {
         let mut command = tokio::process::Command::new("git");
         command
+            .args(NO_PROGRAMS)
             .args(args)
             .current_dir(&self.dir)
             .env("LC_ALL", "C")
@@ -480,5 +495,61 @@ impl std::fmt::Display for GitError {
             GitError::NotRepo => f.write_str("not a git repository"),
             GitError::Failed(why) => f.write_str(why),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every git the facts run turns off what a repository's config could
+    /// run (design §17): a plugin may have written that config.
+    #[test]
+    fn every_git_runs_no_program_its_config_names() {
+        let git = Git::at(Path::new("/x"));
+        let command = git.command(&["status"]);
+        let args: Vec<&std::ffi::OsStr> = command.as_std().get_args().collect();
+        assert_eq!(
+            args,
+            ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "status"]
+        );
+    }
+
+    /// A repository whose config names an fsmonitor and a hook: what the
+    /// facts run never starts them.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_repositorys_fsmonitor_and_hooks_never_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "start"]);
+        let ran = root.join("ran");
+        let script = root.join("x.sh");
+        std::fs::write(&script, format!("#!/bin/sh\ntouch {}\n", ran.display())).unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        git(&["config", "core.fsmonitor", &script.display().to_string()]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        let facts = Git::at(&root).with_index_copy().await.ok().unwrap();
+        for args in [
+            &["status", "--porcelain"][..],
+            &["diff", "--quiet", "--no-ext-diff", "--no-textconv"],
+            &["stash", "create"],
+        ] {
+            let _ = facts.output(args).await;
+        }
+        assert!(!ran.exists(), "the fsmonitor ran");
     }
 }
