@@ -9,12 +9,15 @@ small built-ins of its own, on top of the
 [yoagent](https://github.com/yologdev/yoagent) loop. No code to write:
 an agent is a short settings file and a prompt.
 
-> Status: **0.1, the first release** (macOS and Linux; on crates.io, and
-> binaries on the releases page). Built: the manifest,
-> `yobuild run` and `yobuild check`, installing pinned plugins, the
-> built-ins, the frontends (web page, phone, terminal), the host layer
-> (grants, the kept environment), a gallery of agents built through the
-> skill, and `yobuild new` / `yobuild skill install`.
+> Status: **0.2** (macOS and Linux; on crates.io, and binaries on the
+> releases page). Built: the manifest, `yobuild run` and `yobuild check`,
+> installing pinned plugins, the built-ins, the frontends (web page,
+> phone, terminal), the host layer (grants, the kept environment), a
+> gallery of agents built through the skill, `yobuild new` / `yobuild
+> skill install`, and agents that find and load a tool they lack (MCP
+> servers, pi and DSH packages, remote servers). Next: a sign-in for
+> remote servers (built, not yet released), then 1.0 (the
+> [roadmap](docs/roadmap.md)'s M6).
 
 ## What you can build
 
