@@ -38,6 +38,20 @@ locks it again (commit the new lock).
   did: a value from `${NAME}` in its URL or headers, and a sign-in's
   token, echoed back in a result's text is shown as `${NAME}` (or
   `${oauth}`), so neither the model nor a saved session sees it.
+- **An opt-in sandbox** (design §17). With a `[sandbox]` table, every
+  plugin runtime (not the terminal UI's), every stdio MCP server — one
+  the agent loads too — and the helpers that read a package start
+  confined: bubblewrap on Linux (`bwrap` must be on `PATH`; on Ubuntu
+  23.10 and later unprivileged user namespaces must be allowed),
+  `sandbox-exec` on macOS. They write only to the agent's folder, temp and
+  the folders `write` names; they cannot read `~/.ssh`, `~/.gnupg`, the
+  cloud and GitHub logins, `~/.npmrc`, `~/.netrc`, the keychains, the
+  shell profiles, nor what `hide` names; the network stays open. The
+  agent's own tools are not confined, and what is not hidden can still be
+  read and sent. `check` says which entries are confined, and with the
+  sandbox checks pi and DSH plugins together only (`--json` report
+  version 5: `confined` on each entry, `agent.sandbox`). Without the
+  table nothing changes.
 - **yoagent 0.26.6** (by way of 0.26.4 and 0.26.5). Three more models
   with their real limits and prices: `openai/gpt-6.1-terra`,
   `zai/glm-5.3-flashx` and `qwen/qwen3.8-omni-flash`; Meta's

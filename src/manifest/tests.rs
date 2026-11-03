@@ -1736,3 +1736,67 @@ fn a_url_the_manifest_would_refuse_is_said_without_a_place() {
     assert_eq!(url_problem("https://x.example/$mcp"), None);
     assert!(url_problem("https://x.example/${mcp").is_some());
 }
+
+#[test]
+fn sandbox_is_off_unless_its_table_is_there_and_takes_paths() {
+    assert_eq!(read(MINIMAL).unwrap().sandbox, None);
+    assert_eq!(
+        read(&with("[sandbox]\n")).unwrap().sandbox,
+        Some(Sandbox::default())
+    );
+    let m = read(&with(
+        "[sandbox]\nwrite = [\"./out\", \"../shared/\", \"/srv/cache\", \"~/.cache/acme\"]\nhide = [\"~/.config/acme\", \"./.env\"]\n",
+    ))
+    .unwrap();
+    let sandbox = m.sandbox.unwrap();
+    assert_eq!(
+        sandbox.write,
+        [
+            Place::Path("/agents/out".into()),
+            Place::Path("/agents/../shared".into()),
+            Place::Path("/srv/cache".into()),
+            Place::Home(".cache/acme".into()),
+        ]
+    );
+    assert_eq!(
+        sandbox.hide,
+        [
+            Place::Home(".config/acme".into()),
+            Place::Path("/agents/.env".into()),
+        ]
+    );
+    assert_eq!(
+        sandbox.write[3].under(Path::new("/home/me")),
+        Path::new("/home/me/.cache/acme")
+    );
+}
+
+#[test]
+fn sandbox_refuses_what_is_no_path_named_twice_or_everything() {
+    let cases = [
+        (
+            "[sandbox]\nwrite = [\"out\"]\n",
+            "5:10: [sandbox] write \"out\": a path begins with ./, ../, / or ~/",
+        ),
+        (
+            "[sandbox]\nwrite = [\"~/\"]\n",
+            "5:10: [sandbox] write \"~/\": the whole home folder: name the folders themselves",
+        ),
+        (
+            "[sandbox]\nhide = [\"~/.\"]\n",
+            "5:9: [sandbox] hide \"~/.\": the whole home folder: name the folders themselves",
+        ),
+        (
+            "[sandbox]\nwrite = [\"/\"]\n",
+            "5:10: [sandbox] write \"/\": the whole file system: name the folders themselves",
+        ),
+        (
+            "[sandbox]\nhide = [\"~/.x\", \"~/./.x\"]\n",
+            "5:17: [sandbox] hide \"~/./.x\": named twice",
+        ),
+    ];
+    for (extra, expected) in cases {
+        assert_eq!(error(&with(extra)), expected, "{extra}");
+    }
+    assert!(error(&with("[sandbox]\nread = []\n")).starts_with("5:1: unknown field `read`"));
+}

@@ -169,6 +169,10 @@ my-agent/
   in a sandbox, or a plugin with `policy = true` is the approval policy.
   It lets every call run as the agent asks.
 - Never write a secret into a file: `${NAME}`, set in the environment.
+- Offer `[sandbox]` when the person does not fully trust a plugin or
+  server: they then write only to the agent's folder and temp, and cannot
+  read the usual secrets (reference/manifest.md). It does not stop them
+  reading the rest and sending it, nor confine the agent's own tools.
 - Never install plugin packages by hand, and never edit a lock: yobuild
   installs pinned plugins into its cache from the lock it writes. (A
   rutis plugin of your own is the exception: its package is installed in

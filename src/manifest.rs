@@ -50,6 +50,9 @@ pub struct Manifest {
     /// `[extend]`: the agent may find plugins (design §14); `None` when
     /// the manifest has no such table.
     pub extend: Option<Extend>,
+    /// `[sandbox]`: plugin runtimes and stdio MCP servers start confined
+    /// (design §17); `None` when the manifest has no such table.
+    pub sandbox: Option<Sandbox>,
     pub dsh: Dsh,
     pub frontend: Frontend,
     /// `[session]`: whether the session is saved for `--resume` (design
@@ -852,6 +855,35 @@ pub struct SessionSaving {
 impl Default for SessionSaving {
     fn default() -> Self {
         Self { save: true }
+/// `[sandbox]` (design §17): what plugins and stdio MCP servers may write
+/// and read beyond `yobuild::sandbox`'s own rule — the agent's folder and
+/// temp writable, the owner's secrets (`sandbox::HIDDEN`) unreadable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Sandbox {
+    /// More folders they may write (`write`).
+    pub write: Vec<Place>,
+    /// More folders and files they may not read (`hide`).
+    pub hide: Vec<Place>,
+}
+
+/// A path `[sandbox]` names: from the manifest's folder (`./`, `../`), or
+/// absolute, as written (`/`) — or under the home folder (`~/`), found
+/// when the agent starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Place {
+    Path(PathBuf),
+    Home(PathBuf),
+}
+
+impl Place {
+    /// Where it is, `home` being the home folder.
+    pub fn under(&self, home: &Path) -> PathBuf {
+        match self {
+            Place::Path(path) => path.clone(),
+            Place::Home(rest) => home.join(rest),
+        }
     }
 }
 
@@ -893,6 +925,7 @@ struct Raw {
     #[serde(default)]
     builtins: RawBuiltins,
     extend: Option<Spanned<RawExtend>>,
+    sandbox: Option<Spanned<RawSandbox>>,
     #[serde(default)]
     dsh: RawDsh,
     #[serde(default)]
@@ -985,6 +1018,15 @@ struct RawExtend {
     max_loads: Option<Spanned<i64>>,
     max_attempts: Option<Spanned<i64>>,
     min_age_days: Option<Spanned<i64>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSandbox {
+    #[serde(default)]
+    write: Vec<Spanned<String>>,
+    #[serde(default)]
+    hide: Vec<Spanned<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1267,6 +1309,10 @@ impl Manifest {
                 Some(extend(raw.into_inner()).map_err(located)?)
             }
         };
+        let sandbox = match raw.sandbox {
+            None => None,
+            Some(raw) => Some(sandbox(raw.into_inner(), dir).map_err(located)?),
+        };
         let frontend = frontend(raw.frontend).map_err(located)?;
 
         Ok(Manifest {
@@ -1278,6 +1324,7 @@ impl Manifest {
             mcp,
             builtins,
             extend,
+            sandbox,
             dsh: Dsh {
                 host_services: raw.dsh.host_services,
             },
@@ -2346,6 +2393,48 @@ fn extend(raw: RawExtend) -> Result<Extend, Located> {
         raw.min_age_days, "min_age_days", 0, 365, extend.min_age_days,
     )?;
     Ok(extend)
+}
+
+/// `[sandbox]`'s paths: each `./`, `../`, `/` or `~/`, named once; never
+/// the whole file system or the whole home folder (a `write` of either
+/// would undo the sandbox; a `hide` of either would hide what the runtimes
+/// run from).
+fn sandbox(raw: RawSandbox, dir: &Path) -> Result<Sandbox, Located> {
+    let places = |key: &str, raw: Vec<Spanned<String>>| -> Result<Vec<Place>, Located> {
+        let mut places: Vec<Place> = Vec::new();
+        for entry in raw {
+            let text = entry.get_ref();
+            let refused = |why: &str| (entry.span(), format!("[sandbox] {key} {text:?}: {why}"));
+            let place = if let Some(rest) = text.strip_prefix("~/") {
+                let rest = normal(Path::new(rest));
+                if rest.as_os_str().is_empty() {
+                    return Err(refused(
+                        "the whole home folder: name the folders themselves",
+                    ));
+                }
+                Place::Home(rest)
+            } else if text.starts_with("./") || text.starts_with("../") || text.starts_with('/') {
+                let path = normal(&dir.join(text));
+                if path.parent().is_none() {
+                    return Err(refused(
+                        "the whole file system: name the folders themselves",
+                    ));
+                }
+                Place::Path(path)
+            } else {
+                return Err(refused("a path begins with ./, ../, / or ~/"));
+            };
+            if places.contains(&place) {
+                return Err(refused("named twice"));
+            }
+            places.push(place);
+        }
+        Ok(places)
+    };
+    Ok(Sandbox {
+        write: places("write", raw.write)?,
+        hide: places("hide", raw.hide)?,
+    })
 }
 
 fn frontend(raw: RawFrontend) -> Result<Frontend, Located> {

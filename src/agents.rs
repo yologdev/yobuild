@@ -237,6 +237,13 @@ web = true                  # the web page, at 127.0.0.1:8787
 # agent.toml --resume`; this keeps its conversations off the disk.
 # [session]
 # save = false
+# Plugins and stdio MCP servers confined (Linux: bubblewrap; macOS:
+# sandbox-exec): they write only to this folder and temp, and cannot read
+# your SSH keys, cloud logins and shell profiles; the network stays open.
+# Not the agent's own tools, which the gate judges.
+# [sandbox]
+# write = ["~/.cache/acme"] # more folders they may write
+# hide  = ["~/.config/acme"] # more they may not read
 "##;
 
 const STARTER_PROMPT: &str = "You are NAME, an agent working in {cwd}.
@@ -485,7 +492,7 @@ mod tests {
         }
         assert!(tried >= 8, "{tried}");
         // The blocks, whole.
-        for block in ["# [[plugin]]", "# [[mcp]]", "# [extend]", "# [session]"] {
+        for block in ["# [[plugin]]", "# [[mcp]]", "# [extend]", "# [session]", "# [sandbox]"] {
             let start = lines.iter().position(|l| *l == block).unwrap();
             let mut changed: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
             for line in changed.iter_mut().skip(start) {
@@ -511,6 +518,10 @@ mod tests {
             }
             if block == "# [session]" {
                 assert!(!m.session.save);
+            }
+            if block == "# [sandbox]" {
+                let sandbox = m.sandbox.expect("[sandbox]");
+                assert_eq!((sandbox.write.len(), sandbox.hide.len()), (1, 1));
             }
         }
         // Its demo is a reply file.

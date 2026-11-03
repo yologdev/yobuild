@@ -140,7 +140,7 @@ fn manifest_md_names_every_provider_and_key() {
         "config", "allow", "policy", "npm", "bin", "url", "args", "env", "headers", "ask_owner",
         "report", "facts", "gate", "scratch", "tools", "host_services", "web", "phone", "terminal",
         "grants", "workspace", "trust", "wake", "exec", "kinds", "max_loads", "max_attempts",
-        "min_age_days",
+        "min_age_days", "write", "hide",
     ] {
         let in_toml = text.lines().any(|l| {
             let l = l.trim_start();

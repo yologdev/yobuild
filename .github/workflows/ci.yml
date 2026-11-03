@@ -46,6 +46,16 @@ jobs:
           npm ci --prefix frontend/plugins
           npm ci --prefix adapters/pi
           npm ci --prefix adapters/dsh
+      # `[sandbox]` (design §17) confines plugins through bubblewrap. Ubuntu
+      # 23.10 and later let AppArmor restrict unprivileged user namespaces
+      # (`kernel.apparmor_restrict_unprivileged_userns=1` on the runners),
+      # where `bwrap` cannot set up its uid map: lifted for the job.
+      - name: bubblewrap, with unprivileged user namespaces allowed
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid -- /bin/true && echo "bwrap works"
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -67,7 +77,7 @@ jobs:
         # target/tmp back).
         run: |
           rm -rf target/tmp/yobuild-home target/tmp/pi-lens-home
-          YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked
+          YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 YOBUILD_REQUIRE_SANDBOX=1 cargo test --locked
       - name: pi-lens's logs, on failure
         if: failure()
         run: |
@@ -152,8 +162,9 @@ jobs:
   # not on a runtime's `PATH`; a runtime's `DYLD_*`: the runners have System
   # Integrity Protection off, so it checks that `DYLD_*` arrives — the drop
   # itself, under SIP, only on a machine with it on), kept_env_test (the
-  # kept set, grants, rutis's loopback channel token) and cli_test's server
-  # that cannot start (its problem, fix and the `DYLD_*` note end to end).
+  # kept set, grants, rutis's loopback channel token), cli_test's server
+  # that cannot start (its problem, fix and the `DYLD_*` note end to end),
+  # and the sandbox through `sandbox-exec` (design §17: sandbox_test).
   macos:
     name: Credentials on macOS
     runs-on: macos-latest
@@ -171,15 +182,20 @@ jobs:
       - name: Copy the adapters of the yoagent-rutis crate (adapters/)
         run: scripts/copy-adapters.sh
       - name: Install the plugins' packages
-        run: npm ci --prefix frontend/plugins
-      - name: Unit tests
-        run: cargo test --locked --lib
+        run: |
+          npm ci --prefix frontend/plugins
+          npm ci --prefix adapters/pi
+          npm ci --prefix adapters/dsh
+      - name: Unit tests (a shell confined by sandbox-exec among them)
+        run: YOBUILD_REQUIRE_SANDBOX=1 cargo test --locked --lib
       - name: A withheld variable gone from every runtime
         run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked --test host_test a_withheld_variable_is_gone_from_every_runtime_unless_kept_or_set
       - name: The kept environment, rutis's loopback channel token among what arrives
         run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --locked --test kept_env_test
       - name: A server that cannot start, and the DYLD_* note, through the binary
         run: cargo test --locked --test cli_test a_server_that_cannot_start_is_said_with_what_to_do
+      - name: The sandbox (sandbox-exec) around pi, DSH, rutis and a stdio server
+        run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 YOBUILD_REQUIRE_SANDBOX=1 cargo test --locked --test sandbox_test
 
   # Not supported on Windows yet (design §13 "Distribution"): `run` and
   # `check` refuse there. Kept compiling, for later.

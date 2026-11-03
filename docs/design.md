@@ -1064,8 +1064,11 @@ and does not keep their data from being read or sent. What the model read (a
 web page, a file) reaches the owner's screen in its answers: the page sets
 it as text, the terminal UI cleans it of control sequences (§5,
 "Untrusted text in the terminal UI"); what it says is still the owner's to
-judge. A sandbox (container, VM), without secrets the agent should not
-have, is the deployment's job.
+judge. On request, `[sandbox]` (§17) confines plugin runtimes and stdio
+servers: they write only to the agent's folder and temp, and cannot read
+the usual places of the owner's secrets; reading the rest and sending stay
+open. A sandbox of the whole agent (container, VM), without secrets the
+agent should not have, is the deployment's job.
 
 ## 7. What moved, what it becomes
 
@@ -5775,3 +5778,251 @@ loop's messages); encrypting the file at rest.
 
 **Order of PRs.** One: this design, the code, the tests, the guide, the
 skill, `CLAUDE.md`.
+## 17. An opt-in sandbox for plugins and servers (M6; built 2026-11-03)
+
+**Why.** Every page so far says it: yobuild is not a sandbox. Step 5
+(§12) took the owner's exported credentials away from plugins, but a
+plugin still runs as the owner: it can read `~/.ssh/id_ed25519`, the AWS
+credentials file, a shell profile that exports a key, and write anywhere
+the owner can — a `.bashrc` line, a `~/.npmrc`, another project. A
+container is the deployment's answer, and it stays the stronger one; but
+an owner who runs an agent on their own machine, with a plugin they have
+read and half trust, has nothing between "everything" and "set up
+Docker". `docs/use-cases.md` lists "you need a sandbox" first among what
+yobuild is not for. This section is the middle: the operating system's
+own confinement around the processes yobuild starts for other people's
+code, on request.
+
+### What it is
+
+`[sandbox]` in a manifest. Without the table nothing changes. With it,
+every process yobuild starts to run a plugin's or a server's code starts
+confined:
+
+- every plugin runtime (`pi`, `dsh`, each `rutis-<n>`), in `run` and in
+  `check`'s start together and its rutis plugins alone;
+- a runtime `load_plugin` adds for a pi or DSH package (`loaded-<n>`: the
+  host keeps the sandbox with what every runtime loses, as it keeps the
+  withheld names);
+- every stdio MCP server, a manifest's and one `load_plugin` starts;
+- the adapters' helper scripts (`resolve-package.mjs`,
+  `inspect-package.mjs`, which imports a DSH package's bundle).
+
+Confined means:
+
+- **Writes** only to the agent's folder (the process's working folder,
+  where the file tools and the gate work), the temp folders (`TMPDIR`,
+  `/tmp`, `/var/tmp`; on macOS also the per-user folder holding `TMPDIR`,
+  `/var/folders/…/`, whose `C` is the user's cache), `YOAGENT_DSH_HOME`
+  when the owner set one, and what `write` adds. The terminal and the
+  null devices stay writable.
+- **Reads** everything, but the owner's secrets: `sandbox::HIDDEN`, under
+  the home folder, each one that is there — `.ssh`, `.gnupg`, `.aws`,
+  `.azure`, `.config/gcloud`, `.kube`, `.docker`, `.config/gh`, `.netrc`,
+  `.git-credentials`, `.npmrc`, `.yarnrc.yml`, `.pypirc`,
+  `.cargo/credentials` and `.cargo/credentials.toml`, `.password-store`,
+  `.config/op`, `.local/share/keyrings`, `Library/Keychains`, and the
+  shell profiles (`.bashrc`, `.bash_profile`, `.bash_login`, `.profile`,
+  `.zshrc`, `.zprofile`, `.zshenv`, `.zlogin`, `.config/fish`) — and what
+  `hide` adds.
+- **The network** stays open: a search plugin searches, a server fetches,
+  rutis's channel (a descriptor it hands over, or loopback TCP with
+  `RUTIS_LOCAL_HANDOVER=loopback`) works as before.
+
+```toml
+[sandbox]
+write = ["~/.cache/acme"]    # more folders they may write; default none
+hide  = ["~/.config/acme"]   # more they may not read; default none
+```
+
+Each path begins `./` or `../` (from the manifest's folder), `/`, or `~/`
+(the home folder, found when the agent starts); anything else is refused
+when read: `[sandbox] write "out": a path begins with ./, ../, / or ~/`.
+Refused when read as well: the whole home folder (`"~/"`: "the whole
+home folder: name the folders themselves"), the whole file system
+(`"/"`), a path named twice. Refused as the agent starts, before anything
+is installed (`run::prepare`, so `check` says it too):
+
+- the agent's folder being the home folder or one above it ("the
+  sandbox: the agent's folder X holds your home folder, which plugins
+  could then write: run the agent in a folder of its own");
+- a `write` folder not there ("[sandbox] write X: not there"), a file
+  ("not a folder"), or one holding the home folder ("it holds your home
+  folder: name the folders plugins need");
+- a hidden path holding the agent's folder or a `write` folder ("[sandbox]
+  hide X: it holds the agent's folder: hide what is inside it instead").
+
+A `hide` path not there hides nothing and is said (a Warning in `run`, a
+note in `check`): "[sandbox] hide X: not there, so nothing is hidden for
+it". A path is found once, canonical (the sandboxes match the real path:
+macOS's `/var` is `/private/var`), and must be UTF-8 (a stdio server's
+command is text).
+
+**Whole agent, not per entry.** The pi plugins share one runtime, as the
+DSH plugins do (§12, "One rule for both ecosystems"): a per-plugin switch
+would be a per-runtime one in disguise, and a plugin left out would leave
+its neighbours out. One table, every entry: an owner who needs one part
+free runs it as another agent.
+
+### How
+
+The sandbox wraps the command the kept environment already makes (§12
+"Step 5": `/usr/bin/env -u … <program> <args>`): `<sandbox> … /usr/bin/env
+-u … <program> <args>`, so every name taken out is still taken out and the
+program is still looked for first (`frontend::host::startable`). One type,
+`yobuild::sandbox::Sandbox`, made once per session (`Sandbox::new`), its
+`wrap(program, args)` used by `PluginHostBuilder::sandbox` (each runtime's
+launcher but the terminal one), `run::confined` (a stdio server's command,
+`run::mcp` and `load_plugin`'s start) and `plugins::node_json` (the
+helpers, through `Plan::sandbox`).
+
+- **Linux: bubblewrap** (`bwrap` on `PATH`), unprivileged:
+  `bwrap --die-with-parent --unshare-pid --ro-bind / / --dev /dev --proc
+  /proc --bind W W … --tmpfs H --remount-ro H … --ro-bind /dev/null F …
+  -- <command>`. The whole file system read-only; each writable folder
+  bound writable over it; each hidden folder covered by an empty
+  read-only one and each hidden file by `/dev/null`, after the writable
+  folders, so a hidden one inside them stays hidden. Its own pid
+  namespace, which ends with it, so what the confined process started ends
+  with it; `--die-with-parent`, so a runtime rutis kills (it kills the
+  pid) takes the confined process with it. No `--new-session`: rutis puts
+  each runtime in a process group of its own and the stdio servers'
+  groups are killed whole (yoagent's `own_process_group`). No network
+  namespace: the network is open, and the loopback channel works.
+- **macOS: `sandbox-exec`** (`/usr/bin/sandbox-exec -p <profile>`):
+  `(allow default)`, `(deny file-write*)`, then writing allowed under each
+  writable folder (`subpath`) and to `/dev/null`, `/dev/zero`,
+  `/dev/random`, `/dev/urandom`, `/dev/tty`, `/dev/ttys*`, `/dev/fd/*`,
+  `/dev/dtracehelper`, then reading and writing each hidden path denied
+  (the last rule that matches decides). `sandbox-exec` is deprecated in
+  its manual page since macOS 10.12 but present and working on every
+  macOS since (checked on 15.5), and what others confine command-line
+  processes with (Bazel's macOS sandbox, coding agents' shell sandboxes):
+  yobuild uses it until Apple removes it, then says so. It execs the command: the same process,
+  so `--measure`'s `ps` and rutis's process group are unchanged.
+- **Elsewhere** refused: "[sandbox] confines plugins on Linux (bubblewrap)
+  and macOS (sandbox-exec) only" (Windows is refused anyway, §13).
+
+**Tried first.** `Sandbox::new` starts `/bin/sh -c :` through it, within
+10 s, before anything else: a sandbox that cannot start here is said
+before any plugin is (not as a runtime that "did not start"). Missing
+bubblewrap: "[sandbox] needs bubblewrap (`bwrap`) on PATH, and it is not
+there: install it (`apt install bubblewrap`, `dnf install bubblewrap`),
+or leave out [sandbox]" (hint `no-bwrap`). Bubblewrap that cannot make
+its namespaces (Ubuntu 23.10 and later restrict unprivileged user
+namespaces through AppArmor; a container may forbid them), or
+`sandbox-exec` inside another sandbox: "the sandbox cannot start here:
+bwrap exit status: 1: bwrap: setting up uid map: Permission denied"
+(its first line of stderr; hint `sandbox-cannot-start`, naming
+`kernel.apparmor_restrict_unprivileged_userns`).
+
+### What is not confined, and why
+
+- **The terminal UI's runtime** (`ui`): yobuild's own code, which reads
+  the keyboard; confining it protects nothing of the owner's from a
+  third party.
+- **The agent's own tools** (`bash`, the file tools): yoagent runs them in
+  yobuild's process. The gate judges them (§6); confining `bash` would
+  need yoagent's `BashTool` to take a wrapper, and a build or a test the
+  owner allowed may need what the sandbox hides (a registry login in
+  `~/.npmrc`). Later, if asked for.
+- **npm**: yobuild runs it with `--ignore-scripts` (§4): no package's code
+  runs as it installs. yobuild's own runtime sets run their scripts
+  (§13), which are yobuild's, locked.
+- **`check`'s pi and DSH probes alone**: yoagent-rutis starts them, and its
+  `ProbeOptions` can only add variables. With `[sandbox]`, `check` does
+  not probe them alone: each such entry is `checkedAlone: false` with the
+  note "not probed alone: with [sandbox] nothing runs outside it, and its
+  probe alone would (yoagent-rutis starts it); checked with the agent
+  together, confined". The rule is that nothing of a plugin's runs
+  outside the sandbox once the manifest asks for one, `check` included.
+- **HTTP MCP servers**: nothing of them runs here.
+
+### What it does not stop
+
+Said where the sandbox is said (the guide, the skill), in these words:
+
+- **Reading.** Everything not hidden is readable: other projects, the
+  agent folder's `.env`, a key file in a place the list does not name,
+  pi's `~/.pi/agent/auth.json`, a browser's profile. The list is the
+  usual places, not every place: `hide` adds the owner's own.
+- **Sending.** The network is open: what a plugin reads it can send. The
+  sandbox keeps a plugin from changing the owner's machine outside the
+  agent's folder and from reading the usual secrets, not from leaking
+  what it may read.
+- **The agent's folder.** Plugins may write anywhere in it, `.git` and
+  `.env` included (the gate's protections are the agent's tools', §6).
+- **Temp.** Shared with every other process of the owner's.
+- **The environment.** What the kept set passes (§12, "Step 5") and what
+  the entries grant reaches the confined process as before.
+- **Other local services.** A unix socket the owner's user can reach
+  (`docker.sock`, an SSH agent's — `SSH_AUTH_SOCK` is not kept, but its
+  socket may be found), the cloud's metadata endpoint, a database on
+  localhost: the network and IPC stay open.
+- **A kernel's or a sandbox's own escape.** bubblewrap and Seatbelt are
+  what they are; a container or a VM, with no secrets in it, is still the
+  stronger guarantee, and §6 says so.
+
+### Said
+
+- `run`: an Info notice as the session starts, "the sandbox (bwrap)
+  confines every plugin runtime and stdio MCP server: they write only to
+  <folders>; they read everything else but <hidden>; the network is open
+  to them" (paths under the home folder as `~/…`).
+- `check`: the same, an agent note; each confined entry "confined by the
+  sandbox" (JSON `confined: true`; an HTTP server never), and the agent's
+  `sandbox` in the JSON — `{ tool, write, hide }`, `null` without the
+  table (report version 5).
+- The starter (`yobuild new`) shows the table commented, with a line on
+  what it does and does not do.
+
+### Tests
+
+- `src/sandbox/tests.rs`: the rules (the agent's folder and temp
+  writable, `write` added, the defaults that are there hidden, a `hide`
+  not there said), every refusal in its words, bubblewrap's command line
+  and `sandbox-exec`'s profile exactly, and on a system with the tool a
+  shell confined by them writing in the agent's folder and to
+  `/dev/null`, refused outside, reading neither a hidden folder's file nor
+  a hidden file.
+- `src/manifest/tests.rs`: the table read, each path's form, each refusal
+  at its place.
+- `tests/sandbox_test.rs`: through the binary, a pi extension, a DSH
+  plugin, a rutis plugin and a stdio MCP server each try, as they load, to
+  write in the agent's folder, in a `write` folder and outside, and to read
+  a `hide` file — written, written, refused, refused — in `run --once`
+  and in `check --json` (each entry confined, the pi and DSH ones checked
+  together only, the rutis one alone too); the folder outside empty after
+  both; a `hide` holding the agent's folder refused. yobuild is given a
+  `TMPDIR` of its own beside the folders, which sit outside the system's
+  temp folder (the sandbox lets them write that).
+- `hints.rs`: `no-bwrap` and `sandbox-cannot-start` against the messages
+  as made.
+- CI: the `check` job installs bubblewrap and lifts Ubuntu's AppArmor
+  restriction on unprivileged user namespaces (`sudo sysctl -w
+  kernel.apparmor_restrict_unprivileged_userns=0`; GitHub's Ubuntu 24.04
+  runners set it to 1, which makes `bwrap` fail to set up its uid map);
+  the `macos` job runs the unit tests and `sandbox_test`. Both set
+  `YOBUILD_REQUIRE_SANDBOX=1`, so a missing tool fails instead of
+  skipping.
+
+### Decisions
+
+1. Opt-in, a `[sandbox]` table, whole agent — not on by default (it would
+   change what every existing agent may do, and bubblewrap is not on every
+   Linux) and not per entry (runtimes are shared). Decided (2026-11-03).
+2. Reads open but the secrets list, rather than reads confined to an
+   allow-list: Node, npm's packages, toolchains and language servers
+   (pi-lens) read across the system, and a read allow-list a plugin
+   outgrows would fail in its own words. The cost — reading is not
+   stopped — is said. Decided (2026-11-03).
+3. The network open: plugins search and fetch; a network-off sandbox would
+   be a different feature (later, `network = false`, if asked for).
+   Decided (2026-11-03).
+4. `sandbox-exec` on macOS though deprecated: there is no replacement for
+   a command-line process (App Sandbox needs a signed app). Decided
+   (2026-11-03).
+5. `check` skips the pi and DSH probes alone under the sandbox rather than
+   running them unconfined. Decided (2026-11-03); to revisit if
+   yoagent-rutis's probes take a launcher.
+6. The agent's own `bash` not confined in this step. Decided (2026-11-03).
