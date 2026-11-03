@@ -35,6 +35,15 @@ const START_TIME: Duration = Duration::from_secs(30);
 /// otherwise hold the end of a run, or of the session, for minutes.
 const CLOSE_TIME: Duration = Duration::from_secs(5);
 
+/// Revokes a sign-in's tokens, each request within [`CLOSE_TIME`]; what
+/// fails is logged (the server stopped or the session is ending; a load
+/// still going says it instead, `LoadPlugin::revoke_said`).
+async fn revoke_quietly(source: &super::oauth::Source, name: &str) {
+    for failure in source.revoke_within(CLOSE_TIME).await {
+        tracing::warn!("the loaded MCP server {name}: {failure}");
+    }
+}
+
 /// Closes `client` within [`CLOSE_TIME`]; what fails is logged, not said
 /// (the server is left either way).
 async fn close_quietly(client: &McpClient, name: &str) {
@@ -87,6 +96,9 @@ pub(crate) struct KeptRemote {
     /// Each header sent, its value as written (`Bearer ${CTX_KEY}`): the
     /// variable the owner named, never its value.
     pub headers: Vec<(String, String)>,
+    /// Signed in through the owner's browser (design §14 "Stage 4"): the
+    /// block carries `auth = "oauth"`; no token is ever written.
+    pub signed_in: bool,
 }
 
 impl Kept {
@@ -102,6 +114,9 @@ impl Kept {
         let source = match (self.kind, &self.remote) {
             (ExtendKind::Remote, Some(remote)) => {
                 let mut lines = format!("url  = {}\n", Json::String(remote.url.clone()));
+                if remote.signed_in {
+                    lines.push_str("auth = \"oauth\"\n");
+                }
                 if !remote.headers.is_empty() {
                     let headers: Vec<String> = remote
                         .headers
@@ -257,6 +272,14 @@ pub(crate) fn kept_text(kept: &[Kept], files: &Files) -> String {
             files.manifest
         ));
     }
+    if kept
+        .iter()
+        .any(|k| k.remote.as_ref().is_some_and(|r| r.signed_in))
+    {
+        text.push_str(
+            "\nA server with `auth = \"oauth\"` is signed in through your browser each session, as it was here: its token is never kept. agent.toml reads `auth` from a later yobuild: until then, the agent loads it through [extend].\n",
+        );
+    }
     let mut sets: Vec<&str> = Vec::new();
     for k in kept {
         let set = match k.kind {
@@ -305,6 +328,9 @@ struct Server {
     /// Why a remote server is gone, once a call found it had ended its
     /// session (`remote::Ending` sets it).
     ended: Arc<Mutex<Option<String>>>,
+    /// A remote server's sign-in: once it ended, the server is gone; at
+    /// the end its tokens are revoked.
+    signed_in: Option<Arc<super::oauth::Source>>,
     /// Once the watch said it had gone: when it first did, and the longest
     /// reason read since (yoagent answers without the stderr tail while a
     /// call or `close` holds the child).
@@ -324,6 +350,7 @@ impl Server {
             client,
             exit: Some(exit),
             ended: Arc::default(),
+            signed_in: None,
             gone: Mutex::default(),
         }
     }
@@ -334,6 +361,7 @@ impl Server {
         tools: Vec<Arc<dyn AgentTool>>,
         client: Arc<tokio::sync::Mutex<McpClient>>,
         ended: Arc<Mutex<Option<String>>>,
+        signed_in: Option<Arc<super::oauth::Source>>,
     ) -> Self {
         Server {
             name,
@@ -341,6 +369,7 @@ impl Server {
             client,
             exit: None,
             ended,
+            signed_in,
             gone: Mutex::default(),
         }
     }
@@ -353,7 +382,14 @@ impl Server {
             .as_ref()
             .and_then(|e| e.exited())
             .map(|why| said(&why));
-        let Some(why) = exited.or_else(|| locked(&self.ended).clone()) else {
+        let signed_out = || {
+            let source = self.signed_in.as_ref()?;
+            Some(format!("{} ({})", super::oauth::ENDED, source.ended()?))
+        };
+        let Some(why) = exited
+            .or_else(|| locked(&self.ended).clone())
+            .or_else(signed_out)
+        else {
             return false;
         };
         let mut gone = locked(&self.gone);
@@ -413,6 +449,8 @@ struct Lists {
     /// Every server and package kept this session, stopped ones too: never
     /// shrinks, and holds each before its tools are offered (one lock).
     kept: Vec<Kept>,
+    /// The sign-ins of servers taken out as stopped, not revoked yet.
+    signed_out: Vec<(String, Arc<super::oauth::Source>)>,
 }
 
 #[derive(Default)]
@@ -628,7 +666,20 @@ impl Loaded {
     /// (the generation moved then). `run`'s tick asks every 250 ms, so a
     /// server that dies while idle is said within about a second.
     pub fn stopped(&self) -> Vec<(String, String)> {
-        self.take_stopped(|at| at.elapsed() >= SETTLE)
+        let stopped = self.take_stopped(|at| at.elapsed() >= SETTLE);
+        // A stopped server's sign-in revoked: its tokens may still be good
+        // (its session expired, or its challenge changed).
+        let signed_out = std::mem::take(&mut locked(&self.0.lists).signed_out);
+        if !signed_out.is_empty() {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    for (name, source) in signed_out {
+                        revoke_quietly(&source, &name).await;
+                    }
+                });
+            }
+        }
+        stopped
     }
 
     /// At the session's end: every server seen gone, once the reasons of
@@ -658,13 +709,18 @@ impl Loaded {
         let mut lists = locked(&self.0.lists);
         self.look(&lists);
         let mut out = Vec::new();
+        let mut signed_out = Vec::new();
         lists.servers.retain(|s| match s.gone() {
             Some((at, why)) if say(at) => {
                 out.push((s.name.clone(), why));
+                if let Some(source) = &s.signed_in {
+                    signed_out.push((s.name.clone(), source.clone()));
+                }
                 false
             }
             _ => true,
         });
+        lists.signed_out.extend(signed_out);
         for (name, why) in &out {
             if let Some(k) = lists.kept.iter_mut().find(|k| &k.name == name) {
                 k.stopped = Some(why.clone());
@@ -676,10 +732,29 @@ impl Loaded {
     /// Stops every server (yoagent's stdio `close` kills it; a remote's
     /// sends DELETE), each within [`CLOSE_TIME`].
     pub async fn close(&self) {
-        let servers = std::mem::take(&mut locked(&self.0.lists).servers);
+        let (servers, signed_out) = {
+            let mut lists = locked(&self.0.lists);
+            (
+                std::mem::take(&mut lists.servers),
+                std::mem::take(&mut lists.signed_out),
+            )
+        };
         self.0.generation.fetch_add(1, Ordering::SeqCst);
+        // Those already stopped (found so at the end): revoked only.
+        for (name, source) in signed_out {
+            source.closing();
+            revoke_quietly(&source, &name).await;
+        }
         for server in servers {
+            // Closed first, with no refresh for its `DELETE`; then its
+            // sign-in's tokens revoked.
+            if let Some(source) = &server.signed_in {
+                source.closing();
+            }
             close_quietly(&*server.client.lock().await, &server.name).await;
+            if let Some(source) = &server.signed_in {
+                revoke_quietly(source, &server.name).await;
+            }
         }
     }
 }
@@ -784,8 +859,12 @@ fn clip_start(text: &str, max: usize) -> String {
 
 /// What `load_plugin` refuses, and the notice the owner hears it by.
 struct Refused {
+    /// The owner's words (the notice), and the agent's unless `agent`.
     message: String,
     level: NoticeLevel,
+    /// The agent's words when they are not the owner's: a sign-in's fixed
+    /// reason (what a server said reaches the owner only).
+    agent: Option<String>,
 }
 
 /// A refusal: a Warning notice.
@@ -793,6 +872,7 @@ fn refused(message: impl Into<String>) -> Refused {
     Refused {
         message: message.into(),
         level: NoticeLevel::Warning,
+        agent: None,
     }
 }
 
@@ -802,6 +882,7 @@ fn failed(message: impl Into<String>) -> Refused {
     Refused {
         message: message.into(),
         level: NoticeLevel::Error,
+        agent: None,
     }
 }
 
@@ -840,6 +921,15 @@ pub(crate) struct LoadPlugin {
     keys: Arc<Vec<String>>,
     /// How a remote's credential is read from the environment.
     lookup: remote::Lookup,
+    /// Phone mode: a sign-in's link is printed on this machine, not put
+    /// on the page.
+    phone: bool,
+    /// The sign-in's requests: `oauth::Net::checked()` when first needed,
+    /// or a test's.
+    net: Arc<std::sync::OnceLock<super::oauth::Net>>,
+    /// How long the sign-in question waits: `SIGN_IN_TIMEOUT`, or a
+    /// test's.
+    sign_in_timeout: Duration,
     /// What a pi or DSH package runs on; `None` in `check`, which loads
     /// nothing.
     plugins: Option<Plugins>,
@@ -909,6 +999,9 @@ impl LoadPlugin {
             withheld: Arc::new(super::withheld(manifest)),
             keys: Arc::new(manifest.key_variables()),
             lookup: remote::environment(),
+            phone: manifest.frontend.phone,
+            net: Arc::default(),
+            sign_in_timeout: crate::frontend::session::SIGN_IN_TIMEOUT,
             plugins,
             state: Arc::default(),
         }
@@ -918,6 +1011,13 @@ impl LoadPlugin {
     #[cfg(test)]
     pub(crate) fn with_lookup(mut self, lookup: remote::Lookup) -> Self {
         self.lookup = lookup;
+        self
+    }
+
+    /// The sign-in's requests: a test's stub on this machine.
+    #[cfg(test)]
+    pub(crate) fn with_net(self, net: super::oauth::Net) -> Self {
+        let _ = self.net.set(net);
         self
     }
 
@@ -1696,7 +1796,11 @@ impl AgentTool for LoadPlugin {
                 content: vec![Content::Text { text }],
                 details: json!({}),
             }),
-            Err(Refused { message, level }) => {
+            Err(Refused {
+                message,
+                level,
+                agent,
+            }) => {
                 let package = params["package"].as_str().unwrap_or("?");
                 self.session.notice(
                     level,
@@ -1706,7 +1810,8 @@ impl AgentTool for LoadPlugin {
                     ),
                 );
                 Err(ToolError::Failed(format!(
-                    "load_plugin refused it: {message}"
+                    "load_plugin refused it: {}",
+                    agent.unwrap_or(message)
                 )))
             }
         }

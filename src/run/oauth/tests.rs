@@ -15,59 +15,66 @@ use crate::frontend::{ClientMessage, Connection, ResolveReason, ServerMessage, S
 const WAIT: Duration = Duration::from_secs(10);
 
 /// How the stub answers; the tests change it as they go.
-struct Config {
+pub(crate) struct Config {
     /// The resource metadata (`null`: 404).
-    resource: Json,
+    pub(crate) resource: Json,
     /// The authorization server's metadata (`null`: 404).
-    authorization: Json,
+    pub(crate) authorization: Json,
     /// The registration's answer and status.
-    registration: (u16, Json),
+    pub(crate) registration: (u16, Json),
     /// The `iss` `/authorize` sends back (`None`: none).
-    iss: Option<String>,
+    pub(crate) iss: Option<String>,
     /// `/authorize` sends the browser back with this error instead.
-    error: Option<(String, String)>,
+    pub(crate) error: Option<(String, String)>,
     /// The token endpoint's answer to the code instead of tokens.
-    token_refusal: Option<(u16, String)>,
+    pub(crate) token_refusal: Option<(u16, String)>,
     /// Refresh refused.
-    refresh_refused: bool,
+    pub(crate) refresh_refused: bool,
     /// The access token the MCP server takes now.
-    valid: String,
+    pub(crate) valid: String,
     /// The refresh token the token endpoint takes now.
-    refresh: String,
+    pub(crate) refresh: String,
     /// Tokens issued so far.
-    issued: u32,
+    pub(crate) issued: u32,
     /// PKCE's challenge, as `/authorize` got it.
-    challenge: String,
+    pub(crate) challenge: String,
     /// The resource metadata's status when not 200 (302: to `/elsewhere`).
-    resource_status: u16,
+    pub(crate) resource_status: u16,
     /// The resource metadata at the root's well-known address (`null`: 404).
-    root_resource: Json,
+    pub(crate) root_resource: Json,
     /// OpenID Connect discovery's metadata (`null`: 404).
-    openid: Json,
+    pub(crate) openid: Json,
     /// The registration and the token endpoint wait this long first.
-    slow: Duration,
+    pub(crate) slow: Duration,
     /// A refresh rotates the refresh token.
-    rotate: bool,
+    pub(crate) rotate: bool,
     /// A refresh answered with this status instead (a passing trouble).
-    refresh_status: Option<u16>,
+    pub(crate) refresh_status: Option<u16>,
     /// The revocation endpoint's status.
-    revoke_status: u16,
+    pub(crate) revoke_status: u16,
+    /// The MCP server lets `initialize` through unsigned and asks for the
+    /// sign-in at `tools/list`.
+    pub(crate) challenge_at_list: bool,
+    /// The MCP server's 401 carries its `WWW-Authenticate` challenge.
+    pub(crate) challenge_header: bool,
+    /// The resource metadata waits this long first.
+    pub(crate) slow_metadata: Duration,
 }
 
 /// An MCP server and its authorization server on this machine, recording
 /// what they get.
-struct Stub {
-    base: String,
+pub(crate) struct Stub {
+    pub(crate) base: String,
     seen: Arc<Mutex<Vec<String>>>,
     config: Arc<Mutex<Config>>,
 }
 
 const CODE: &str = "the-authorization-code-0123456789";
 
-fn access(n: u32) -> String {
+pub(crate) fn access(n: u32) -> String {
     format!("access-token-{n}-abcdefghijklmnop")
 }
-fn refresh(n: u32) -> String {
+pub(crate) fn refresh(n: u32) -> String {
     format!("refresh-token-{n}-qrstuvwxyz012345")
 }
 
@@ -78,7 +85,7 @@ fn form(body: &str) -> std::collections::HashMap<String, String> {
 }
 
 impl Stub {
-    async fn start() -> Stub {
+    pub(crate) async fn start() -> Stub {
         use axum::http::{HeaderMap, Method, StatusCode};
         use axum::response::IntoResponse;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -118,6 +125,9 @@ impl Stub {
             rotate: true,
             refresh_status: None,
             revoke_status: 200,
+            challenge_at_list: false,
+            challenge_header: true,
+            slow_metadata: Duration::ZERO,
         }));
         let challenge = format!(
             "Bearer realm=\"OAuth\", resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\", scope=\"read write\""
@@ -127,6 +137,8 @@ impl Stub {
             let c = c.clone();
             let s = s.clone();
             async move {
+                let slow = c.lock().unwrap().slow_metadata;
+                tokio::time::sleep(slow).await;
                 s.lock().unwrap().push("resource metadata".into());
                 let (json, status) = {
                     let c = c.lock().unwrap();
@@ -338,16 +350,31 @@ impl Stub {
                     .unwrap_or("-")
                     .to_owned();
                 let what = request["method"].as_str().unwrap_or("-").to_owned();
-                s.lock()
-                    .unwrap()
-                    .push(format!("{method} {what} auth={auth} session={session}"));
-                if auth != format!("Bearer {}", c.lock().unwrap().valid) {
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        [("www-authenticate", challenge)],
-                        "sign in",
-                    )
-                        .into_response();
+                // A header besides the token, when one is sent.
+                let org = headers
+                    .get("x-org")
+                    .and_then(|a| a.to_str().ok())
+                    .map(|o| format!(" org={o}"))
+                    .unwrap_or_default();
+                s.lock().unwrap().push(format!(
+                    "{method} {what} auth={auth} session={session}{org}"
+                ));
+                let (valid, at_list, with_challenge) = {
+                    let c = c.lock().unwrap();
+                    (c.valid.clone(), c.challenge_at_list, c.challenge_header)
+                };
+                let unsigned_through = at_list
+                    && auth == "-"
+                    && (what == "initialize" || what.starts_with("notifications/"));
+                if auth != format!("Bearer {valid}") && !unsigned_through {
+                    let mut refused = (StatusCode::UNAUTHORIZED, "sign in").into_response();
+                    if with_challenge {
+                        refused.headers_mut().insert(
+                            "www-authenticate",
+                            axum::http::HeaderValue::from_str(&challenge).unwrap(),
+                        );
+                    }
+                    return refused;
                 }
                 if method == Method::DELETE {
                     return StatusCode::OK.into_response();
@@ -402,7 +429,7 @@ impl Stub {
         Stub { base, seen, config }
     }
 
-    fn server(&self) -> Url {
+    pub(crate) fn server(&self) -> Url {
         Url::parse(&format!("{}/mcp", self.base)).unwrap()
     }
 
@@ -413,11 +440,11 @@ impl Stub {
         )
     }
 
-    fn seen(&self) -> Vec<String> {
+    pub(crate) fn seen(&self) -> Vec<String> {
         self.seen.lock().unwrap().clone()
     }
 
-    fn set(&self, change: impl FnOnce(&mut Config)) {
+    pub(crate) fn set(&self, change: impl FnOnce(&mut Config)) {
         change(&mut self.config.lock().unwrap());
     }
 
@@ -434,7 +461,7 @@ impl Stub {
 }
 
 /// A browser's GET: the status and where it is sent on.
-async fn get(url: &str) -> Result<(u16, Option<String>), reqwest::Error> {
+pub(crate) async fn get(url: &str) -> Result<(u16, Option<String>), reqwest::Error> {
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -450,7 +477,7 @@ async fn get(url: &str) -> Result<(u16, Option<String>), reqwest::Error> {
 
 /// From the start link to the sign-in page and back: the callback's URL
 /// the authorization server sends the browser to.
-async fn to_callback(start: &str) -> String {
+pub(crate) async fn to_callback(start: &str) -> String {
     let (status, authorize) = get(start).await.unwrap();
     assert_eq!(status, 302);
     let (status, back) = get(&authorize.unwrap()).await.unwrap();
@@ -684,7 +711,7 @@ async fn discovery_refuses_before_anyone_is_asked() {
     let cases: Vec<(Change, Why, &str)> = vec![
         (
             Box::new(|c| c.resource = Json::Null),
-            Why::Discovery,
+            Why::NoSignIn,
             "no resource metadata",
         ),
         (

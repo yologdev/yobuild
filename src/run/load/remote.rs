@@ -1,9 +1,12 @@
 //! Loading a remote MCP server `find_plugin` returned (design §14 "Stage
-//! 3", points 3–9): nothing of it runs here. The owner is asked to connect
-//! to it, then for each header it would send that takes a credential, which
-//! environment variable holds it — never the value, never the agent's
-//! choice — then connected over streamable HTTP with no redirect followed,
-//! its tools listed, and the owner asked again with them in front of them.
+//! 3", points 3–9, and "Stage 4"): nothing of it runs here. The owner is
+//! asked to connect to it; it is connected with no credential first when
+//! its entry lists no required header, and signed in through the owner's
+//! browser when it asks for that ([`crate::run::oauth`]); else asked, for
+//! each header it would send that takes a credential, which environment
+//! variable holds it — never the value, never the agent's choice — then
+//! connected over streamable HTTP with no redirect followed, its tools
+//! listed, and the owner asked again with them in front of them.
 
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
@@ -13,8 +16,8 @@ use yoagent::mcp::{HttpTransport, McpClient, McpError, McpToolAdapter, McpToolIn
 use yoagent::{AgentTool, ToolContext, ToolError, ToolResult};
 
 use super::{
-    close_quietly, failed, kept_text, locked, refused, second_details, tools_problem, Kept,
-    KeptRemote, LoadPlugin, Refused, Server, START_TIME,
+    close_quietly, failed, kept_text, locked, refused, revoke_quietly, second_details,
+    tools_problem, Kept, KeptRemote, LoadPlugin, Refused, Server, CLOSE_TIME, START_TIME,
 };
 use crate::builtins::find_plugin::{Remote, RemoteHeader};
 use crate::builtins::Candidate;
@@ -22,6 +25,7 @@ use crate::frontend::session::UI_TIMEOUT;
 use crate::frontend::{NoticeLevel, UiRequest};
 use crate::manifest::ExtendKind;
 use crate::run::host::clip;
+use crate::run::oauth::{self, Site, Source, Why};
 
 /// How many times the owner is asked for one header's variable.
 const CREDENTIAL_ASKS: usize = 3;
@@ -63,9 +67,88 @@ struct Header {
     variable: Option<(String, String)>,
 }
 
+/// A connection made: the client and the tools it listed.
+type Connected = (McpClient, Vec<McpToolInfo>);
+
+/// How a connection did not come about.
+enum Connect {
+    Refused(Refused),
+    /// A 401 offering no sign-in, or a 403: what it was given (nothing, at
+    /// first) does not let yobuild in.
+    Denied(Refused),
+    /// A 401 that may offer a sign-in — its `Bearer` challenge, or, with
+    /// nothing sent, no challenge at all (its well-known metadata may say
+    /// how) — and what is said when it offers none after all.
+    SignIn {
+        challenge: Option<String>,
+        otherwise: Refused,
+    },
+}
+
+/// How a sign-in did not come about.
+enum NotSignedIn {
+    /// The server publishes none (`oauth::Why::NoSignIn`): the credential
+    /// refusal its 401 would get.
+    NoneOffered(Refused),
+    Refused(Refused),
+}
+
+/// What connecting came to: the connection, the headers sent (the
+/// block's), what the second question says was not sent, and the sign-in
+/// when it took one.
+struct Connection {
+    client: McpClient,
+    listed: Vec<McpToolInfo>,
+    headers: Vec<Header>,
+    not_sent: Vec<String>,
+    signed_in: Option<Unkept>,
+}
+
+/// A sign-in's tokens until its server is kept: revoked if it is not —
+/// by [`LoadPlugin::close_unkept`], or, the call dropped meanwhile, on a
+/// task of its own.
+struct Unkept {
+    source: Option<Arc<Source>>,
+    name: String,
+}
+
+impl Unkept {
+    fn new(source: Arc<Source>, name: &str) -> Unkept {
+        Unkept {
+            source: Some(source),
+            name: name.to_owned(),
+        }
+    }
+
+    fn source(&self) -> Option<&Arc<Source>> {
+        self.source.as_ref()
+    }
+
+    /// Kept: its tokens are the server's now, revoked when it closes.
+    fn keep(mut self) -> Option<Arc<Source>> {
+        self.source.take()
+    }
+}
+
+impl Drop for Unkept {
+    fn drop(&mut self) {
+        let Some(source) = self.source.take() else {
+            return;
+        };
+        let name = std::mem::take(&mut self.name);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                source.closing();
+                revoke_quietly(&source, &name).await;
+            });
+        }
+    }
+}
+
 impl LoadPlugin {
-    /// Steps 4 to 7 for a remote server: asked, its credentials named,
-    /// connected, asked again, kept.
+    /// Steps 4 to 7 for a remote server: asked, connected — with no
+    /// credential first, signed in when it asks for that (design §14
+    /// "Stage 4", point 2), else its credentials named — asked again, kept.
     pub(super) async fn load_remote(
         &self,
         candidate: &Candidate,
@@ -87,34 +170,20 @@ impl LoadPlugin {
             ctx,
         )
         .await?;
-        // 5. Each credential, by the variable that holds it.
-        let mut headers = Vec::new();
-        let mut not_sent = Vec::new();
-        for header in remote.headers().iter().filter(|h| h.sent()) {
-            match self.header(header, name, host, ctx).await? {
-                Taken::Sent(header) => headers.push(header),
-                Taken::LeftOff(None) => {}
-                Taken::LeftOff(Some(why)) => {
-                    let said = format!(
-                        "its optional header `{}` is not sent: no usable variable was named after {CREDENTIAL_ASKS} tries (the last: {why})",
-                        clip(&header.name, 64)
-                    );
-                    self.session.notice(
-                        NoticeLevel::Warning,
-                        format!("The agent's plugin `{package}`: {said}."),
-                    );
-                    not_sent.push(said);
-                }
-            }
-        }
+        // 5–6. Connected, its tools listed and judged.
+        let Connection {
+            client,
+            listed,
+            headers,
+            not_sent,
+            signed_in,
+        } = self.connection(candidate, remote, name, ctx).await?;
         let hide = Arc::new(credentials_hidden(&headers));
-        // 6. Connected, its tools listed and judged.
-        let (client, listed) = self.connect(package, remote, &headers, &hide, ctx).await?;
         let names: Vec<String> = listed.iter().map(|t| t.name.clone()).collect();
         let own = match tools_problem(name, &names) {
             Ok(own) => own,
             Err(e) => {
-                close_quietly(&client, name).await;
+                self.close_unkept(&client, name, signed_in).await;
                 return Err(failed(format!("{package}: {e}")));
             }
         };
@@ -136,11 +205,16 @@ impl LoadPlugin {
         for said in &not_sent {
             details.push_str(&format!("\nNot sent: {said}."));
         }
+        if signed_in.is_some() {
+            details.push_str("\nSigned in: its token is kept for this session only, never shown.");
+        }
         if let Err(no) = self.ask(title, details, package, "keep it", ctx).await {
-            // Not kept: its session ended (yoagent's `close` sends DELETE).
-            close_quietly(&client, name).await;
+            // Not kept: its session ended (yoagent's `close` sends DELETE),
+            // its sign-in revoked.
+            self.close_unkept(&client, name, signed_in).await;
             return Err(no);
         }
+        let source = signed_in.and_then(Unkept::keep);
         let client = Arc::new(tokio::sync::Mutex::new(client));
         let ended: Arc<Mutex<Option<String>>> = Arc::default();
         let tools: Vec<Arc<dyn AgentTool>> = listed
@@ -152,6 +226,7 @@ impl LoadPlugin {
                         .with_call_timeout(Some(McpToolAdapter::DEFAULT_CALL_TIMEOUT)),
                     ended: ended.clone(),
                     hide: hide.clone(),
+                    signed_in: source.clone(),
                 }) as Arc<dyn AgentTool>
             })
             .collect();
@@ -171,6 +246,7 @@ impl LoadPlugin {
                     .iter()
                     .map(|h| (h.name.clone(), h.written.clone()))
                     .collect(),
+                signed_in: source.is_some(),
             }),
         };
         self.session.notice(
@@ -180,12 +256,301 @@ impl LoadPlugin {
                 kept_text(std::slice::from_ref(&kept), &self.files)
             ),
         );
-        self.loaded
-            .add(kept, Server::remote(name.to_owned(), tools, client, ended));
+        self.loaded.add(
+            kept,
+            Server::remote(name.to_owned(), tools, client, ended, source),
+        );
         Ok(format!(
             "Connected to {package} at {host} as {name}, for this session. Its tools are yours from your next step: {}. Each call asks the owner, and sends its arguments to {host}.",
             tool_names.join(", ")
         ))
+    }
+
+    /// Steps 5 and 6 (design §14 "Stage 4", point 2): a server whose entry
+    /// lists no required header is connected with no credential first — a
+    /// 401 offering a sign-in goes to it; one answering is kept as it is
+    /// when it has no header to send, else closed before its optional
+    /// headers are asked (a transport's headers are fixed when built); one
+    /// that lets nothing in unsigned and publishes no sign-in is asked its
+    /// optional headers too, when it has any. Then its credentials are
+    /// asked and it is connected with them; a 401 with a `Bearer` challenge
+    /// then goes to the sign-in, its `Authorization` header left to it.
+    async fn connection(
+        &self,
+        candidate: &Candidate,
+        remote: &Remote,
+        name: &str,
+        ctx: &ToolContext,
+    ) -> Result<Connection, Refused> {
+        let package = &candidate.package;
+        let host = remote.host();
+        let sent: Vec<&RemoteHeader> = remote.headers().iter().filter(|h| h.sent()).collect();
+        if !sent.iter().any(|h| h.required) {
+            match self.connect(package, remote, &[], None, &[], ctx).await {
+                Ok((client, listed)) if sent.is_empty() => {
+                    return Ok(Connection {
+                        client,
+                        listed,
+                        headers: Vec::new(),
+                        not_sent: Vec::new(),
+                        signed_in: None,
+                    })
+                }
+                Ok((client, _)) => close_quietly(&client, name).await,
+                Err(Connect::SignIn {
+                    challenge,
+                    otherwise,
+                }) => match self
+                    .sign_in(package, remote, name, challenge, otherwise, &[], None, ctx)
+                    .await
+                {
+                    Ok(((client, listed), unkept)) => {
+                        return Ok(Connection {
+                            client,
+                            listed,
+                            headers: Vec::new(),
+                            not_sent: Vec::new(),
+                            signed_in: Some(unkept),
+                        })
+                    }
+                    // None published: its optional headers may hold the key.
+                    Err(NotSignedIn::NoneOffered(_)) if !sent.is_empty() => {}
+                    Err(NotSignedIn::NoneOffered(no) | NotSignedIn::Refused(no)) => return Err(no),
+                },
+                Err(Connect::Denied(_)) if !sent.is_empty() => {}
+                Err(Connect::Denied(no) | Connect::Refused(no)) => return Err(no),
+            }
+        }
+        // Each credential, by the variable that holds it.
+        let mut headers = Vec::new();
+        let mut not_sent = Vec::new();
+        for header in sent {
+            match self.header(header, name, host, ctx).await? {
+                Taken::Sent(header) => headers.push(header),
+                Taken::LeftOff(None) => {}
+                Taken::LeftOff(Some(why)) => {
+                    let said = format!(
+                        "its optional header `{}` is not sent: no usable variable was named after {CREDENTIAL_ASKS} tries (the last: {why})",
+                        clip(&header.name, 64)
+                    );
+                    self.session.notice(
+                        NoticeLevel::Warning,
+                        format!("The agent's plugin `{package}`: {said}."),
+                    );
+                    not_sent.push(said);
+                }
+            }
+        }
+        let hide = credentials_hidden(&headers);
+        match self
+            .connect(package, remote, &headers, None, &hide, ctx)
+            .await
+        {
+            Ok((client, listed)) => Ok(Connection {
+                client,
+                listed,
+                headers,
+                not_sent,
+                signed_in: None,
+            }),
+            Err(Connect::SignIn {
+                challenge,
+                otherwise,
+            }) => {
+                // The sign-in gives the `Authorization` header: the one
+                // the owner named, refused, is said and left off.
+                let replaced = headers
+                    .iter()
+                    .find(|h| h.name.eq_ignore_ascii_case("authorization"))
+                    .map(|h| match &h.variable {
+                        Some((variable, _)) => format!(
+                            "its `Authorization` header from `${{{variable}}}`, refused: signed in instead"
+                        ),
+                        None => "its `Authorization` header as listed, refused: signed in instead"
+                            .to_owned(),
+                    });
+                headers.retain(|h| !h.name.eq_ignore_ascii_case("authorization"));
+                not_sent.extend(replaced.clone());
+                match self
+                    .sign_in(
+                        package, remote, name, challenge, otherwise, &headers, replaced, ctx,
+                    )
+                    .await
+                {
+                    Ok(((client, listed), unkept)) => Ok(Connection {
+                        client,
+                        listed,
+                        headers,
+                        not_sent,
+                        signed_in: Some(unkept),
+                    }),
+                    Err(NotSignedIn::NoneOffered(no) | NotSignedIn::Refused(no)) => Err(no),
+                }
+            }
+            Err(Connect::Denied(no) | Connect::Refused(no)) => Err(no),
+        }
+    }
+
+    /// The sign-in (design §14 "Stage 4", points 3–9): discovered and
+    /// checked before anyone is asked — a server that publishes none is
+    /// [`NotSignedIn::NoneOffered`], `otherwise` — then the owner asked to
+    /// sign in (Block remembered), the sign-in in their browser, and the
+    /// server connected with its token and `headers`. What the agent is
+    /// told of a sign-in that did not happen is fixed words; the owner's
+    /// notice says why. `note` is said first in the question (an
+    /// `Authorization` header the sign-in replaces).
+    #[allow(clippy::too_many_arguments)]
+    async fn sign_in(
+        &self,
+        package: &str,
+        remote: &Remote,
+        name: &str,
+        challenge: Option<String>,
+        otherwise: Refused,
+        headers: &[Header],
+        note: Option<String>,
+        ctx: &ToolContext,
+    ) -> Result<(Connected, Unkept), NotSignedIn> {
+        let net = match self.net.get() {
+            Some(net) => net.clone(),
+            None => match oauth::Net::checked() {
+                Ok(net) => self.net.get_or_init(|| net).clone(),
+                Err(e) if challenge.is_none() => {
+                    tracing::warn!("{package}: no sign-in looked for: {e}");
+                    return Err(NotSignedIn::NoneOffered(otherwise));
+                }
+                Err(e) => {
+                    return Err(NotSignedIn::Refused(failed(format!(
+                        "{package}'s sign-in: {e}"
+                    ))))
+                }
+            },
+        };
+        let found = tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                return Err(NotSignedIn::Refused(refused("the run was stopped while its sign-in was looked up: it may be proposed again")))
+            }
+            found = oauth::discover(&net, remote.url(), challenge.as_deref(), Site::Own) => found,
+        };
+        let found = match found {
+            Ok(found) => found,
+            Err(no) if no.why() == Why::NoSignIn => {
+                return Err(NotSignedIn::NoneOffered(otherwise))
+            }
+            Err(no) => return Err(NotSignedIn::Refused(self.sign_in_refused(package, &no))),
+        };
+        let host = remote.host();
+        let link = found.link_host();
+        let details = match &note {
+            Some(note) => format!("{}.\n{}", capitalized(note), found.details()),
+            None => found.details(),
+        };
+        self.ask(
+            format!("Sign in to {package} ({host}) at {link}? (asked by the agent)"),
+            details,
+            package,
+            "sign in to it",
+            ctx,
+        )
+        .await
+        .map_err(NotSignedIn::Refused)?;
+        let print = |link: &str| {
+            eprintln!(
+                "yobuild: to sign in to {package} ({host}), open this link in a browser on this machine: {link}"
+            )
+        };
+        let ask = oauth::Ask {
+            session: &self.session,
+            title: format!("Sign in to {package} at {link} in your browser"),
+            timeout: self.sign_in_timeout,
+            printed: self.phone.then_some(&print as &(dyn Fn(&str) + Sync)),
+        };
+        let source = oauth::sign_in(&net, &found, ask, &ctx.cancel)
+            .await
+            .map_err(|no| NotSignedIn::Refused(self.sign_in_refused(package, &no)))?;
+        let unkept = Unkept::new(source.clone(), name);
+        let hide = credentials_hidden(headers);
+        match self
+            .connect(package, remote, headers, Some(source), &hide, ctx)
+            .await
+        {
+            Ok(connected) => Ok((connected, unkept)),
+            Err(
+                Connect::Refused(no) | Connect::Denied(no) | Connect::SignIn { otherwise: no, .. },
+            ) => {
+                self.revoke_said(unkept).await;
+                // What the server said is the owner's to read.
+                Err(NotSignedIn::Refused(Refused {
+                    agent: Some(format!(
+                        "{package}: it did not connect once signed in (the owner was told why)"
+                    )),
+                    ..no
+                }))
+            }
+        }
+    }
+
+    /// A sign-in that did not happen, as `load_plugin` refuses it: the
+    /// owner's reason in the notice, fixed words for the agent. The owner's
+    /// Cancel is remembered as a Block. Nobody there, a stop or the
+    /// session's end are Warnings; anything else, refused after the owner
+    /// allowed it to connect, an Error.
+    fn sign_in_refused(&self, package: &str, no: &oauth::Refusal) -> Refused {
+        let (level, after) = match no.why() {
+            Why::Cancelled => {
+                locked(&self.state).blocked.insert(package.to_owned());
+                (
+                    NoticeLevel::Warning,
+                    format!(": do not propose {package} again this session"),
+                )
+            }
+            Why::TimedOut | Why::NoFrontend | Why::Stopped | Why::SessionEnded => {
+                (NoticeLevel::Warning, ": it may be proposed again".into())
+            }
+            Why::NoSignIn
+            | Why::Discovery
+            | Why::NoPkce
+            | Why::NoRegistration
+            | Why::OtherSite
+            | Why::Registration
+            | Why::Callback
+            | Why::Exchange
+            | Why::Local => (NoticeLevel::Error, String::new()),
+        };
+        Refused {
+            message: format!("{package}'s sign-in: {}{after}", no.for_owner()),
+            level,
+            agent: Some(format!("{package}: {}{after}", no.for_agent())),
+        }
+    }
+
+    /// Closes a server not kept, then revokes its sign-in.
+    async fn close_unkept(&self, client: &McpClient, name: &str, signed_in: Option<Unkept>) {
+        if let Some(source) = signed_in.as_ref().and_then(Unkept::source) {
+            source.closing();
+        }
+        close_quietly(client, name).await;
+        if let Some(unkept) = signed_in {
+            self.revoke_said(unkept).await;
+        }
+    }
+
+    /// Revokes a sign-in whose server is not kept, saying what failed as a
+    /// Warning (a token that outlives the session at its provider).
+    async fn revoke_said(&self, mut unkept: Unkept) {
+        let Some(source) = unkept.source.take() else {
+            return;
+        };
+        source.closing();
+        for failure in source.revoke_within(CLOSE_TIME).await {
+            self.session.notice(
+                NoticeLevel::Warning,
+                format!(
+                    "The agent's plugin `{}`: {failure}: it may stay valid at its provider until it expires.",
+                    unkept.name
+                ),
+            );
+        }
     }
 
     /// Step 5 for one header: a fixed one as listed; else the variable the
@@ -281,24 +646,64 @@ impl LoadPlugin {
     }
 
     /// Step 6: connected over streamable HTTP, following no redirect,
-    /// `initialize` and `tools/list` each within [`START_TIME`]. What
-    /// fails is said with each credential as its `${NAME}`.
+    /// `initialize` and `tools/list` each within [`START_TIME`], with
+    /// `headers` and, signed in, `source`'s token. What fails is said with
+    /// each credential as its `${NAME}`, each token as `${oauth}`.
     async fn connect(
         &self,
         package: &str,
         remote: &Remote,
         headers: &[Header],
+        source: Option<Arc<Source>>,
         hide: &[(String, String)],
         ctx: &ToolContext,
-    ) -> Result<(McpClient, Vec<McpToolInfo>), Refused> {
-        let hidden = |text: &str| super::super::hidden(text, hide);
-        let did_not = |e: &McpError| failed(connect_failed(package, e, &hidden));
+    ) -> Result<Connected, Connect> {
+        let mut hide = hide.to_vec();
+        if let Some(source) = &source {
+            hide.extend(source.hidden());
+            hide.sort_by_key(|(value, _)| std::cmp::Reverse(value.len()));
+        }
+        let hidden = |text: &str| super::super::hidden(text, &hide);
+        let given = Given {
+            signed_in: source.is_some(),
+            sent: !headers.is_empty(),
+            listed: remote.headers().iter().any(|h| h.sent()),
+        };
+        let did_not = |e: &McpError| {
+            let no = failed(connect_failed(package, e, given, &hidden));
+            match e.http_status() {
+                Some(401) if !given.signed_in => {
+                    // With nothing sent, a 401 with no challenge may still
+                    // have its sign-in published; with a credential, only
+                    // a `Bearer` challenge offers one.
+                    let bearer = e
+                        .www_authenticate()
+                        .map(|c| oauth::Challenge::parse(c).bearer().is_some());
+                    if bearer.unwrap_or(!given.sent) {
+                        Connect::SignIn {
+                            challenge: e.www_authenticate().map(str::to_owned),
+                            otherwise: no,
+                        }
+                    } else {
+                        Connect::Denied(no)
+                    }
+                }
+                Some(401 | 403) => Connect::Denied(no),
+                _ => Connect::Refused(no),
+            }
+        };
+        let closing = source.clone();
         let mut transport = HttpTransport::new(remote.url().as_str())
             .and_then(|t| t.with_redirects(Redirects::None))
             .map_err(|e| did_not(&e))?;
         for header in headers {
             transport = transport
                 .with_header(&header.name, &header.filled)
+                .map_err(|e| did_not(&e))?;
+        }
+        if let Some(source) = source {
+            transport = transport
+                .with_authorization(source)
                 .map_err(|e| did_not(&e))?;
         }
         let mut client = McpClient::from_transport(Box::new(transport))
@@ -324,31 +729,79 @@ impl LoadPlugin {
             }
         };
         let listed = tokio::select! {
-            _ = ctx.cancel.cancelled() => Err(refused("the run was stopped while it connected")),
+            _ = ctx.cancel.cancelled() => Err(Connect::Refused(refused("the run was stopped while it connected"))),
             listed = started => listed.map_err(|e| match e {
                 Ok(e) => did_not(&e),
-                Err(late) => failed(format!("{package} did not connect: {late}")),
+                Err(late) => Connect::Refused(failed(format!("{package} did not connect: {late}"))),
             }),
         };
         if listed.is_err() {
+            // No refresh for its `DELETE`: the sign-in is revoked after.
+            if let Some(source) = &closing {
+                source.closing();
+            }
             close_quietly(&client, package).await;
         }
         listed.map(|listed| (client, listed))
     }
 }
 
-/// Why a connection failed, in words the owner can act on: a 401 or 403
-/// wants a credential or a sign-in yobuild cannot do yet; anything else as
-/// yoagent says it, with what was filled in hidden.
-fn connect_failed(package: &str, e: &McpError, hidden: &dyn Fn(&str) -> String) -> String {
+/// What a connection was given, for the words of its refusal.
+#[derive(Clone, Copy)]
+struct Given {
+    signed_in: bool,
+    /// A header was sent.
+    sent: bool,
+    /// Its registry entry lists a header it would send.
+    listed: bool,
+}
+
+/// Why a connection failed, in words the owner can act on: a 401 says
+/// what it was given (nothing, a credential, a sign-in), a 403 whether it
+/// was given anything; anything else as yoagent says it, with what was
+/// filled in hidden.
+fn connect_failed(
+    package: &str,
+    e: &McpError,
+    given: Given,
+    hidden: &dyn Fn(&str) -> String,
+) -> String {
     let said = e.to_string();
     let said = hidden(said.strip_prefix("Transport error: ").unwrap_or(&said));
+    let said = clip(&said, 200);
+    let refused = |status: u16, what: &str| {
+        format!("{package} refused yobuild's request (HTTP {status}){what} ({said})")
+    };
     match e.http_status() {
-        Some(status @ (401 | 403)) => format!(
-            "{package} refused yobuild's request (HTTP {status}): it needs a credential, or a sign-in (OAuth) yobuild cannot do yet ({})",
-            clip(&said, 200)
+        Some(401) if given.signed_in => refused(401, " though it was signed in"),
+        Some(401) if given.sent => format!(
+            "{package} refused the credential it was sent (HTTP 401) and offers no sign-in ({said})"
+        ),
+        Some(401) if given.listed => refused(
+            401,
+            " and offers no sign-in: it needs a credential yobuild was not given",
+        ),
+        Some(401) => refused(
+            401,
+            " and offers no sign-in: it needs a credential its registry entry lists no header for",
+        ),
+        Some(403) if !given.signed_in && !given.sent => {
+            refused(403, ": it does not let yobuild in without a credential")
+        }
+        Some(403) => refused(
+            403,
+            ": it does not take the credential or sign-in it was given",
         ),
         _ => format!("{package} did not connect: {}", clip(&said, 300)),
+    }
+}
+
+/// `text` with its first letter capitalized.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -503,6 +956,8 @@ struct Ending {
     /// Its credentials, shown as their names in what a call's error says
     /// (a server may echo the key it refused).
     hide: Arc<Vec<(String, String)>>,
+    /// Its sign-in: each token it handed out shown as `${oauth}` too.
+    signed_in: Option<Arc<Source>>,
 }
 
 #[async_trait::async_trait]
@@ -526,7 +981,12 @@ impl AgentTool for Ending {
                 Err(ToolError::Failed(ENDED.into()))
             }
             Err(ToolError::Failed(why)) => {
-                Err(ToolError::Failed(super::super::hidden(&why, &self.hide)))
+                let mut hide = self.hide.to_vec();
+                if let Some(source) = &self.signed_in {
+                    hide.extend(source.hidden());
+                    hide.sort_by_key(|(value, _)| std::cmp::Reverse(value.len()));
+                }
+                Err(ToolError::Failed(super::super::hidden(&why, &hide)))
             }
             out => out,
         }

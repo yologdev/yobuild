@@ -347,10 +347,20 @@ that host only, said nowhere. A variable yoagent reads for a model's key
 is asked up to 3 times. An empty answer leaves an optional header off
 and refuses a server whose header is required; an optional header still
 without a usable variable after 3 answers is not sent (a Warning). Then "Keep the remote MCP server …? It
-offers: …". A server that needs a sign-in (OAuth) is refused at the
-connection (HTTP 401 or 403): yobuild cannot sign in yet. The block printed at
-the end is an `[[mcp]]` with `url` and, for a credential, `headers`
-naming its variable.
+offers: …". A server whose entry lists no required header is connected
+with no credential first: one that answers 401 asking for a sign-in
+(OAuth) is signed in through the person's browser — "Sign in to … at
+<host>? (asked by the agent)", then a sign-in question with a link (on
+the page, or printed in the terminal yobuild runs in under `phone`) that
+the person opens and finishes; Cancel there is remembered as a Block.
+Its whole sign-in must be on the server's own site, it must offer PKCE
+and dynamic registration, and the token is kept for the session only:
+the agent never sees it, and a sign-in that cannot be renewed marks the
+server stopped. The agent is told a failed sign-in in fixed words; the
+person's notice says why. The block printed at the end is an `[[mcp]]`
+with `url` and, for a credential, `headers` naming its variable, or
+`auth = "oauth"` for a server signed in (`agent.toml` cannot read that
+key yet: such a server is loaded through `[extend]` each session).
 
 - Context7 (`io.github.upstash/context7` at
   `https://mcp.context7.com/mcp`, checked 2026-10-30): up-to-date
