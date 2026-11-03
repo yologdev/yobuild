@@ -67,6 +67,20 @@ use yobuild::frontend::RunOutcome;
 use yobuild::manifest::Manifest;
 use yobuild::run::{run, Layout, Options};
 
+/// `println!`, but a reader gone (`yobuild new --list | head`, a launcher
+/// that read the URL and closed the pipe) is no panic: what is left of the
+/// text is dropped. Any other failure to write panics, as `println!` does.
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if let Err(e) = writeln!(std::io::stdout(), $($arg)*) {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                panic!("failed printing to stdout: {e}");
+            }
+        }
+    }};
+}
+
 /// What yobuild says on stderr while it gets ready (an install of its own
 /// runtime files).
 fn say(text: &str) {
@@ -92,7 +106,7 @@ fn layout(manifest: &Manifest, terminal: bool) -> Result<Layout, BoxError> {
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-const USAGE: &str = "usage: yobuild run <agent.toml> [--scripted FILE] [--once [--report FILE]] [--measure] [--web ADDR] [--locked] [--] [TASK…]
+const USAGE: &str = "usage: yobuild run <agent.toml> [--scripted FILE] [--once [--report FILE]] [--measure] [--web ADDR] [--locked] [--resume] [--] [TASK…]
        yobuild check <agent.toml> [--locked] [--json]
        yobuild log <agent.toml> [-n N] [--json]
        yobuild new <folder> [--from <agent>]
@@ -129,18 +143,18 @@ fn start() -> Result<ExitCode, BoxError> {
         Some("new") => return new(args),
         Some("skill") => return skill(args),
         Some("-V" | "--version") => {
-            println!("yobuild {}", env!("CARGO_PKG_VERSION"));
+            out!("yobuild {}", env!("CARGO_PKG_VERSION"));
             return Ok(ExitCode::SUCCESS);
         }
         Some("-h" | "--help") | None => {
-            println!("{USAGE}");
+            out!("{USAGE}");
             return Ok(ExitCode::SUCCESS);
         }
         Some(other) => return Err(format!("unknown command {other:?}\n{USAGE}").into()),
     }
     let path = match args.next() {
         Some(help) if help == "-h" || help == "--help" => {
-            println!("{USAGE}");
+            out!("{USAGE}");
             return Ok(ExitCode::SUCCESS);
         }
         Some(path) if !path.starts_with('-') => PathBuf::from(path),
@@ -257,7 +271,7 @@ fn run_and_say(
             Ok(ended) => {
                 let answer = ended.agent.as_ref().and_then(|a| last_answer(a.messages()));
                 if let (true, Some(answer)) = (once, &answer) {
-                    println!("{answer}");
+                    out!("{answer}");
                 }
                 // The report file, whatever the outcome: a run that gave no
                 // answer says how it ended, so an old report is never left
@@ -283,7 +297,7 @@ fn run_and_say(
                     .and_then(|o| yobuild::run::what_to_do(o, ended.error.as_deref()));
                 let error = ended.error.map(|e| format!(": {e}")).unwrap_or_default();
                 match (ended.outcome, once) {
-                    (Some(outcome), true) => println!("{outcome:?}{error}"),
+                    (Some(outcome), true) => out!("{outcome:?}{error}"),
                     (Some(RunOutcome::Completed) | None, false) | (None, true) => {}
                     (Some(outcome), false) => {
                         eprintln!("yobuild: the last run ended {outcome:?}{error}");
@@ -361,7 +375,7 @@ fn log(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
     use yobuild::run_log::RunLog;
     let path = match args.next() {
         Some(help) if help == "-h" || help == "--help" => {
-            println!("{USAGE}");
+            out!("{USAGE}");
             return Ok(ExitCode::SUCCESS);
         }
         Some(path) if !path.starts_with('-') => PathBuf::from(path),
@@ -422,14 +436,14 @@ fn new(args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
     use yobuild::agents::{new_agent, BUILTIN};
     let args: Vec<String> = args.collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        println!("{USAGE}");
+        out!("{USAGE}");
         return Ok(ExitCode::SUCCESS);
     }
     if args == ["--list"] {
         for kind in ["gallery", "example"] {
-            println!("{kind}:");
+            out!("{kind}:");
             for agent in BUILTIN.iter().filter(|a| a.kind == kind) {
-                println!("  {:<18} {}", agent.name, agent.summary);
+                out!("  {:<18} {}", agent.name, agent.summary);
             }
         }
         return Ok(ExitCode::SUCCESS);
@@ -446,20 +460,20 @@ fn new(args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
     // Absolute: the commands below run from the folder the agent works in.
     let dir = std::path::absolute(&dir)?;
     match from {
-        Some(from) => println!("made {} from the built-in agent `{from}`:", dir.display()),
-        None => println!("made {}, a starter to fill in:", dir.display()),
+        Some(from) => out!("made {} from the built-in agent `{from}`:", dir.display()),
+        None => out!("made {}, a starter to fill in:", dir.display()),
     }
     for file in &made.files {
-        println!("  {file}");
+        out!("  {file}");
     }
     for change in &made.changed {
-        println!("  changed: {change}");
+        out!("  changed: {change}");
     }
     // A rutis plugin of its own runs in its package, which yobuild does not
     // install: `npm ci` in each one copied with its lock, first.
     for file in &made.files {
         if let Some(package) = file.strip_suffix("package-lock.json") {
-            println!(
+            out!(
                 "first, install its plugin's package (once):\n  (cd {} && npm ci --ignore-scripts)",
                 dir.join(package.trim_end_matches('/')).display()
             );
@@ -468,14 +482,14 @@ fn new(args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
     let manifest = dir.join("agent.toml");
     let demo = dir.join("scripts/demo.json");
     let task = dir.join("scripts/demo.task");
-    println!(
+    out!(
         "next, from the folder it should work in (its own, or a project's):\n  yobuild check {m}\n  yobuild run {m} --scripted {d} --once \"$(cat {t})\"   # no key needed\n  DEEPSEEK_API_KEY=… yobuild run {m}",
         m = manifest.display(),
         d = demo.display(),
         t = task.display()
     );
     if from.is_some() && dir.join("README.md").is_file() {
-        println!(
+        out!(
             "its README says what it needs and does: {}",
             dir.join("README.md").display()
         );
@@ -492,7 +506,7 @@ fn skill(args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
         return Err(USAGE.into());
     };
     if command == "-h" || command == "--help" {
-        println!("{USAGE}");
+        out!("{USAGE}");
         return Ok(ExitCode::SUCCESS);
     }
     if command != "install" {
@@ -516,19 +530,17 @@ fn skill(args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
     }
     let dir = target.folder()?;
     match install(&dir, force)? {
-        Done::Installed => println!("installed the yobuild skill in {}", dir.display()),
-        Done::Updated { from } => println!(
+        Done::Installed => out!("installed the yobuild skill in {}", dir.display()),
+        Done::Updated { from } => out!(
             "updated the yobuild skill in {} (it was yobuild {from}'s)",
             dir.display()
         ),
-        Done::AlreadyThere => println!("the yobuild skill is in {} already", dir.display()),
-        Done::Replaced => println!("wrote the yobuild skill afresh in {}", dir.display()),
-        _ => println!("the yobuild skill is in {}", dir.display()),
+        Done::AlreadyThere => out!("the yobuild skill is in {} already", dir.display()),
+        Done::Replaced => out!("wrote the yobuild skill afresh in {}", dir.display()),
+        _ => out!("the yobuild skill is in {}", dir.display()),
     }
     if target == Target::User || target == Target::Project {
-        println!(
-            "Claude Code reads it there: ask it to build an agent (\"make me an agent that …\")."
-        );
+        out!("Claude Code reads it there: ask it to build an agent (\"make me an agent that …\").");
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -540,7 +552,7 @@ fn check(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
     use yobuild::run::check::{check, CheckOptions};
     let path = match args.next() {
         Some(help) if help == "-h" || help == "--help" => {
-            println!("{USAGE}");
+            out!("{USAGE}");
             return Ok(ExitCode::SUCCESS);
         }
         Some(path) if !path.starts_with('-') => PathBuf::from(path),

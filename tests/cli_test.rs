@@ -2964,3 +2964,24 @@ fn a_server_that_signs_in_is_refused_under_once() {
         "{stderr}"
     );
 }
+
+/// A reader that closes the pipe early (`yobuild new --list | head -1`)
+/// ends the listing quietly: no panic, exit 0.
+#[test]
+fn a_reader_gone_is_no_panic() {
+    use std::process::Stdio;
+    for args in [&["new", "--list"][..], &["--help"][..], &["--version"][..]] {
+        let mut child = bin()
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Closed before it writes.
+        drop(child.stdout.take());
+        let out = child.wait_with_output().unwrap();
+        let stderr = text(&out.stderr);
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+        assert!(out.status.success(), "{args:?}: {stderr}");
+    }
+}

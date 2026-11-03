@@ -6256,8 +6256,9 @@ Said where the sandbox is said (the guide, the skill), in these words:
 
 - `run`: an Info notice as the session starts, "the sandbox (bwrap)
   confines every plugin runtime and stdio MCP server: they write only to
-  <folders> (not the repository's git folder); they read everything else
-  but <hidden>; the terminal is out of their reach and the network open
+  <folders> (not the repository's git folder); they read everything but
+  <hidden> ("they read everything (none of the hidden folders is here)"
+  when none is); the terminal is out of their reach and the network open
   to them; what they write in the agent's folder runs unconfined when
   your tools or the builds the gate allows use it" (paths under the home
   folder as `~/…`).

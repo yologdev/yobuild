@@ -408,12 +408,12 @@ impl Sandbox {
         };
         let write: Vec<String> = self.writable().iter().map(|p| shown(p)).collect();
         let hide: Vec<String> = self.hidden().into_iter().map(shown).collect();
-        let hide = match hide.is_empty() {
-            true => "nothing".to_owned(),
-            false => hide.join(", "),
+        let reads = match hide.is_empty() {
+            true => "they read everything (none of the hidden folders is here)".to_owned(),
+            false => format!("they read everything but {}", hide.join(", ")),
         };
         format!(
-            "the sandbox ({}) confines every plugin runtime and stdio MCP server: they write only to {} (not the repository's git folder); they read everything else but {hide}; the terminal is out of their reach and the network open to them; what they write in the agent's folder runs unconfined when your tools or the builds the gate allows use it",
+            "the sandbox ({}) confines every plugin runtime and stdio MCP server: they write only to {} (not the repository's git folder); {reads}; the terminal is out of their reach and the network open to them; what they write in the agent's folder runs unconfined when your tools or the builds the gate allows use it",
             self.tool(),
             write.join(", ")
         )
