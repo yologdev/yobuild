@@ -401,7 +401,9 @@ PR with its design section.
   `[sandbox]`).
 - **The newcomer test:** someone who has not seen yobuild builds an
   agent from the docs alone; what they trip on is fixed.
-- **1.0**, with open question 2 (the library's API) decided.
+- **1.0**, promising the `yobuild` command, `agent.toml` and the
+  `check --json` report, not the library (open question 2, decided
+  2026-11-03).
 
 **Done when** each part is built and tested, a newcomer has an agent
 of their own running from the docs alone, and 1.0 is released.
@@ -416,8 +418,10 @@ decision 2).
 2. **Publish to crates.io?** Decided: yes, from 0.1 (`cargo install
    yobuild`). The library (`yobuild::builtins`, `frontend`, `install`,
    `manifest`, `run`) is published with it, but with no API promise.
-   Still open: should it be promised to people who would rather write
-   Rust than a manifest?
+   Decided (2026-11-03): it stays unpromised at 1.0 and after. 1.0
+   promises the `yobuild` command, `agent.toml` and the `check --json`
+   report (by its `version`); nobody has asked to embed yobuild in Rust,
+   and its internals still move quickly.
 3. **The probe as a library.** Decided: exposed from yoagent-rutis as a
    public module (so `check` and the compatibility matrix cannot drift
    apart), together with the adapter files' location.

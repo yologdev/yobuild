@@ -19,7 +19,10 @@
 //! - [`skill`]: `yobuild skill install` — the skill where a coding agent reads it.
 //! - [`sessions`]: each session saved, and resumed with `yobuild run --resume`.
 //!
-//! Not published yet and without an API promise.
+//! The library is published with the binary but has no API promise, at
+//! 1.0 or after: any release may change it. What is stable from 1.0 is
+//! the `yobuild` command, `agent.toml` and `yobuild check --json`'s
+//! report (versioned by its `version`).
 
 pub mod agents;
 pub mod builtins;
