@@ -90,7 +90,7 @@ plugin needs them. What each release brings:
 [CHANGELOG.md](CHANGELOG.md).
 
 ```sh
-cargo install yobuild                                     # or build it with Rust
+cargo binstall yobuild                                    # the release binary (or download it, above; or `cargo install yobuild`: a 10–15 minute build)
 yobuild new --list                                        # the agents built in: the gallery and the examples
 yobuild new research --from web-research                  # a copy, ready to run
 cd research                                               # an agent works in the folder it starts in

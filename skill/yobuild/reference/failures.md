@@ -161,7 +161,8 @@ what changed); `[builtins] ask_owner is off` (the error a plugin's own
 | `cannot start node: No such file or directory (os error 2)` <!-- hint: no-node --> | install Node 22.19 or later: the plugin runtimes run on it |
 | `cannot start X with the kept environment: /usr/bin/env is not there, …` <!-- hint: no-env --> | install `env` at `/usr/bin/env` (and `/bin/sh`, needed for a program whose path holds `=`): yobuild starts every plugin runtime and stdio server through it, with the kept environment |
 | `[sandbox] needs bubblewrap (\`bwrap\`) on PATH, and it is not there: …` <!-- hint: no-bwrap --> | install bubblewrap (`apt install bubblewrap`, `dnf install bubblewrap`, `pacman -S bubblewrap`): `[sandbox]` confines plugins through it on Linux; or leave out `[sandbox]`, and they run unconfined |
-| `the sandbox cannot start here: …` <!-- hint: sandbox-cannot-start --> | on Linux bubblewrap needs unprivileged user namespaces, which Ubuntu 23.10 and later restrict through AppArmor: give `bwrap` an AppArmor profile that allows them (a file in `/etc/apparmor.d` naming `/usr/bin/bwrap` with `userns,`; Ubuntu ships `bwrap-userns-restrict` as an example), or, for the whole system, `sysctl kernel.apparmor_restrict_unprivileged_userns=0`; a container must allow them too; on macOS `sandbox-exec` cannot start inside another sandbox (run yobuild outside it); or leave out `[sandbox]` |
+| `the sandbox cannot start here: bwrap …` <!-- hint: sandbox-cannot-start --> | bubblewrap needs unprivileged user namespaces, which Ubuntu 23.10 and later restrict through AppArmor: give `bwrap` an AppArmor profile that allows them (Ubuntu ships `bwrap-userns-restrict` as an example), or, for the whole system, `sysctl kernel.apparmor_restrict_unprivileged_userns=0`; a container must allow them too; or leave out `[sandbox]` |
+| `the sandbox cannot start here: sandbox-exec …` <!-- hint: sandbox-cannot-start-macos --> | `sandbox-exec` cannot start inside another sandbox (a coding agent's, an app's): run yobuild outside it; or leave out `[sandbox]` |
 | `mcp X: the server lists no tools` <!-- hint: mcp-no-tools --> | the server's arguments, or its version |
 | `mcp X: its \`allow\` names "x", which it does not offer (it offers: …)` <!-- hint: mcp-allow --> | use the server's own tool names in its `allow` |
 | `cannot make the scratch folder …` | the temp folder is not writable: fix `TMPDIR`, or `scratch = false` |
@@ -177,7 +178,7 @@ what changed); `[builtins] ask_owner is off` (the error a plugin's own
 | What it says | What to do |
 |---|---|
 | `agent.toml:3:9: …` | the manifest at that line and column: the message says what it takes |
-| `deepseek/deepseek-flash needs its key in DEEPSEEK_API_KEY` | set the variable (never in the manifest); `check` does not look |
+| `deepseek/deepseek-flash needs its key in DEEPSEEK_API_KEY` <!-- hint: no-key --> | set the variable where yobuild runs (never in the manifest), or run the agent's reply file with `--scripted`, which needs no key; `check` does not look |
 | `budget_usd set, but acme/m1 has no price` (the manifest), `budget_usd: … has no price here` (`run`) | another model, or no budget |
 | `prompt prompts/x.md: …` | the prompt file (missing; `{scratch}` without `[builtins] scratch`) |
 | `agent.lock: its \`pi\` set is missing` / `is not current: …` / `does not agree with itself: …` `(--locked: run without it to resolve the set again)` | run without `--locked`, then commit the new lock |

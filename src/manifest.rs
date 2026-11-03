@@ -1140,7 +1140,19 @@ impl Manifest {
             at: None,
             message,
         };
-        let text = std::fs::read_to_string(path).map_err(|e| error(e.to_string()))?;
+        let text = std::fs::read_to_string(path).map_err(|e| match e.kind() {
+            // Run from the agent's working folder, a manifest elsewhere is
+            // given by its path.
+            std::io::ErrorKind::NotFound if path.is_relative() => {
+                let here = std::env::current_dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|_| "this folder".into());
+                error(format!(
+                    "no such file in {here}: give the manifest's path (`path/to/agent.toml`), from the folder the agent should work in"
+                ))
+            }
+            _ => error(e.to_string()),
+        })?;
         let parent = match path.parent() {
             Some(p) if !p.as_os_str().is_empty() => p,
             _ => Path::new("."),

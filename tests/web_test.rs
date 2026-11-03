@@ -163,7 +163,7 @@ async fn the_page_and_ui_plugin_modules_are_served() {
         .unwrap();
     assert!(served.url().ends_with(&format!("/?t={}", served.token())));
     let addr = served.addr();
-    assert!(get(addr, "/").await.contains("<title>yoagent</title>"));
+    assert!(get(addr, "/").await.contains("<title>yobuild</title>"));
     assert!(get(addr, "/app.js").await.contains("text/javascript"));
     assert!(get(addr, "/lib.js").await.contains("markdownParts"));
     let module = get(addr, "/ui-plugins/links.js").await;
@@ -208,10 +208,23 @@ async fn past_runs_need_the_token_and_are_read_when_asked() {
             json!({ "runs": [{ "run": n }] })
         })
     };
-    let served = web::serve_with(session.clone(), "127.0.0.1:0".parse().unwrap(), Some(runs))
-        .await
-        .unwrap();
+    let served = web::serve_with(
+        session.clone(),
+        "127.0.0.1:0".parse().unwrap(),
+        Some(runs),
+        Some("<notes> & 'co'"),
+    )
+    .await
+    .unwrap();
     let addr = served.addr();
+    // The page names yobuild and the agent, its name escaped.
+    let page = get(addr, "/").await;
+    assert!(
+        page.contains("<title>&lt;notes&gt; &amp; &#39;co&#39; · yobuild</title>")
+            && page.contains("<b>yobuild</b><span>&lt;notes&gt; &amp; &#39;co&#39; · this page")
+            && !page.contains("yoagent"),
+        "{page}"
+    );
     for query in ["", "?t=", "?t=guess"] {
         let response = get(addr, &format!("/runs{query}")).await;
         assert!(
