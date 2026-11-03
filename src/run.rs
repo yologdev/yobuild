@@ -652,6 +652,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         base: crate::run_log::Base {
             agent: name.clone(),
             manifest: manifest.path.display().to_string(),
+            folder: cwd.display().to_string(),
             session: session.id().to_owned(),
             mode: match (once, terminal) {
                 (true, _) => "once",

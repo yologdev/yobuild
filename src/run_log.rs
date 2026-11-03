@@ -66,6 +66,10 @@ pub struct Entry {
     /// The agent's name and its manifest's path.
     pub agent: String,
     pub manifest: String,
+    /// The folder it worked in: with `manifest`, the session `--resume`
+    /// continues there (design §15).
+    #[serde(default)]
+    pub folder: String,
     /// The session's id and the run's number in it.
     pub session: String,
     pub run: u64,
@@ -161,6 +165,7 @@ impl Seeing {
 pub(crate) struct Base {
     pub agent: String,
     pub manifest: String,
+    pub folder: String,
     pub session: String,
     pub mode: &'static str,
     pub scripted: bool,
@@ -191,6 +196,7 @@ pub(crate) fn entry(base: &Base, seeing: Seeing, ending: Ending, hide: &Hide) ->
             .unwrap_or_default(),
         agent: base.agent.clone(),
         manifest: base.manifest.clone(),
+        folder: base.folder.clone(),
         session: base.session.clone(),
         run: seeing.run,
         mode: base.mode.to_owned(),

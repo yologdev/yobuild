@@ -5788,8 +5788,11 @@ they will be seen, and a record of every run to look back on. M6
 log, shown on the page; a run started on a schedule or a trigger (cron,
 launchd) whose report is saved and whose questions wait for the owner."
 
-§15 (sessions that survive a restart) and §17 (a sandbox) are designed
-apart. This section leaves room for §15: every entry names its session.
+§15 (sessions that survive a restart) saves a session's conversation
+per agent and folder; this log keeps a line per run, whichever process
+ran it. Every entry names its session (`session`, the id of the process's
+session, a resumed one's too) and its `folder`: with the manifest, where
+`--resume` continues it. §17 (a sandbox) is designed apart.
 
 ### The log
 
@@ -5813,8 +5816,8 @@ apart. This section leaves room for §15: every entry names its session.
   to the umask.
 - **What a line holds** (`run_log::Entry`, camelCase, `v: 1`):
   `started`/`ended` (UTC, `YYYY-MM-DDTHH:MM:SSZ`) and `seconds`;
-  `agent`, `manifest`; `session` (the session's id) and `run` (its
-  number in the session); `mode` (`once`, `web`, `terminal`) and
+  `agent`, `manifest`, `folder` (the working folder); `session` (the
+  session's id) and `run` (its number in the session); `mode` (`once`, `web`, `terminal`) and
   `scripted`; `task` (the prompt that started the run: the task, the
   owner's message, or a steer — an answer, a plugin's wake); `outcome`
   and `error` (the run Ctrl+C, SIGHUP or SIGTERM cut short is `aborted`,
@@ -5826,7 +5829,7 @@ apart. This section leaves room for §15: every entry names its session.
   facts counts them), `tokensOut`, `turns`; `tools` (each tool by name,
   its calls `ok` and `failed`); `facts` (the `facts` built-in's line,
   without `Facts: `); `waiting` (`ask_owner`'s questions still open as
-  the run ended, `#N question`: `AskOwner::waiting`); `report` (the
+  the run ended, `#N question`: `AskOwner::open`); `report` (the
   run's last answer, a blank one none).
 - **What it never holds:** a tool's arguments or results (they carry
   file contents, commands, what a server answered), notices other than
@@ -5940,10 +5943,12 @@ and for its questions.
   not be written, or yobuild refused it before it started.
 - **Questions:** under `--once`, `ask_owner`'s questions stay open and
   facts counts them; the log keeps each under `waiting`, shown by
-  `yobuild log` ("waiting on you: #1 …") and on the page. Answering one
-  later belongs with §15's resume, which can name the run by its
-  `session`; until then the owner answers by giving the next run the
-  answer in its task. The gate's questions are not logged: under
+  `yobuild log` ("waiting on you: #1 …") and on the page. The saved
+  session keeps them too (§15): `yobuild run agent.toml --resume` from
+  the entry's `folder` asks them again with their numbers, on the page
+  or the terminal UI — or, under `--once`, gives the run the earlier
+  conversation, the owner answering in its task. With `[session] save =
+  false`, the next run's task is the only way. The gate's questions are not logged: under
   `--once` a call it would ask about is refused at once, counted as `✗`.
 - **`docs/guide.md`** gains "Running an agent on a schedule": a nightly
   crontab line and a launchd agent (`StartCalendarInterval`), the key
@@ -5968,7 +5973,8 @@ and for its questions.
 - No notification when an unattended run leaves a question (mail, a
   push): the log and the page are where it waits.
 - No pruning by age; the rotation bounds the size.
-- Answering a logged question later: §15.
+- Answering a logged question from `yobuild log` itself: `--resume`
+  (§15) asks it again.
 
 ### Tests
 

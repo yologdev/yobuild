@@ -1017,6 +1017,14 @@ fn a_scheduled_run_writes_its_report_and_logs_what_waits_on_the_owner() {
     let first = &runs[0];
     assert_eq!(first["outcome"], "completed");
     assert_eq!(first["mode"], "once");
+    // The folder it worked in: where `--resume` continues its session.
+    let folder = dir.path().file_name().unwrap().to_str().unwrap();
+    assert!(
+        first["folder"]
+            .as_str()
+            .is_some_and(|f| f.ends_with(folder)),
+        "{first}"
+    );
     assert_eq!(first["scripted"], true);
     assert_eq!(first["task"], "sum with ${MY_SERVICE_TOKEN}");
     assert_eq!(

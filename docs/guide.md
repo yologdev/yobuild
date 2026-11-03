@@ -302,6 +302,37 @@ DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml --once "a task"   # one task
   tool's arguments or results, and a credential set in the environment
   is written as its `${NAME}`, never its value.
 
+## Resuming a session
+
+Every session is saved as it goes, so stopping yobuild (Ctrl+C, a closed
+terminal, a crash) loses at most the run in progress. To go on where it
+was, run it again from the same folder with `--resume`:
+
+```sh
+DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml --resume
+DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml --resume --once "and now the tests"
+```
+
+- **What comes back:** the agent's conversation, its open `ask_owner`
+  questions (asked again, with their numbers), and what the session has
+  spent, so `session_budget_usd` still holds.
+- **What does not:** what the page showed before (it starts empty; the
+  agent remembers), the plugins the agent loaded through `[extend]` (it
+  may load them again), sign-ins (you sign in again), facts' snapshot and
+  the plugins' own state. A notice says which apply.
+- **One saved session per agent and folder**, under yobuild's home
+  (`~/.yobuild/sessions/`, or `$YOBUILD_HOME/sessions/`), readable by you
+  only. Nothing is written in the project. A run without `--resume`
+  starts a new conversation, which replaces the saved one once its first
+  run ends (it says so as it starts).
+- **Another model, or an edited `agent.toml`:** the session resumes, with
+  a warning; the prompt is the manifest's as it is now.
+- **To keep conversations off the disk**, put `[session] save = false` in
+  the manifest.
+
+The saved file holds the conversation as the model saw it: what a tool
+showed is in it.
+
 ## Running an agent on a schedule
 
 `--once` runs one task with nobody there, so cron or launchd can start an
@@ -320,7 +351,10 @@ that day. Two things make such a run useful when nobody watches it:
 
 Its questions cannot be answered while it runs: `ask_owner`'s stay open,
 and the log keeps them. `yobuild log` shows each as `waiting on you:
-#1 …`, and so does the page; give the next run the answer in its task.
+#1 …`, and so does the page. `yobuild run agent.toml --resume`, from
+the folder the agent worked in, asks them again on the page (the
+conversation is saved: [Resuming a session](#resuming-a-session));
+or give the next run the answer in its task.
 A call the gate would ask about is refused at once (nobody is there to
 allow it): `allow` what a scheduled agent needs, and keep `budget_usd`
 and `session_budget_usd` set.
@@ -381,37 +415,6 @@ The next morning, read the report, and the run in the log:
 cat ~/reports/release-notes.md
 yobuild log ~/agents/release-notes/agent.toml -n 1
 ```
-
-## Resuming a session
-
-Every session is saved as it goes, so stopping yobuild (Ctrl+C, a closed
-terminal, a crash) loses at most the run in progress. To go on where it
-was, run it again from the same folder with `--resume`:
-
-```sh
-DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml --resume
-DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml --resume --once "and now the tests"
-```
-
-- **What comes back:** the agent's conversation, its open `ask_owner`
-  questions (asked again, with their numbers), and what the session has
-  spent, so `session_budget_usd` still holds.
-- **What does not:** what the page showed before (it starts empty; the
-  agent remembers), the plugins the agent loaded through `[extend]` (it
-  may load them again), sign-ins (you sign in again), facts' snapshot and
-  the plugins' own state. A notice says which apply.
-- **One saved session per agent and folder**, under yobuild's home
-  (`~/.yobuild/sessions/`, or `$YOBUILD_HOME/sessions/`), readable by you
-  only. Nothing is written in the project. A run without `--resume`
-  starts a new conversation, which replaces the saved one once its first
-  run ends (it says so as it starts).
-- **Another model, or an edited `agent.toml`:** the session resumes, with
-  a warning; the prompt is the manifest's as it is now.
-- **To keep conversations off the disk**, put `[session] save = false` in
-  the manifest.
-
-The saved file holds the conversation as the model saw it: what a tool
-showed is in it.
 
 ## Scripted runs
 

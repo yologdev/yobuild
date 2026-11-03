@@ -4,6 +4,7 @@ fn base() -> Base {
     Base {
         agent: "a".into(),
         manifest: "/x/agent.toml".into(),
+        folder: "/x".into(),
         session: "s-1".into(),
         mode: "once",
         scripted: true,
