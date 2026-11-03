@@ -550,3 +550,8 @@ See the README's [Upgrading](../README.md#upgrading):
   without `--locked`.
 
 What each release changes is in the [CHANGELOG](../CHANGELOG.md).
+
+What stays stable from 1.0: the `yobuild` command and its options,
+`agent.toml`, and the report `yobuild check --json` prints (its
+`version` says which shape it has). The Rust library published with the
+crate is not part of that promise: any release may change it.

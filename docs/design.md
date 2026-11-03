@@ -3657,7 +3657,8 @@ made plain:
   a binary crate (`cargo install yobuild`).
   - Its library (`yobuild::builtins`, `frontend`, `install`, `manifest`,
     `run`) stays, since the tests use it, documented as having no API
-    promise before 1.0.
+    promise — at 1.0 too (decided 2026-11-03: 1.0 promises the command,
+    `agent.toml` and the `check --json` report instead).
   - Cargo.toml changes:
     - `publish = false` goes;
     - `version` becomes 0.1.0;
