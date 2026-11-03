@@ -12,6 +12,7 @@
 //! - [`manifest`]: an agent in one TOML file, read strictly.
 //! - [`install`]: a manifest's pinned packages, locked and installed.
 //! - [`run`]: an agent from its manifest (the `yobuild run` command).
+//! - [`run_log`]: each run, logged as it ends (`yobuild log`).
 //! - [`runtime`]: yobuild's own runtime files, installed into the cache.
 //! - [`sandbox`]: plugins and stdio MCP servers confined, with `[sandbox]`.
 //! - [`agents`]: `yobuild new` — a starter, or a built-in agent copied.
@@ -28,6 +29,7 @@ pub(crate) mod hints;
 pub mod install;
 pub mod manifest;
 pub mod run;
+pub mod run_log;
 pub mod runtime;
 pub mod sandbox;
 pub mod sessions;

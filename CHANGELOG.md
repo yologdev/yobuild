@@ -56,6 +56,18 @@ locks it again (commit the new lock).
   sandbox checks pi and DSH plugins together only (`--json` report
   version 5: `confined` on each entry, `agent.sandbox`). Without the
   table nothing changes.
+- **A run log, and unattended runs** (design §16). Every run is logged
+  as it ends, under `~/.yobuild/logs/` (yours alone): when, its task,
+  how it ended, its cost, the tools it called, the facts, the
+  `ask_owner` questions left waiting on you, and its report. It never
+  holds a tool's arguments or results, and a credential set in the
+  environment is written as its `${NAME}`. `yobuild log agent.toml`
+  prints the last runs (`-n`, `--json`); the page lists them beside the
+  conversation. For cron and launchd, `--once --report FILE` writes the
+  last answer to FILE (always: "No answer: …" when there was none); the
+  exit code stays 0 only for a completed run. The guide's "Running an
+  agent on a schedule" has a worked example. A blank last answer is now
+  no answer under `--once`.
 - **yoagent 0.26.6** (by way of 0.26.4 and 0.26.5). Three more models
   with their real limits and prices: `openai/gpt-6.1-terra`,
   `zai/glm-5.3-flashx` and `qwen/qwen3.8-omni-flash`; Meta's

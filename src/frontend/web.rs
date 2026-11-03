@@ -5,6 +5,9 @@
 //! - `GET /ws` — the WebSocket: each text frame is one JSON message,
 //!   [`ClientMessage`] in, [`ServerMessage`] out.
 //! - `GET /ui-plugins/{name}` — a UI plugin's ES module (`{name}` ends in `.js`).
+//! - `GET /runs?t=…` — the agent's past runs, as [`serve_with`] was given
+//!   them (`yobuild run`'s: its run log, design §16); 404 without; the
+//!   token required, as `/ws`'s.
 //!
 //! **The WebSocket needs a token.** Browsers do not apply cross-origin rules
 //! to WebSockets, so without one any page the user has open — on any site —
@@ -69,15 +72,30 @@ impl Drop for Served {
 struct App {
     session: Session,
     token: std::sync::Arc<str>,
+    runs: Option<PastRuns>,
 }
+
+/// What `GET /runs` answers, read each time it is asked (off the async
+/// threads): a JSON value the page shows as its past runs.
+pub type PastRuns = std::sync::Arc<dyn Fn() -> serde_json::Value + Send + Sync>;
 
 /// Serve the browser frontend for `session` on `addr`, with a new random
 /// token, until the returned [`Served`] is stopped or dropped.
 pub async fn serve(session: Session, addr: SocketAddr) -> std::io::Result<Served> {
+    serve_with(session, addr, None).await
+}
+
+/// [`serve`], with the past runs `GET /runs` answers.
+pub async fn serve_with(
+    session: Session,
+    addr: SocketAddr,
+    runs: Option<PastRuns>,
+) -> std::io::Result<Served> {
     let token = uuid::Uuid::new_v4().simple().to_string();
     let state = App {
         session,
         token: token.clone().into(),
+        runs,
     };
     let app = Router::new()
         .route("/", get(|| async { Html(INDEX) }))
@@ -86,6 +104,7 @@ pub async fn serve(session: Session, addr: SocketAddr) -> std::io::Result<Served
         .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .route("/ui-plugins/{name}", get(ui_plugin))
         .route("/ws", get(socket))
+        .route("/runs", get(past_runs))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -117,17 +136,43 @@ async fn ui_plugin(State(app): State<App>, Path(file): Path<String>) -> Response
     }
 }
 
+/// Whether `query` carries the server's token.
+fn token_given(app: &App, query: Option<&str>) -> bool {
+    let given = query
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("t="));
+    given == Some(&*app.token)
+}
+
+/// The past runs, as JSON: the agent's own tasks and answers, so the token
+/// is required.
+async fn past_runs(State(app): State<App>, RawQuery(query): RawQuery) -> Response {
+    if !token_given(&app, query.as_deref()) {
+        return (StatusCode::FORBIDDEN, "a valid token is required").into_response();
+    }
+    let Some(runs) = app.runs else {
+        return (StatusCode::NOT_FOUND, "no past runs here").into_response();
+    };
+    match tokio::task::spawn_blocking(move || runs()).await {
+        Ok(value) => (
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            value.to_string(),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    }
+}
+
 async fn socket(
     State(app): State<App>,
     RawQuery(query): RawQuery,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    let given = query
-        .as_deref()
-        .unwrap_or_default()
-        .split('&')
-        .find_map(|pair| pair.strip_prefix("t="));
-    if given != Some(&*app.token) {
+    if !token_given(&app, query.as_deref()) {
         return (StatusCode::FORBIDDEN, "a valid token is required").into_response();
     }
     let session = app.session;

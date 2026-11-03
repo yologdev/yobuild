@@ -972,6 +972,8 @@ pub(crate) struct LoadPlugin {
     sandbox: Option<Arc<crate::sandbox::Sandbox>>,
     /// How a remote's credential is read from the environment.
     lookup: remote::Lookup,
+    /// Each credential taken, `(variable, value)`: the run log hides them.
+    credentials_taken: crate::run_log::Credentials,
     /// Phone mode: a sign-in's link is printed on this machine, not put
     /// on the page.
     phone: bool,
@@ -1054,6 +1056,7 @@ impl LoadPlugin {
             }),
             sandbox: None,
             lookup: remote::environment(),
+            credentials_taken: Default::default(),
             phone: manifest.frontend.phone,
             net: Arc::default(),
             sign_in_timeout: crate::frontend::session::SIGN_IN_TIMEOUT,
@@ -1071,6 +1074,12 @@ impl LoadPlugin {
             sandbox: sandbox.clone(),
         });
         self.sandbox = sandbox;
+        self
+    }
+
+    /// Where each credential it takes is put, for the run log to hide.
+    pub(crate) fn with_taken(mut self, taken: crate::run_log::Credentials) -> Self {
+        self.credentials_taken = taken;
         self
     }
 

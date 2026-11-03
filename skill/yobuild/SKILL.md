@@ -149,6 +149,18 @@ my-agent/
      folder, continues the saved conversation (open questions asked
      again, the session budget's spend kept); without it a new one starts
      (`[session] save = false`: nothing is saved).
+   - **past runs**: every run is logged as it ends (task, outcome, cost,
+     tools, facts, the questions left waiting, the report):
+     `yobuild log agent.toml` (`-n N`, `--json`), and the page's side
+     panel;
+   - **a run on a schedule** (cron, launchd): `yobuild run agent.toml
+     --locked --once --report report.md "<task>"` — the last answer
+     written to `report.md` (always: "No answer: …" when there was
+     none), the exit code 0 only when the run completed, its
+     `ask_owner` questions left open and shown by `yobuild log` as
+     `waiting on you`. Nobody allows a gate question there: `allow` what
+     it needs. The guide's "Running an agent on a schedule" has a
+     crontab line and a launchd agent.
 
    Keep `agent.toml`, `agent.lock`, the prompt and the reply files
    together (commit them, in a repository).

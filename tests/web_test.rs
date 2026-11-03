@@ -193,3 +193,48 @@ async fn the_websocket_refuses_a_missing_or_wrong_token() {
     open(&served).await;
     served.stop();
 }
+
+/// The past runs (design §16): the owner's own tasks and answers, so the
+/// token is required, as `/ws`'s; read fresh each time; none without a log.
+#[tokio::test]
+async fn past_runs_need_the_token_and_are_read_when_asked() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (session, _driver) = Session::new(false);
+    let asked = std::sync::Arc::new(AtomicUsize::new(0));
+    let runs: web::PastRuns = {
+        let asked = asked.clone();
+        std::sync::Arc::new(move || {
+            let n = asked.fetch_add(1, Ordering::SeqCst) + 1;
+            json!({ "runs": [{ "run": n }] })
+        })
+    };
+    let served = web::serve_with(session.clone(), "127.0.0.1:0".parse().unwrap(), Some(runs))
+        .await
+        .unwrap();
+    let addr = served.addr();
+    for query in ["", "?t=", "?t=guess"] {
+        let response = get(addr, &format!("/runs{query}")).await;
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "with {query:?}: {response}"
+        );
+    }
+    assert_eq!(asked.load(Ordering::SeqCst), 0);
+    for n in 1..=2 {
+        let response = get(addr, &format!("/runs?t={}", served.token())).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200")
+                && response.contains("content-type: application/json")
+                && response.contains("cache-control: no-store")
+                && response.ends_with(&format!(r#"{{"runs":[{{"run":{n}}}]}}"#)),
+            "{response}"
+        );
+    }
+    served.stop();
+    // `serve`: no log, none.
+    let served = web::serve(session, "127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let response = get(served.addr(), &format!("/runs?t={}", served.token())).await;
+    assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+}

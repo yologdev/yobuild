@@ -391,6 +391,24 @@ test('a run line says how the run ended', () => {
   )
 })
 
+import { pastRunCost, pastRunLine } from './lib.js'
+
+test('a past run reads as when, how it ended, its cost and what waits', () => {
+  const run = { started: '2026-11-03T09:12:04Z', outcome: 'completed', turns: 3, costUsd: 0.00213, waiting: [] }
+  assert.equal(pastRunLine(run), '2026-11-03 09:12 UTC · done · $0.0021')
+  assert.equal(pastRunLine({ ...run, waiting: ['#1 Which month?'] }), '2026-11-03 09:12 UTC · done · $0.0021 · 1 waiting on you')
+  assert.equal(pastRunLine({ ...run, outcome: 'stopped' }), '2026-11-03 09:12 UTC · stopped early · $0.0021')
+  assert.equal(pastRunLine({ ...run, outcome: 'later' }), '2026-11-03 09:12 UTC · later · $0.0021')
+  assert.equal(pastRunCost({ ...run, costUsd: 0.00001 }), '<$0.0001')
+  assert.equal(pastRunCost({ ...run, costUsd: null }), 'not priced')
+  assert.equal(pastRunCost({ ...run, turns: 0 }), 'nothing spent')
+  assert.equal(pastRunCost({ ...run, turns: 0, outcome: 'aborted' }), 'unknown')
+  assert.equal(pastRunCost({ ...run, turns: 0, outcome: 'error' }), 'unknown')
+  // Whatever the server gives: no throw.
+  assert.equal(pastRunLine(), ' · unknown · nothing spent')
+  assert.equal(pastRunLine({ waiting: 'x', turns: 1, costUsd: '1' }), ' · unknown · not priced')
+})
+
 import { diffRows, safeUrl, toolView, viewTitle } from './lib.js'
 
 test('a tool view is read only in the card vocabulary', () => {

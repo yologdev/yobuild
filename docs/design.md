@@ -5779,6 +5779,237 @@ loop's messages); encrypting the file at rest.
 **Order of PRs.** One: this design, the code, the tests, the guide, the
 skill, `CLAUDE.md`.
 
+## 16. A run log, and unattended runs (M6; proposed and built 2026-11-03)
+
+**Why.** A run leaves little behind once its frontend closes: the
+page's history is the session's, `--once` prints to a terminal nobody
+keeps, and what a run cost or left waiting is gone. An agent that runs
+while nobody watches — every night, on a trigger — needs more than that:
+its report somewhere the owner will read it, its questions somewhere
+they will be seen, and a record of every run to look back on. M6
+(roadmap): "each run's facts, cost, outcome and report kept in a local
+log, shown on the page; a run started on a schedule or a trigger (cron,
+launchd) whose report is saved and whose questions wait for the owner."
+
+§15 (sessions that survive a restart) saves a session's conversation
+per agent and folder; this log keeps a line per run, whichever process
+ran it. Every entry names its session (`session`, the id of the process's
+session, a resumed one's too) and its `folder`: with the manifest, where
+`--resume` continues it. §17 (a sandbox) is designed apart.
+
+### The log
+
+- **One JSON line per run, appended when it ends**, in every mode
+  (`--once`, the page, the terminal UI). `run`'s watch writes it: it is
+  an observer of the session and sees what every frontend sees — the
+  run's start (its prompt), its events, the notices, its `RunEnd`. It
+  writes before `--once` counts the run as ended, so the process never
+  exits before its line is down. A session of five runs is five lines: a
+  run is what an owner asks about ("what did last night's run do?"),
+  and a session's runs are tied together by `session`.
+- **Where:** `<home>/logs/<agent>-<16 hex>/runs.jsonl` — the home is
+  yobuild's (`YOBUILD_HOME`, else `~/.yobuild`), the hex the first 8
+  bytes of a sha256 of the manifest's canonical path, so two agents of
+  one name keep their own logs and `yobuild log <agent.toml>` finds one
+  from the manifest alone. Not beside the manifest: an agent's folder is
+  often a repository, and the log holds the owner's tasks and the
+  agent's answers, not to be committed by accident. A manifest moved or
+  renamed starts a new log (the old one stays, named by its agent).
+- **Private:** the folder 0700, the file 0600 (unix), made so — not left
+  to the umask.
+- **What a line holds** (`run_log::Entry`, camelCase, `v: 1`):
+  `started`/`ended` (UTC, `YYYY-MM-DDTHH:MM:SSZ`) and `seconds`;
+  `agent`, `manifest`, `folder` (the working folder); `session` (the
+  session's id) and `run` (its number in the session); `mode` (`once`, `web`, `terminal`) and
+  `scripted`; `task` (the prompt that started the run: the task, the
+  owner's message, or a steer — an answer, a plugin's wake); `outcome`
+  and `error` (the run Ctrl+C, SIGHUP or SIGTERM cut short is `aborted`,
+  "stopped with Ctrl+C", as `--once` says it — not the error the
+  driver's end reports, "the session stopped during the run"
+  (`session::STOPPED_DURING_THE_RUN`), by which it is told: a run that
+  completed just before the signal keeps its own outcome); `costUsd` (yoagent's `total_cost_usd`: `null`
+  when not priced), `tokensIn` (input + cache reads + cache writes, as
+  facts counts them), `tokensOut`, `turns`; `tools` (each tool by name,
+  its calls `ok` and `failed`); `facts` (the `facts` built-in's line,
+  without `Facts: `); `waiting` (`ask_owner`'s questions still open as
+  the run ended, `#N question`: `AskOwner::open`); `report` (the
+  run's last answer, a blank one none).
+- **What it never holds:** a tool's arguments or results (they carry
+  file contents, commands, what a server answered), notices other than
+  the facts line, the system prompt. The texts it does hold (the task,
+  the answer, the error, the facts, the questions) have each credential
+  replaced by its `${NAME}` (`run_log::Hide`, as `run::hidden` does for
+  an MCP server's errors), before they are cut (so a credential the cut
+  would split is never left in part):
+  - every variable set in yobuild's environment, of 8 characters or
+    more, that is one of the model's key variables, that the manifest
+    hands out whatever its name — a `${NAME}` its plugins' `config` or
+    its servers' URLs, headers, `env` or `args` refer to, a name or a
+    prefix (`AWS_*`) of an `env` grant — or whose name reads as a
+    secret's (`manifest::secret`: `KEY`, `TOKEN`, `SECRET`, `PASSWORD`,
+    `AUTH`, …);
+  - each credential `load_plugin` takes this session (a remote server's
+    header filled from the variable its owner named), whatever its
+    length, from the moment it is taken (`run_log::Credentials`, shared
+    with `LoadPlugin`).
+
+  A sign-in's tokens never reach the model, so never these texts. A
+  value of fewer than 8 characters set under a name none of these
+  covers is not hidden.
+- **Bounded:** each text cut to its bound, the cut said on a line of its
+  own ("… (cut: N more characters)"): the task 2 000 characters, the
+  report 16 000, the error and the facts 2 000 each, each question 500
+  and at most 20 of them, at most 100 tool names. The file is rotated to
+  `runs.1.jsonl` when an append finds it past 2 MiB (one kept): at least
+  4 MiB of history — thousands of typical runs — and not much more.
+- **A write that fails** (a full disk, a home that is a file) is a
+  Warning notice — "The run log could not be written: <path>: <error>
+  (the run is not logged)" — never the run's failure; a home that cannot
+  be found is said once ("The run log is off this session: …").
+- **Two yobuilds on one agent at once** take the folder's advisory lock
+  (`flock` on `runs.lock`, unix) around the size check, the rotation and
+  the append, so the file is rotated once (two renames would put the
+  fresh file over the rotated history); a rename that finds the file
+  gone counts as rotated already. Each line is one `write` (`O_APPEND`).
+- **A line torn by a crash** (a write cut mid-character) is one unread
+  line: the log is read as bytes, line by line, and a line that is not
+  UTF-8 or not an entry is counted, not fatal. An append to a file that
+  does not end with a line break writes one first, so the torn line
+  never swallows the next run's.
+
+### Reading it
+
+- **`yobuild log <agent.toml> [-n N] [--json]`**: the last N runs
+  (default 10), oldest first so the latest is nearest the prompt:
+
+  ```text
+  the last 2 run(s) of nightly (in ~/.yobuild/logs/nightly-2a8cd53ab8297371):
+  2026-11-03 02:00:04 UTC  run 1 (once)  Completed  $0.0021  12s
+    task: Summarise yesterday's commits
+    tools: release_commits 1✓
+    waiting on you: #1 Should the docs change go under Fixes?
+    facts: since the start: no changes, 0 new commit(s); …
+    report:
+      ## Range covered
+      …
+  ```
+
+  `--json` prints the entries as logged. A line another version wrote,
+  or a broken one, is skipped and counted on stderr. No log yet: "no
+  runs of <agent> logged yet (in <folder>)", exit 0.
+- **The page** lists the last 20 in its side panel, newest first, each a
+  `<details>` whose summary is `pastRunLine` (`2026-11-03 02:00 UTC ·
+  done · $0.0021 · 1 waiting on you`) and whose body is the task, the
+  error, the questions waiting, the facts, and the report drawn as
+  Markdown (`drawMarkdown`: no HTML from the log either). It reads
+  `GET /runs?t=<token>` when it connects and half a second after each
+  `runEnd` (the line is written as the run ends, a moment after the page
+  hears it).
+  - A route, not a protocol message: the log is not the session's state
+    (a message would go into the session's history, be replayed to every
+    late frontend, and be stale by the next run), and a route reads the
+    file fresh each time, past sessions' runs included.
+  - The token required, as `/ws`'s (403 without): the log holds the
+    owner's tasks and answers, and any page the owner has open could
+    otherwise read them from localhost.
+  - `web::serve_with(session, addr, Some(PastRuns))`, its reader run off
+    the async threads; `web::serve` has none (404).
+- **The terminal UI** does not show past runs: `yobuild log`, in another
+  terminal, does.
+
+### Unattended runs
+
+`--once` already runs a task with nobody there and exits: 0 only when
+the run completed. What a scheduled run lacked is a place for its report
+and for its questions.
+
+- **`--report FILE`** (with `--once` only: "--report needs --once (the
+  task's run's answer is what it writes)"): the last answer written to
+  FILE whole or not at all (a temporary file in its folder, 0600,
+  synced, renamed over it).
+  - Refused before anything runs: given twice ("--report given twice"),
+    an option in its place ("--report --once: give the report's file
+    after --report"), a folder that is not there ("--report gone/r.md:
+    its folder gone is not there").
+  - Always written once its arguments are read, so yesterday's report
+    never stands as today's: a run that gave no answer writes "No
+    answer: the run ended <Outcome>[: <error>]."; anything that stops
+    yobuild after its arguments — the log, its runtime files (under
+    cron, "found no node on PATH"), the plugins, the servers — writes
+    "No answer: yobuild stopped: <error>".
+  - A report that cannot be written (a folder where the file would go)
+    is said ("yobuild: --report <path>: …") and the exit code is 1: what
+    a scheduled run is for is missing.
+- **The exit code**, the contract for cron and launchd: 0 when the run
+  completed; 1 when it stopped (a limit, a budget), failed, was refused,
+  was aborted (launchd's SIGTERM: "stopped by SIGTERM"), its report could
+  not be written, or yobuild refused it before it started.
+- **Questions:** under `--once`, `ask_owner`'s questions stay open and
+  facts counts them; the log keeps each under `waiting`, shown by
+  `yobuild log` ("waiting on you: #1 …") and on the page. The saved
+  session keeps them too (§15): `yobuild run agent.toml --resume` from
+  the entry's `folder` asks them again with their numbers, on the page
+  or the terminal UI — or, under `--once`, gives the run the earlier
+  conversation, the owner answering in its task. With `[session] save =
+  false`, the next run's task is the only way. The gate's questions are not logged: under
+  `--once` a call it would ask about is refused at once, counted as `✗`.
+- **`docs/guide.md`** gains "Running an agent on a schedule": a nightly
+  crontab line and a launchd agent (`StartCalendarInterval`), the key
+  read from a file only the owner can read rather than written in the
+  crontab, the folder the agent works in, `--locked`, and reading the
+  result with `yobuild log`.
+
+### Decisions for review
+
+1. One line per run, not per session? Decided: per run (the unit an
+   owner asks about); `session` ties them.
+2. Under the home, keyed by the manifest's path, not beside the
+   manifest? Decided: under the home (a repository must not commit it).
+3. No switch to turn it off? Decided (for now): none; it is local and
+   private. A manifest key can come if asked for.
+4. A route for the page, not a protocol message? Decided: a route,
+   behind the token.
+5. `--report` only with `--once`, always written? Decided: yes.
+
+### What is not done
+
+- No notification when an unattended run leaves a question (mail, a
+  push): the log and the page are where it waits.
+- No pruning by age; the rotation bounds the size.
+- Answering a logged question from `yobuild log` itself: `--resume`
+  (§15) asks it again.
+
+### Tests
+
+- `src/run_log/tests.rs`: an entry from what was seen (tools counted by
+  name, tokens as facts counts them, the questions, read back equal);
+  each bound and its cut; credentials hidden in every text, a key
+  straddling the cut hidden whole, a value inside another hidden as the
+  longer; what the manifest hands out (`handed_out`), a credential
+  `load_plugin` takes; the folder under the home, named by agent and
+  path, 0700/0600, another manifest of one name apart; rotation and
+  reading both files in order, the last N, lines of another version or
+  broken counted; a torn non-UTF-8 line followed by a good one; eight
+  appenders at once rotating once; a write failing naming the path;
+  `text()`.
+- `tests/cli_test.rs`:
+  `a_scheduled_run_writes_its_report_and_logs_what_waits_on_the_owner`
+  (`--once --report`: the file holds the answer; a run with no answer
+  writes "No answer: …" over it; a report that cannot be written exits
+  1; `yobuild log` before any run, then `--json` and `-n 1` — the task
+  and the answer with a `MY_SERVICE_TOKEN` value shown as its `${NAME}`,
+  the question waiting, the tool counted, the facts line; the argument
+  errors, `--report`'s among them),
+  `a_report_is_written_when_yobuild_stops_before_the_run` (no node on
+  `PATH`, an empty home), `ctrl_c_stops_a_once_run_as_aborted` and
+  `sigterm_stops_a_once_run_as_aborted` (one line, `aborted`, "stopped
+  with Ctrl+C" / "stopped by SIGTERM", the report saying so),
+  `a_log_that_cannot_be_written_is_said_and_the_run_goes_on`,
+  `the_page_reads_the_past_runs_with_its_token` (`--web`: `/runs` after
+  `runEnd`, mode `web`; 403 with a wrong token).
+- `tests/web_test.rs` `past_runs_need_the_token_and_are_read_when_asked`;
+  `frontend/web/lib.test.js` (`pastRunLine`, `pastRunCost`).
+
 ## 17. An opt-in sandbox for plugins and servers (M6; built 2026-11-03)
 
 **Why.** Every page so far says it: yobuild is not a sandbox. Step 5
