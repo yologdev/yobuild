@@ -556,8 +556,28 @@ async fn a_loaded_server_runs_in_the_sandbox() {
     );
     assert!(work.join("inside.txt").exists());
     assert!(!outside.exists());
+    // The pid the server left is its namespace's under bubblewrap
+    // (`--unshare-pid`: 2, another process here): the server is looked for
+    // by its program's path instead, which only it (and bubblewrap, around
+    // it) has on its command line, from this test's own home.
+    let program = home.join(".yobuild").display().to_string();
+    let running = || {
+        let found = Command::new("pgrep")
+            .args(["-f", &program])
+            .output()
+            .unwrap();
+        !found.stdout.is_empty()
+    };
+    assert!(running(), "the server is not seen running by its path");
     page.interrupt();
-    all_stopped(&home);
+    let gone = (0..100).any(|_| {
+        if !running() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        false
+    });
+    assert!(gone, "the server still runs 10 s after yobuild stopped");
 }
 
 #[tokio::test(flavor = "multi_thread")]
