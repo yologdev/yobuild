@@ -5,6 +5,29 @@ base changed**, because a lock with DSH plugins records it: when it
 changed, `--locked` refuses such a lock, and one run without `--locked`
 locks it again (commit the new lock).
 
+## 0.3.1 — 2026-11-03
+
+Fixes from a newcomer's first hour with yobuild. The DSH base is
+unchanged.
+
+- **A reader gone is no panic:** `yobuild new --list | head` and the
+  like stop quietly instead of panicking on the closed pipe.
+- **Clearer first mistakes:** a missing key says to export it, or to try
+  the agent without one on its reply file (`--scripted scripts/demo.json`);
+  a manifest path not found says which folder it was looked for in and to
+  run from the folder the agent should work in; a sandbox that cannot
+  start on macOS (inside another sandbox) gets its own hint.
+- **Quieter logs:** the scripted model's no-key warning stays hidden
+  under your own `RUST_LOG` too, unless it names that target.
+- **The page names the agent** in its title and header.
+- **Smaller fixes:** `--resume` in `run`'s usage, `new --list` aligned,
+  the sandbox notice when none of the hidden folders is there.
+- **Docs:** `cargo binstall yobuild` first in the install steps, every
+  gallery agent in the README's table, how to approve writes with a
+  read-only agent, the sandbox inside a container, and what 1.0 will
+  promise (the command, `agent.toml` and `check --json`; not the
+  library).
+
 ## 0.3.0 — 2026-11-03
 
 Agents you can keep: a sign-in for remote servers, sessions that survive

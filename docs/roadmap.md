@@ -393,7 +393,7 @@ PR with its design section.
   page and its token, `[sandbox]` under bubblewrap where the container
   allows user namespaces and refused with its hint where not; a closed
   pipe's panic and the sandbox notice's wording fixed after); 0.3.0
-  (released 2026-11-03).
+  (released 2026-11-03), 0.3.1 (the newcomer test's fixes).
 - **Sessions that survive a restart** (built, #115; design §15): the
   conversation, the open questions and the session's spend saved per
   agent and folder, and resumed with `--resume`.
