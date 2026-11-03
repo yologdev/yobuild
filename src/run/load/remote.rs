@@ -643,6 +643,11 @@ impl LoadPlugin {
                 );
                 continue;
             }
+            // The run log hides it from now on (design §16).
+            self.credentials_taken
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((answer.to_owned(), secret.clone()));
             return Ok(Taken::Sent(Header {
                 name: header.name.clone(),
                 written: value.as_str().to_owned(),

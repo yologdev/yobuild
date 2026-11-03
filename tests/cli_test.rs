@@ -401,6 +401,8 @@ mod web {
 
     pub struct Page {
         pub child: Child,
+        /// The page's URL, its token included.
+        pub url: String,
         socket: tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
@@ -468,7 +470,11 @@ mod web {
                     panic!("cannot connect to the page ({e}); yobuild said:\n{said}");
                 }
             };
-            Page { child, socket }
+            Page {
+                child,
+                url: url.to_owned(),
+                socket,
+            }
         }
 
         /// The next message, whatever it is.
@@ -612,15 +618,19 @@ fn a_plugin_tool_named_ask_owner_is_not_free() {
     );
 }
 
-#[test]
-fn ctrl_c_stops_a_once_run_as_aborted() {
+/// A `--once` run (with `--report`) stopped mid-run by `signal`: exit 1,
+/// said as `Aborted: stopped <said>`, in the report, and logged once so.
+fn a_signal_stops_a_once_run_as_aborted(signal: &str, said: &str) {
+    let home = tempfile::tempdir().unwrap();
     let dir = project(
         "[builtins]\ngate = \"off\"\n",
         r#"[{ "tools": [{ "name": "bash", "arguments": { "command": "sleep 30" } }] }, { "text": "done" }]"#,
     );
     let child = bin()
+        .env("YOBUILD_HOME", home.path())
         .args([
-            "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+            "run", "agent.toml", "--scripted", "script.json", "--once", "--report", "report.md",
+            "go",
         ])
         .current_dir(dir.path())
         .stdout(std::process::Stdio::piped())
@@ -630,7 +640,7 @@ fn ctrl_c_stops_a_once_run_as_aborted() {
     // Ready, then the run under way.
     std::thread::sleep(std::time::Duration::from_secs(3));
     Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
+        .args([signal, &child.id().to_string()])
         .status()
         .unwrap();
     let started = std::time::Instant::now();
@@ -639,13 +649,72 @@ fn ctrl_c_stops_a_once_run_as_aborted() {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
     assert_eq!(
         text(&out.stdout).lines().last(),
-        Some("Aborted: stopped with Ctrl+C")
+        Some(format!("Aborted: stopped {said}").as_str())
     );
     // Its figures went with it: not zero, unknown.
     assert!(
         text(&out.stderr).contains("\n  Cost: unknown (the run's figures were lost with it)\n"),
         "{}",
         text(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("report.md")).unwrap(),
+        format!("No answer: the run ended Aborted: stopped {said}.\n")
+    );
+    // Logged once, as it ended.
+    let out = logged(home.path(), dir.path(), &["--json"]);
+    let runs: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(runs.as_array().map(Vec::len), Some(1), "{runs}");
+    assert_eq!(runs[0]["outcome"], "aborted", "{runs}");
+    assert_eq!(runs[0]["error"], format!("stopped {said}"), "{runs}");
+    assert_eq!(
+        runs[0]["tools"],
+        serde_json::json!([]),
+        "the call never ended"
+    );
+}
+
+#[test]
+fn ctrl_c_stops_a_once_run_as_aborted() {
+    a_signal_stops_a_once_run_as_aborted("-INT", "with Ctrl+C");
+}
+
+#[test]
+fn sigterm_stops_a_once_run_as_aborted() {
+    // What launchd sends a job it stops.
+    a_signal_stops_a_once_run_as_aborted("-TERM", "by SIGTERM");
+}
+
+#[test]
+fn a_report_is_written_when_yobuild_stops_before_the_run() {
+    // Under cron, with no node on PATH: yobuild's own runtime files cannot
+    // be installed, so nothing runs — and yesterday's report must not
+    // stand as today's.
+    let home = tempfile::tempdir().unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let dir = project(
+        "[[plugin]]\npi = \"yobuild:confirm-dangerous\"\n",
+        r#"[{ "text": "done" }]"#,
+    );
+    std::fs::write(dir.path().join("report.md"), "yesterday's\n").unwrap();
+    let out = bin()
+        .env("YOBUILD_HOME", home.path())
+        .env("PATH", empty.path())
+        .args([
+            "run", "agent.toml", "--scripted", "script.json", "--once", "--report", "report.md",
+            "go",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("found no node on PATH"), "{stderr}");
+    let report = std::fs::read_to_string(dir.path().join("report.md")).unwrap();
+    assert!(
+        report.starts_with("No answer: yobuild stopped: installing yobuild's runtime ")
+            && report.contains("found no node on PATH"),
+        "{report}"
     );
 }
 
@@ -870,6 +939,209 @@ fn a_resumed_session_goes_on_from_its_conversation() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(!text(&out.stderr).contains("the conversation is saved"));
     assert!(!empty.path().join("sessions").exists());
+}
+
+/// The run log (design §16), in a home of its own: what `yobuild log`
+/// reads.
+fn logged(home: &Path, dir: &Path, args: &[&str]) -> Output {
+    bin()
+        .env("YOBUILD_HOME", home)
+        .args(["log", "agent.toml"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_scheduled_run_writes_its_report_and_logs_what_waits_on_the_owner() {
+    let home = tempfile::tempdir().unwrap();
+    let dir = project(
+        "[builtins]\nask_owner = true\nfacts = true\n",
+        r###"[{ "tools": [{ "name": "ask_owner", "arguments": { "question": "Which month?" } }] },
+            { "text": "## Done\nSummed with tok-secret-12345.\n## Waiting on you\n#1" }]"###,
+    );
+    let run = |args: &[&str]| {
+        bin()
+            .env("YOBUILD_HOME", home.path())
+            // A credential by its name: never written to the log as it is.
+            .env("MY_SERVICE_TOKEN", "tok-secret-12345")
+            .args(["run", "agent.toml", "--scripted", "script.json"])
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+    };
+    // None yet.
+    let out = logged(home.path(), dir.path(), &[]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stdout).starts_with("no runs of a logged yet (in "),
+        "{}",
+        text(&out.stdout)
+    );
+    let out = run(&[
+        "--once", "--report", "out.md", "sum", "with", "tok-secret-12345",
+    ]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let report = std::fs::read_to_string(dir.path().join("out.md")).unwrap();
+    assert_eq!(
+        report,
+        "## Done\nSummed with tok-secret-12345.\n## Waiting on you\n#1\n"
+    );
+    // A second run that gives no answer: the file says so, not the first
+    // run's report.
+    std::fs::write(dir.path().join("script.json"), r#"[{ "text": "" }]"#).unwrap();
+    let out = run(&["--once", "--report", "out.md", "again"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let report = std::fs::read_to_string(dir.path().join("out.md")).unwrap();
+    assert_eq!(report, "No answer: the run ended Completed.\n");
+    // One that cannot be written fails the run: what it is for is missing
+    // (a folder where the file would go).
+    std::fs::create_dir(dir.path().join("a-folder")).unwrap();
+    let out = run(&["--once", "--report", "a-folder", "again"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("\nyobuild: --report a-folder: "),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // Each logged, oldest first.
+    let out = logged(home.path(), dir.path(), &["--json"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let raw = text(&out.stdout);
+    assert!(!raw.contains("tok-secret-12345"), "{raw}");
+    let runs: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(runs.as_array().unwrap().len(), 3, "{raw}");
+    let first = &runs[0];
+    assert_eq!(first["outcome"], "completed");
+    assert_eq!(first["mode"], "once");
+    assert_eq!(first["scripted"], true);
+    assert_eq!(first["task"], "sum with ${MY_SERVICE_TOKEN}");
+    assert_eq!(
+        first["report"],
+        "## Done\nSummed with ${MY_SERVICE_TOKEN}.\n## Waiting on you\n#1"
+    );
+    assert_eq!(first["waiting"], serde_json::json!(["#1 Which month?"]));
+    assert_eq!(
+        first["tools"],
+        serde_json::json!([{ "name": "ask_owner", "ok": 1, "failed": 0 }])
+    );
+    assert!(
+        first["facts"]
+            .as_str()
+            .is_some_and(|f| f.ends_with("; 1 question(s) waiting on you.")),
+        "{first}"
+    );
+    assert_eq!(runs[1]["outcome"], "completed");
+    assert_eq!(runs[1]["report"], serde_json::Value::Null);
+    assert_eq!(runs[1]["task"], "again");
+    // As text, `-n 1`: the last only.
+    let out = logged(home.path(), dir.path(), &["-n", "1"]);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.starts_with("the last 1 run(s) of a (in ")
+            && shown.contains("  task: again\n")
+            && !shown.contains("Which month?"),
+        "{shown}"
+    );
+    let out = logged(home.path(), dir.path(), &[]);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("  waiting on you: #1 Which month?\n")
+            && shown.contains("  tools: ask_owner 1✓\n")
+            && shown.contains("  Completed  not priced  "),
+        "{shown}"
+    );
+
+    // What is refused before anything runs.
+    for (args, error) in [
+        (
+            vec!["go", "--report", "x.md"],
+            "yobuild: --report needs --once",
+        ),
+        (vec!["--once", "go", "--report"], "yobuild: usage: "),
+        (
+            vec!["go", "--report", "--once"],
+            "yobuild: --report --once: give the report's file after --report",
+        ),
+        (
+            vec!["--once", "go", "--report", "a.md", "--report", "b.md"],
+            "yobuild: --report given twice",
+        ),
+        // Its folder is looked at before anything runs.
+        (
+            vec!["--once", "go", "--report", "gone/out.md"],
+            "yobuild: --report gone/out.md: its folder gone is not there",
+        ),
+    ] {
+        let out = run(&args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = text(&out.stderr);
+        assert!(stderr.starts_with(error), "{args:?}: {stderr}");
+    }
+    for (args, error) in [
+        (
+            vec!["-n", "0"],
+            "yobuild: -n 0: a number of runs, 1 or more",
+        ),
+        (vec!["--frob"], "yobuild: unknown option --frob"),
+    ] {
+        let out = logged(home.path(), dir.path(), &args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = text(&out.stderr);
+        assert!(stderr.starts_with(error), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
+fn a_log_that_cannot_be_written_is_said_and_the_run_goes_on() {
+    // A file where yobuild's home would be.
+    let home = tempfile::NamedTempFile::new().unwrap();
+    let dir = project("[builtins]\ngate = \"off\"\n", r#"[{ "text": "done" }]"#);
+    let out = bin()
+        .env("YOBUILD_HOME", home.path())
+        .args([
+            "run", "agent.toml", "--scripted", "script.json", "--once", "go",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("  Warning: The run log could not be written: ")
+            && stderr.contains(" (the run is not logged)\n"),
+        "{stderr}"
+    );
+    assert_eq!(text(&out.stdout), "done\nCompleted\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_page_reads_the_past_runs_with_its_token() {
+    let dir = project("[builtins]\ngate = \"off\"\n", r#"[{ "text": "done" }]"#);
+    let mut page = web::Page::open(dir.path(), "go").await;
+    assert_eq!(page.until("runEnd").await["outcome"], "completed");
+    let runs = page.url.replace("/?t=", "/runs?t=");
+    // Written as the run ends: a moment after the page hears it.
+    let mut found = serde_json::Value::Null;
+    for _ in 0..50 {
+        found = reqwest::get(&runs).await.unwrap().json().await.unwrap();
+        if found["runs"].as_array().is_some_and(|r| !r.is_empty()) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(found["runs"][0]["task"], "go", "{found}");
+    assert_eq!(found["runs"][0]["mode"], "web", "{found}");
+    assert_eq!(found["runs"][0]["report"], "done", "{found}");
+    let without = reqwest::get(page.url.replace("/?t=", "/runs?t=guess"))
+        .await
+        .unwrap();
+    assert_eq!(without.status(), 403);
+    let (code, stderr) = page.interrupt();
+    assert_eq!(code, Some(0), "{stderr}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

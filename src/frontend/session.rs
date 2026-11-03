@@ -684,6 +684,10 @@ impl Inner {
     }
 }
 
+/// The error of the `RunEnd` a run in progress gets when the driver goes
+/// (its task aborted, as Ctrl+C does): the run log tells it by this.
+pub(crate) const STOPPED_DURING_THE_RUN: &str = "the session stopped during the run";
+
 /// However the driver goes — [`Driver::run`] returning, its task failing, or
 /// a driver never run — a run in progress gets its `RunEnd` and every
 /// frontend `Closed`.
@@ -699,7 +703,7 @@ impl Drop for Ending {
             self.inner.broadcast(ServerMessage::RunEnd {
                 run,
                 outcome: RunOutcome::Error,
-                error: Some("the session stopped during the run".into()),
+                error: Some(STOPPED_DURING_THE_RUN.into()),
                 stats: Box::default(),
                 total_cost_usd: None,
             });

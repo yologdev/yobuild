@@ -16,6 +16,7 @@ links there rather than repeating it.
 - [Checking an agent](#checking-an-agent)
 - [Running an agent](#running-an-agent)
 - [Resuming a session](#resuming-a-session)
+- [Running an agent on a schedule](#running-an-agent-on-a-schedule)
 - [Scripted runs](#scripted-runs)
 - [What keeps an agent in bounds](#what-keeps-an-agent-in-bounds)
 - [When something fails](#when-something-fails)
@@ -292,6 +293,94 @@ DEEPSEEK_API_KEY=… yobuild run path/to/agent.toml --once "a task"   # one task
   the run (` · $0.0034`), and under `--once` as a line on stderr
   (`Cost: $0.0034 (…)`). With `facts`, a notice says what changed in the
   folder's git repository.
+- **Every run is logged** as it ends: when, its task, how it ended, its
+  cost, the tools it called, the facts, the questions left waiting on
+  you, and its report (the last answer). `yobuild log path/to/agent.toml`
+  prints the last ten (`-n 30` for more, `--json` as logged); the page
+  lists the last twenty beside the conversation. The log is yours alone
+  (under `~/.yobuild/logs/`, readable only by you); it never holds a
+  tool's arguments or results, and a credential set in the environment
+  is written as its `${NAME}`, never its value.
+
+## Running an agent on a schedule
+
+`--once` runs one task with nobody there, so cron or launchd can start an
+agent: every night, say, to draft the release notes for what was merged
+that day. Two things make such a run useful when nobody watches it:
+- **`--report FILE`** writes the agent's last answer to FILE, whole or not
+  at all, readable only by you. Its folder must be there (yobuild says
+  so before anything runs). It is always written: a run that gave no
+  answer writes "No answer: the run ended …" over yesterday's report,
+  and one yobuild could not start (no node on the scheduler's `PATH`,
+  say) "No answer: yobuild stopped: …".
+- **The exit code** is 0 only when the run completed. A run stopped by a
+  limit or a budget, one that failed, one stopped by a signal, or a
+  report that could not be written, is 1: have the scheduler mail you
+  the output when it is not 0.
+
+Its questions cannot be answered while it runs: `ask_owner`'s stay open,
+and the log keeps them. `yobuild log` shows each as `waiting on you:
+#1 …`, and so does the page; give the next run the answer in its task.
+A call the gate would ask about is refused at once (nobody is there to
+allow it): `allow` what a scheduled agent needs, and keep `budget_usd`
+and `session_budget_usd` set.
+
+A worked example: the gallery's release-notes agent, run at 2:00 each
+night on a project.
+
+```sh
+yobuild new ~/agents/release-notes --from release-notes   # then the npm ci line it prints
+cd ~/projects/shop && yobuild check ~/agents/release-notes/agent.toml   # once, by hand
+```
+
+A script the scheduler runs, `~/bin/release-notes.sh` (`chmod 700`):
+
+```sh
+#!/bin/sh
+set -eu
+# cron and launchd start with a bare PATH: yobuild, node and npm must be on it.
+export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+# The key from a file only you can read (chmod 600), not in the crontab.
+DEEPSEEK_API_KEY=$(cat "$HOME/.config/yobuild/deepseek.key")
+export DEEPSEEK_API_KEY
+cd "$HOME/projects/shop"   # the folder the agent works in
+exec yobuild run "$HOME/agents/release-notes/agent.toml" --locked --once \
+  --report "$HOME/reports/release-notes.md" \
+  "Draft the release notes for everything since the last version tag."
+```
+
+With cron (`crontab -e`):
+
+```text
+0 2 * * * $HOME/bin/release-notes.sh >> $HOME/reports/release-notes.out 2>&1
+```
+
+With launchd on macOS: `~/Library/LaunchAgents/dev.yobuild.release-notes.plist`
+(its paths written out in full: launchd expands neither `~` nor `$HOME`),
+then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.yobuild.release-notes.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.yobuild.release-notes</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/sh</string><string>/Users/you/bin/release-notes.sh</string></array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>/Users/you/reports/release-notes.out</string>
+  <key>StandardErrorPath</key><string>/Users/you/reports/release-notes.out</string>
+</dict>
+</plist>
+```
+
+The next morning, read the report, and the run in the log:
+
+```sh
+cat ~/reports/release-notes.md
+yobuild log ~/agents/release-notes/agent.toml -n 1
+```
 
 ## Resuming a session
 
@@ -410,14 +499,17 @@ the end under the terminal UI.
 
 ## The cache
 
-Everything yobuild installs is under `~/.yobuild` (`YOBUILD_HOME` to move
+Everything yobuild installs or keeps is under `~/.yobuild` (`YOBUILD_HOME` to move
 it):
 - `runtime/<set>/<hash>/`: its own runtime files, a folder per version;
 - `plugins/<set>/<hash>/`: agents' pinned packages, shared by agents whose
-  pins resolve alike.
+  pins resolve alike;
+- `logs/<agent>-<hash>/`: each agent's run log (`runs.jsonl`, and
+  `runs.1.jsonl` once it passed 2 MiB), what `yobuild log` reads.
 
 Old folders are not removed. Delete `~/.yobuild`, or any folder in it,
-whenever no yobuild is running: what is needed is installed again.
+whenever no yobuild is running: what is needed is installed again (but
+not the run logs: keep `logs/` to keep them).
 
 ## Upgrading
 

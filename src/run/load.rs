@@ -968,6 +968,8 @@ pub(crate) struct LoadPlugin {
     keys: Arc<Vec<String>>,
     /// How a remote's credential is read from the environment.
     lookup: remote::Lookup,
+    /// Each credential taken, `(variable, value)`: the run log hides them.
+    credentials_taken: crate::run_log::Credentials,
     /// Phone mode: a sign-in's link is printed on this machine, not put
     /// on the page.
     phone: bool,
@@ -1046,12 +1048,19 @@ impl LoadPlugin {
             withheld: Arc::new(super::withheld(manifest)),
             keys: Arc::new(manifest.key_variables()),
             lookup: remote::environment(),
+            credentials_taken: Default::default(),
             phone: manifest.frontend.phone,
             net: Arc::default(),
             sign_in_timeout: crate::frontend::session::SIGN_IN_TIMEOUT,
             plugins,
             state: Arc::default(),
         }
+    }
+
+    /// Where each credential it takes is put, for the run log to hide.
+    pub(crate) fn with_taken(mut self, taken: crate::run_log::Credentials) -> Self {
+        self.credentials_taken = taken;
+        self
     }
 
     /// The environment a remote's credential is read from: a test's.

@@ -366,6 +366,17 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             }
         }
     });
+    // The run log (design §16): every run's line, appended as it ends. One
+    // that cannot be found is said, and the session goes on without it.
+    let run_log = match crate::run_log::RunLog::of(&manifest, home.as_deref()) {
+        Ok(log) => Some(log),
+        Err(e) => {
+            let said = format!("The run log is off this session: {e}");
+            tracing::warn!("{said}");
+            session.notice(NoticeLevel::Warning, said);
+            None
+        }
+    };
     let scratch = match manifest.builtins.scratch {
         true => Some(Scratch::create(name)?),
         false => None,
@@ -407,6 +418,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // What the agent loads this session (design §14): offered from the next
     // turn, each tool asking.
     let loaded = load::Loaded::default();
+    // The credentials `load_plugin` takes: the run log hides them.
+    let taken = crate::run_log::Credentials::default();
     let files = load::Files {
         manifest: crate::install::file_name(&manifest.path),
         lock: crate::install::file_name(&crate::install::lock_path(&manifest)),
@@ -437,7 +450,8 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                 bridge: bridge.clone(),
                 adapters: layout.adapters.clone(),
             }),
-        );
+        )
+        .with_taken(taken.clone());
         tools.add(FindPlugin::TOOL, vec![Box::new(find)]);
         tools.add(load::LoadPlugin::TOOL, vec![Box::new(load)]);
     }
@@ -598,7 +612,13 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             true => "0.0.0.0:8787".parse().expect("an address"),
             false => "127.0.0.1:8787".parse().expect("an address"),
         });
-        let web = stops.until(web::serve(session.clone(), addr)).await?;
+        // The page's past runs: the log's last ones, read when asked.
+        let runs = run_log
+            .clone()
+            .map(|log| Arc::new(move || past_runs(&log)) as web::PastRuns);
+        let web = stops
+            .until(web::serve_with(session.clone(), addr, runs))
+            .await?;
         // Every interface: a link the phone can open.
         let url = match (web.addr().ip().is_unspecified(), lan_ip()) {
             (true, Some(ip)) => format!("http://{ip}:{}/?t={}", web.addr().port(), web.token()),
@@ -623,7 +643,27 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     }
 
     // What the frontends see; in `once`, written out as it comes.
-    let (seen, mut ended_runs, watching) = watch(&session, once);
+    // Set as Ctrl+C aborts a run: the log says it so, not as the failed
+    // task the driver's end reports.
+    let stopping: Stopping = Arc::default();
+    let logging = run_log.map(|log| Logging {
+        log,
+        hide: crate::run_log::Hide::from_env(&manifest).with_taken(taken.clone()),
+        base: crate::run_log::Base {
+            agent: name.clone(),
+            manifest: manifest.path.display().to_string(),
+            session: session.id().to_owned(),
+            mode: match (once, terminal) {
+                (true, _) => "once",
+                (false, true) => "terminal",
+                (false, false) => "web",
+            },
+            scripted: options_scripted,
+        },
+        ask_owner: ask_owner.clone(),
+        stopping: stopping.clone(),
+    });
+    let (seen, mut ended_runs, watching) = watch(&session, once, logging);
     // With a frontend, the task waits for it: a question its run asks must
     // reach the owner (with nobody there it would get its default — a
     // refusal — unseen). `--once` has no owner to wait for.
@@ -776,6 +816,10 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             Err(e) => (None, None, Some(format!("the agent's task failed: {e}"))),
         },
         End::Interrupted { running, by } => {
+            *stopping
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(format!("stopped {}", by.said()));
             driving.abort();
             drop(driving.await);
             (None, running.then_some(by), None)
@@ -1626,12 +1670,114 @@ struct Seen {
 
 type Shared = Arc<std::sync::Mutex<Seen>>;
 
+/// Why a run Ctrl+C (SIGHUP, SIGTERM) aborted ended, once one came.
+type Stopping = Arc<std::sync::Mutex<Option<String>>>;
+
+/// What the watch needs to log each run (design §16).
+struct Logging {
+    log: crate::run_log::RunLog,
+    hide: crate::run_log::Hide,
+    base: crate::run_log::Base,
+    /// The questions waiting on the owner as a run ends.
+    ask_owner: Option<AskOwner>,
+    stopping: Stopping,
+}
+
+impl Logging {
+    /// Appends the run `seeing` saw, ended as its `RunEnd` says; a write
+    /// that fails is a Warning, and the session goes on.
+    fn append(&self, session: &Session, seeing: crate::run_log::Seeing, ending: RunEnding) {
+        let stopping = self
+            .stopping
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        // Only the run the stop cut short: its `RunEnd` is the driver's
+        // end's (a run that ended just before keeps its own).
+        let cut_short = ending.error == Some(crate::frontend::session::STOPPED_DURING_THE_RUN);
+        let (outcome, error) = match (&stopping, cut_short) {
+            (Some(why), true) => (RunOutcome::Aborted, Some(why.as_str())),
+            _ => (ending.outcome, ending.error),
+        };
+        // `#N question`, in the order asked.
+        let waiting = self
+            .ask_owner
+            .as_ref()
+            .map(|ask| {
+                ask.open()
+                    .into_iter()
+                    .map(|(n, q)| format!("#{n} {}", q.question()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let entry = crate::run_log::entry(
+            &self.base,
+            seeing,
+            crate::run_log::Ending {
+                outcome,
+                error,
+                stats: ending.stats,
+                total_cost_usd: ending.total_cost_usd,
+                waiting,
+            },
+            &self.hide,
+        );
+        if let Err(e) = self.log.append(&entry) {
+            let said = format!("The run log could not be written: {e} (the run is not logged)");
+            tracing::warn!("{said}");
+            session.notice(NoticeLevel::Warning, said);
+        }
+    }
+}
+
+/// A `RunEnd`'s fields the log takes.
+struct RunEnding<'a> {
+    outcome: RunOutcome,
+    error: Option<&'a str>,
+    stats: &'a yoagent::SessionStats,
+    total_cost_usd: Option<f64>,
+}
+
+/// The page's past runs (`GET /runs`): the log's last [`PAST_RUNS`],
+/// oldest first, and how many lines could not be read; or why it could
+/// not be read.
+fn past_runs(log: &crate::run_log::RunLog) -> serde_json::Value {
+    match log.read(PAST_RUNS) {
+        Ok(read) => serde_json::json!({ "runs": read.entries, "unread": read.unread }),
+        Err(e) => serde_json::json!({ "runs": [], "error": e.to_string() }),
+    }
+}
+
+/// How the facts built-in's notice begins.
+const FACTS: &str = "Facts: ";
+
+/// How many past runs the page is given.
+const PAST_RUNS: usize = 20;
+
+/// The text of an assistant message, when it has any.
+fn answer_of(message: &yoagent::AgentMessage) -> Option<String> {
+    let yoagent::AgentMessage::Llm(yoagent::Message::Assistant { content, .. }) = message else {
+        return None;
+    };
+    let text: Vec<&str> = content
+        .iter()
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let text = text.join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
 /// Watches the session: how many runs ended (`ended`; it closes with the
 /// session), and what was seen; with `print`, each tool call and notice on
-/// stderr. Ends with the session.
+/// stderr; with `logging`, each run appended to the run log as it ends.
+/// Ends with the session.
 fn watch(
     session: &Session,
     print: bool,
+    logging: Option<Logging>,
 ) -> (
     Shared,
     tokio::sync::watch::Receiver<u64>,
@@ -1648,8 +1794,19 @@ fn watch(
     let task = tokio::spawn(async move {
         // The hints for refused tool calls said this run (each once).
         let mut said: HashSet<&'static str> = HashSet::new();
+        // The run in progress, for the log.
+        let mut seeing = crate::run_log::Seeing::default();
         loop {
             match watching.messages.recv().await {
+                Some(ServerMessage::RunStart { run, prompt }) => {
+                    seeing = crate::run_log::Seeing {
+                        started: crate::run_log::now(),
+                        since: Some(Instant::now()),
+                        run,
+                        task: prompt,
+                        ..Default::default()
+                    };
+                }
                 Some(ServerMessage::RunEnd {
                     outcome,
                     error,
@@ -1658,6 +1815,20 @@ fn watch(
                     ..
                 }) => {
                     said.clear();
+                    // Logged first: under `once` the session quits once
+                    // this run's end is counted.
+                    if let Some(logging) = &logging {
+                        logging.append(
+                            &notify,
+                            std::mem::take(&mut seeing),
+                            RunEnding {
+                                outcome,
+                                error: error.as_deref(),
+                                stats: &stats,
+                                total_cost_usd,
+                            },
+                        );
+                    }
                     if print {
                         eprintln!("  {}", cost(outcome, &stats, total_cost_usd));
                     }
@@ -1674,6 +1845,11 @@ fn watch(
                     ended.send_modify(|n| *n += 1);
                 }
                 Some(ServerMessage::Event { event, .. }) => {
+                    if let AgentEvent::MessageEnd { message } = &*event {
+                        if let Some(text) = answer_of(message) {
+                            seeing.answer = Some(text);
+                        }
+                    }
                     if let AgentEvent::ToolExecutionEnd {
                         tool_name,
                         result,
@@ -1690,6 +1866,7 @@ fn watch(
                             })
                             .collect();
                         let text = text.join(" ");
+                        seeing.tool(&tool_name, is_error);
                         // A call refused for a reason yobuild knows (the
                         // policy plugin gone, a handler failed): what to do,
                         // once a run — the run itself may still complete.
@@ -1713,6 +1890,10 @@ fn watch(
                     }
                 }
                 Some(ServerMessage::Notice { level, message }) => {
+                    // The facts built-in's line, for the log.
+                    if let (NoticeLevel::Info, Some(facts)) = (level, message.strip_prefix(FACTS)) {
+                        seeing.facts = Some(facts.to_owned());
+                    }
                     if print {
                         eprintln!("  {level:?}: {message}");
                     }

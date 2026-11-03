@@ -895,6 +895,27 @@ export function runEndLine({ run, outcome, error, totalCostUsd }) {
   }
 }
 
+// A past run's cost, as `yobuild log` says it (design §16): its dollars,
+// `<$0.0001`, `not priced`; with no turn, `nothing spent`, or `unknown` for
+// a run aborted or failed (its figures were lost with it).
+export function pastRunCost({ outcome, turns, costUsd } = {}) {
+  if (!turns) return outcome === 'aborted' || outcome === 'error' ? 'unknown' : 'nothing spent'
+  if (typeof costUsd !== 'number') return 'not priced'
+  if (costUsd > 0 && costUsd < 0.00005) return '<$0.0001'
+  return `$${costUsd.toFixed(4)}`
+}
+
+// A past run's line on the page, from its run log entry: when it started
+// (UTC, to the minute), how it ended, its cost, and the questions it left
+// waiting on the owner.
+export function pastRunLine(entry = {}) {
+  const when = String(entry.started ?? '').replace('T', ' ').replace(/:\d\dZ$/, ' UTC')
+  const ended = { completed: 'done', aborted: 'stopped', rejected: 'refused', stopped: 'stopped early', error: 'failed' }
+  const outcome = ended[entry.outcome] ?? String(entry.outcome ?? 'unknown')
+  const waiting = Array.isArray(entry.waiting) && entry.waiting.length ? ` · ${entry.waiting.length} waiting on you` : ''
+  return `${when} · ${outcome} · ${pastRunCost(entry)}${waiting}`
+}
+
 // Tool cards. A tool result may carry `details.view = {call?, result?}`: how
 // the tool wants its call shown, in a small card vocabulary (the DeepSeek
 // Harness one): generic, terminal, diff, search, read, web. Anything else is

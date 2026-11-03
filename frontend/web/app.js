@@ -9,7 +9,7 @@
 // A tool no plugin draws, whose result carries `details.view`, gets a card
 // (and its line the view's title).
 
-import { diffRows, drawMarkdown, jsonText, Questions, runEndLine, safeUrl, signInLink, toolView, viewTitle } from './lib.js'
+import { diffRows, drawMarkdown, jsonText, pastRunLine, Questions, runEndLine, safeUrl, signInLink, toolView, viewTitle } from './lib.js'
 
 const log = document.getElementById('log')
 const panels = document.getElementById('panels')
@@ -261,6 +261,49 @@ function onEvent(event) {
   }
 }
 
+// The agent's past runs, from its run log (design §16): newest first in
+// a side panel, each opened to its task, the questions it left waiting,
+// its facts and its report. Read again after each run (the log is written
+// as the run ends, so a little after the page hears it). A server without
+// a log (404), or an answer that cannot be read, shows nothing.
+const past = el('section', 'past')
+async function showPastRuns() {
+  let answer
+  try {
+    const response = await fetch(`/runs?t=${encodeURIComponent(token)}`, { cache: 'no-store' })
+    if (!response.ok) return
+    answer = await response.json()
+  } catch (error) {
+    console.warn('the past runs could not be read', error)
+    return
+  }
+  const runs = Array.isArray(answer?.runs) ? answer.runs : []
+  past.replaceChildren()
+  if (!runs.length && !answer?.error) {
+    past.remove()
+    return
+  }
+  if (!past.isConnected) panels.append(past)
+  past.append(el('h3', '', 'Past runs'))
+  if (answer?.error) past.append(el('div', 'note', `The run log could not be read: ${answer.error}`))
+  for (const entry of runs.slice().reverse()) {
+    const item = el('details', 'run')
+    item.append(el('summary', '', pastRunLine(entry)))
+    if (entry.task) item.append(el('div', 'you', `› ${entry.task}`))
+    if (entry.error) item.append(el('div', 'note', String(entry.error)))
+    for (const question of Array.isArray(entry.waiting) ? entry.waiting : []) {
+      item.append(el('div', 'waiting', `waiting on you: ${question}`))
+    }
+    if (entry.facts) item.append(el('div', 'note', String(entry.facts)))
+    if (entry.report) {
+      const report = el('div', 'answer')
+      markdown(String(entry.report), report)
+      item.append(report)
+    }
+    past.append(item)
+  }
+}
+
 // One question at a time, the next when it closes. Docked, not modal: the
 // page stays usable — read what the agent did, scroll, even type to it —
 // and the question is answered when the user is ready.
@@ -417,6 +460,7 @@ async function handle(message) {
       status.textContent = message.running ? 'working…' : 'ready'
       await loadPlugins(message.uiPlugins)
       for (const { id, request } of message.uiRequests ?? []) ask(id, request)
+      showPastRuns()
       return
     case 'uiPlugins':
       await loadPlugins(message.uiPlugins)
@@ -432,6 +476,7 @@ async function handle(message) {
       add(message.outcome === 'error' ? 'end error' : 'end', runEndLine(message))
       status.textContent = 'ready'
       answer = null
+      setTimeout(showPastRuns, 500)
       return
     case 'notice':
       add(message.level === 'error' ? 'notice error' : 'notice', message.message)

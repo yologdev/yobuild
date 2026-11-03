@@ -1,8 +1,9 @@
 //! `yobuild`: run an agent from its manifest, or check it.
 //!
 //! ```text
-//! yobuild run <agent.toml> [--scripted FILE] [--once] [--measure] [--web ADDR] [--locked] [--resume] [--] [TASK…]
+//! yobuild run <agent.toml> [--scripted FILE] [--once [--report FILE]] [--measure] [--web ADDR] [--locked] [--resume] [--] [TASK…]
 //! yobuild check <agent.toml> [--locked] [--json]
+//! yobuild log <agent.toml> [-n N] [--json]
 //! yobuild new <folder> [--from <agent>]
 //! yobuild new --list
 //! yobuild skill install [--project | --dir <folder>] [--force]
@@ -26,6 +27,9 @@
 //!   goes to stderr, then the agent's last answer and how the run ended
 //!   (`Completed`, `Stopped: …`, `Error: …`) to stdout; the exit code is
 //!   non-zero unless it completed.
+//! - `--report FILE` (with `--once`): the agent's last answer written to
+//!   FILE, whole or not at all (a run that gave none: a line saying how it
+//!   ended) — for a run started by cron or launchd (design §16).
 //! - `--measure`: after each run, say each plugin's hook time and each
 //!   plugin runtime's memory to every frontend (with `--once` always; else
 //!   in the log, at info).
@@ -42,6 +46,12 @@
 //! made): with `--once` the task's run, with the web page or the terminal
 //! UI the session's last — a run Ctrl+C stopped is aborted, and a terminal
 //! UI that stopped on its own is an error.
+//!
+//! Every run is logged as it ends (design §16): when, what it was asked,
+//! how it ended, its cost, its tools, the facts, the questions waiting on
+//! the owner and its report, under `YOBUILD_HOME` (default `~/.yobuild`),
+//! `logs/`. `log` prints an agent's last runs (`-n`, default 10), or
+//! `--json`.
 //!
 //! The agent works in the current folder. Its log goes to stderr
 //! (`RUST_LOG`, default warnings), or under a terminal UI to
@@ -82,8 +92,9 @@ fn layout(manifest: &Manifest, terminal: bool) -> Result<Layout, BoxError> {
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-const USAGE: &str = "usage: yobuild run <agent.toml> [--scripted FILE] [--once] [--measure] [--web ADDR] [--locked] [--] [TASK…]
+const USAGE: &str = "usage: yobuild run <agent.toml> [--scripted FILE] [--once [--report FILE]] [--measure] [--web ADDR] [--locked] [--] [TASK…]
        yobuild check <agent.toml> [--locked] [--json]
+       yobuild log <agent.toml> [-n N] [--json]
        yobuild new <folder> [--from <agent>]
        yobuild new --list
        yobuild skill install [--project | --dir <folder>] [--force]
@@ -114,6 +125,7 @@ fn start() -> Result<ExitCode, BoxError> {
     match command.as_deref() {
         Some("run") => {}
         Some("check") => return check(args),
+        Some("log") => return log(args),
         Some("new") => return new(args),
         Some("skill") => return skill(args),
         Some("-V" | "--version") => {
@@ -138,10 +150,23 @@ fn start() -> Result<ExitCode, BoxError> {
     let mut options = Options::new(manifest);
     let mut task = Vec::new();
     let mut web = false;
+    let mut report: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--scripted" => options.scripted = Some(args.next().ok_or(USAGE)?.into()),
             "--once" => options.once = true,
+            "--report" => {
+                if report.is_some() {
+                    return Err("--report given twice".into());
+                }
+                let file = args.next().ok_or(USAGE)?;
+                if file.starts_with('-') {
+                    return Err(
+                        format!("--report {file}: give the report's file after --report").into(),
+                    );
+                }
+                report = Some(file.into());
+            }
             "--measure" => options.measure = true,
             "--locked" => options.locked = true,
             "--resume" => options.resume = true,
@@ -162,10 +187,43 @@ fn start() -> Result<ExitCode, BoxError> {
     if options.once && options.task.is_none() {
         return Err("--once needs a task".into());
     }
+    if report.is_some() && !options.once {
+        return Err("--report needs --once (the task's run's answer is what it writes)".into());
+    }
+    // Its folder, before anything runs: a report that cannot be written is
+    // a run wasted.
+    if let Some(path) = &report {
+        let folder = folder_of(path);
+        if !folder.is_dir() {
+            return Err(format!(
+                "--report {}: its folder {} is not there",
+                path.display(),
+                folder.display()
+            )
+            .into());
+        }
+    }
     let terminal = options.manifest.frontend.terminal && !options.once;
     if web && (options.once || terminal) {
         return Err("--web: this run has no web frontend (--once, or a terminal manifest)".into());
     }
+    let ran = run_and_say(options, &path, report.as_deref(), terminal);
+    // Whatever stopped it before the run (no node on PATH under cron, say):
+    // no old report left standing as this run's.
+    if let (Err(e), Some(path)) = (&ran, &report) {
+        stopped_report(path, &e.to_string());
+    }
+    ran
+}
+
+/// `run` once its arguments are read: the log, yobuild's runtime files, the
+/// run, then what it says; `report` written as the run ends.
+fn run_and_say(
+    mut options: Options,
+    path: &std::path::Path,
+    report: Option<&std::path::Path>,
+    terminal: bool,
+) -> Result<ExitCode, BoxError> {
     let log = logging(terminal.then_some(options.manifest.agent.name.as_str()))?;
     // yobuild's own runtime files, from the cache (design §13), once the
     // log is there for what installing them warns of.
@@ -189,14 +247,36 @@ fn start() -> Result<ExitCode, BoxError> {
                 if let Some(fix) = yobuild::run::what_to_do_at_start(&e.to_string()) {
                     eprintln!("  what to do: {fix}");
                 }
+                // No old report left standing as this run's.
+                if let Some(path) = report {
+                    stopped_report(path, &e.to_string());
+                }
                 ExitCode::FAILURE
             }
             // The last run's answer (`--once`: the task's) and how it ended.
             Ok(ended) => {
                 let answer = ended.agent.as_ref().and_then(|a| last_answer(a.messages()));
-                if let (true, Some(answer)) = (once, answer) {
+                if let (true, Some(answer)) = (once, &answer) {
                     println!("{answer}");
                 }
+                // The report file, whatever the outcome: a run that gave no
+                // answer says how it ended, so an old report is never left
+                // standing as this run's.
+                let written = report.map(|path| {
+                    let text = match (&answer, ended.outcome) {
+                        (Some(answer), _) => format!("{answer}\n"),
+                        (None, Some(outcome)) => format!(
+                            "No answer: the run ended {outcome:?}{}.\n",
+                            ended
+                                .error
+                                .as_deref()
+                                .map(|e| format!(": {e}"))
+                                .unwrap_or_default()
+                        ),
+                        (None, None) => "No answer: no run was made.\n".to_owned(),
+                    };
+                    write_report(path, &text)
+                });
                 // (`--once` printed what to do among its notices.)
                 let fix = ended
                     .outcome
@@ -223,9 +303,15 @@ fn start() -> Result<ExitCode, BoxError> {
                         path.display()
                     );
                 }
-                match ended.outcome {
-                    Some(RunOutcome::Completed) | None => ExitCode::SUCCESS,
-                    Some(_) => ExitCode::FAILURE,
+                match (ended.outcome, written) {
+                    // A report that could not be written fails the run:
+                    // what a scheduled run is for is missing.
+                    (_, Some(Err(e))) => {
+                        eprintln!("yobuild: --report {e}");
+                        ExitCode::FAILURE
+                    }
+                    (Some(RunOutcome::Completed) | None, _) => ExitCode::SUCCESS,
+                    (Some(_), _) => ExitCode::FAILURE,
                 }
             }
         };
@@ -237,6 +323,96 @@ fn start() -> Result<ExitCode, BoxError> {
         }
         Ok(code)
     })
+}
+
+/// The folder `path` is written in.
+fn folder_of(path: &std::path::Path) -> &std::path::Path {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => std::path::Path::new("."),
+    }
+}
+
+/// `text` written to `path` whole or not at all: a temporary file in its
+/// folder (0600, as `tempfile` makes it), synced, renamed over it. Errors
+/// name the path.
+fn write_report(path: &std::path::Path, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let failed = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let mut temp = tempfile::NamedTempFile::new_in(folder_of(path)).map_err(|e| failed(&e))?;
+    temp.write_all(text.as_bytes()).map_err(|e| failed(&e))?;
+    temp.as_file().sync_all().map_err(|e| failed(&e))?;
+    temp.persist(path).map_err(|e| failed(&e.error))?;
+    Ok(())
+}
+
+/// The report of a run yobuild stopped before or as it started: why.
+fn stopped_report(path: &std::path::Path, error: &str) {
+    if let Err(e) = write_report(path, &format!("No answer: yobuild stopped: {error}\n")) {
+        eprintln!("yobuild: --report {e}");
+    }
+}
+
+/// `yobuild log <agent.toml> [-n N] [--json]`: the agent's last runs, as
+/// its run log keeps them (design §16) — oldest first, so the latest is
+/// last; `--json` the entries as logged.
+fn log(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
+    use std::io::Write;
+    use yobuild::run_log::RunLog;
+    let path = match args.next() {
+        Some(help) if help == "-h" || help == "--help" => {
+            println!("{USAGE}");
+            return Ok(ExitCode::SUCCESS);
+        }
+        Some(path) if !path.starts_with('-') => PathBuf::from(path),
+        _ => return Err(USAGE.into()),
+    };
+    let manifest = Manifest::load(&path)?;
+    let (mut n, mut json) = (10, false);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--json" => json = true,
+            "-n" => {
+                let given = args.next().ok_or(USAGE)?;
+                n = given
+                    .parse()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .ok_or_else(|| format!("-n {given}: a number of runs, 1 or more"))?;
+            }
+            other => return Err(format!("unknown option {other}\n{USAGE}").into()),
+        }
+    }
+    let log = RunLog::of(&manifest, None)?;
+    let read = log.read(n)?;
+    let text = match json {
+        true => format!("{}\n", serde_json::to_string_pretty(&read.entries)?),
+        false if read.entries.is_empty() => format!(
+            "no runs of {} logged yet (in {})\n",
+            manifest.agent.name,
+            log.dir().display()
+        ),
+        false => format!(
+            "the last {} run(s) of {} (in {}):\n{}",
+            read.entries.len(),
+            manifest.agent.name,
+            log.dir().display(),
+            yobuild::run_log::text(&read.entries, 6)
+        ),
+    };
+    if read.unread > 0 {
+        eprintln!(
+            "yobuild: {} line(s) of the log could not be read (another yobuild's, or broken): skipped",
+            read.unread
+        );
+    }
+    // A reader gone (a closed pipe) is not an error; any other failure is.
+    if let Err(e) = std::io::stdout().write_all(text.as_bytes()) {
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            return Err(format!("writing the log: {e}").into());
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `yobuild new <folder> [--from <agent>]`: a new agent's folder, the
@@ -449,7 +625,7 @@ fn logging(agent: Option<&str>) -> Result<Option<PathBuf>, BoxError> {
     Ok(Some(path))
 }
 
-/// The text of the agent's last answer.
+/// The text of the agent's last answer (a blank one is none).
 fn last_answer(messages: &[AgentMessage]) -> Option<String> {
     messages.iter().rev().find_map(|m| match m {
         AgentMessage::Llm(Message::Assistant { content, .. }) => {
@@ -460,7 +636,9 @@ fn last_answer(messages: &[AgentMessage]) -> Option<String> {
                     _ => None,
                 })
                 .collect();
-            (!text.is_empty()).then(|| text.join("\n"))
+            // A blank answer is none.
+            let text = text.join("\n");
+            (!text.trim().is_empty()).then_some(text)
         }
         _ => None,
     })

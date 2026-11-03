@@ -95,6 +95,7 @@ cd research                                               # an agent works in th
 yobuild check agent.toml                                  # vet every plugin, no model or key needed
 yobuild run agent.toml --scripted scripts/demo.json --once "$(cat scripts/demo.task)"   # scripted: no key (its searches still search)
 DEEPSEEK_API_KEY=… yobuild run agent.toml                 # live: open the URL it prints
+yobuild log agent.toml                                    # its past runs: outcome, cost, report, questions waiting
 ```
 
 Each gallery agent's copy has a README saying what it needs and does (the
