@@ -5,7 +5,11 @@ base changed**, because a lock with DSH plugins records it: when it
 changed, `--locked` refuses such a lock, and one run without `--locked`
 locks it again (commit the new lock).
 
-## Unreleased
+## 0.3.0 — 2026-11-03
+
+Agents you can keep: a sign-in for remote servers, sessions that survive
+a restart, a run log and runs on a schedule, and an opt-in sandbox.
+**The DSH base changed** (below).
 
 - **A sign-in for remote MCP servers** (OAuth in your browser; design
   §14 "Stage 4"):

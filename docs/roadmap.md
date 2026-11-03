@@ -378,7 +378,7 @@ Later: rutis plugins (§14, "Later steps"), once some are published.
   page shows no cost (the run log, M6, will).
 - **Next:** a release.
 
-## M6 — 1.0: an agent you keep (proposed 2026-11-03)
+## M6 — 1.0: an agent you keep (proposed 2026-11-03; sessions #115, the sandbox #114, the run log #116 built 2026-11-03)
 
 What real users need before 1.0: an agent that survives a restart, runs
 without you, keeps a record, and can be confined. Each part is its own
@@ -386,15 +386,19 @@ PR with its design section.
 
 - **Loose ends:** the README's status; a live sign-in to a real OAuth
   server (done 2026-11-03, Linear: stage 4 above); a local model
-  run (Ollama); the Linux tarballs checked by hand; 0.3.0.
-- **Sessions that survive a restart:** the conversation, the open
-  questions and the session's spend saved per agent and resumed.
+  run (Ollama); the Linux tarballs checked by hand; 0.3.0 (prepared
+  2026-11-03).
+- **Sessions that survive a restart** (built, #115; design §15): the
+  conversation, the open questions and the session's spend saved per
+  agent and folder, and resumed with `--resume`.
 - **A run log, and unattended runs:** each run's facts, cost, outcome
   and report kept in a local log, shown on the page; a run started on a
   schedule or a trigger (cron, launchd) whose report is saved and whose
-  questions wait for the owner.
+  questions wait for the owner (built, #116; design §16: `yobuild log`,
+  the page's past runs, `--once --report FILE`).
 - **An opt-in sandbox** for plugin runtimes and stdio MCP servers
-  (Linux: bubblewrap; macOS: `sandbox-exec`).
+  (Linux: bubblewrap; macOS: `sandbox-exec`) (built, #114; design §17:
+  `[sandbox]`).
 - **The newcomer test:** someone who has not seen yobuild builds an
   agent from the docs alone; what they trip on is fixed.
 - **1.0**, with open question 2 (the library's API) decided.
