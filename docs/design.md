@@ -6431,22 +6431,29 @@ node delegating a task (yo's M3). A CLI mode, not a library entry point
   `127.0.0.1:8787`; `phone` refused), with no task of its own (a task,
   `--once`, `--report` or `--web` refused). Its stdout says the page's URL,
   then `tasks: {"runs": "<base>/api/runs", "token": …, "pid": …}`, which
-  is also written, 0600, to `<home>/serve/<agent>-<hash>.json` (named as
-  the agent's run log folder) and removed as it ends.
+  is also written, 0600, to `<home>/serve/<agent>-<hash>.json` (the hash
+  over the manifest's path and the working folder, as a session's folder)
+  and removed as it ends, when it still holds this process's `pid`. That
+  token is the API's own: the page's does not open the API, nor the API's
+  the page, so a program cannot answer the owner's questions.
 - `[serve] approval = "run" | "ask" | "never"`, the owner's in
   `agent.toml`, never the caller's: without the table, or with `never`,
   `serve` is refused. With `ask` each task is put to the owner's
   frontends (Allow/Block, `UI_TIMEOUT`) as its turn comes; Block, no
-  answer, or nobody on the page refuses it, said in its `why`.
-- The API, beside the page's routes and behind its token (`?t=` or
+  answer, or nobody on the page refuses it, said in its `why`. Whoever
+  reads `serve`'s stdout has the page's URL too: the owner's launcher.
+- The API, beside the page's routes and behind its own token (`?t=` or
   `Authorization: Bearer`): `POST /api/runs` `{"task": "…"}` (JSON only —
   `Content-Type: application/json`, so a page elsewhere cannot send one
   without a preflight this server never answers; a blank task, one over
-  64 KiB, or a 101st waiting refused) → 202 and its status; `GET
+  65,536 characters, or a 101st queued — not yet asked or sent — refused)
+  → 202 and its status; `GET
   /api/runs/{id}[?wait=S]` its status, held up to `S` (≤ 600) seconds
   until it is done; `GET /api/runs/{id}/events` its run's messages as JSON
   lines (`runStart`, `event`, `runEnd`, as the page gets them; those
-  before included), the last `{"type": "task", "task": <status>}`. A
+  before included; a first line `{"type": "missed"}` when its beginning is
+  no longer held), the last `{"type": "task", "task": <status>}`, after
+  its run's `runEnd`. A
   status: `id` (`t1`, `t2`, …), `state` (`queued`, `asking`, `sent`,
   `running`, `ended`, `refused`), `done`, `run` (the session's), `why`,
   and `entry`: the run log's entry (§16) — the answer as `report`, the
@@ -6454,11 +6461,14 @@ node delegating a task (yo's M3). A CLI mode, not a library entry point
 - One task at a time, in the order sent: the next is put to the owner, or
   sent, once the last is done. A task is sent as a prompt; its run is the
   next to start with its text (a run the owner starts from the page
-  meanwhile is not it). The session is one, so a task sees the
-  conversation so far, as the page's prompts do; `[session]` and
-  `--resume` as for `run`. The run log's `mode` is `serve`. As the session
-  ends, every task not done is refused ("the session ended before it
-  ran").
+  meanwhile is not it). Sent behind the owner's run, it waits for it; a
+  reset then drops it, refused ("the session was reset before it ran").
+  The session is one, so a task sees the conversation so far, as the
+  page's prompts do; `[session]` and `--resume` as for `run`. The run log's
+  `mode` is `serve`. As the session ends no task is taken, and once its
+  runs' ends are seen, every task not done is refused ("the session ended
+  before it ran", or "… while it ran (its end was not seen)"); a worker
+  that fails is an Error notice and refuses them the same way.
 - Open until yo's M3 decides: whether `serve` speaks A2A itself or the
   node translates; one session per caller, or a fresh one per task.
 

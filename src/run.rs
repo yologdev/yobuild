@@ -674,27 +674,35 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         let _ = writeln!(std::io::stdout(), "{name}: {url}  (Ctrl+C to stop)");
         if jobs.is_some() {
             let base = format!("http://{}", web.addr());
-            let said = serve::said(&base, web.token());
+            let said = serve::said(&base, web.api_token().expect("the API's token"));
             let _ = writeln!(std::io::stdout(), "{name}: tasks: {said}");
-            serve_file = run_log.as_ref().and_then(|log| {
-                let file = serve::file_of(log);
-                match serve::write(&file, format!("{said}\n").as_bytes()) {
-                    Ok(()) => Some(file),
-                    Err(e) => {
-                        let said = format!("{}: could not be written: {e}", file.display());
-                        tracing::warn!("{said}");
-                        session.notice(NoticeLevel::Warning, said);
-                        None
-                    }
+            let written = serve::file_of(&manifest, &cwd, home.as_deref()).and_then(
+                |file| -> Result<PathBuf, BoxError> {
+                    serve::write(&file, format!("{said}\n").as_bytes())
+                        .map_err(|e| format!("{}: {e}", file.display()))?;
+                    Ok(file)
+                },
+            );
+            match written {
+                Ok(file) => serve_file = Some(file),
+                Err(e) => {
+                    let said = format!(
+                        "The task file programs find the API by could not be written (the `tasks:` line on stdout has it): {e}"
+                    );
+                    tracing::warn!("{said}");
+                    eprintln!("{name}: {said}");
+                    session.notice(NoticeLevel::Warning, said);
                 }
-            });
+            }
             match manifest.serve {
                 Some(crate::manifest::Approval::Ask) => eprintln!(
                     "{name}: each task a program sends is put to you on the page first ([serve] approval = \"ask\")"
                 ),
-                _ => eprintln!(
+                Some(crate::manifest::Approval::Run) => eprintln!(
                     "{name}: each task a program sends runs as sent ([serve] approval = \"run\")"
                 ),
+                // `serving` refused the rest before anything started.
+                _ => {}
             }
         }
         if task.is_some() {
@@ -768,7 +776,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     };
     let mut driving = tokio::spawn(driver.run(agent));
     // `yobuild serve`: its tasks, one at a time, once the session runs.
-    let working = match (&jobs, queue, manifest.serve) {
+    let mut working = match (&jobs, queue, manifest.serve) {
         (Some(jobs), Some(queue), Some(approval)) => Some(tokio::spawn(serve::work(
             jobs.clone(),
             session.clone(),
@@ -806,6 +814,20 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                 }
             }
             _ = tick.tick() => {
+                // `serve`'s worker never returns while the session runs: one
+                // that did failed, and no task would run again.
+                if let Some(worker) = working.take_if(|w| w.is_finished()) {
+                    let why = match worker.await {
+                        Err(e) => e.to_string(),
+                        Ok(()) => "it returned".into(),
+                    };
+                    let said = format!("yobuild serve's task worker stopped ({why}): no more tasks are run this session");
+                    tracing::error!("{said}");
+                    session.notice(NoticeLevel::Error, said);
+                    if let Some(jobs) = &jobs {
+                        jobs.close_with("the task worker stopped");
+                    }
+                }
                 if signs_in.is_some() && session.frontends() > 0 {
                     let servers = signs_in.take().expect("servers that sign in");
                     let signs = load::sign_in_all(
@@ -911,16 +933,17 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             (agent, None, Some(format!("the terminal UI stopped: {why}")))
         }
     };
-    // `serve`'s tasks not run are refused, its worker stopped, its token's
-    // file removed.
+    // `serve` takes no more tasks, its worker stopped, its token's file
+    // removed (when still its own); those not done are refused once the
+    // watch has seen the runs end (below).
     if let Some(jobs) = &jobs {
-        jobs.close();
+        jobs.closing();
     }
     if let Some(working) = working {
         working.abort();
     }
     if let Some(file) = serve_file {
-        if let Err(e) = std::fs::remove_file(&file) {
+        if let Err(e) = serve::remove_own(&file) {
             tracing::warn!("{}: {e}", file.display());
         }
     }
@@ -948,6 +971,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     });
     let mut ended = finish(seen, watching, agent, once, interrupted).await;
     ended.saved = saved;
+    if let Some(jobs) = &jobs {
+        jobs.close();
+    }
     // However it ended: what was loaded, and how to keep it (nothing is
     // written). Each was said as a notice when it was kept; the binary
     // writes this once the runtimes have stopped (the terminal UI may hold
@@ -1880,7 +1906,13 @@ impl Logging {
         if let Some(jobs) = &self.jobs {
             match serde_json::to_value(&entry) {
                 Ok(value) => jobs.ended(entry.run, value),
-                Err(e) => tracing::warn!("a run's entry is not serializable: {e}"),
+                Err(e) => {
+                    tracing::warn!("a run's entry is not serializable: {e}");
+                    jobs.ended(
+                        entry.run,
+                        serde_json::json!({ "error": format!("its entry could not be made: {e}") }),
+                    );
+                }
             }
         }
     }

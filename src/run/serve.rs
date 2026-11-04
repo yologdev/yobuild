@@ -15,7 +15,8 @@ use crate::frontend::session::UI_TIMEOUT;
 use crate::frontend::{Session, UiRequest};
 use crate::manifest::Approval;
 
-/// The most tasks waiting at once: one more is refused, not queued.
+/// The most tasks queued at once (not yet put to the owner or sent): one
+/// more is refused, not queued.
 pub(crate) const QUEUED_AT_MOST: usize = 100;
 
 /// The most characters a task may have.
@@ -29,12 +30,13 @@ enum State {
     /// Put to the owner (`approval = "ask"`).
     Asking,
     /// Sent to the session; its run has not started yet (a run the owner
-    /// started from the page may still be going).
+    /// started from the page may still be going). A reset meanwhile drops
+    /// it: refused, as the worker sees the session's generation move on.
     Sent,
     Running,
     Ended,
-    /// Not run: the owner blocked it, nobody answered, or the session
-    /// ended first.
+    /// Not run, or not seen to end: the owner blocked it, nobody answered,
+    /// a reset dropped it, or the session ended first.
     Refused,
 }
 
@@ -146,14 +148,44 @@ impl Jobs {
         });
     }
 
-    /// The session ended: every job not done is refused, and no new one is
-    /// taken.
+    /// The session is ending: no new job is taken (those there are left to
+    /// the watch, which may still see a run end: [`Jobs::close`] after).
+    pub(crate) fn closing(&self) {
+        self.with(|inner| inner.closed = true);
+    }
+
+    /// The session ended and its watch with it: every job not done is
+    /// refused, said by where it was; no new one is taken.
     pub(crate) fn close(&self) {
+        self.close_with("the session ended");
+    }
+
+    /// [`Jobs::close`], saying `why` the session took no more.
+    pub(crate) fn close_with(&self, why: &str) {
         self.with(|inner| {
             inner.closed = true;
+            inner.sent = None;
             for job in inner.jobs.values_mut().filter(|j| !j.state.done()) {
+                let when = match job.state {
+                    State::Running => "while it ran (its end was not seen)",
+                    _ => "before it ran",
+                };
                 job.state = State::Refused;
-                job.why = Some("the session ended before it ran".into());
+                job.why = Some(format!("{why} {when}"));
+            }
+        });
+    }
+
+    /// The job `id`, still sent and not seen to start, refused for `why`.
+    fn refuse_sent(&self, id: &str, why: &str) {
+        self.with(|inner| {
+            let Some(job) = inner.jobs.get_mut(id) else {
+                return;
+            };
+            if job.state == State::Sent {
+                job.state = State::Refused;
+                job.why = Some(why.into());
+                inner.sent = None;
             }
         });
     }
@@ -172,7 +204,11 @@ impl crate::frontend::web::Api for Jobs {
             if inner.closed {
                 return Err("the session has ended".to_owned());
             }
-            let waiting = inner.jobs.values().filter(|j| !j.state.done()).count();
+            let waiting = inner
+                .jobs
+                .values()
+                .filter(|j| j.state == State::Queued)
+                .count();
             if waiting >= QUEUED_AT_MOST {
                 return Err(format!(
                     "{waiting} tasks are waiting already: send it once one has ended"
@@ -266,23 +302,62 @@ pub(crate) async fn work(
                 continue;
             }
         }
+        // Watched from here: a reset drops a prompt the driver queued
+        // behind a run, and only its `RunStart` (broadcast before the
+        // driver reads a later reset) tells it was not dropped. The history
+        // replay is read first, so an earlier run of the same text is not
+        // taken for it.
+        let mut watching = session.observe();
+        while watching.messages.try_recv().is_ok() {}
+        let generation = session.generation();
         jobs.with(|inner| {
             inner.sent = Some(id.clone());
             if let Some(job) = inner.jobs.get_mut(&id) {
                 job.state = State::Sent;
             }
         });
-        if !session.send(ClientMessage::Prompt { text: task }) {
+        if !session.send(ClientMessage::Prompt { text: task.clone() }) {
             jobs.set(&id, State::Refused, Some("the session has ended".into()));
             continue;
         }
+        let mut seen = false;
         // Until its run ends (or the session does: `close`).
-        while !jobs.state(&id).is_none_or(State::done) {
-            if changes.changed().await.is_err() {
-                return;
+        loop {
+            match jobs.state(&id) {
+                None => break,
+                Some(state) if state.done() => break,
+                Some(State::Sent) if !seen => {
+                    seen = started_in(&mut watching, &task);
+                    if !seen && session.generation() != generation {
+                        jobs.refuse_sent(&id, "the session was reset before it ran");
+                        continue;
+                    }
+                }
+                Some(_) => {}
+            }
+            tokio::select! {
+                changed = changes.changed() => if changed.is_err() {
+                    return;
+                },
+                _ = tokio::time::sleep(SENT_LOOK), if !seen => {}
             }
         }
     }
+}
+
+/// How often a sent job is looked at for a reset that dropped it.
+const SENT_LOOK: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Whether a run with `task` as its prompt started among what `watching`
+/// got since it was last read (read to the end, so it stays small).
+fn started_in(watching: &mut crate::frontend::Connection, task: &str) -> bool {
+    let mut started = false;
+    while let Ok(message) = watching.messages.try_recv() {
+        if let crate::frontend::ServerMessage::RunStart { prompt, .. } = message {
+            started |= prompt == task;
+        }
+    }
+    started
 }
 
 /// What a program needs to find the API, written where `yobuild serve`
@@ -295,16 +370,41 @@ pub(crate) fn said(url: &str, token: &str) -> Json {
     })
 }
 
-/// Where `yobuild serve` writes [`said`] for the agent whose run log is
-/// `log`: `<home>/serve/<agent>-<hash>.json`, named as the log's folder.
-pub(crate) fn file_of(log: &crate::run_log::RunLog) -> std::path::PathBuf {
-    let dir = log.dir();
-    let home = dir
-        .parent()
-        .and_then(std::path::Path::parent)
-        .unwrap_or(dir);
-    let name = dir.file_name().unwrap_or_default().to_string_lossy();
-    home.join("serve").join(format!("{name}.json"))
+/// Where `yobuild serve` writes [`said`] for `manifest` served from `cwd`:
+/// `<home>/serve/<agent>-<hash>.json`, the hash over the manifest's path
+/// (links resolved) and the working folder, as a session's folder is
+/// named — so serving one agent from two folders writes two files.
+pub(crate) fn file_of(
+    manifest: &crate::manifest::Manifest,
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, super::BoxError> {
+    let home = match home {
+        Some(home) => home.to_owned(),
+        None => crate::install::home()?,
+    };
+    let file = manifest.dir.join(crate::install::file_name(&manifest.path));
+    let file = std::fs::canonicalize(&file).unwrap_or(file);
+    let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_owned());
+    let hash = crate::install::sha256_hex(&[
+        file.as_os_str().as_encoded_bytes(),
+        cwd.as_os_str().as_encoded_bytes(),
+    ]);
+    let name = format!("{}-{}.json", manifest.agent.name, &hash[..16]);
+    Ok(home.join("serve").join(name))
+}
+
+/// Removes `file` when it is still this process's (another `yobuild serve`
+/// of the same agent and folder may have written its own over it since).
+pub(crate) fn remove_own(file: &std::path::Path) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(file)?;
+    let pid = serde_json::from_str::<Json>(&text)
+        .ok()
+        .and_then(|said| said["pid"].as_u64());
+    match pid == Some(u64::from(std::process::id())) {
+        true => std::fs::remove_file(file),
+        false => Ok(()),
+    }
 }
 
 /// Writes `bytes` to `file` whole, readable by this user only: its folder
@@ -375,15 +475,54 @@ mod tests {
             .submit("t".into())
             .unwrap_err()
             .contains("waiting already"));
-        jobs.close();
-        let status = jobs.status("t1").unwrap();
-        assert_eq!(
-            (&status["state"], &status["why"]),
-            (&"refused".into(), &"the session ended before it ran".into())
-        );
+        // One sent and running: no longer counted as waiting.
+        jobs.with(|inner| {
+            inner.jobs.get_mut("t1").unwrap().state = State::Running;
+            inner.jobs.get_mut("t1").unwrap().run = Some(1);
+        });
+        jobs.submit("t".into()).unwrap();
+        jobs.closing();
         assert_eq!(
             jobs.submit("t".into()).unwrap_err(),
             "the session has ended"
+        );
+        // Closing leaves a running one to the watch.
+        jobs.ended(1, json!({ "run": 1 }));
+        jobs.close();
+        let why = |id: &str| jobs.status(id).unwrap()["why"].clone();
+        assert_eq!(jobs.status("t1").unwrap()["state"], "ended");
+        assert_eq!(why("t2"), "the session ended before it ran");
+        assert_eq!(
+            jobs.submit("t".into()).unwrap_err(),
+            "the session has ended"
+        );
+    }
+
+    #[test]
+    fn a_job_not_seen_to_end_is_said_so_and_only_a_sent_one_refused_as_sent() {
+        let (jobs, _queue) = Jobs::new();
+        jobs.submit("a".into()).unwrap();
+        jobs.submit("b".into()).unwrap();
+        jobs.with(|inner| {
+            inner.sent = Some("t1".into());
+            inner.jobs.get_mut("t1").unwrap().state = State::Sent;
+        });
+        jobs.refuse_sent("t2", "reset");
+        assert_eq!(jobs.status("t2").unwrap()["state"], "queued");
+        jobs.refuse_sent("t1", "the session was reset before it ran");
+        assert_eq!(
+            jobs.status("t1").unwrap()["why"],
+            "the session was reset before it ran"
+        );
+        jobs.started(3, "a");
+        assert_eq!(jobs.run_of("t1"), Some(None), "a refused job is not bound");
+        jobs.with(|inner| {
+            inner.jobs.get_mut("t2").unwrap().state = State::Running;
+        });
+        jobs.close_with("the worker stopped");
+        assert_eq!(
+            jobs.status("t2").unwrap()["why"],
+            "the worker stopped while it ran (its end was not seen)"
         );
     }
 }

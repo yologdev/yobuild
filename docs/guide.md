@@ -258,9 +258,11 @@ A program on the same machine sends a task with `POST /api/runs`
 (`{"task": "…"}`, JSON, the token as `Authorization: Bearer …`) and gets
 an id; `GET /api/runs/<id>?wait=60` says where it is, and once it ran,
 its run log entry: the answer, the outcome, the cost. Tasks run one at a
-time in the session the page shows. The URL and token are printed, and
-written for your user only to `serve/<agent>-<hash>.json` under yobuild's
-home. [§18](design.md#18-what-yo-reads-app-the-static-check-serve-post-10-asked-2026-11-04)
+time in the session the page shows. The API's URL and its own token
+(not the page's: a program cannot answer your questions on the page) are
+printed after the page's URL, and written for your user only to
+`serve/<agent>-<hash>.json` under yobuild's home, one file per agent and
+folder. [§18](design.md#18-what-yo-reads-app-the-static-check-serve-post-10-asked-2026-11-04)
 is the design.
 
 ## Checking an agent

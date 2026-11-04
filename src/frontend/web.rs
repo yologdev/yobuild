@@ -12,8 +12,10 @@
 //!   §18): `POST /api/runs` `{"task": …}` queues a task; `GET
 //!   /api/runs/{id}` (`?wait=S`, up to 600 s, until it is done) says where
 //!   it is; `GET /api/runs/{id}/events` streams its run's messages, one
-//!   JSON line each, the last its status. The token is required, as
-//!   `?t=…` or `Authorization: Bearer …`; a `POST` must be JSON
+//!   JSON line each, the last its status. The API's own token is required
+//!   ([`Served::api_token`]; not the page's, which it cannot stand in
+//!   for: a program holding it cannot open `/ws` and answer the owner's
+//!   questions), as `?t=…` or `Authorization: Bearer …`; a `POST` must be JSON
 //!   (`Content-Type: application/json`), so a page elsewhere cannot send
 //!   one without the browser asking first, which this server never allows.
 //!
@@ -49,6 +51,7 @@ const LIB: &str = include_str!("../../frontend/web/lib.js");
 pub struct Served {
     addr: SocketAddr,
     token: String,
+    api_token: Option<String>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -68,6 +71,12 @@ impl Served {
         &self.token
     }
 
+    /// The token `/api/runs` requires, with an [`Api`] ([`serve_api`]):
+    /// another than the page's, which the API does not take either.
+    pub fn api_token(&self) -> Option<&str> {
+        self.api_token.as_deref()
+    }
+
     /// Stop serving: no new connections (open ones end with their socket).
     pub fn stop(self) {}
 }
@@ -83,7 +92,8 @@ struct App {
     session: Session,
     token: std::sync::Arc<str>,
     runs: Option<PastRuns>,
-    api: Option<std::sync::Arc<dyn Api>>,
+    /// The API and its own token.
+    api: Option<(std::sync::Arc<dyn Api>, std::sync::Arc<str>)>,
 }
 
 /// Tasks a program on this machine sends (`yobuild serve`, design §18):
@@ -156,11 +166,14 @@ async fn serving(
 ) -> std::io::Result<Served> {
     let page = Html(index(agent));
     let token = uuid::Uuid::new_v4().simple().to_string();
+    let api_token = api
+        .is_some()
+        .then(|| uuid::Uuid::new_v4().simple().to_string());
     let state = App {
         session,
         token: token.clone().into(),
         runs,
-        api,
+        api: api.zip(api_token.clone().map(Into::into)),
     };
     let app = Router::new()
         .route("/", get(move || async move { page }))
@@ -184,6 +197,7 @@ async fn serving(
     Ok(Served {
         addr: bound,
         token,
+        api_token,
         task,
     })
 }
@@ -204,22 +218,27 @@ async fn ui_plugin(State(app): State<App>, Path(file): Path<String>) -> Response
     }
 }
 
-/// Whether `query` carries the server's token.
+/// Whether `query` carries the page's token.
 fn token_given(app: &App, query: Option<&str>) -> bool {
-    let given = query
-        .unwrap_or_default()
-        .split('&')
-        .find_map(|pair| pair.strip_prefix("t="));
-    given == Some(&*app.token)
+    query_token(query) == Some(&*app.token)
 }
 
-/// Whether `query` or the `Authorization: Bearer` header carries the token.
-fn api_token_given(app: &App, query: Option<&str>, headers: &HeaderMap) -> bool {
+/// The `t=` of `query`.
+fn query_token(query: Option<&str>) -> Option<&str> {
+    query
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("t="))
+}
+
+/// Whether `query` or the `Authorization: Bearer` header carries `token`
+/// (the API's).
+fn api_token_given(token: &str, query: Option<&str>, headers: &HeaderMap) -> bool {
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    bearer == Some(&*app.token) || token_given(app, query)
+    bearer == Some(token) || query_token(query) == Some(token)
 }
 
 fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
@@ -244,18 +263,19 @@ fn api_of(
     query: Option<&str>,
     headers: &HeaderMap,
 ) -> Result<std::sync::Arc<dyn Api>, Box<Response>> {
-    if !api_token_given(app, query, headers) {
+    let Some((api, token)) = &app.api else {
         return Err(Box::new(api_error(
-            StatusCode::FORBIDDEN,
-            "a valid token is required",
-        )));
-    }
-    app.api.clone().ok_or_else(|| {
-        Box::new(api_error(
             StatusCode::NOT_FOUND,
             "this session takes no tasks: `yobuild serve` does",
-        ))
-    })
+        )));
+    };
+    if !api_token_given(token, query, headers) {
+        return Err(Box::new(api_error(
+            StatusCode::FORBIDDEN,
+            "a valid token is required (the API's, not the page's)",
+        )));
+    }
+    Ok(api.clone())
 }
 
 /// `POST /api/runs` `{"task": "…"}`: 202 and the task's status.
@@ -379,14 +399,19 @@ async fn events(
         let mut changes = api.changes();
         // Its run's messages until it started are held: the history replay
         // and what comes may hold them before the task knows its run.
-        let mut held: Vec<ServerMessage> = Vec::new();
+        let mut held: std::collections::VecDeque<ServerMessage> = Default::default();
+        // Bounded: a task waiting long behind others (what is let go is
+        // said, below, as its run's beginning missed).
+        let hold = |held: &mut std::collections::VecDeque<ServerMessage>, message| {
+            if held.len() >= HELD_AT_MOST {
+                held.pop_front();
+            }
+            held.push_back(message);
+        };
         // The history replay is there at once: held, so a task done already
         // still streams its run.
         while let Ok(message) = watching.messages.try_recv() {
-            if held.len() >= HELD_AT_MOST {
-                held.remove(0);
-            }
-            held.push(message);
+            hold(&mut held, message);
         }
         let line = |value: &serde_json::Value| Ok(Bytes::from(format!("{value}\n")));
         let of_run = |message: &ServerMessage| match message {
@@ -395,42 +420,59 @@ async fn events(
             | ServerMessage::RunEnd { run, .. } => Some(*run),
             _ => None,
         };
+        // Whether the run's first line went out: a `runStart`, or a line
+        // saying its beginning is no longer held.
+        let mut begun = false;
         loop {
-            let run = api.run_of(&id).flatten();
-            if let Some(run) = run {
+            // Done is read first, then what came meanwhile: the run's last
+            // messages (its `runEnd`) are in the channel before its task is
+            // done, so none is left behind the status line.
+            let status = api.status(&id).unwrap_or_default();
+            let done = status["done"].as_bool().unwrap_or(true);
+            if done {
+                while let Ok(message) = watching.messages.try_recv() {
+                    hold(&mut held, message);
+                }
+            }
+            if let Some(run) = api.run_of(&id).flatten() {
                 for message in held.drain(..).filter(|m| of_run(m) == Some(run)) {
-                    let Ok(value) = serde_json::to_value(&message) else {
-                        continue;
+                    if !std::mem::replace(&mut begun, true)
+                        && !matches!(message, ServerMessage::RunStart { .. })
+                    {
+                        let cut = serde_json::json!({
+                            "type": "missed",
+                            "why": "the run's first messages are no longer held: it began before these",
+                        });
+                        if tx.send(line(&cut)).await.is_err() {
+                            return;
+                        }
+                    }
+                    let value = match serde_json::to_value(&message) {
+                        Ok(value) => value,
+                        Err(e) => {
+                            tracing::warn!("a message of task {id}'s run is not serializable: {e}");
+                            continue;
+                        }
                     };
                     if tx.send(line(&value)).await.is_err() {
                         return;
                     }
                 }
             }
-            let status = api.status(&id).unwrap_or_default();
-            if status["done"].as_bool().unwrap_or(true) {
+            if done {
                 let end = serde_json::json!({ "type": "task", "task": status });
                 let _ = tx.send(line(&end)).await;
                 return;
             }
             tokio::select! {
                 message = watching.messages.recv() => match message {
-                    Some(message) if of_run(&message).is_some() => match run {
-                        Some(run) if of_run(&message) == Some(run) => {
-                            let Ok(value) = serde_json::to_value(&message) else { continue };
-                            if tx.send(line(&value)).await.is_err() {
-                                return;
-                            }
+                    // Held whatever the run: sent at the top of the loop,
+                    // in order, once it is this task's.
+                    Some(message) if of_run(&message).is_some() => {
+                        if api.run_of(&id).flatten().is_none_or(|run| of_run(&message) == Some(run)) {
+                            hold(&mut held, message);
                         }
-                        Some(_) => {}
-                        None => {
-                            // Bounded: a task waiting long behind others.
-                            if held.len() >= HELD_AT_MOST {
-                                held.remove(0);
-                            }
-                            held.push(message);
-                        }
-                    },
+                    }
                     Some(_) => {}
                     // The session ended: its status says so next.
                     None => {

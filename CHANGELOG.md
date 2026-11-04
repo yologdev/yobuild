@@ -18,7 +18,8 @@ What yo (a host that publishes yobuild agents as apps) reads; design §18.
   files (a rutis plugin's package and runtime too) and `[app]`'s icon, and
   reports each entry as the manifest gives it.
 - **`yobuild serve agent.toml`**: the agent's runs offered to programs on
-  this machine. The page, and beside it `/api/runs` behind its token:
+  this machine. The page, and beside it `/api/runs` behind a token of its
+  own (not the page's, so a program cannot answer the owner's questions):
   `POST` a task, `GET` its status (`?wait=`) and its run's events. Tasks
   run one at a time; `[serve] approval` (`"ask"`, `"run"` or `"never"`,
   required) says whether the owner allows each on the page first. Each
