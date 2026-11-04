@@ -6370,7 +6370,8 @@ needs   = ["device.location"]     # capabilities only a local node has
   beginning or ending with `-`.
 - `needs`: yo owns the vocabulary (its devices.md); yobuild checks each
   entry's shape only — two or more dotted parts, each a lowercase letter
-  then lowercase letters, digits and `-` — and that none is listed twice.
+  then lowercase letters, digits and `-`, at most 128 characters — and
+  that none is listed twice.
   A new capability name needs no yobuild release.
 - `icon`: `./` and inside the folder (no `..` past it) when read; that
   the file is there, `check` says (a problem when it is not).
@@ -6382,10 +6383,14 @@ needs   = ["device.location"]     # capabilities only a local node has
 `yobuild check agent.toml --static [--json]`: what can be known without
 starting anything — no Node, no npm, no runtime, no server connected, no
 network. yo's publish step reads it. It reads the manifest (as always),
-the prompt, `[app]`'s icon, and each local plugin file or folder the
-manifest names; then reports each entry from the manifest alone:
-`kind`, `name`, `ecosystem`, `source`, `grants`, `environment`, `tier`,
-its `allow`ed names as `allowed` tools, `checkedAlone` false; and the
+the prompt, `[app]`'s icon, each local plugin file or folder and stdio
+server file the manifest names (missing, or not to be looked at: a
+problem), and for a rutis plugin its package and yobuild's runtime there,
+as `run` refuses them; pins with no lock beside the manifest are a note
+(`run` resolves them, `run --locked` refuses). It then reports each entry
+from the manifest alone: `kind`, `name`, `ecosystem`, `source`, `grants`,
+`environment`, `confined`, `tier`, its `allow`ed names as `allowed` tools,
+`checkedAlone` false; and the
 agent's built-in tools (yoagent's six or the read-only three, `ask_owner`,
 `find_plugin`/`load_plugin`) with the gate's kinds. `agent.together` is
 `"static"`: nothing was started. `ok` means no problem was found, which
@@ -6397,10 +6402,15 @@ Each entry's `tier` is yobuild's opinion of where it can run, which yo may
 override:
 
 - `"remote"`: an MCP server over HTTP — nothing of it runs here.
-- `"container"`: a pi, DSH or rutis plugin or a stdio MCP server — it
-  needs Node or a process, but nothing of the owner's machine.
-- `"local"`: one of these granted `workspace`, `trust`, `exec` or `env` —
-  it reaches the owner's folder, shell or environment.
+- `"container"`: a DSH or rutis plugin granted nothing but `wake` or
+  `model`, or a stdio MCP server handed no variable — it needs Node or a
+  process, and nothing granted of the owner's machine.
+- `"local"`: every pi plugin (a pi extension always has the folder,
+  `ctx.cwd`, and all of them share one runtime), a DSH or rutis plugin
+  granted `workspace`, `trust` or `env`, or a stdio MCP server whose `env`
+  table hands it variables — it reaches the owner's folder, shell or
+  environment. A stdio server is started in the agent's folder all the
+  same; whether its `args` point it there is not judged.
 
 The agent's own tools are listed under `agent.tools` as before; with them,
 `agent.builtins` says the `[builtins]` table as set: `tools`

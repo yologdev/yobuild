@@ -255,18 +255,22 @@ pub struct Entry {
 pub enum Tier {
     /// An MCP server over HTTP: nothing of it runs here.
     Remote,
-    /// A plugin or a stdio server: it needs Node or a process, not the
-    /// owner's machine.
+    /// A DSH or rutis plugin granted nothing beyond `wake`/`model`, or a
+    /// stdio server handed no variable: it needs Node or a process, and
+    /// nothing granted of the owner's machine.
     Container,
-    /// Granted `workspace`, `trust`, `exec` or `env`: it reaches the
-    /// owner's folder, shell or environment.
+    /// A pi plugin (every pi extension has the folder, `ctx.cwd`, and they
+    /// share one runtime), a plugin granted `workspace`, `trust`, `exec` or
+    /// `env`, or a stdio server whose `env` hands it variables: it reaches
+    /// the owner's folder, shell or environment.
     Local,
 }
 
 impl Tier {
     fn of_plugin(plugin: &crate::manifest::Plugin) -> Tier {
         let g = &plugin.grants;
-        let reaches = g.workspace
+        let reaches = matches!(plugin.kind, PluginKind::Pi(_))
+            || g.workspace
             || g.trust
             || g.exec != crate::manifest::ExecGrant::Off
             || !g.env.is_empty();
@@ -279,6 +283,7 @@ impl Tier {
     fn of_server(server: &crate::manifest::Mcp) -> Tier {
         match server.transport {
             Transport::Http { .. } => Tier::Remote,
+            Transport::Stdio { ref env, .. } if !env.is_empty() => Tier::Local,
             _ => Tier::Container,
         }
     }
@@ -1334,12 +1339,14 @@ pub fn check_static(manifest: &Manifest) -> Result<Report, BoxError> {
         };
         let mut problems = Vec::new();
         if let Some(path) = path.map(|p| manifest.dir.join(p)) {
-            if !path.exists() {
-                problems.push(Problem::new(format!(
-                    "plugin {}: no such file or folder: {}",
-                    plugin.name,
-                    path.display()
-                )));
+            match there(&path) {
+                Err(why) => problems.push(Problem::new(format!("plugin {}: {why}", plugin.name))),
+                Ok(()) if ecosystem == Ecosystem::Rutis => {
+                    if let Err(e) = plugins::rutis_ready(&path) {
+                        problems.push(Problem::new(format!("plugin {}: {e}", plugin.name)));
+                    }
+                }
+                Ok(()) => {}
             }
         }
         entries.push(Entry {
@@ -1368,12 +1375,8 @@ pub fn check_static(manifest: &Manifest) -> Result<Report, BoxError> {
         let mut problems = Vec::new();
         if let Transport::Stdio { source, .. } = &server.transport {
             if let Some(path) = path_of(source).map(|p| manifest.dir.join(p)) {
-                if !path.exists() {
-                    problems.push(Problem::new(format!(
-                        "mcp {}: no such file: {}",
-                        server.name,
-                        path.display()
-                    )));
+                if let Err(why) = there(&path) {
+                    problems.push(Problem::new(format!("mcp {}: {why}", server.name)));
                 }
             }
         }
@@ -1415,10 +1418,41 @@ pub fn check_static(manifest: &Manifest) -> Result<Report, BoxError> {
         left_out: super::left_out(manifest, vars(), cfg!(unix)),
         ..agent_of(manifest)
     };
+    let pins = manifest.plugins.iter().any(|p| match &p.kind {
+        PluginKind::Pi(s) | PluginKind::Dsh(s) => matches!(s, Source::Package(_)),
+        PluginKind::Rutis { .. } => false,
+    }) || manifest.mcp.iter().any(|m| {
+        matches!(
+            &m.transport,
+            Transport::Stdio {
+                source: Source::Package(_),
+                ..
+            }
+        )
+    });
+    let lock = crate::install::lock_path(manifest);
+    if pins && !lock.is_file() {
+        agent.notes.push(format!(
+            "it pins packages and {} is not there: `run` resolves it with npm first, and `run --locked` refuses",
+            lock.display()
+        ));
+    }
     agent.notes.push(
         "static: nothing was installed or started, so each plugin's and server's tools are only the names its `allow` lists; `check` without --static starts them".into(),
     );
     Ok(Report::new(entries, agent))
+}
+
+/// Whether a local file or folder is there, telling a missing one from one
+/// that cannot be looked at.
+fn there(path: &Path) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(format!("no such file or folder: {}", path.display()))
+        }
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
 }
 
 /// A local source's path, as the manifest gives it.
@@ -1687,9 +1721,6 @@ struct Together_<'a> {
     sources: Option<&'a Sources>,
 }
 
-/// The agent together, through `run`'s own start: a refusal there is a
-/// problem; then the tools one run is offered, how the gate treats each,
-/// and what `run` would only warn about (notes).
 /// The agent's own tools, as the gate treats them — yoagent's,
 /// `ask_owner`, `find_plugin` and `load_plugin` — with their schemas.
 fn own_tools(
@@ -1745,6 +1776,9 @@ fn own_tools(
     (tools, seen)
 }
 
+/// The agent together, through `run`'s own start: a refusal there is a
+/// problem; then the tools one run is offered, how the gate treats each,
+/// and what `run` would only warn about (notes).
 async fn together(context: &Together_<'_>, agent: &mut Agent) {
     let Together_ {
         manifest,
@@ -2141,6 +2175,10 @@ name = "exec"
 pi = "./x.ts"
 grants = { exec = "gate" }
 
+[[plugin]]
+name = "pi"
+pi = "./y.ts"
+
 [[mcp]]
 name = "web"
 url = "https://example.com/mcp"
@@ -2148,6 +2186,11 @@ url = "https://example.com/mcp"
 [[mcp]]
 name = "proc"
 npm = "./server"
+
+[[mcp]]
+name = "handed"
+npm = "./server"
+env = { LANG = "${LANG}" }
 "#,
             Path::new("agent.toml"),
             Path::new("/agents"),
@@ -2166,9 +2209,10 @@ npm = "./server"
                 ("wakes", Tier::Container),
                 ("env", Tier::Local),
                 ("exec", Tier::Local),
+                ("pi", Tier::Local),
             ]
         );
         let servers: Vec<Tier> = manifest.mcp.iter().map(Tier::of_server).collect();
-        assert_eq!(servers, [Tier::Remote, Tier::Container]);
+        assert_eq!(servers, [Tier::Remote, Tier::Container, Tier::Local]);
     }
 }
