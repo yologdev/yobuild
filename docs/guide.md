@@ -252,7 +252,7 @@ yobuild check agent.toml --json   # the same, for a program
 yobuild check agent.toml --static # starts nothing: the manifest, its prompt and local files only
 ```
 
-`--static` (on main, not yet released: 0.3.1 refuses it) installs and starts nothing (no Node or npm needed): it reads
+`--static` (since 0.3.2) installs and starts nothing (no Node or npm needed): it reads
 the manifest, its prompt, its local plugin and server files and `[app]`'s
 icon, and
 reports each entry as the manifest gives it, its tools only the names its
@@ -436,9 +436,7 @@ yobuild log ~/agents/release-notes/agent.toml -n 1
 
 ## Offering an agent to programs: `yobuild serve`
 
-On main, not yet released: it comes with the next release (the
-[changelog](../CHANGELOG.md)'s "Unreleased"); 0.3.1 does not know `serve`
-or `[serve]`.
+Since 0.3.2.
 
 ```toml
 [serve]

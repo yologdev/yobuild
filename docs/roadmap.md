@@ -393,7 +393,8 @@ PR with its design section.
   page and its token, `[sandbox]` under bubblewrap where the container
   allows user namespaces and refused with its hint where not; a closed
   pipe's panic and the sandbox notice's wording fixed after); 0.3.0
-  (released 2026-11-03), 0.3.1 (the newcomer test's fixes).
+  (released 2026-11-03), 0.3.1 (the newcomer test's fixes), 0.3.2 (what
+  yo reads, M7; released 2026-11-04).
 - **Sessions that survive a restart** (built, #115; design §15): the
   conversation, the open questions and the session's spend saved per
   agent and folder, and resumed with `--resume`.
@@ -418,7 +419,7 @@ After 1.0: Windows (open question 7), M3c, rutis plugins through
 `[extend]`, a sign-in kept across sessions (design §14 "Stage 4",
 decision 2).
 
-## M7 — What yo reads (asked 2026-11-04; design §18)
+## M7 — What yo reads (asked 2026-11-04, released in 0.3.2; design §18)
 
 yo publishes yobuild agents as apps for people who do not code. Additive,
 none changing what an agent does:
