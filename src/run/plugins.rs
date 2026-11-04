@@ -914,6 +914,12 @@ fn package_of(path: &Path) -> Result<PathBuf, BoxError> {
         })
 }
 
+/// Whether a rutis plugin at `path` has a package with yobuild's runtime
+/// installed, as `plan` requires (`check --static`'s look at it).
+pub(crate) fn rutis_ready(path: &Path) -> Result<(), BoxError> {
+    rutis_runtime(&package_of(path)?)
+}
+
 /// A rutis plugin's Node runtime: `@arcships/rutis-runtime` installed in its
 /// package (`dir`), at the version yobuild's own runtimes use.
 fn rutis_runtime(dir: &Path) -> Result<(), BoxError> {

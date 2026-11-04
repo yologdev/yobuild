@@ -14,10 +14,12 @@ What yo (a host that publishes yobuild agents as apps) reads; design §18.
   `icon`, `needs`). Read strictly, used by nothing at run time; `check`
   says a problem when its `icon` is not there.
 - **`yobuild check --static`**: starts nothing — no Node, npm, runtime or
-  server. It reads the manifest, its prompt, its local plugin files and
-  `[app]`'s icon, and reports each entry as the manifest gives it.
+  server. It reads the manifest, its prompt, its local plugin and server
+  files (a rutis plugin's package and runtime too) and `[app]`'s icon, and
+  reports each entry as the manifest gives it.
 - **`check --json`'s report is version 6:** each entry's `tier`
-  (`remote`, `container` or `local`: where yobuild thinks it can run), the
+  (`remote`, `container` or `local`: where yobuild thinks it can run —
+  every pi plugin is `local`, as it has the folder), the
   agent's `builtins` and `app`, and the report's `static`.
 
 ## 0.3.1 — 2026-11-03

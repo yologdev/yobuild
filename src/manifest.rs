@@ -2510,8 +2510,10 @@ fn app(raw: Spanned<RawApp>) -> Result<App, Located> {
         if text.is_empty() {
             return Err(refused("blank".into()));
         }
-        if text.chars().any(char::is_control) {
-            return Err(refused("one line, without control characters".into()));
+        if text.contains(|c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')) {
+            return Err(refused(
+                "one line, without control characters or line separators".into(),
+            ));
         }
         let n = text.chars().count();
         if n > max {

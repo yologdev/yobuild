@@ -1858,7 +1858,11 @@ fn app_refuses_each_field_out_of_shape_where_it_is() {
         ),
         (
             "[app]\nid = \"a/b\"\nversion = \"1.0.0\"\ntitle = \"a\\nb\"\n",
-            "7:9: [app] title: one line, without control characters",
+            "7:9: [app] title: one line, without control characters or line separators",
+        ),
+        (
+            "[app]\nid = \"a/b\"\nversion = \"1.0.0\"\ntitle = \"a\\u2028b\"\n",
+            "7:9: [app] title: one line, without control characters or line separators",
         ),
         (
             &format!("[app]\n{ok}author = \"{}\"\n", "x".repeat(81)),

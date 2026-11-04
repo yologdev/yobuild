@@ -3097,6 +3097,11 @@ args = ["."]
     assert_eq!(code, Some(0), "{stdout}{stderr}");
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(report["ok"], true);
+    let notes = report["agent"]["notes"].to_string();
+    assert!(
+        notes.contains("it pins packages and") && notes.contains("`run --locked` refuses"),
+        "{notes}"
+    );
     let entries = report["entries"].as_array().unwrap();
     let said: Vec<(&str, &str, &str, bool)> = entries
         .iter()
@@ -3167,4 +3172,56 @@ args = ["."]
     let (code, _, stderr) = static_check(&["--locked"]);
     assert_eq!(code, Some(1));
     assert!(stderr.contains("--locked and --static"), "{stderr}");
+
+    // What `plan` would refuse from files alone: a rutis plugin with no
+    // package, then one whose package lacks yobuild's runtime; a stdio
+    // server's file not there.
+    let manifest = dir.path().join("agent.toml");
+    let written = std::fs::read_to_string(&manifest).unwrap();
+    std::fs::write(
+        &manifest,
+        format!(
+            "{written}\n[[plugin]]\nname = \"own\"\nrutis = \"./tool/t.ts\"\nruntime = \"node\"\n\n[[mcp]]\nname = \"gone\"\nnpm = \"./gone.js\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join("tool")).unwrap();
+    std::fs::write(dir.path().join("tool/t.ts"), "export default {};\n").unwrap();
+    let problems =
+        |report: &serde_json::Value, at: usize| report["entries"][at]["problems"].to_string();
+    let (code, stdout, _) = static_check(&["--json"]);
+    assert_eq!(code, Some(1));
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        problems(&report, 2).contains("no package.json above"),
+        "{}",
+        problems(&report, 2)
+    );
+    assert!(
+        problems(&report, 5).contains("mcp gone: no such file or folder"),
+        "{}",
+        problems(&report, 5)
+    );
+    std::fs::write(
+        dir.path().join("tool/package.json"),
+        "{\"type\": \"module\"}\n",
+    )
+    .unwrap();
+    let (_, stdout, _) = static_check(&["--json"]);
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        problems(&report, 2).contains("@arcships/rutis-runtime"),
+        "{}",
+        problems(&report, 2)
+    );
+
+    // A prompt that is not there stops it, as it stops `run`.
+    std::fs::write(
+        &manifest,
+        written.replace("[builtins]", "prompt = \"./gone.md\"\n\n[builtins]"),
+    )
+    .unwrap();
+    let (code, _, stderr) = static_check(&[]);
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("gone.md"), "{stderr}");
 }

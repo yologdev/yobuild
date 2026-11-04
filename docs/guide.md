@@ -252,11 +252,13 @@ yobuild check agent.toml --static # starts nothing: the manifest, its prompt and
 ```
 
 `--static` installs and starts nothing (no Node or npm needed): it reads
-the manifest, its prompt, its local plugin files and `[app]`'s icon, and
+the manifest, its prompt, its local plugin and server files and `[app]`'s
+icon, and
 reports each entry as the manifest gives it, its tools only the names its
 `allow` lists. A host that runs agents elsewhere reads it: each entry's
 `tier` says where yobuild thinks it can run (`remote`, `container`, or
-`local` when granted the folder, trust, `exec` or `env`).
+`local` for a pi plugin, which always has the folder, and for one granted
+the folder, trust, `exec` or `env`).
 
 `check` needs no model and no key. It starts each plugin and server
 alone (a few DSH plugins that the DSH runtime loads anyway are checked
