@@ -8,6 +8,16 @@
 //! - `GET /runs?t=…` — the agent's past runs, as [`serve_with`] was given
 //!   them (`yobuild run`'s: its run log, design §16); 404 without; the
 //!   token required, as `/ws`'s.
+//! - `/api/runs` — with an [`Api`] ([`serve_api`]; `yobuild serve`, design
+//!   §18): `POST /api/runs` `{"task": …}` queues a task; `GET
+//!   /api/runs/{id}` (`?wait=S`, up to 600 s, until it is done) says where
+//!   it is; `GET /api/runs/{id}/events` streams its run's messages, one
+//!   JSON line each, the last its status. The API's own token is required
+//!   ([`Served::api_token`]; not the page's, which it cannot stand in
+//!   for: a program holding it cannot open `/ws` and answer the owner's
+//!   questions), as `?t=…` or `Authorization: Bearer …`; a `POST` must be JSON
+//!   (`Content-Type: application/json`), so a page elsewhere cannot send
+//!   one without the browser asking first, which this server never allows.
 //!
 //! **The WebSocket needs a token.** Browsers do not apply cross-origin rules
 //! to WebSockets, so without one any page the user has open — on any site —
@@ -19,11 +29,13 @@
 
 use std::net::SocketAddr;
 
+use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, RawQuery, State};
+use axum::http::HeaderMap;
 use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use futures::{SinkExt, StreamExt};
 
@@ -39,6 +51,7 @@ const LIB: &str = include_str!("../../frontend/web/lib.js");
 pub struct Served {
     addr: SocketAddr,
     token: String,
+    api_token: Option<String>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -58,6 +71,12 @@ impl Served {
         &self.token
     }
 
+    /// The token `/api/runs` requires, with an [`Api`] ([`serve_api`]):
+    /// another than the page's, which the API does not take either.
+    pub fn api_token(&self) -> Option<&str> {
+        self.api_token.as_deref()
+    }
+
     /// Stop serving: no new connections (open ones end with their socket).
     pub fn stop(self) {}
 }
@@ -73,6 +92,23 @@ struct App {
     session: Session,
     token: std::sync::Arc<str>,
     runs: Option<PastRuns>,
+    /// The API and its own token.
+    api: Option<(std::sync::Arc<dyn Api>, std::sync::Arc<str>)>,
+}
+
+/// Tasks a program on this machine sends (`yobuild serve`, design §18):
+/// each one's status is a JSON object with at least `id`, `state`, `done`
+/// and, once its run started, `run` (the session's run).
+pub trait Api: Send + Sync + 'static {
+    /// Queues `task`: its status, or why not.
+    fn submit(&self, task: String) -> Result<serde_json::Value, String>;
+    /// The task `id`'s status; `None` when there is no such task.
+    fn status(&self, id: &str) -> Option<serde_json::Value>;
+    /// The session's run of task `id`, once it started; `None` when there
+    /// is no such task.
+    fn run_of(&self, id: &str) -> Option<Option<u64>>;
+    /// Moves on each change of any task.
+    fn changes(&self) -> tokio::sync::watch::Receiver<u64>;
 }
 
 /// The page, naming `agent` in its title and header when there is one.
@@ -99,6 +135,17 @@ pub async fn serve(session: Session, addr: SocketAddr) -> std::io::Result<Served
     serve_with(session, addr, None, None).await
 }
 
+/// [`serve_with`], with the tasks `/api/runs` takes.
+pub async fn serve_api(
+    session: Session,
+    addr: SocketAddr,
+    runs: Option<PastRuns>,
+    agent: Option<&str>,
+    api: std::sync::Arc<dyn Api>,
+) -> std::io::Result<Served> {
+    serving(session, addr, runs, agent, Some(api)).await
+}
+
 /// [`serve`], with the past runs `GET /runs` answers and the agent's name
 /// on the page.
 pub async fn serve_with(
@@ -107,12 +154,26 @@ pub async fn serve_with(
     runs: Option<PastRuns>,
     agent: Option<&str>,
 ) -> std::io::Result<Served> {
+    serving(session, addr, runs, agent, None).await
+}
+
+async fn serving(
+    session: Session,
+    addr: SocketAddr,
+    runs: Option<PastRuns>,
+    agent: Option<&str>,
+    api: Option<std::sync::Arc<dyn Api>>,
+) -> std::io::Result<Served> {
     let page = Html(index(agent));
     let token = uuid::Uuid::new_v4().simple().to_string();
+    let api_token = api
+        .is_some()
+        .then(|| uuid::Uuid::new_v4().simple().to_string());
     let state = App {
         session,
         token: token.clone().into(),
         runs,
+        api: api.zip(api_token.clone().map(Into::into)),
     };
     let app = Router::new()
         .route("/", get(move || async move { page }))
@@ -122,6 +183,9 @@ pub async fn serve_with(
         .route("/ui-plugins/{name}", get(ui_plugin))
         .route("/ws", get(socket))
         .route("/runs", get(past_runs))
+        .route("/api/runs", post(submit))
+        .route("/api/runs/{id}", get(status))
+        .route("/api/runs/{id}/events", get(events))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -133,6 +197,7 @@ pub async fn serve_with(
     Ok(Served {
         addr: bound,
         token,
+        api_token,
         task,
     })
 }
@@ -153,13 +218,288 @@ async fn ui_plugin(State(app): State<App>, Path(file): Path<String>) -> Response
     }
 }
 
-/// Whether `query` carries the server's token.
+/// Whether `query` carries the page's token.
 fn token_given(app: &App, query: Option<&str>) -> bool {
-    let given = query
+    query_token(query) == Some(&*app.token)
+}
+
+/// The `t=` of `query`.
+fn query_token(query: Option<&str>) -> Option<&str> {
+    query
         .unwrap_or_default()
         .split('&')
-        .find_map(|pair| pair.strip_prefix("t="));
-    given == Some(&*app.token)
+        .find_map(|pair| pair.strip_prefix("t="))
+}
+
+/// Whether `query` or the `Authorization: Bearer` header carries `token`
+/// (the API's).
+fn api_token_given(token: &str, query: Option<&str>, headers: &HeaderMap) -> bool {
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    bearer == Some(token) || query_token(query) == Some(token)
+}
+
+fn json_response(status: StatusCode, value: serde_json::Value) -> Response {
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        value.to_string(),
+    )
+        .into_response()
+}
+
+fn api_error(status: StatusCode, why: impl Into<String>) -> Response {
+    json_response(status, serde_json::json!({ "error": why.into() }))
+}
+
+/// The API, once the token is checked; else the response to give.
+fn api_of(
+    app: &App,
+    query: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<std::sync::Arc<dyn Api>, Box<Response>> {
+    let Some((api, token)) = &app.api else {
+        return Err(Box::new(api_error(
+            StatusCode::NOT_FOUND,
+            "this session takes no tasks: `yobuild serve` does",
+        )));
+    };
+    if !api_token_given(token, query, headers) {
+        return Err(Box::new(api_error(
+            StatusCode::FORBIDDEN,
+            "a valid token is required (the API's, not the page's)",
+        )));
+    }
+    Ok(api.clone())
+}
+
+/// `POST /api/runs` `{"task": "…"}`: 202 and the task's status.
+async fn submit(
+    State(app): State<App>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let api = match api_of(&app, query.as_deref(), &headers) {
+        Ok(api) => api,
+        Err(response) => return *response,
+    };
+    let json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(';')
+                .next()
+                .is_some_and(|t| t.trim() == "application/json")
+        });
+    if !json {
+        return api_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "send the task as JSON (Content-Type: application/json)",
+        );
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Sent {
+        task: String,
+    }
+    let sent: Sent = match serde_json::from_slice(&body) {
+        Ok(sent) => sent,
+        Err(e) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                format!("the body is {{\"task\": \"…\"}}: {e}"),
+            )
+        }
+    };
+    match api.submit(sent.task) {
+        Ok(status) => json_response(StatusCode::ACCEPTED, status),
+        Err(why) => api_error(StatusCode::UNPROCESSABLE_ENTITY, why),
+    }
+}
+
+/// The most messages `events` holds for a task whose run has not started.
+const HELD_AT_MOST: usize = 10_000;
+
+/// The longest `?wait=` a status waits.
+const WAIT_AT_MOST: u64 = 600;
+
+/// `GET /api/runs/{id}[?wait=S]`: the task's status, once it is done or
+/// `S` seconds passed.
+async fn status(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let api = match api_of(&app, query.as_deref(), &headers) {
+        Ok(api) => api,
+        Err(response) => return *response,
+    };
+    let wait = query
+        .as_deref()
+        .unwrap_or_default()
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("wait="));
+    let wait = match wait.map(str::parse::<u64>) {
+        None => 0,
+        Some(Ok(s)) if s <= WAIT_AT_MOST => s,
+        Some(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                format!("wait is a number of seconds, 0 to {WAIT_AT_MOST}"),
+            )
+        }
+    };
+    let mut changes = api.changes();
+    let until = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+    loop {
+        let Some(status) = api.status(&id) else {
+            return api_error(StatusCode::NOT_FOUND, format!("no task {id}"));
+        };
+        let done = status["done"].as_bool().unwrap_or(true);
+        if done || tokio::time::Instant::now() >= until {
+            return json_response(StatusCode::OK, status);
+        }
+        if tokio::time::timeout_at(until, changes.changed())
+            .await
+            .is_ok_and(|r| r.is_err())
+        {
+            return json_response(StatusCode::OK, status);
+        }
+    }
+}
+
+/// `GET /api/runs/{id}/events`: the task's run's messages as they come
+/// (those before included), one JSON line each, then its status, once it
+/// is done.
+async fn events(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
+    let api = match api_of(&app, query.as_deref(), &headers) {
+        Ok(api) => api,
+        Err(response) => return *response,
+    };
+    if api.status(&id).is_none() {
+        return api_error(StatusCode::NOT_FOUND, format!("no task {id}"));
+    }
+    let session = app.session.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(64);
+    tokio::spawn(async move {
+        // Attached as an observer: it is never counted as the owner there.
+        let mut watching = session.observe();
+        let mut changes = api.changes();
+        // Its run's messages until it started are held: the history replay
+        // and what comes may hold them before the task knows its run.
+        let mut held: std::collections::VecDeque<ServerMessage> = Default::default();
+        // Bounded: a task waiting long behind others (what is let go is
+        // said, below, as its run's beginning missed).
+        let hold = |held: &mut std::collections::VecDeque<ServerMessage>, message| {
+            if held.len() >= HELD_AT_MOST {
+                held.pop_front();
+            }
+            held.push_back(message);
+        };
+        // The history replay is there at once: held, so a task done already
+        // still streams its run.
+        while let Ok(message) = watching.messages.try_recv() {
+            hold(&mut held, message);
+        }
+        let line = |value: &serde_json::Value| Ok(Bytes::from(format!("{value}\n")));
+        let of_run = |message: &ServerMessage| match message {
+            ServerMessage::RunStart { run, .. }
+            | ServerMessage::Event { run, .. }
+            | ServerMessage::RunEnd { run, .. } => Some(*run),
+            _ => None,
+        };
+        // Whether the run's first line went out: a `runStart`, or a line
+        // saying its beginning is no longer held.
+        let mut begun = false;
+        loop {
+            // Done is read first, then what came meanwhile: the run's last
+            // messages (its `runEnd`) are in the channel before its task is
+            // done, so none is left behind the status line.
+            let status = api.status(&id).unwrap_or_default();
+            let done = status["done"].as_bool().unwrap_or(true);
+            if done {
+                while let Ok(message) = watching.messages.try_recv() {
+                    hold(&mut held, message);
+                }
+            }
+            if let Some(run) = api.run_of(&id).flatten() {
+                for message in held.drain(..).filter(|m| of_run(m) == Some(run)) {
+                    if !std::mem::replace(&mut begun, true)
+                        && !matches!(message, ServerMessage::RunStart { .. })
+                    {
+                        let cut = serde_json::json!({
+                            "type": "missed",
+                            "why": "the run's first messages are no longer held: it began before these",
+                        });
+                        if tx.send(line(&cut)).await.is_err() {
+                            return;
+                        }
+                    }
+                    let value = match serde_json::to_value(&message) {
+                        Ok(value) => value,
+                        Err(e) => {
+                            tracing::warn!("a message of task {id}'s run is not serializable: {e}");
+                            continue;
+                        }
+                    };
+                    if tx.send(line(&value)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            if done {
+                let end = serde_json::json!({ "type": "task", "task": status });
+                let _ = tx.send(line(&end)).await;
+                return;
+            }
+            tokio::select! {
+                message = watching.messages.recv() => match message {
+                    // Held whatever the run: sent at the top of the loop,
+                    // in order, once it is this task's.
+                    Some(message) if of_run(&message).is_some() => {
+                        if api.run_of(&id).flatten().is_none_or(|run| of_run(&message) == Some(run)) {
+                            hold(&mut held, message);
+                        }
+                    }
+                    Some(_) => {}
+                    // The session ended: its status says so next.
+                    None => {
+                        if changes.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                },
+                changed = changes.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    (
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response()
 }
 
 /// The past runs, as JSON: the agent's own tasks and answers, so the token

@@ -61,6 +61,33 @@ pub struct Manifest {
     /// `[app]`: what yo publishes the agent as (design §18); used by
     /// nothing at run time. `None` when the manifest has no such table.
     pub app: Option<App>,
+    /// `[serve]`: whether `yobuild serve` offers the agent's runs, and how
+    /// (design §18). `None` when the manifest has no such table: `serve`
+    /// is refused.
+    pub serve: Option<Approval>,
+}
+
+/// `[serve] approval` (design §18): what `yobuild serve` does with a task a
+/// program sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Approval {
+    /// It runs.
+    Run,
+    /// The owner allows each one on the page first.
+    Ask,
+    /// `serve` is refused.
+    Never,
+}
+
+impl Approval {
+    pub fn name(self) -> &'static str {
+        match self {
+            Approval::Run => "run",
+            Approval::Ask => "ask",
+            Approval::Never => "never",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -961,6 +988,13 @@ struct Raw {
     #[serde(default)]
     session: RawSession,
     app: Option<Spanned<RawApp>>,
+    serve: Option<Spanned<RawServe>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawServe {
+    approval: Option<Spanned<String>>,
 }
 
 #[derive(Deserialize)]
@@ -1372,6 +1406,26 @@ impl Manifest {
             None => None,
             Some(raw) => Some(app(raw).map_err(located)?),
         };
+        let serve = match raw.serve {
+            None => None,
+            Some(raw) => {
+                let table = raw.span();
+                let Some(approval) = raw.into_inner().approval else {
+                    let m = "[serve] needs `approval`: \"run\", \"ask\" or \"never\"";
+                    return Err(located((table, m.into())));
+                };
+                Some(match approval.get_ref().as_str() {
+                    "run" => Approval::Run,
+                    "ask" => Approval::Ask,
+                    "never" => Approval::Never,
+                    other => {
+                        let m =
+                            format!("[serve] approval {other:?}: \"run\", \"ask\" or \"never\"");
+                        return Err(located((approval.span(), m)));
+                    }
+                })
+            }
+        };
 
         Ok(Manifest {
             path: path.to_owned(),
@@ -1391,6 +1445,7 @@ impl Manifest {
                 save: raw.session.save,
             },
             app,
+            serve,
         })
     }
 }

@@ -23,6 +23,7 @@ pub(crate) mod oauth;
 pub mod plugin_log;
 pub(crate) mod plugins;
 pub(crate) mod script;
+pub(crate) mod serve;
 pub(crate) mod spend;
 
 use std::collections::{HashMap, HashSet};
@@ -189,6 +190,10 @@ pub struct Options {
     /// §15); else a new one, which replaces the saved one when its first
     /// run ends.
     pub resume: bool,
+    /// `yobuild serve` (design §18): no task; the page, with the API that
+    /// takes tasks from programs on this machine, as `[serve] approval`
+    /// says.
+    pub serve: bool,
 }
 
 impl Options {
@@ -204,6 +209,7 @@ impl Options {
             locked: false,
             home: None,
             resume: false,
+            serve: false,
         }
     }
 }
@@ -261,7 +267,7 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         crate::stops::Stops::listen().map_err(|e| format!("cannot listen for Ctrl+C: {e}"))?;
     let cwd = std::env::current_dir()?;
     // Node and npm, before anything uses them (design §13).
-    let terminal = options.manifest.frontend.terminal && !options.once;
+    let terminal = options.manifest.frontend.terminal && !options.once && !options.serve;
     if needs_node(&options.manifest, terminal) {
         crate::runtime::node_and_npm()?;
     }
@@ -289,11 +295,12 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         layout,
         scripted,
         home,
+        serve,
         ..
     } = options;
     let options_scripted = scripted.is_some();
     let name = &manifest.agent.name;
-    let terminal = manifest.frontend.terminal && !once;
+    let terminal = manifest.frontend.terminal && !once && !serve;
 
     // A terminal UI ends the session when it quits, as does a `once` run.
     let (session, driver) = Session::new(terminal || once);
@@ -604,6 +611,15 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
 
     let ui = "terminal-ui";
     let mut served = None;
+    // `yobuild serve`'s tasks (design §18), and where its token is written.
+    let (jobs, queue) = match serve {
+        true => {
+            let (jobs, queue) = serve::Jobs::new();
+            (Some(jobs), Some(queue))
+        }
+        false => (None, None),
+    };
+    let mut serve_file: Option<PathBuf> = None;
     if terminal {
         let row =
             Row::new(ui, layout.frontend.join("plugins/terminal-ui.ts").display()).runtime("ui");
@@ -620,14 +636,30 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         let runs = run_log
             .clone()
             .map(|log| Arc::new(move || past_runs(&log)) as web::PastRuns);
-        let web = stops
-            .until(web::serve_with(
-                session.clone(),
-                addr,
-                runs,
-                Some(&manifest.agent.name),
-            ))
-            .await?;
+        let web = match &jobs {
+            Some(jobs) => {
+                let api = Arc::new(jobs.clone()) as Arc<dyn web::Api>;
+                stops
+                    .until(web::serve_api(
+                        session.clone(),
+                        addr,
+                        runs,
+                        Some(&manifest.agent.name),
+                        api,
+                    ))
+                    .await?
+            }
+            None => {
+                stops
+                    .until(web::serve_with(
+                        session.clone(),
+                        addr,
+                        runs,
+                        Some(&manifest.agent.name),
+                    ))
+                    .await?
+            }
+        };
         // Every interface: a link the phone can open.
         let url = match (web.addr().ip().is_unspecified(), lan_ip()) {
             (true, Some(ip)) => format!("http://{ip}:{}/?t={}", web.addr().port(), web.token()),
@@ -640,6 +672,39 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         // The URL on stdout (what a launcher reads); a reader gone does not
         // end the agent (`println!` would panic on a closed pipe).
         let _ = writeln!(std::io::stdout(), "{name}: {url}  (Ctrl+C to stop)");
+        if jobs.is_some() {
+            let base = format!("http://{}", web.addr());
+            let said = serve::said(&base, web.api_token().expect("the API's token"));
+            let _ = writeln!(std::io::stdout(), "{name}: tasks: {said}");
+            let written = serve::file_of(&manifest, &cwd, home.as_deref()).and_then(
+                |file| -> Result<PathBuf, BoxError> {
+                    serve::write(&file, format!("{said}\n").as_bytes())
+                        .map_err(|e| format!("{}: {e}", file.display()))?;
+                    Ok(file)
+                },
+            );
+            match written {
+                Ok(file) => serve_file = Some(file),
+                Err(e) => {
+                    let said = format!(
+                        "The task file programs find the API by could not be written (the `tasks:` line on stdout has it): {e}"
+                    );
+                    tracing::warn!("{said}");
+                    eprintln!("{name}: {said}");
+                    session.notice(NoticeLevel::Warning, said);
+                }
+            }
+            match manifest.serve {
+                Some(crate::manifest::Approval::Ask) => eprintln!(
+                    "{name}: each task a program sends is put to you on the page first ([serve] approval = \"ask\")"
+                ),
+                Some(crate::manifest::Approval::Run) => eprintln!(
+                    "{name}: each task a program sends runs as sent ([serve] approval = \"run\")"
+                ),
+                // `serving` refused the rest before anything started.
+                _ => {}
+            }
+        }
         if task.is_some() {
             match signs_in.is_empty() {
                 true => eprintln!("{name}: the task starts when the page is open"),
@@ -655,18 +720,20 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     // Set as Ctrl+C aborts a run: the log says it so, not as the failed
     // task the driver's end reports.
     let stopping: Stopping = Arc::default();
-    let logging = run_log.map(|log| Logging {
-        log,
+    let logging = (run_log.is_some() || jobs.is_some()).then(|| Logging {
+        log: run_log,
+        jobs: jobs.clone(),
         hide: crate::run_log::Hide::from_env(&manifest).with_taken(taken.clone()),
         base: crate::run_log::Base {
             agent: name.clone(),
             manifest: manifest.path.display().to_string(),
             folder: cwd.display().to_string(),
             session: session.id().to_owned(),
-            mode: match (once, terminal) {
-                (true, _) => "once",
-                (false, true) => "terminal",
-                (false, false) => "web",
+            mode: match (once, terminal, serve) {
+                (true, _, _) => "once",
+                (false, true, _) => "terminal",
+                (false, false, true) => "serve",
+                (false, false, false) => "web",
             },
             scripted: options_scripted,
         },
@@ -708,6 +775,16 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
         None => driver,
     };
     let mut driving = tokio::spawn(driver.run(agent));
+    // `yobuild serve`: its tasks, one at a time, once the session runs.
+    let mut working = match (&jobs, queue, manifest.serve) {
+        (Some(jobs), Some(queue), Some(approval)) => Some(tokio::spawn(serve::work(
+            jobs.clone(),
+            session.clone(),
+            approval,
+            queue,
+        ))),
+        _ => None,
+    };
     // The manifest's servers that sign in: started once a frontend is
     // there to ask, ended with the session.
     let signing_stop = tokio_util::sync::CancellationToken::new();
@@ -737,6 +814,20 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
                 }
             }
             _ = tick.tick() => {
+                // `serve`'s worker never returns while the session runs: one
+                // that did failed, and no task would run again.
+                if let Some(worker) = working.take_if(|w| w.is_finished()) {
+                    let why = match worker.await {
+                        Err(e) => e.to_string(),
+                        Ok(()) => "it returned".into(),
+                    };
+                    let said = format!("yobuild serve's task worker stopped ({why}): no more tasks are run this session");
+                    tracing::error!("{said}");
+                    session.notice(NoticeLevel::Error, said);
+                    if let Some(jobs) = &jobs {
+                        jobs.close_with("the task worker stopped");
+                    }
+                }
                 if signs_in.is_some() && session.frontends() > 0 {
                     let servers = signs_in.take().expect("servers that sign in");
                     let signs = load::sign_in_all(
@@ -842,6 +933,20 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
             (agent, None, Some(format!("the terminal UI stopped: {why}")))
         }
     };
+    // `serve` takes no more tasks, its worker stopped, its token's file
+    // removed (when still its own); those not done are refused once the
+    // watch has seen the runs end (below).
+    if let Some(jobs) = &jobs {
+        jobs.closing();
+    }
+    if let Some(working) = working {
+        working.abort();
+    }
+    if let Some(file) = serve_file {
+        if let Err(e) = serve::remove_own(&file) {
+            tracing::warn!("{}: {e}", file.display());
+        }
+    }
     drop(served);
     // A sign-in still going is stopped here (its question withdrawn, its
     // listener closed, what it got revoked) and waited for; one signed in
@@ -866,6 +971,9 @@ pub async fn run(root: &Ctx, options: Options) -> Result<Ended, BoxError> {
     });
     let mut ended = finish(seen, watching, agent, once, interrupted).await;
     ended.saved = saved;
+    if let Some(jobs) = &jobs {
+        jobs.close();
+    }
     // However it ended: what was loaded, and how to keep it (nothing is
     // written). Each was said as a notice when it was kept; the binary
     // writes this once the runtimes have stopped (the terminal UI may hold
@@ -1115,6 +1223,33 @@ pub(crate) async fn sandbox_of(
     })
 }
 
+/// What `yobuild serve` refuses before anything starts (design §18).
+fn serving(options: &Options) -> Result<(), BoxError> {
+    let manifest = &options.manifest;
+    match manifest.serve {
+        None => return Err(
+            "agent.toml has no [serve] table: add `[serve] approval = \"ask\"` (each task allowed on the page) or `\"run\"` to offer its runs to programs on this machine".into(),
+        ),
+        Some(crate::manifest::Approval::Never) => {
+            return Err("agent.toml's [serve] approval = \"never\": its runs are not offered".into())
+        }
+        Some(_) => {}
+    }
+    if options.once || options.task.is_some() {
+        return Err("serve takes its tasks from programs: no task, no --once".into());
+    }
+    if manifest.frontend.phone {
+        return Err("serve listens on this machine only: not with [frontend] phone".into());
+    }
+    if let Some(addr) = options.addr.filter(|a| !a.ip().is_loopback()) {
+        return Err(format!(
+            "--addr {addr}: serve listens on this machine only (127.0.0.1 or ::1)"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn check(
     options: &Options,
     cwd: &Path,
@@ -1123,6 +1258,9 @@ fn check(
     let manifest = &options.manifest;
     if options.once && options.task.as_deref().is_none_or(|t| t.trim().is_empty()) {
         return Err("a once run needs a task".into());
+    }
+    if options.serve {
+        serving(options)?;
     }
     if let Some(server) = manifest
         .mcp
@@ -1709,7 +1847,11 @@ type Stopping = Arc<std::sync::Mutex<Option<String>>>;
 
 /// What the watch needs to log each run (design §16).
 struct Logging {
-    log: crate::run_log::RunLog,
+    /// None when it could not be found (said): `serve`'s tasks still get
+    /// their entries.
+    log: Option<crate::run_log::RunLog>,
+    /// `yobuild serve`'s tasks: each run's start and entry.
+    jobs: Option<serve::Jobs>,
     hide: crate::run_log::Hide,
     base: crate::run_log::Base,
     /// The questions waiting on the owner as a run ends.
@@ -1756,10 +1898,22 @@ impl Logging {
             },
             &self.hide,
         );
-        if let Err(e) = self.log.append(&entry) {
+        if let Some(Err(e)) = self.log.as_ref().map(|log| log.append(&entry)) {
             let said = format!("The run log could not be written: {e} (the run is not logged)");
             tracing::warn!("{said}");
             session.notice(NoticeLevel::Warning, said);
+        }
+        if let Some(jobs) = &self.jobs {
+            match serde_json::to_value(&entry) {
+                Ok(value) => jobs.ended(entry.run, value),
+                Err(e) => {
+                    tracing::warn!("a run's entry is not serializable: {e}");
+                    jobs.ended(
+                        entry.run,
+                        serde_json::json!({ "error": format!("its entry could not be made: {e}") }),
+                    );
+                }
+            }
         }
     }
 }
@@ -1833,6 +1987,9 @@ fn watch(
         loop {
             match watching.messages.recv().await {
                 Some(ServerMessage::RunStart { run, prompt }) => {
+                    if let Some(jobs) = logging.as_ref().and_then(|l| l.jobs.as_ref()) {
+                        jobs.started(run, &prompt);
+                    }
                     seeing = crate::run_log::Seeing {
                         started: crate::run_log::now(),
                         since: Some(Instant::now()),

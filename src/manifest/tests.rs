@@ -1908,3 +1908,25 @@ fn app_refuses_each_field_out_of_shape_where_it_is() {
         error(&with(&format!("[app]\n{ok}icons = []\n"))).starts_with("8:1: unknown field `icons`")
     );
 }
+
+#[test]
+fn serve_takes_an_approval() {
+    assert_eq!(read(MINIMAL).unwrap().serve, None);
+    for (word, approval) in [
+        ("run", Approval::Run),
+        ("ask", Approval::Ask),
+        ("never", Approval::Never),
+    ] {
+        let m = read(&with(&format!("[serve]\napproval = \"{word}\"\n"))).unwrap();
+        assert_eq!(m.serve, Some(approval));
+    }
+    assert_eq!(
+        error(&with("[serve]\n")),
+        "4:1: [serve] needs `approval`: \"run\", \"ask\" or \"never\""
+    );
+    assert_eq!(
+        error(&with("[serve]\napproval = \"always\"\n")),
+        "5:12: [serve] approval \"always\": \"run\", \"ask\" or \"never\""
+    );
+    assert!(error(&with("[serve]\nport = 1\n")).starts_with("5:1: unknown field `port`"));
+}

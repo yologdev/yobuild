@@ -77,6 +77,9 @@ save = true                           # the default: saved for `yobuild run --re
 write = ["~/.cache/acme"]             # more folders they may write (./, ../, / or ~/)
 hide  = ["~/.config/acme"]            # more they may not read
 
+[serve]                               # optional: `yobuild serve` offers its runs to programs on this machine
+approval = "ask"                      # "ask": the owner allows each task on the page; "run"; "never"
+
 [app]                                 # optional: the agent as a yo app; nothing at run time
 id      = "alice/research-desk"       # required: <author>/<name>, lowercase
 version = "1.0.0"                     # required: full semver
@@ -362,6 +365,12 @@ its own words ("EPERM", "read-only file system"): give that folder in
 and DSH plugins alone (their probes would run outside it): they are
 checked together, and every confined entry says "confined by the
 sandbox".
+
+**`[serve]`**: only when the person wants programs on their machine to
+send the agent tasks (`yobuild serve agent.toml`); leave it out
+otherwise — without it `serve` is refused. `approval` is required:
+`"ask"` puts each task to the person on the page, `"run"` runs it as
+sent, `"never"` refuses `serve`.
 
 **`[app]`**: only when the person publishes the agent as a yo app; leave
 it out otherwise. Nothing reads it at run time; `check --json` echoes it
