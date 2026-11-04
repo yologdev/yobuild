@@ -17,6 +17,7 @@ links there rather than repeating it.
 - [Running an agent](#running-an-agent)
 - [Resuming a session](#resuming-a-session)
 - [Running an agent on a schedule](#running-an-agent-on-a-schedule)
+- [Offering an agent to programs: `yobuild serve`](#offering-an-agent-to-programs-yobuild-serve)
 - [Scripted runs](#scripted-runs)
 - [What keeps an agent in bounds](#what-keeps-an-agent-in-bounds)
 - [When something fails](#when-something-fails)
@@ -251,7 +252,7 @@ yobuild check agent.toml --json   # the same, for a program
 yobuild check agent.toml --static # starts nothing: the manifest, its prompt and local files only
 ```
 
-`--static` installs and starts nothing (no Node or npm needed): it reads
+`--static` (on main, not yet released: 0.3.1 refuses it) installs and starts nothing (no Node or npm needed): it reads
 the manifest, its prompt, its local plugin and server files and `[app]`'s
 icon, and
 reports each entry as the manifest gives it, its tools only the names its
@@ -434,6 +435,10 @@ yobuild log ~/agents/release-notes/agent.toml -n 1
 ```
 
 ## Offering an agent to programs: `yobuild serve`
+
+On main, not yet released: it comes with the next release (the
+[changelog](../CHANGELOG.md)'s "Unreleased"); 0.3.1 does not know `serve`
+or `[serve]`.
 
 ```toml
 [serve]

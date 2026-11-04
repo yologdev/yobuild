@@ -5802,7 +5802,7 @@ session, a resumed one's too) and its `folder`: with the manifest, where
 ### The log
 
 - **One JSON line per run, appended when it ends**, in every mode
-  (`--once`, the page, the terminal UI). `run`'s watch writes it: it is
+  (`--once`, the page, the terminal UI, `yobuild serve`). `run`'s watch writes it: it is
   an observer of the session and sees what every frontend sees — the
   run's start (its prompt), its events, the notices, its `RunEnd`. It
   writes before `--once` counts the run as ended, so the process never
