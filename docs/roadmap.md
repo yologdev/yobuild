@@ -423,10 +423,10 @@ decision 2).
 yo publishes yobuild agents as apps for people who do not code. Additive,
 none changing what an agent does:
 
-- **`[app]` and `check --static`** (built 2026-11-04): the agent's
+- **`[app]` and `check --static`** (built 2026-11-04, #123): the agent's
   identity as an app; a check that starts nothing, each entry's `tier`
   and the agent's `builtins` (report version 6) — yo's publish step.
-- **`yobuild serve`** (built 2026-11-04): one agent's runs offered on
+- **`yobuild serve`** (built 2026-11-04, #124): one agent's runs offered on
   loopback to a local yo node (`/api/runs`), the owner's `[serve]
   approval` deciding; A2A, and a session per caller, wait for yo's M3.
 

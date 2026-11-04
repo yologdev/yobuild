@@ -73,7 +73,7 @@ pub struct Entry {
     /// The session's id and the run's number in it.
     pub session: String,
     pub run: u64,
-    /// `once`, `web` or `terminal`; whether the model's replies came from
+    /// `once`, `web`, `terminal` or `serve`; whether the model's replies came from
     /// a file (`--scripted`).
     pub mode: String,
     pub scripted: bool,

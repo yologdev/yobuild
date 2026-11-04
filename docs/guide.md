@@ -17,6 +17,7 @@ links there rather than repeating it.
 - [Running an agent](#running-an-agent)
 - [Resuming a session](#resuming-a-session)
 - [Running an agent on a schedule](#running-an-agent-on-a-schedule)
+- [Offering an agent to programs: `yobuild serve`](#offering-an-agent-to-programs-yobuild-serve)
 - [Scripted runs](#scripted-runs)
 - [What keeps an agent in bounds](#what-keeps-an-agent-in-bounds)
 - [When something fails](#when-something-fails)
@@ -243,28 +244,6 @@ MCP server it lacks and load it for the session. It works like this:
 [§14](design.md#14-agents-that-extend-themselves-m5-decided-2026-10-25)
 is the design.
 
-## Offering an agent to programs: `yobuild serve`
-
-```toml
-[serve]
-approval = "ask"   # each task allowed on the page first; "run": as sent; "never"
-```
-
-```sh
-yobuild serve agent.toml           # the page, and beside it /api/runs, on this machine only
-```
-
-A program on the same machine sends a task with `POST /api/runs`
-(`{"task": "…"}`, JSON, the token as `Authorization: Bearer …`) and gets
-an id; `GET /api/runs/<id>?wait=60` says where it is, and once it ran,
-its run log entry: the answer, the outcome, the cost. Tasks run one at a
-time in the session the page shows. The API's URL and its own token
-(not the page's: a program cannot answer your questions on the page) are
-printed after the page's URL, and written for your user only to
-`serve/<agent>-<hash>.json` under yobuild's home, one file per agent and
-folder. [§18](design.md#18-what-yo-reads-app-the-static-check-serve-post-10-asked-2026-11-04)
-is the design.
-
 ## Checking an agent
 
 ```sh
@@ -273,7 +252,7 @@ yobuild check agent.toml --json   # the same, for a program
 yobuild check agent.toml --static # starts nothing: the manifest, its prompt and local files only
 ```
 
-`--static` installs and starts nothing (no Node or npm needed): it reads
+`--static` (on main, not yet released: 0.3.1 refuses it) installs and starts nothing (no Node or npm needed): it reads
 the manifest, its prompt, its local plugin and server files and `[app]`'s
 icon, and
 reports each entry as the manifest gives it, its tools only the names its
@@ -454,6 +433,32 @@ The next morning, read the report, and the run in the log:
 cat ~/reports/release-notes.md
 yobuild log ~/agents/release-notes/agent.toml -n 1
 ```
+
+## Offering an agent to programs: `yobuild serve`
+
+On main, not yet released: it comes with the next release (the
+[changelog](../CHANGELOG.md)'s "Unreleased"); 0.3.1 does not know `serve`
+or `[serve]`.
+
+```toml
+[serve]
+approval = "ask"   # each task allowed on the page first; "run": as sent; "never"
+```
+
+```sh
+yobuild serve agent.toml           # the page, and beside it /api/runs, on this machine only
+```
+
+A program on the same machine sends a task with `POST /api/runs`
+(`{"task": "…"}`, JSON, the token as `Authorization: Bearer …`) and gets
+an id; `GET /api/runs/<id>?wait=60` says where it is, and once it ran,
+its run log entry: the answer, the outcome, the cost. Tasks run one at a
+time in the session the page shows. The API's URL and its own token
+(not the page's: a program cannot answer your questions on the page) are
+printed after the page's URL, and written for your user only to
+`serve/<agent>-<hash>.json` under yobuild's home, one file per agent and
+folder. [§18](design.md#18-what-yo-reads-app-the-static-check-serve-asked-and-built-2026-11-04)
+is the design.
 
 ## Scripted runs
 

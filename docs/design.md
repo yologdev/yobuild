@@ -618,7 +618,8 @@ install runs there, and has the network.
 
 ### Vet: `yobuild check agent.toml` (M2b, decided 2026-10-18)
 
-`yobuild check <agent.toml> [--locked] [--json]` needs no model, no key
+`yobuild check <agent.toml> [--locked] [--json]` (and, since §18,
+`--static`, which starts nothing) needs no model, no key
 and no task:
 
 1. **Read and install.** Read the manifest (its errors as `run` gives
@@ -5801,7 +5802,7 @@ session, a resumed one's too) and its `folder`: with the manifest, where
 ### The log
 
 - **One JSON line per run, appended when it ends**, in every mode
-  (`--once`, the page, the terminal UI). `run`'s watch writes it: it is
+  (`--once`, the page, the terminal UI, `yobuild serve`). `run`'s watch writes it: it is
   an observer of the session and sees what every frontend sees — the
   run's start (its prompt), its events, the notices, its `RunEnd`. It
   writes before `--once` counts the run as ended, so the process never
@@ -5821,7 +5822,7 @@ session, a resumed one's too) and its `folder`: with the manifest, where
 - **What a line holds** (`run_log::Entry`, camelCase, `v: 1`):
   `started`/`ended` (UTC, `YYYY-MM-DDTHH:MM:SSZ`) and `seconds`;
   `agent`, `manifest`, `folder` (the working folder); `session` (the
-  session's id) and `run` (its number in the session); `mode` (`once`, `web`, `terminal`) and
+  session's id) and `run` (its number in the session); `mode` (`once`, `web`, `terminal`, `serve`) and
   `scripted`; `task` (the prompt that started the run: the task, the
   owner's message, or a steer — an answer, a plugin's wake); `outcome`
   and `error` (the run Ctrl+C, SIGHUP or SIGTERM cut short is `aborted`,
@@ -6340,7 +6341,7 @@ Said where the sandbox is said (the guide, the skill), in these words:
    is; the histories and the AI tools' logins hidden; macOS's `C` cache
    folder no longer writable; the trial async.
 
-## 18. What yo reads: `[app]`, the static check, `serve` (post-1.0; asked 2026-11-04)
+## 18. What yo reads: `[app]`, the static check, `serve` (asked and built 2026-11-04)
 
 yo (yoyo-meme/yo, its design's §13) gives consumers what yobuild leaves
 out on purpose — accounts, publishing and installing with a trust screen,
