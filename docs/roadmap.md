@@ -418,6 +418,18 @@ After 1.0: Windows (open question 7), M3c, rutis plugins through
 `[extend]`, a sign-in kept across sessions (design §14 "Stage 4",
 decision 2).
 
+## M7 — What yo reads (asked 2026-11-04; design §18)
+
+yo publishes yobuild agents as apps for people who do not code. Additive,
+none changing what an agent does:
+
+- **`[app]` and `check --static`** (built 2026-11-04): the agent's
+  identity as an app; a check that starts nothing, each entry's `tier`
+  and the agent's `builtins` (report version 6) — yo's publish step.
+- **`yobuild serve`**: one agent's runs offered on loopback to a local yo
+  node, the owner's `[serve] approval` deciding; its wire format waits for
+  yo's M3.
+
 ## Open questions (for review)
 
 1. **Name and home.** Decided: `yologdev/yobuild`, public.

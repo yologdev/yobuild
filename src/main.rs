@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! yobuild run <agent.toml> [--scripted FILE] [--once [--report FILE]] [--measure] [--web ADDR] [--locked] [--resume] [--] [TASK…]
-//! yobuild check <agent.toml> [--locked] [--json]
+//! yobuild check <agent.toml> [--locked | --static] [--json]
 //! yobuild log <agent.toml> [-n N] [--json]
 //! yobuild new <folder> [--from <agent>]
 //! yobuild new --list
@@ -21,6 +21,9 @@
 //! `check` vets every plugin and MCP server without a model or a key (each
 //! alone, then the agent together; design §4): a report on stdout, as text
 //! or `--json`; the exit code is non-zero when anything has a problem.
+//! `--static` starts nothing (no Node, npm, runtime or server): the
+//! manifest, its prompt and local files, each entry as written (design
+//! §18).
 //!
 //! - `--scripted FILE`: the model's replies from a file (no provider, no key).
 //! - `--once`: run TASK alone, without a frontend; each tool call and notice
@@ -107,7 +110,7 @@ fn layout(manifest: &Manifest, terminal: bool) -> Result<Layout, BoxError> {
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const USAGE: &str = "usage: yobuild run <agent.toml> [--scripted FILE] [--once [--report FILE]] [--measure] [--web ADDR] [--locked] [--resume] [--] [TASK…]
-       yobuild check <agent.toml> [--locked] [--json]
+       yobuild check <agent.toml> [--locked | --static] [--json]
        yobuild log <agent.toml> [-n N] [--json]
        yobuild new <folder> [--from <agent>]
        yobuild new --list
@@ -550,7 +553,7 @@ fn skill(args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
 /// exit 1 when anything has a problem.
 fn check(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
     use std::io::Write;
-    use yobuild::run::check::{check, CheckOptions};
+    use yobuild::run::check::{check, check_static, CheckOptions};
     let path = match args.next() {
         Some(help) if help == "-h" || help == "--help" => {
             out!("{USAGE}");
@@ -561,24 +564,38 @@ fn check(mut args: impl Iterator<Item = String>) -> Result<ExitCode, BoxError> {
     };
     let mut options = CheckOptions::new(Manifest::load(&path)?);
     let mut json = false;
+    let mut only_read = false;
     for arg in args {
         match arg.as_str() {
             "--locked" => options.locked = true,
             "--json" => json = true,
+            "--static" => only_read = true,
             other => return Err(format!("unknown option {other}\n{USAGE}").into()),
         }
     }
+    if only_read && options.locked {
+        return Err(
+            "--locked and --static: a static check installs nothing, so has no lock to hold to"
+                .into(),
+        );
+    }
     logging(None)?;
-    // As `run`'s: after the options are read and the log is there.
-    options.layout = layout(&options.manifest, false)?;
     let runtime = tokio::runtime::Runtime::new()?;
-    // Ctrl+C (SIGHUP, SIGTERM) from the start: the servers `check` starts
-    // run in process groups of their own, and are stopped only when
-    // dropped.
-    let report = match runtime.block_on(async {
-        let mut stops = yobuild::stops::Stops::listen()?;
-        stops.until(check(options)).await
-    }) {
+    let checked = match only_read {
+        true => runtime.block_on(async { check_static(&options.manifest) }),
+        false => {
+            // As `run`'s: after the options are read and the log is there.
+            options.layout = layout(&options.manifest, false)?;
+            // Ctrl+C (SIGHUP, SIGTERM) from the start: the servers `check`
+            // starts run in process groups of their own, and are stopped
+            // only when dropped.
+            runtime.block_on(async {
+                let mut stops = yobuild::stops::Stops::listen()?;
+                stops.until(check(options)).await
+            })
+        }
+    };
+    let report = match checked {
         Ok(report) => report,
         // As `run`'s refusals: the fix when yobuild knows one.
         Err(e) => {

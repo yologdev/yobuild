@@ -1439,7 +1439,7 @@ fn check_says_what_run_would_refuse() {
     assert_eq!(code, Some(1), "{out}");
     // As JSON: the problem and its fix.
     let report: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(report["version"], 5);
+    assert_eq!(report["version"], 6);
     assert_eq!(report["agent"]["together"], "refused");
     let problem = &report["agent"]["problems"][0];
     assert!(
@@ -3025,4 +3025,146 @@ fn a_newcomers_first_mistakes_and_runs_are_said_plainly() {
             && stderr.contains("  what to do: set that variable to your key"),
         "{stderr}"
     );
+}
+
+#[test]
+fn a_static_check_reads_the_manifest_and_starts_nothing() {
+    let dir = project(
+        r#"[builtins]
+tools = "read-only"
+report = ["Done", "Next"]
+
+[app]
+id = "alice/notes"
+version = "1.0.0"
+title = "Notes"
+icon = "./icon.png"
+needs = ["device.location"]
+
+[[plugin]]
+name = "local"
+pi = "./ext.ts"
+grants = { trust = true }
+allow = ["shout"]
+
+[[plugin]]
+dsh = "dsh-free-search@0.8.1"
+allow = ["research"]
+
+[[mcp]]
+name = "remote"
+url = "https://mcp.example.com/mcp"
+allow = ["fetch"]
+
+[[mcp]]
+name = "files"
+npm = "@modelcontextprotocol/server-filesystem@1.0.0"
+args = ["."]
+"#,
+        "[]",
+    );
+    // No Node, npm or home: nothing is installed or started.
+    let home = tempfile::tempdir().unwrap();
+    let static_check = |args: &[&str]| {
+        let out = bin()
+            .args(["check", "agent.toml", "--static"])
+            .args(args)
+            .current_dir(dir.path())
+            .env("YOBUILD_HOME", home.path())
+            .env("PATH", "/nonexistent")
+            .output()
+            .unwrap();
+        (out.status.code(), text(&out.stdout), text(&out.stderr))
+    };
+    // The pi file and the icon are not there: each a problem.
+    let (code, stdout, stderr) = static_check(&["--json"]);
+    assert_eq!(code, Some(1), "{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["version"], 6);
+    assert_eq!(report["static"], true);
+    assert_eq!(report["ok"], false);
+    let problems = report["entries"][0]["problems"].to_string();
+    assert!(problems.contains("no such file or folder"), "{problems}");
+    let problems = report["agent"]["problems"].to_string();
+    assert!(
+        problems.contains("[app] icon \\\"./icon.png\\\": no such file"),
+        "{problems}"
+    );
+
+    std::fs::write(dir.path().join("ext.ts"), "export default () => {};\n").unwrap();
+    std::fs::write(dir.path().join("icon.png"), "").unwrap();
+    let (code, stdout, stderr) = static_check(&["--json"]);
+    assert_eq!(code, Some(0), "{stdout}{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["ok"], true);
+    let entries = report["entries"].as_array().unwrap();
+    let said: Vec<(&str, &str, &str, bool)> = entries
+        .iter()
+        .map(|e| {
+            (
+                e["name"].as_str().unwrap(),
+                e["ecosystem"].as_str().unwrap(),
+                e["tier"].as_str().unwrap(),
+                e["checkedAlone"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        said,
+        [
+            ("local", "pi", "local", false),
+            ("dsh-free-search", "dsh", "container", false),
+            ("remote", "http", "remote", false),
+            ("files", "stdio", "container", false),
+        ]
+    );
+    assert_eq!(entries[0]["grants"], serde_json::json!(["trust"]));
+    assert_eq!(
+        entries[0]["tools"],
+        serde_json::json!([{ "name": "shout", "kind": "allowed" }])
+    );
+    assert_eq!(entries[2]["tools"][0]["name"], "remote__fetch");
+    let agent = &report["agent"];
+    assert_eq!(agent["together"], "static");
+    assert_eq!(
+        agent["builtins"],
+        serde_json::json!({
+            "tools": "read-only", "askOwner": false, "report": ["Done", "Next"],
+            "facts": false, "scratch": false, "gate": "allow-list"
+        })
+    );
+    assert_eq!(
+        agent["app"],
+        serde_json::json!({
+            "id": "alice/notes", "version": "1.0.0", "title": "Notes",
+            "summary": null, "author": null, "icon": "./icon.png",
+            "needs": ["device.location"]
+        })
+    );
+    let tools: Vec<&str> = agent["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools, ["read_file", "list_files", "search"]);
+    assert!(agent["tools"][0]["parameters"].is_object());
+    assert_eq!(
+        std::fs::read_dir(home.path()).unwrap().count(),
+        0,
+        "nothing written to yobuild's home"
+    );
+    // As text.
+    let (code, stdout, _) = static_check(&[]);
+    assert_eq!(code, Some(0));
+    assert!(
+        stdout.contains("plugin local  pi ")
+            && stdout.contains("  read\n  tools: shout (allowed)\n")
+            && stdout.contains("  tier: local\n")
+            && stdout.contains("agent a: read (static: nothing was started)\n"),
+        "{stdout}"
+    );
+    let (code, _, stderr) = static_check(&["--locked"]);
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("--locked and --static"), "{stderr}");
 }

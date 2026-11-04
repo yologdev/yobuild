@@ -6339,3 +6339,101 @@ Said where the sandbox is said (the guide, the skill), in these words:
    macOS launchd sockets refused; `YOAGENT_DSH_HOME` checked as `write`
    is; the histories and the AI tools' logins hidden; macOS's `C` cache
    folder no longer writable; the trial async.
+
+## 18. What yo reads: `[app]`, the static check, `serve` (post-1.0; asked 2026-11-04)
+
+yo (yoyo-meme/yo, its design's §13) gives consumers what yobuild leaves
+out on purpose — accounts, publishing and installing with a trust screen,
+per-user grants, hosting on Cloudflare Workers, channels. A yo app is a
+yobuild agent: its `agent.toml` plus one table of identity. yo vets an app
+when it is published, natively (a Worker cannot run yobuild), and sorts
+each part into where it can run. Three additions serve that; each is
+additive, and none changes what an agent does.
+
+### `[app]`
+
+An optional table, read as strictly as every other (unknown keys refused
+at their place), and used by nothing at run time:
+
+```toml
+[app]
+id      = "alice/weather-brief"   # required: <author>/<name>, stable across versions
+version = "1.2.0"                 # required: full semver
+title   = "Weather brief"         # required: one line, ≤ 80 characters
+summary = "A morning brief …"     # one line, ≤ 280 characters
+author  = "Alice"                 # one line, ≤ 80 characters
+icon    = "./icon.png"            # in the agent's folder: .png, .svg, .jpg, .jpeg or .webp
+needs   = ["device.location"]     # capabilities only a local node has
+```
+
+- `id`: two parts, each 1 to 64 lowercase letters, digits and `-`, not
+  beginning or ending with `-`.
+- `needs`: yo owns the vocabulary (its devices.md); yobuild checks each
+  entry's shape only — two or more dotted parts, each a lowercase letter
+  then lowercase letters, digits and `-` — and that none is listed twice.
+  A new capability name needs no yobuild release.
+- `icon`: `./` and inside the folder (no `..` past it) when read; that
+  the file is there, `check` says (a problem when it is not).
+- `check --json` echoes it as `agent.app` (`null` without it).
+- `yobuild new` writes no `[app]` block until yo publishes apps.
+
+### `check --static`
+
+`yobuild check agent.toml --static [--json]`: what can be known without
+starting anything — no Node, no npm, no runtime, no server connected, no
+network. yo's publish step reads it. It reads the manifest (as always),
+the prompt, `[app]`'s icon, and each local plugin file or folder the
+manifest names; then reports each entry from the manifest alone:
+`kind`, `name`, `ecosystem`, `source`, `grants`, `environment`, `tier`,
+its `allow`ed names as `allowed` tools, `checkedAlone` false; and the
+agent's built-in tools (yoagent's six or the read-only three, `ask_owner`,
+`find_plugin`/`load_plugin`) with the gate's kinds. `agent.together` is
+`"static"`: nothing was started. `ok` means no problem was found, which
+is less than a full `check`'s. The report gains `static: true|false`.
+
+### `tier` and `agent.builtins`
+
+Each entry's `tier` is yobuild's opinion of where it can run, which yo may
+override:
+
+- `"remote"`: an MCP server over HTTP — nothing of it runs here.
+- `"container"`: a pi, DSH or rutis plugin or a stdio MCP server — it
+  needs Node or a process, but nothing of the owner's machine.
+- `"local"`: one of these granted `workspace`, `trust`, `exec` or `env` —
+  it reaches the owner's folder, shell or environment.
+
+The agent's own tools are listed under `agent.tools` as before; with them,
+`agent.builtins` says the `[builtins]` table as set: `tools`
+(`"coding"`/`"read-only"`), `askOwner`, `report` (the sections, or
+`null`), `facts`, `scratch`, `gate`. The report's version is 6.
+
+### `yobuild serve` (its own PR)
+
+One agent's runs offered to a caller on the same machine — yo's local node
+delegating a task (yo's M3). A CLI mode, not a library entry point (1.0
+promises the command, not the library). Until it exists, a local node uses
+`run --once --report FILE` and `log --json`.
+
+- `yobuild serve agent.toml [--addr 127.0.0.1:PORT]`: loopback only; the
+  session `run` makes, with its page for the owner, and an API beside it
+  behind a token (as the page's `/ws`), written to a 0600 file under
+  yobuild's home and printed.
+- `POST /runs` `{task}` → `{run}`; the run's events as a stream; its end
+  as the run log's entry (§16) — answer, outcome, cost, tokens, tools.
+  One run at a time, the rest queued.
+- `[serve] approval = "run" | "ask" | "never"`, the owner's in
+  `agent.toml`, never the caller's: `ask` puts each task to the owner's
+  frontends (Allow/Block) before it runs; `never` refuses `serve`.
+- Open until yo's M3 decides: whether `serve` speaks A2A itself or the
+  node translates; one session per caller, or a fresh one per task.
+
+### Decisions
+
+1. yobuild checks `needs`' shape, yo its meaning. Decided with yo
+   (2026-11-04).
+2. `id` is `<author>/<name>`. Decided with yo (2026-11-04).
+3. `tier` is an opinion beside the stable `ecosystem`; yo maps from
+   `ecosystem` and the tools when they disagree. Decided with yo
+   (2026-11-04).
+4. `serve` is a CLI mode with the owner's approval policy in the manifest.
+   Decided with yo (2026-11-04); its wire format waits for yo's M3.

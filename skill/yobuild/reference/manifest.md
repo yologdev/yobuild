@@ -76,6 +76,15 @@ save = true                           # the default: saved for `yobuild run --re
 [sandbox]                             # optional: plugins and stdio servers confined (Linux: bwrap; macOS: sandbox-exec)
 write = ["~/.cache/acme"]             # more folders they may write (./, ../, / or ~/)
 hide  = ["~/.config/acme"]            # more they may not read
+
+[app]                                 # optional: the agent as a yo app; nothing at run time
+id      = "alice/research-desk"       # required: <author>/<name>, lowercase
+version = "1.0.0"                     # required: full semver
+title   = "Research desk"             # required: one line, ≤ 80
+summary = "Answers with sources."     # one line, ≤ 280
+author  = "Alice"                     # one line, ≤ 80
+icon    = "./icon.png"                # in the folder: png, svg, jpg, jpeg or webp
+needs   = ["device.location"]         # capabilities only a local node has (dotted lowercase)
 ```
 
 ## The keys
@@ -353,6 +362,13 @@ its own words ("EPERM", "read-only file system"): give that folder in
 and DSH plugins alone (their probes would run outside it): they are
 checked together, and every confined entry says "confined by the
 sandbox".
+
+**`[app]`**: only when the person publishes the agent as a yo app; leave
+it out otherwise. Nothing reads it at run time; `check --json` echoes it
+as `agent.app`, and `check` says a problem when `icon` is not there. `id`
+is `<author>/<name>` (lowercase letters, digits, `-`) and stays the same
+across versions; `version` is full semver; `needs` names capabilities in
+yo's words (`device.location`), checked for their shape only.
 
 ## Writing the prompt
 

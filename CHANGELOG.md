@@ -5,6 +5,21 @@ base changed**, because a lock with DSH plugins records it: when it
 changed, `--locked` refuses such a lock, and one run without `--locked`
 locks it again (commit the new lock).
 
+## Unreleased
+
+What yo (a host that publishes yobuild agents as apps) reads; design §18.
+
+- **`[app]`**, an optional table: the agent's identity as a yo app
+  (`id` as `<author>/<name>`, `version`, `title`, `summary`, `author`,
+  `icon`, `needs`). Read strictly, used by nothing at run time; `check`
+  says a problem when its `icon` is not there.
+- **`yobuild check --static`**: starts nothing — no Node, npm, runtime or
+  server. It reads the manifest, its prompt, its local plugin files and
+  `[app]`'s icon, and reports each entry as the manifest gives it.
+- **`check --json`'s report is version 6:** each entry's `tier`
+  (`remote`, `container` or `local`: where yobuild thinks it can run), the
+  agent's `builtins` and `app`, and the report's `static`.
+
 ## 0.3.1 — 2026-11-03
 
 Fixes from a newcomer's first hour with yobuild. The DSH base is
