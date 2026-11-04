@@ -5,9 +5,10 @@ base changed**, because a lock with DSH plugins records it: when it
 changed, `--locked` refuses such a lock, and one run without `--locked`
 locks it again (commit the new lock).
 
-## Unreleased
+## 0.3.2 — 2026-11-04
 
 What yo (a host that publishes yobuild agents as apps) reads; design §18.
+The DSH base is unchanged.
 
 - **`[app]`**, an optional table: the agent's identity as a yo app
   (`id` as `<author>/<name>`, `version`, `title`, `summary`, `author`,

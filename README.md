@@ -18,9 +18,9 @@ an agent is a short settings file and a prompt.
 > servers, pi and DSH packages, remote servers), a sign-in for remote
 > servers, sessions that survive a restart (`--resume`), a run log
 > (`yobuild log`) and runs on a schedule (`--once --report`), and an
-> opt-in sandbox (`[sandbox]`). On main, not yet released: what yo reads
-> — `yobuild serve` (an agent's runs offered to programs on this
-> machine), `check --static` and the `[app]` table. Next: 1.0 (the
+> opt-in sandbox (`[sandbox]`), and what yo reads — `yobuild serve` (an
+> agent's runs offered to programs on this machine), `check --static` and
+> the `[app]` table. Next: 1.0 (the
 > [roadmap](docs/roadmap.md)'s M6).
 
 ## What you can build
