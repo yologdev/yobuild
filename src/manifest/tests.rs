@@ -1800,3 +1800,111 @@ fn sandbox_refuses_what_is_no_path_named_twice_or_everything() {
     }
     assert!(error(&with("[sandbox]\nread = []\n")).starts_with("5:1: unknown field `read`"));
 }
+
+#[test]
+fn app_is_absent_unless_its_table_is_there_and_reads_each_field() {
+    assert_eq!(read(MINIMAL).unwrap().app, None);
+    let m = read(&with(
+        "[app]\nid = \"alice/weather-brief\"\nversion = \"1.2.0-rc.1\"\ntitle = \" Weather brief \"\nsummary = \"A morning brief.\"\nauthor = \"Alice\"\nicon = \"./img/../icon.PNG\"\nneeds = [\"device.location\", \"device.camera-roll\"]\n",
+    ))
+    .unwrap();
+    assert_eq!(
+        m.app,
+        Some(App {
+            id: "alice/weather-brief".into(),
+            version: "1.2.0-rc.1".into(),
+            title: "Weather brief".into(),
+            summary: Some("A morning brief.".into()),
+            author: Some("Alice".into()),
+            icon: Some("./img/../icon.PNG".into()),
+            needs: vec!["device.location".into(), "device.camera-roll".into()],
+        })
+    );
+    let m = read(&with(
+        "[app]\nid = \"a/b\"\nversion = \"0.1.0\"\ntitle = \"B\"\n",
+    ))
+    .unwrap();
+    let app = m.app.unwrap();
+    assert_eq!((app.summary, app.author, app.icon), (None, None, None));
+    assert!(app.needs.is_empty());
+}
+
+#[test]
+fn app_refuses_each_field_out_of_shape_where_it_is() {
+    let ok = "id = \"a/b\"\nversion = \"1.0.0\"\ntitle = \"T\"\n";
+    let cases = [
+        ("[app]\nversion = \"1.0.0\"\ntitle = \"T\"\n", "4:1: [app] needs `id`"),
+        ("[app]\nid = \"a/b\"\ntitle = \"T\"\n", "4:1: [app] needs `version`"),
+        ("[app]\nid = \"a/b\"\nversion = \"1.0.0\"\n", "4:1: [app] needs `title`"),
+        (
+            "[app]\nid = \"weather\"\nversion = \"1.0.0\"\ntitle = \"T\"\n",
+            "5:6: [app] id \"weather\": <author>/<name>, each 1 to 64 lowercase letters, digits and `-` (`alice/weather-brief`)",
+        ),
+        (
+            "[app]\nid = \"Alice/b\"\nversion = \"1.0.0\"\ntitle = \"T\"\n",
+            "5:6: [app] id \"Alice/b\": <author>/<name>, each 1 to 64 lowercase letters, digits and `-` (`alice/weather-brief`)",
+        ),
+        (
+            "[app]\nid = \"a/-b\"\nversion = \"1.0.0\"\ntitle = \"T\"\n",
+            "5:6: [app] id \"a/-b\": <author>/<name>, each 1 to 64 lowercase letters, digits and `-` (`alice/weather-brief`)",
+        ),
+        (
+            "[app]\nid = \"a/b\"\nversion = \"1.0\"\ntitle = \"T\"\n",
+            "6:11: [app] version \"1.0\": a full semver version (`1.0.0`)",
+        ),
+        (
+            "[app]\nid = \"a/b\"\nversion = \"1.0.0\"\ntitle = \" \"\n",
+            "7:9: [app] title: blank",
+        ),
+        (
+            "[app]\nid = \"a/b\"\nversion = \"1.0.0\"\ntitle = \"a\\nb\"\n",
+            "7:9: [app] title: one line, without control characters or line separators",
+        ),
+        (
+            "[app]\nid = \"a/b\"\nversion = \"1.0.0\"\ntitle = \"a\\u2028b\"\n",
+            "7:9: [app] title: one line, without control characters or line separators",
+        ),
+        (
+            &format!("[app]\n{ok}author = \"{}\"\n", "x".repeat(81)),
+            "8:10: [app] author: 81 characters: at most 80",
+        ),
+        (
+            &format!("[app]\n{ok}icon = \"icon.png\"\n"),
+            "8:8: [app] icon \"icon.png\": a path in the agent's folder, beginning with ./",
+        ),
+        (
+            &format!("[app]\n{ok}icon = \"./a/../../icon.png\"\n"),
+            "8:8: [app] icon \"./a/../../icon.png\": a path in the agent's folder, not outside it",
+        ),
+        (
+            &format!("[app]\n{ok}icon = \"./\"\n"),
+            "8:8: [app] icon \"./\": a file in the agent's folder",
+        ),
+        (
+            &format!("[app]\n{ok}icon = \"./icon.gif\"\n"),
+            "8:8: [app] icon \"./icon.gif\": an image: png, svg, jpg, jpeg, webp",
+        ),
+        (
+            &format!("[app]\n{ok}needs = [\"location\"]\n"),
+            "8:10: [app] needs \"location\": a capability's name, dotted lowercase (`device.location`)",
+        ),
+        (
+            &format!("[app]\n{ok}needs = [\"Device.location\"]\n"),
+            "8:10: [app] needs \"Device.location\": a capability's name, dotted lowercase (`device.location`)",
+        ),
+        (
+            &format!("[app]\n{ok}needs = [\"device..location\"]\n"),
+            "8:10: [app] needs \"device..location\": a capability's name, dotted lowercase (`device.location`)",
+        ),
+        (
+            &format!("[app]\n{ok}needs = [\"device.location\", \"device.location\"]\n"),
+            "8:29: [app] needs \"device.location\": listed twice",
+        ),
+    ];
+    for (extra, expected) in cases {
+        assert_eq!(error(&with(extra)), expected, "{extra}");
+    }
+    assert!(
+        error(&with(&format!("[app]\n{ok}icons = []\n"))).starts_with("8:1: unknown field `icons`")
+    );
+}

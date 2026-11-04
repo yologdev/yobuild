@@ -50,7 +50,7 @@ const SETTLE: Duration = Duration::from_secs(3);
 const STILL: Duration = Duration::from_millis(500);
 
 /// The report's shape, for whoever reads `--json`.
-const REPORT_VERSION: u32 = 5;
+const REPORT_VERSION: u32 = 6;
 
 /// A pi or DSH plugin's note with `[sandbox]`: not probed alone.
 const UNCONFINED_PROBE: &str = "not probed alone: with [sandbox] nothing runs outside it, and its probe alone would (yoagent-rutis starts it); checked with the agent together, confined";
@@ -243,6 +243,58 @@ pub struct Entry {
     /// a plugin's runtime or a stdio server, with the table; never an HTTP
     /// server (nothing of it runs here).
     pub confined: bool,
+    /// Where it can run, in yobuild's opinion (design §18).
+    pub tier: Tier,
+}
+
+/// Where an entry can run (design §18): yobuild's opinion, beside the
+/// stable [`Ecosystem`], for a host that runs agents elsewhere (yo).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum Tier {
+    /// An MCP server over HTTP: nothing of it runs here.
+    Remote,
+    /// A DSH or rutis plugin granted nothing beyond `wake`/`model`, or a
+    /// stdio server handed no variable: it needs Node or a process, and
+    /// nothing granted of the owner's machine.
+    Container,
+    /// A pi plugin (every pi extension has the folder, `ctx.cwd`, and they
+    /// share one runtime), a plugin granted `workspace`, `trust`, `exec` or
+    /// `env`, or a stdio server whose `env` hands it variables: it reaches
+    /// the owner's folder, shell or environment.
+    Local,
+}
+
+impl Tier {
+    fn of_plugin(plugin: &crate::manifest::Plugin) -> Tier {
+        let g = &plugin.grants;
+        let reaches = matches!(plugin.kind, PluginKind::Pi(_))
+            || g.workspace
+            || g.trust
+            || g.exec != crate::manifest::ExecGrant::Off
+            || !g.env.is_empty();
+        match reaches {
+            true => Tier::Local,
+            false => Tier::Container,
+        }
+    }
+
+    fn of_server(server: &crate::manifest::Mcp) -> Tier {
+        match server.transport {
+            Transport::Http { .. } => Tier::Remote,
+            Transport::Stdio { ref env, .. } if !env.is_empty() => Tier::Local,
+            _ => Tier::Container,
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            Tier::Remote => "remote",
+            Tier::Container => "container",
+            Tier::Local => "local",
+        }
+    }
 }
 
 /// Whether the agent was started together.
@@ -257,6 +309,8 @@ pub enum Together {
     /// Tried, and `run` would refuse it at start (its problems say why).
     Refused,
     Started,
+    /// `check --static`: nothing is started.
+    Static,
 }
 
 /// The agent, together.
@@ -286,6 +340,98 @@ pub struct Agent {
     pub extend: Option<Extend>,
     /// The sandbox, with `[sandbox]`; `null` without it.
     pub sandbox: Option<SandboxSaid>,
+    /// `[builtins]` as set.
+    pub builtins: Builtins,
+    /// `[app]` as written (design §18); `null` without it.
+    pub app: Option<App>,
+}
+
+/// `[builtins]`, as `check --json` says it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct Builtins {
+    /// `coding` or `read-only`.
+    pub tools: String,
+    pub ask_owner: bool,
+    /// The report's sections; `null` without one.
+    pub report: Option<Vec<String>>,
+    pub facts: bool,
+    pub scratch: bool,
+    /// `allow-list` or `off`.
+    pub gate: String,
+}
+
+impl From<&crate::manifest::Builtins> for Builtins {
+    fn from(b: &crate::manifest::Builtins) -> Self {
+        use crate::manifest::Tools;
+        Self {
+            tools: match b.tools {
+                Tools::ReadOnly => "read-only",
+                _ => "coding",
+            }
+            .to_owned(),
+            ask_owner: b.ask_owner,
+            report: b.report.as_ref().map(|r| r.sections().to_vec()),
+            facts: b.facts,
+            scratch: b.scratch,
+            gate: match b.gate {
+                GateMode::Off => "off",
+                _ => "allow-list",
+            }
+            .to_owned(),
+        }
+    }
+}
+
+/// `[app]`, as `check --json` says it (design §18).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct App {
+    pub id: String,
+    pub version: String,
+    pub title: String,
+    pub summary: Option<String>,
+    pub author: Option<String>,
+    pub icon: Option<String>,
+    pub needs: Vec<String>,
+}
+
+impl From<&crate::manifest::App> for App {
+    fn from(a: &crate::manifest::App) -> Self {
+        Self {
+            id: a.id.clone(),
+            version: a.version.clone(),
+            title: a.title.clone(),
+            summary: a.summary.clone(),
+            author: a.author.clone(),
+            icon: a.icon.clone(),
+            needs: a.needs.clone(),
+        }
+    }
+}
+
+/// The agent's own: `[builtins]` and `[app]` said, and an `[app] icon`
+/// that is not there a problem.
+fn agent_of(manifest: &Manifest) -> Agent {
+    let mut agent = Agent {
+        name: manifest.agent.name.clone(),
+        extend: manifest.extend.as_ref().map(Extend::from),
+        builtins: Builtins::from(&manifest.builtins),
+        app: manifest.app.as_ref().map(App::from),
+        ..Agent::default()
+    };
+    if let Some(icon) = manifest.app.as_ref().and_then(|a| a.icon.as_deref()) {
+        let path = manifest.dir.join(icon);
+        if !path.is_file() {
+            agent.problems.push(Problem::new(format!(
+                "[app] icon {icon:?}: no such file in {}",
+                manifest.dir.display()
+            )));
+        }
+    }
+    agent
 }
 
 /// The sandbox, as `check --json` says it (design §17).
@@ -395,20 +541,26 @@ impl From<&crate::manifest::Extend> for Extend {
 pub struct Report {
     /// The report's shape.
     pub version: u32,
-    /// No entry and not the agent has a problem, and the agent started.
+    /// No entry and not the agent has a problem, and the agent started
+    /// (with `static`: no problem found, nothing started).
     pub ok: bool,
+    /// `check --static`: read from the manifest and its files alone.
+    #[serde(rename = "static")]
+    pub is_static: bool,
     pub entries: Vec<Entry>,
     pub agent: Agent,
 }
 
 impl Report {
     fn new(entries: Vec<Entry>, agent: Agent) -> Report {
+        let is_static = agent.together == Together::Static;
         let ok = agent.problems.is_empty()
-            && agent.together == Together::Started
+            && (agent.together == Together::Started || is_static)
             && entries.iter().all(|e| e.problems.is_empty());
         Report {
             version: REPORT_VERSION,
             ok,
+            is_static,
             entries,
             agent,
         }
@@ -438,6 +590,10 @@ impl Report {
         let started = self.agent.together == Together::Started;
         for entry in &self.entries {
             let verdict = match (entry.checked_alone, started) {
+                _ if self.is_static => match entry.problems.is_empty() {
+                    true => "read".to_owned(),
+                    false => count(&entry.problems),
+                },
                 // Checked together only, and the agent was not started.
                 (false, false) if entry.problems.is_empty() => "not checked".to_owned(),
                 _ => count(&entry.problems),
@@ -478,6 +634,10 @@ impl Report {
             if entry.confined {
                 out.push_str("  confined by the sandbox\n");
             }
+            // Where it can run: what a static check is read for.
+            if self.is_static {
+                out.push_str(&format!("  tier: {}\n", entry.tier.word()));
+            }
             if !entry.environment.is_empty() {
                 out.push_str(&format!(
                     "  environment beyond the kept set: {}\n",
@@ -494,6 +654,9 @@ impl Report {
         let agent = &self.agent;
         let verdict = match agent.together {
             Together::Skipped => "not started together: an entry has a problem".to_owned(),
+            Together::Static if agent.problems.is_empty() => {
+                "read (static: nothing was started)".to_owned()
+            }
             _ => count(&agent.problems),
         };
         out.push_str(&format!("agent {}: {verdict}\n", agent.name));
@@ -845,6 +1008,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
                 .map(|e| e.environment())
                 .unwrap_or_default(),
             confined: plan.sandbox.is_some(),
+            tier: Tier::of_plugin(plugin),
         };
         // With `[sandbox]` nothing runs outside it: the pi and DSH probes
         // alone, which yoagent-rutis starts, cannot be confined.
@@ -1007,6 +1171,7 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
             grants: Vec::new(),
             environment: super::Starts::Server(server).environment(),
             confined: plan.sandbox.is_some() && ecosystem == Ecosystem::Stdio,
+            tier: Tier::of_server(server),
         };
         if let Transport::Stdio {
             source: Source::Package(p),
@@ -1076,13 +1241,11 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
         ));
     }
     let mut agent = Agent {
-        name: manifest.agent.name.clone(),
         notes: agent_notes,
         install_scripts: scripts.base.clone(),
         left_out,
-        extend: manifest.extend.as_ref().map(Extend::from),
         sandbox: plan.sandbox.as_deref().map(SandboxSaid::from),
-        ..Agent::default()
+        ..agent_of(&manifest)
     };
     if entries.iter().all(|e| e.problems.is_empty()) {
         let expected: Vec<String> = entries
@@ -1128,6 +1291,176 @@ pub async fn check(options: CheckOptions) -> Result<Report, BoxError> {
     }
     fill(&mut agent.tools);
     Ok(Report::new(entries, agent))
+}
+
+/// `check --static` (design §18): what can be known without starting
+/// anything — no Node, npm, runtime, server or network. The manifest (read
+/// already), the prompt, `[app]`'s icon and each local plugin file; each
+/// entry as the manifest gives it, its `allow`ed names its tools; the
+/// agent's own tools. An error is what stops `run` before anything starts.
+pub fn check_static(manifest: &Manifest) -> Result<Report, BoxError> {
+    let cwd = std::env::current_dir().map_err(|e| format!("the current folder: {e}"))?;
+    Prompt::read(manifest)?;
+    let gate_off = manifest.builtins.gate == GateMode::Off;
+    let allowed = |names: &[String], prefix: &str| -> Vec<Tool> {
+        names
+            .iter()
+            .map(|n| {
+                let kind = match gate_off {
+                    true => ToolKind::Runs,
+                    false => ToolKind::Allowed,
+                };
+                Tool::new(format!("{prefix}{n}"), kind)
+            })
+            .collect()
+    };
+    let starts = super::starts(manifest);
+    let environment = |name: &str| {
+        starts
+            .iter()
+            .find(|e| e.name() == name)
+            .map(|e| e.environment())
+            .unwrap_or_default()
+    };
+    let mut entries = Vec::new();
+    for plugin in &manifest.plugins {
+        let (ecosystem, source, path) = match &plugin.kind {
+            PluginKind::Pi(source) => (Ecosystem::Pi, source_text(source), path_of(source)),
+            PluginKind::Dsh(source) => (Ecosystem::Dsh, source_text(source), path_of(source)),
+            PluginKind::Rutis { path, .. } => (
+                Ecosystem::Rutis,
+                path.display().to_string(),
+                plugin.builtin.is_none().then(|| path.clone()),
+            ),
+        };
+        let source = match &plugin.builtin {
+            Some(name) => format!("yobuild:{name}"),
+            None => source,
+        };
+        let mut problems = Vec::new();
+        if let Some(path) = path.map(|p| manifest.dir.join(p)) {
+            match there(&path) {
+                Err(why) => problems.push(Problem::new(format!("plugin {}: {why}", plugin.name))),
+                Ok(()) if ecosystem == Ecosystem::Rutis => {
+                    if let Err(e) = plugins::rutis_ready(&path) {
+                        problems.push(Problem::new(format!("plugin {}: {e}", plugin.name)));
+                    }
+                }
+                Ok(()) => {}
+            }
+        }
+        entries.push(Entry {
+            kind: EntryKind::Plugin,
+            name: plugin.name.clone(),
+            ecosystem,
+            source,
+            checked_alone: false,
+            problems,
+            notes: Vec::new(),
+            tools: allowed(&plugin.allow, ""),
+            handlers: None,
+            guidance_chars: None,
+            install_scripts: Vec::new(),
+            grants: plugin.grants.said(),
+            environment: environment(&plugin.name),
+            confined: manifest.sandbox.is_some(),
+            tier: Tier::of_plugin(plugin),
+        });
+    }
+    for server in &manifest.mcp {
+        let (ecosystem, source) = match &server.transport {
+            Transport::Stdio { source, .. } => (Ecosystem::Stdio, source_text(source)),
+            Transport::Http { url, .. } => (Ecosystem::Http, url.as_str().to_owned()),
+        };
+        let mut problems = Vec::new();
+        if let Transport::Stdio { source, .. } = &server.transport {
+            if let Some(path) = path_of(source).map(|p| manifest.dir.join(p)) {
+                if let Err(why) = there(&path) {
+                    problems.push(Problem::new(format!("mcp {}: {why}", server.name)));
+                }
+            }
+        }
+        entries.push(Entry {
+            kind: EntryKind::Mcp,
+            name: server.name.clone(),
+            ecosystem,
+            source,
+            checked_alone: false,
+            problems,
+            notes: Vec::new(),
+            tools: allowed(&server.allow, &format!("{}__", server.name)),
+            handlers: None,
+            guidance_chars: None,
+            install_scripts: Vec::new(),
+            grants: Vec::new(),
+            environment: super::Starts::Server(server).environment(),
+            confined: manifest.sandbox.is_some() && ecosystem == Ecosystem::Stdio,
+            tier: Tier::of_server(server),
+        });
+    }
+    let sources = match &manifest.extend {
+        Some(extend) if extend.asks_registry() => Some(Sources::from_env()?),
+        Some(_) => Some(Sources::npm_only()),
+        None => None,
+    };
+    let (session, _driver) = Session::new(false);
+    let (mut tools, schemas) = own_tools(manifest, &session, &cwd, sources.as_ref());
+    for tool in &mut tools {
+        if let Some((description, parameters)) = schemas.get(&tool.name) {
+            tool.description = Some(description.clone());
+            tool.parameters = Some(parameters.clone());
+        }
+    }
+    let vars = || std::env::vars_os().map(|(k, _)| k);
+    let mut agent = Agent {
+        together: Together::Static,
+        tools,
+        left_out: super::left_out(manifest, vars(), cfg!(unix)),
+        ..agent_of(manifest)
+    };
+    let pins = manifest.plugins.iter().any(|p| match &p.kind {
+        PluginKind::Pi(s) | PluginKind::Dsh(s) => matches!(s, Source::Package(_)),
+        PluginKind::Rutis { .. } => false,
+    }) || manifest.mcp.iter().any(|m| {
+        matches!(
+            &m.transport,
+            Transport::Stdio {
+                source: Source::Package(_),
+                ..
+            }
+        )
+    });
+    let lock = crate::install::lock_path(manifest);
+    if pins && !lock.is_file() {
+        agent.notes.push(format!(
+            "it pins packages and {} is not there: `run` resolves it with npm first, and `run --locked` refuses",
+            lock.display()
+        ));
+    }
+    agent.notes.push(
+        "static: nothing was installed or started, so each plugin's and server's tools are only the names its `allow` lists; `check` without --static starts them".into(),
+    );
+    Ok(Report::new(entries, agent))
+}
+
+/// Whether a local file or folder is there, telling a missing one from one
+/// that cannot be looked at.
+fn there(path: &Path) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(format!("no such file or folder: {}", path.display()))
+        }
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// A local source's path, as the manifest gives it.
+fn path_of(source: &Source) -> Option<PathBuf> {
+    match source {
+        Source::Path(path) => Some(path.clone()),
+        _ => None,
+    }
 }
 
 /// The code `entry` runs, for the scan of what it reads
@@ -1388,6 +1721,61 @@ struct Together_<'a> {
     sources: Option<&'a Sources>,
 }
 
+/// The agent's own tools, as the gate treats them — yoagent's,
+/// `ask_owner`, `find_plugin` and `load_plugin` — with their schemas.
+fn own_tools(
+    manifest: &Manifest,
+    session: &Session,
+    cwd: &Path,
+    sources: Option<&Sources>,
+) -> (Vec<Tool>, Schemas) {
+    let gate_off = manifest.builtins.gate == GateMode::Off;
+    let yoagents = tools_for(manifest.builtins.tools, cwd);
+    let mut seen: Schemas = yoagents.iter().map(|t| schema_of(t.as_ref())).collect();
+    let mut tools = Vec::new();
+    for tool in &yoagents {
+        let name = tool.name();
+        let otherwise = match READ_ONLY_TOOLS.contains(&name) {
+            true => ToolKind::Free,
+            false => ToolKind::Judged,
+        };
+        tools.push(Tool::new(name, kind_of(gate_off, name, otherwise)));
+    }
+    if manifest.builtins.ask_owner {
+        seen.extend([schema_of(&AskOwner::new(session.clone()))]);
+        tools.push(Tool::new(
+            AskOwner::TOOL,
+            kind_of(gate_off, AskOwner::TOOL, ToolKind::Allowed),
+        ));
+    }
+    if let Some(extend) = &manifest.extend {
+        if let Some(sources) = sources {
+            let find = FindPlugin::new(session.clone(), extend.clone(), sources.clone());
+            let files = super::load::Files {
+                manifest: String::new(),
+                lock: String::new(),
+                shared: Vec::new(),
+            };
+            let load = super::load::LoadPlugin::new(
+                session.clone(),
+                files,
+                manifest,
+                extend.clone(),
+                find.clone(),
+                super::load::Loaded::default(),
+                false,
+                None,
+                cwd,
+                None,
+            );
+            seen.extend([schema_of(&find), schema_of(&load)]);
+        }
+        tools.push(Tool::new(FindPlugin::TOOL, ToolKind::Allowed));
+        tools.push(Tool::new(super::load::LoadPlugin::TOOL, ToolKind::Allowed));
+    }
+    (tools, seen)
+}
+
 /// The agent together, through `run`'s own start: a refusal there is a
 /// problem; then the tools one run is offered, how the gate treats each,
 /// and what `run` would only warn about (notes).
@@ -1454,43 +1842,10 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
         }
         let offered = offered(&bridge).await?;
         // The agent's own tools: yoagent's, ask_owner, the servers'.
-        let own_tools = tools_for(manifest.builtins.tools, cwd);
-        let yoagents: Vec<String> = own_tools.iter().map(|t| t.name().to_owned()).collect();
-        let mut seen: Schemas = own_tools.iter().map(|t| schema_of(t.as_ref())).collect();
-        if manifest.builtins.ask_owner {
-            seen.extend([schema_of(&AskOwner::new(session.clone()))]);
-        }
-        if let (Some(extend), Some(sources)) = (&manifest.extend, sources) {
-            let find = FindPlugin::new(session.clone(), extend.clone(), sources.clone());
-            let files = super::load::Files {
-                manifest: String::new(),
-                lock: String::new(),
-                shared: Vec::new(),
-            };
-            let load = super::load::LoadPlugin::new(
-                session.clone(),
-                files,
-                manifest,
-                extend.clone(),
-                find.clone(),
-                super::load::Loaded::default(),
-                false,
-                None,
-                cwd,
-                None,
-            );
-            seen.extend([schema_of(&find), schema_of(&load)]);
-        }
+        let (mut tools, mut seen) = own_tools(manifest, session, cwd, sources);
         seen.extend(offered.iter().map(|o| (o.name.clone(), (o.description.clone(), o.parameters.clone()))));
         schemas.lock().unwrap().extend(seen);
-        let mut own: HashSet<String> = yoagents.iter().cloned().collect();
-        if manifest.builtins.ask_owner {
-            own.insert(AskOwner::TOOL.to_owned());
-        }
-        if manifest.extend.is_some() {
-            own.insert(FindPlugin::TOOL.to_owned());
-            own.insert(super::load::LoadPlugin::TOOL.to_owned());
-        }
+        let mut own: HashSet<String> = tools.iter().map(|t| t.name.clone()).collect();
         own.extend(server_tools.iter().map(|t| t.name.clone()));
         let adapters = Adapters {
             pi: plan.pi_handler.clone(),
@@ -1508,24 +1863,6 @@ async fn together(context: &Together_<'_>, agent: &mut Agent) {
             })
         };
         let gate_off = manifest.builtins.gate == GateMode::Off;
-        let mut tools = Vec::new();
-        for name in &yoagents {
-            let otherwise = match READ_ONLY_TOOLS.contains(&name.as_str()) {
-                true => ToolKind::Free,
-                false => ToolKind::Judged,
-            };
-            tools.push(Tool::new(name.clone(), kind_of(gate_off, name, otherwise)));
-        }
-        if manifest.builtins.ask_owner {
-            tools.push(Tool::new(
-                AskOwner::TOOL,
-                kind_of(gate_off, AskOwner::TOOL, ToolKind::Allowed),
-            ));
-        }
-        if manifest.extend.is_some() {
-            tools.push(Tool::new(FindPlugin::TOOL, ToolKind::Allowed));
-            tools.push(Tool::new(super::load::LoadPlugin::TOOL, ToolKind::Allowed));
-        }
         tools.extend(server_tools.iter().cloned());
         for Offer { name, owner, .. } in &offered {
             let by = owner.as_ref().map_or("no plugin row", |o| o.owner());
@@ -1660,6 +1997,7 @@ mod tests {
             grants: Vec::new(),
             environment: Vec::new(),
             confined: false,
+            tier: Tier::Container,
         }
     }
 
@@ -1774,7 +2112,7 @@ mod tests {
             },
         );
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["version"], 5);
+        assert_eq!(json["version"], 6);
         assert_eq!(json["agent"]["extend"], serde_json::Value::Null);
         assert_eq!(json["agent"]["sandbox"], serde_json::Value::Null);
         assert_eq!(json["entries"][0]["confined"], false);
@@ -1800,5 +2138,81 @@ mod tests {
             assert_eq!(kind_of(true, name, ToolKind::Asks), ToolKind::Runs);
         }
         assert_eq!(kind_of(false, "todo", ToolKind::Allowed), ToolKind::Allowed);
+    }
+
+    #[test]
+    fn a_tier_is_local_for_what_reaches_the_owners_machine() {
+        let manifest = Manifest::parse(
+            r#"[agent]
+name = "a"
+model = "deepseek/deepseek-flash"
+
+[[plugin]]
+name = "plain"
+rutis = "./p.ts"
+runtime = "node"
+
+[[plugin]]
+name = "folder"
+rutis = "./f.ts"
+runtime = "node"
+grants = { workspace = true }
+
+[[plugin]]
+name = "wakes"
+rutis = "./w.ts"
+runtime = "node"
+grants = { wake = true, model = "info" }
+
+[[plugin]]
+name = "env"
+rutis = "./e.ts"
+runtime = "node"
+grants = { env = ["LANG"] }
+
+[[plugin]]
+name = "exec"
+pi = "./x.ts"
+grants = { exec = "gate" }
+
+[[plugin]]
+name = "pi"
+pi = "./y.ts"
+
+[[mcp]]
+name = "web"
+url = "https://example.com/mcp"
+
+[[mcp]]
+name = "proc"
+npm = "./server"
+
+[[mcp]]
+name = "handed"
+npm = "./server"
+env = { LANG = "${LANG}" }
+"#,
+            Path::new("agent.toml"),
+            Path::new("/agents"),
+        )
+        .unwrap();
+        let plugins: Vec<(&str, Tier)> = manifest
+            .plugins
+            .iter()
+            .map(|p| (p.name.as_str(), Tier::of_plugin(p)))
+            .collect();
+        assert_eq!(
+            plugins,
+            [
+                ("plain", Tier::Container),
+                ("folder", Tier::Local),
+                ("wakes", Tier::Container),
+                ("env", Tier::Local),
+                ("exec", Tier::Local),
+                ("pi", Tier::Local),
+            ]
+        );
+        let servers: Vec<Tier> = manifest.mcp.iter().map(Tier::of_server).collect();
+        assert_eq!(servers, [Tier::Remote, Tier::Container, Tier::Local]);
     }
 }

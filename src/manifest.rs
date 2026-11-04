@@ -58,6 +58,9 @@ pub struct Manifest {
     /// `[session]`: whether the session is saved for `--resume` (design
     /// §15).
     pub session: SessionSaving,
+    /// `[app]`: what yo publishes the agent as (design §18); used by
+    /// nothing at run time. `None` when the manifest has no such table.
+    pub app: Option<App>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -858,6 +861,28 @@ impl Default for SessionSaving {
     }
 }
 
+/// `[app]` (design §18): the agent's identity as a yo app. Checked for
+/// shape only: yo owns what `needs` names mean.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct App {
+    /// `<author>/<name>`, stable across versions.
+    pub id: String,
+    /// Full semver.
+    pub version: String,
+    pub title: String,
+    pub summary: Option<String>,
+    pub author: Option<String>,
+    /// As written (`./…`), inside the agent's folder; whether the file is
+    /// there, `check` says.
+    pub icon: Option<String>,
+    /// Capabilities only a local node has (`device.location`), each once.
+    pub needs: Vec<String>,
+}
+
+/// The image kinds `[app] icon` may be.
+pub const ICON_KINDS: [&str; 5] = ["png", "svg", "jpg", "jpeg", "webp"];
+
 /// `[sandbox]` (design §17): what plugins and stdio MCP servers may write
 /// and read beyond `yobuild::sandbox`'s own rule — the agent's folder and
 /// temp writable, the owner's secrets (`sandbox::HIDDEN`) unreadable.
@@ -935,6 +960,20 @@ struct Raw {
     frontend: RawFrontend,
     #[serde(default)]
     session: RawSession,
+    app: Option<Spanned<RawApp>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawApp {
+    id: Option<Spanned<String>>,
+    version: Option<Spanned<String>>,
+    title: Option<Spanned<String>>,
+    summary: Option<Spanned<String>>,
+    author: Option<Spanned<String>>,
+    icon: Option<Spanned<String>>,
+    #[serde(default)]
+    needs: Vec<Spanned<String>>,
 }
 
 #[derive(Deserialize)]
@@ -1329,6 +1368,10 @@ impl Manifest {
             Some(raw) => Some(sandbox(raw.into_inner(), dir).map_err(located)?),
         };
         let frontend = frontend(raw.frontend).map_err(located)?;
+        let app = match raw.app {
+            None => None,
+            Some(raw) => Some(app(raw).map_err(located)?),
+        };
 
         Ok(Manifest {
             path: path.to_owned(),
@@ -1347,6 +1390,7 @@ impl Manifest {
             session: SessionSaving {
                 save: raw.session.save,
             },
+            app,
         })
     }
 }
@@ -2449,6 +2493,118 @@ fn sandbox(raw: RawSandbox, dir: &Path) -> Result<Sandbox, Located> {
     Ok(Sandbox {
         write: places("write", raw.write)?,
         hide: places("hide", raw.hide)?,
+    })
+}
+
+/// `[app]` (design §18): each field's shape, at its place.
+fn app(raw: Spanned<RawApp>) -> Result<App, Located> {
+    let table = raw.span();
+    let raw = raw.into_inner();
+    let required = |field: Option<Spanned<String>>, key: &str| {
+        field.ok_or_else(|| (table.clone(), format!("[app] needs `{key}`")))
+    };
+    // One line of at most `max` characters, not blank.
+    let line = |field: Spanned<String>, key: &str, max: usize| -> Result<String, Located> {
+        let text = field.get_ref().trim();
+        let refused = |why: String| (field.span(), format!("[app] {key}: {why}"));
+        if text.is_empty() {
+            return Err(refused("blank".into()));
+        }
+        if text.contains(|c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')) {
+            return Err(refused(
+                "one line, without control characters or line separators".into(),
+            ));
+        }
+        let n = text.chars().count();
+        if n > max {
+            return Err(refused(format!("{n} characters: at most {max}")));
+        }
+        Ok(text.to_owned())
+    };
+    let part = |p: &str| {
+        (1..=64).contains(&p.len())
+            && p.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            && !p.starts_with('-')
+            && !p.ends_with('-')
+    };
+    let id = required(raw.id, "id")?;
+    if !matches!(id.get_ref().split_once('/'), Some((a, n)) if part(a) && part(n)) {
+        let m = format!(
+            "[app] id {:?}: <author>/<name>, each 1 to 64 lowercase letters, digits and `-` (`alice/weather-brief`)",
+            id.get_ref()
+        );
+        return Err((id.span(), m));
+    }
+    let version = required(raw.version, "version")?;
+    if !semver(version.get_ref()) {
+        let m = format!(
+            "[app] version {:?}: a full semver version (`1.0.0`)",
+            version.get_ref()
+        );
+        return Err((version.span(), m));
+    }
+    let title = line(required(raw.title, "title")?, "title", 80)?;
+    let summary = raw.summary.map(|s| line(s, "summary", 280)).transpose()?;
+    let author = raw.author.map(|a| line(a, "author", 80)).transpose()?;
+    let icon = match raw.icon {
+        None => None,
+        Some(icon) => {
+            let text = icon.get_ref();
+            let refused = |why: &str| (icon.span(), format!("[app] icon {text:?}: {why}"));
+            let Some(rest) = text.strip_prefix("./") else {
+                return Err(refused("a path in the agent's folder, beginning with ./"));
+            };
+            let mut depth: usize = 0;
+            for component in Path::new(rest).components() {
+                match component {
+                    std::path::Component::Normal(_) => depth += 1,
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir if depth > 0 => depth -= 1,
+                    _ => return Err(refused("a path in the agent's folder, not outside it")),
+                }
+            }
+            if depth == 0 {
+                return Err(refused("a file in the agent's folder"));
+            }
+            let kind = Path::new(rest)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase);
+            if !kind.is_some_and(|k| ICON_KINDS.contains(&k.as_str())) {
+                return Err(refused(&format!("an image: {}", ICON_KINDS.join(", "))));
+            }
+            Some(text.clone())
+        }
+    };
+    let mut needs: Vec<String> = Vec::new();
+    for need in raw.needs {
+        let text = need.get_ref();
+        let named = |p: &str| {
+            p.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+                && p.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        };
+        let parts: Vec<&str> = text.split('.').collect();
+        if parts.len() < 2 || !parts.iter().all(|p| named(p)) || text.len() > 128 {
+            let m = format!(
+                "[app] needs {text:?}: a capability's name, dotted lowercase (`device.location`)"
+            );
+            return Err((need.span(), m));
+        }
+        if needs.contains(text) {
+            return Err((need.span(), format!("[app] needs {text:?}: listed twice")));
+        }
+        needs.push(text.clone());
+    }
+    Ok(App {
+        id: id.into_inner(),
+        version: version.into_inner(),
+        title,
+        summary,
+        author,
+        icon,
+        needs,
     })
 }
 
