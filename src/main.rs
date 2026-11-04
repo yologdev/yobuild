@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! yobuild run <agent.toml> [--scripted FILE] [--once [--report FILE]] [--measure] [--web ADDR] [--locked] [--resume] [--] [TASK…]
+//! yobuild serve <agent.toml> [--addr ADDR] [--scripted FILE] [--measure] [--locked] [--resume]
 //! yobuild check <agent.toml> [--locked | --static] [--json]
 //! yobuild log <agent.toml> [-n N] [--json]
 //! yobuild new <folder> [--from <agent>]
@@ -17,6 +18,12 @@
 //! reads it: `~/.claude/skills/yobuild/` (Claude Code), the project's
 //! `.claude/skills/yobuild/`, or `--dir`; it updates a copy nobody edited
 //! and refuses one someone changed (`--force`).
+//!
+//! `serve` offers the agent's runs to programs on this machine (design
+//! §18): the page, and beside it `/api/runs`, behind the page's token
+//! (printed, and written to `serve/<agent>-<hash>.json` under yobuild's
+//! home); each task a program sends waits its turn, and runs as `[serve]
+//! approval` says — `run`, or `ask` (the owner allows each on the page).
 //!
 //! `check` vets every plugin and MCP server without a model or a key (each
 //! alone, then the agent together; design §4): a report on stdout, as text
@@ -110,6 +117,7 @@ fn layout(manifest: &Manifest, terminal: bool) -> Result<Layout, BoxError> {
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const USAGE: &str = "usage: yobuild run <agent.toml> [--scripted FILE] [--once [--report FILE]] [--measure] [--web ADDR] [--locked] [--resume] [--] [TASK…]
+       yobuild serve <agent.toml> [--addr ADDR] [--scripted FILE] [--measure] [--locked] [--resume]
        yobuild check <agent.toml> [--locked | --static] [--json]
        yobuild log <agent.toml> [-n N] [--json]
        yobuild new <folder> [--from <agent>]
@@ -136,11 +144,11 @@ fn start() -> Result<ExitCode, BoxError> {
     // Not tested on Windows yet: no kept environment there, a terminal UI
     // that reads /dev/tty (design §13 "Distribution"). `new` and `skill`
     // only write files, and run anywhere.
-    if cfg!(windows) && matches!(command.as_deref(), Some("run" | "check")) {
+    if cfg!(windows) && matches!(command.as_deref(), Some("run" | "serve" | "check")) {
         return Err("Windows is not supported yet (yobuild 0.1: macOS and Linux)".into());
     }
     match command.as_deref() {
-        Some("run") => {}
+        Some("run" | "serve") => {}
         Some("check") => return check(args),
         Some("log") => return log(args),
         Some("new") => return new(args),
@@ -165,14 +173,30 @@ fn start() -> Result<ExitCode, BoxError> {
     };
     let manifest = Manifest::load(&path)?;
     let mut options = Options::new(manifest);
+    options.serve = command.as_deref() == Some("serve");
+    // What `serve` takes: no task, `--once` or `--web` (its `--addr`).
+    let only_run = |flag: &str| -> Result<(), BoxError> {
+        match options.serve {
+            true => Err(format!("serve: {flag} is `run`'s\n{USAGE}").into()),
+            false => Ok(()),
+        }
+    };
     let mut task = Vec::new();
     let mut web = false;
     let mut report: Option<PathBuf> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--scripted" => options.scripted = Some(args.next().ok_or(USAGE)?.into()),
-            "--once" => options.once = true,
+            "--once" => {
+                only_run("--once")?;
+                options.once = true;
+            }
+            "--addr" if options.serve => {
+                let addr = args.next().ok_or(USAGE)?;
+                options.addr = Some(addr.parse().map_err(|e| format!("--addr {addr}: {e}"))?);
+            }
             "--report" => {
+                only_run("--report")?;
                 if report.is_some() {
                     return Err("--report given twice".into());
                 }
@@ -188,15 +212,22 @@ fn start() -> Result<ExitCode, BoxError> {
             "--locked" => options.locked = true,
             "--resume" => options.resume = true,
             "--web" => {
+                only_run("--web (serve's is --addr)")?;
                 let addr = args.next().ok_or(USAGE)?;
                 options.addr = Some(addr.parse().map_err(|e| format!("--web {addr}: {e}"))?);
                 web = true;
             }
-            "--" => task.extend(args.by_ref()),
+            "--" => {
+                only_run("a task")?;
+                task.extend(args.by_ref());
+            }
             flag if flag.starts_with('-') => {
                 return Err(format!("unknown option {flag}\n{USAGE}").into())
             }
-            word => task.push(word.to_owned()),
+            word => {
+                only_run("a task")?;
+                task.push(word.to_owned());
+            }
         }
     }
     let task = task.join(" ");
@@ -220,7 +251,7 @@ fn start() -> Result<ExitCode, BoxError> {
             .into());
         }
     }
-    let terminal = options.manifest.frontend.terminal && !options.once;
+    let terminal = options.manifest.frontend.terminal && !options.once && !options.serve;
     if web && (options.once || terminal) {
         return Err("--web: this run has no web frontend (--once, or a terminal manifest)".into());
     }

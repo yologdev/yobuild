@@ -16,6 +16,12 @@ What yo (a host that publishes yobuild agents as apps) reads; design §18.
 - **`yobuild check --static`**: starts nothing — no Node, npm, runtime or
   server. It reads the manifest, its prompt, its local plugin files and
   `[app]`'s icon, and reports each entry as the manifest gives it.
+- **`yobuild serve agent.toml`**: the agent's runs offered to programs on
+  this machine. The page, and beside it `/api/runs` behind its token:
+  `POST` a task, `GET` its status (`?wait=`) and its run's events. Tasks
+  run one at a time; `[serve] approval` (`"ask"`, `"run"` or `"never"`,
+  required) says whether the owner allows each on the page first. Each
+  ends with its run log entry: the answer, outcome, cost and tokens.
 - **`check --json`'s report is version 6:** each entry's `tier`
   (`remote`, `container` or `local`: where yobuild thinks it can run), the
   agent's `builtins` and `app`, and the report's `static`.

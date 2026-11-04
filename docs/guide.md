@@ -243,6 +243,26 @@ MCP server it lacks and load it for the session. It works like this:
 [§14](design.md#14-agents-that-extend-themselves-m5-decided-2026-10-25)
 is the design.
 
+## Offering an agent to programs: `yobuild serve`
+
+```toml
+[serve]
+approval = "ask"   # each task allowed on the page first; "run": as sent; "never"
+```
+
+```sh
+yobuild serve agent.toml           # the page, and beside it /api/runs, on this machine only
+```
+
+A program on the same machine sends a task with `POST /api/runs`
+(`{"task": "…"}`, JSON, the token as `Authorization: Bearer …`) and gets
+an id; `GET /api/runs/<id>?wait=60` says where it is, and once it ran,
+its run log entry: the answer, the outcome, the cost. Tasks run one at a
+time in the session the page shows. The URL and token are printed, and
+written for your user only to `serve/<agent>-<hash>.json` under yobuild's
+home. [§18](design.md#18-what-yo-reads-app-the-static-check-serve-post-10-asked-2026-11-04)
+is the design.
+
 ## Checking an agent
 
 ```sh

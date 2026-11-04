@@ -6407,23 +6407,48 @@ The agent's own tools are listed under `agent.tools` as before; with them,
 (`"coding"`/`"read-only"`), `askOwner`, `report` (the sections, or
 `null`), `facts`, `scratch`, `gate`. The report's version is 6.
 
-### `yobuild serve` (its own PR)
+### `yobuild serve` (built 2026-11-04)
 
-One agent's runs offered to a caller on the same machine — yo's local node
-delegating a task (yo's M3). A CLI mode, not a library entry point (1.0
-promises the command, not the library). Until it exists, a local node uses
-`run --once --report FILE` and `log --json`.
+One agent's runs offered to a program on the same machine — yo's local
+node delegating a task (yo's M3). A CLI mode, not a library entry point
+(1.0 promises the command, not the library). Before it, a local node used
+`run --once --report FILE` and `log --json`; both still work.
 
-- `yobuild serve agent.toml [--addr 127.0.0.1:PORT]`: loopback only; the
-  session `run` makes, with its page for the owner, and an API beside it
-  behind a token (as the page's `/ws`), written to a 0600 file under
-  yobuild's home and printed.
-- `POST /runs` `{task}` → `{run}`; the run's events as a stream; its end
-  as the run log's entry (§16) — answer, outcome, cost, tokens, tools.
-  One run at a time, the rest queued.
+- `yobuild serve agent.toml [--addr 127.0.0.1:PORT] [--scripted FILE]
+  [--measure] [--locked] [--resume]`: the session `run` makes in web mode
+  (the page for the owner, whatever `[frontend]` says), listening on this
+  machine only (`--addr` must be a loopback address; default
+  `127.0.0.1:8787`; `phone` refused), with no task of its own (a task,
+  `--once`, `--report` or `--web` refused). Its stdout says the page's URL,
+  then `tasks: {"runs": "<base>/api/runs", "token": …, "pid": …}`, which
+  is also written, 0600, to `<home>/serve/<agent>-<hash>.json` (named as
+  the agent's run log folder) and removed as it ends.
 - `[serve] approval = "run" | "ask" | "never"`, the owner's in
-  `agent.toml`, never the caller's: `ask` puts each task to the owner's
-  frontends (Allow/Block) before it runs; `never` refuses `serve`.
+  `agent.toml`, never the caller's: without the table, or with `never`,
+  `serve` is refused. With `ask` each task is put to the owner's
+  frontends (Allow/Block, `UI_TIMEOUT`) as its turn comes; Block, no
+  answer, or nobody on the page refuses it, said in its `why`.
+- The API, beside the page's routes and behind its token (`?t=` or
+  `Authorization: Bearer`): `POST /api/runs` `{"task": "…"}` (JSON only —
+  `Content-Type: application/json`, so a page elsewhere cannot send one
+  without a preflight this server never answers; a blank task, one over
+  64 KiB, or a 101st waiting refused) → 202 and its status; `GET
+  /api/runs/{id}[?wait=S]` its status, held up to `S` (≤ 600) seconds
+  until it is done; `GET /api/runs/{id}/events` its run's messages as JSON
+  lines (`runStart`, `event`, `runEnd`, as the page gets them; those
+  before included), the last `{"type": "task", "task": <status>}`. A
+  status: `id` (`t1`, `t2`, …), `state` (`queued`, `asking`, `sent`,
+  `running`, `ended`, `refused`), `done`, `run` (the session's), `why`,
+  and `entry`: the run log's entry (§16) — the answer as `report`, the
+  outcome, cost and tokens, the tools, what waits on the owner.
+- One task at a time, in the order sent: the next is put to the owner, or
+  sent, once the last is done. A task is sent as a prompt; its run is the
+  next to start with its text (a run the owner starts from the page
+  meanwhile is not it). The session is one, so a task sees the
+  conversation so far, as the page's prompts do; `[session]` and
+  `--resume` as for `run`. The run log's `mode` is `serve`. As the session
+  ends, every task not done is refused ("the session ended before it
+  ran").
 - Open until yo's M3 decides: whether `serve` speaks A2A itself or the
   node translates; one session per caller, or a fresh one per task.
 
@@ -6437,3 +6462,5 @@ promises the command, not the library). Until it exists, a local node uses
    (2026-11-04).
 4. `serve` is a CLI mode with the owner's approval policy in the manifest.
    Decided with yo (2026-11-04); its wire format waits for yo's M3.
+5. The API under `/api/runs`, not `/runs`, which the page's past runs
+   already hold (2026-11-04).

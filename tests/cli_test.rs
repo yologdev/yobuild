@@ -3168,3 +3168,199 @@ args = ["."]
     assert_eq!(code, Some(1));
     assert!(stderr.contains("--locked and --static"), "{stderr}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn serve_runs_a_programs_tasks_one_at_a_time_as_the_owner_allows() {
+    let dir = project(
+        "[builtins]\ntools = \"read-only\"\n\n[serve]\napproval = \"ask\"\n",
+        r#"[{ "text": "first answer" }, { "text": "second answer" }]"#,
+    );
+    let args = ["serve", "agent.toml", "--scripted", "script.json"];
+    let mut page = web::Page::start(
+        dir.path(),
+        &args,
+        &["--addr", "127.0.0.1:0"],
+        std::time::Duration::ZERO,
+    )
+    .await;
+    let (base, token) = page.url.split_once("/?t=").unwrap();
+    let (base, token) = (base.to_owned(), token.to_owned());
+    let runs = format!("{base}/api/runs");
+    let client = reqwest::Client::new();
+    let post = |body: &str, json: bool, token: &str| {
+        let mut request = client.post(&runs).bearer_auth(token).body(body.to_owned());
+        if json {
+            request = request.header("Content-Type", "application/json");
+        }
+        request.send()
+    };
+    let get = |path: &str| {
+        client
+            .get(format!("{runs}{path}"))
+            .bearer_auth(&token)
+            .send()
+    };
+    // Refused before anything is queued.
+    assert_eq!(
+        post(r#"{"task":"x"}"#, true, "guess")
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        post(r#"{"task":"x"}"#, false, &token)
+            .await
+            .unwrap()
+            .status(),
+        415
+    );
+    assert_eq!(
+        post(r#"{"task":" "}"#, true, &token)
+            .await
+            .unwrap()
+            .status(),
+        422
+    );
+    assert_eq!(
+        post(r#"{"tasks":"x"}"#, true, &token)
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(get("/t9").await.unwrap().status(), 404);
+    assert_eq!(get("/t9?wait=601").await.unwrap().status(), 400);
+    // The token also in the query, as the page's.
+    let by_query = client
+        .get(format!("{runs}/t9?t={token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(by_query.status(), 404);
+
+    // Two tasks: the first put to the owner and allowed, the second
+    // waiting its turn, then blocked.
+    let first: serde_json::Value = post(r#"{"task":"one"}"#, true, &token)
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        (&first["id"], &first["state"]),
+        (&"t1".into(), &"queued".into())
+    );
+    let second: serde_json::Value = post(r#"{"task":"two"}"#, true, &token)
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(second["id"], "t2");
+    let asked = page.until("uiRequest").await;
+    assert_eq!(asked["request"]["message"], "one", "{asked}");
+    let waiting: serde_json::Value = get("/t2").await.unwrap().json().await.unwrap();
+    assert_eq!(waiting["state"], "queued", "{waiting}");
+    page.send(serde_json::json!({ "type": "uiResponse", "id": asked["id"], "value": "Allow" }))
+        .await;
+    let done: serde_json::Value = get("/t1?wait=60").await.unwrap().json().await.unwrap();
+    assert_eq!(done["state"], "ended", "{done}");
+    let entry = &done["entry"];
+    assert_eq!(
+        (&entry["task"], &entry["outcome"], &entry["report"], &entry["mode"]),
+        (
+            &"one".into(),
+            &"completed".into(),
+            &"first answer".into(),
+            &"serve".into()
+        ),
+        "{done}"
+    );
+    let asked = page.until("uiRequest").await;
+    assert_eq!(asked["request"]["message"], "two", "{asked}");
+    page.send(serde_json::json!({ "type": "uiResponse", "id": asked["id"], "value": "Block" }))
+        .await;
+    let blocked: serde_json::Value = get("/t2?wait=60").await.unwrap().json().await.unwrap();
+    assert_eq!(
+        (&blocked["state"], &blocked["why"]),
+        (&"refused".into(), &"the owner blocked it".into()),
+        "{blocked}"
+    );
+    // The first's run, streamed after it ended: its messages, then its
+    // status.
+    let text = get("/t1/events").await.unwrap().text().await.unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let kinds: Vec<&str> = lines.iter().map(|l| l["type"].as_str().unwrap()).collect();
+    assert_eq!(kinds.first(), Some(&"runStart"), "{text}");
+    assert!(kinds.contains(&"event"), "{text}");
+    assert_eq!(&kinds[kinds.len() - 2..], ["runEnd", "task"], "{text}");
+    assert_eq!(lines.last().unwrap()["task"]["id"], "t1");
+    // Where a program finds the API: written for this user only, gone at
+    // the end.
+    let said = std::fs::read_dir(format!("{CACHE}/serve"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            std::fs::read_to_string(p)
+                .unwrap_or_default()
+                .contains(&token)
+        })
+        .expect("the serve file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&said).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let found: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&said).unwrap()).unwrap();
+    assert_eq!(found["runs"], runs.as_str());
+    let (code, stderr) = page.interrupt();
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(!said.exists(), "{}", said.display());
+}
+
+#[test]
+fn serve_is_refused_unless_the_manifest_offers_it_on_this_machine() {
+    let cases = [
+        ("", vec![], "agent.toml has no [serve] table"),
+        (
+            "[serve]\napproval = \"never\"\n",
+            vec![],
+            "agent.toml's [serve] approval = \"never\"",
+        ),
+        (
+            "[serve]\napproval = \"run\"\n",
+            vec!["--addr", "0.0.0.0:0"],
+            "serve listens on this machine only (127.0.0.1 or ::1)",
+        ),
+        (
+            "[serve]\napproval = \"run\"\n",
+            vec!["hi"],
+            "serve: a task is `run`'s",
+        ),
+        (
+            "[serve]\napproval = \"run\"\n",
+            vec!["--once"],
+            "serve: --once is `run`'s",
+        ),
+        (
+            "[serve]\napproval = \"run\"\n",
+            vec!["--web", "127.0.0.1:0"],
+            "serve: --web (serve's is --addr) is `run`'s",
+        ),
+    ];
+    for (manifest, args, said) in cases {
+        let dir = project(manifest, "[]");
+        let mut all = vec!["serve", "agent.toml", "--scripted", "script.json"];
+        all.extend(args.iter().copied());
+        let out = yobuild(&all, dir.path());
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{manifest} {args:?}: {stderr}");
+        assert!(stderr.contains(said), "{manifest} {args:?}: {stderr}");
+    }
+}
